@@ -200,6 +200,18 @@ def probe_max_sessions(width: int = 1920, height: int = 1200, limit: int = 24) -
     plus encode_parallel for the post-hoc/remux path. The cap has moved across
     driver generations (2 -> 3 -> 5 -> 8 -> 12), so it must be PROBED, never
     hardcoded. Sessions are released before returning.
+
+    Releasing them is the whole difficulty, and it is the same trap `_warm()`
+    documents: **`EndEncode()` ends the bitstream but does NOT free the
+    session** — the encoder object's destructor does. Ending the streams and
+    letting the list fall out of scope leaves release at the mercy of refcount
+    and GC timing, and this probe holds the most sessions of anything in the
+    process. At 9 cameras the preflight asks for 11 of a 12-session cap and the
+    router then wants 9 more immediately, so any that linger put the request at
+    20 against 12. Observed 2026-09-10 as an intermittent HANG at recording
+    start, right after the `[hw] NVENC sessions:` line — intermittent precisely
+    because it depended on when the collector ran. So drop every reference
+    explicitly and collect before returning.
     """
     _load()
     if _nvc is None:
@@ -214,10 +226,17 @@ def probe_max_sessions(width: int = 1920, height: int = 1200, limit: int = 24) -
                 break
         return len(encs)
     finally:
-        for e in encs:
+        # Pop-and-delete rather than iterate: this drops the last reference to
+        # each encoder as we go, instead of leaving them all alive in `encs`
+        # until the function returns. The caller creates its real encoders
+        # immediately after this, so "eventually" is not good enough.
+        while encs:
+            e = encs.pop()
             try:
                 e.EndEncode()
             except Exception:
                 pass
+            del e
+        gc.collect()
         encs.clear()
         gc.collect()
