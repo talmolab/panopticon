@@ -129,6 +129,10 @@ class BoardDetector:
         self.glow = np.zeros(n)
         self.shared = np.zeros((n, n), dtype=int)
         self.per_cam_covis = np.zeros(n, dtype=int)
+        #: Connected components of the co-visibility graph, refreshed each tick.
+        #: One component is the READY condition; more than one means the solve
+        #: will keep the largest and silently drop the rest.
+        self.components: list[list[int]] = [[i] for i in range(n)]
         self.grid_covered = np.zeros((n, self.GRID_ROWS, self.GRID_COLS), dtype=bool)
         self.grid_cells_hit = np.zeros(n, dtype=int)
         self.ready = False
@@ -166,8 +170,20 @@ class BoardDetector:
                         self.grid_cells_hit[i] = int(self.grid_covered[i].sum())
 
         if len(seen) >= 2:
+            # Weighted by PARTNER COUNT, not 1 per tick. A tick in which three
+            # cameras see the board yields three pairwise constraints, not one,
+            # and pairwise constraints are what stereo calibration consumes — so
+            # a camera that co-sees with two others is making twice the progress
+            # of one that co-sees with a single neighbour. Counting ticks
+            # flattened that distinction and let a camera reach its target while
+            # only ever pairing with the same partner, which is exactly how a
+            # co-visibility graph ends up in disconnected clusters that each
+            # look well covered. Connectivity is still enforced separately in
+            # _update_ready(); this only makes the per-camera number mean
+            # "constraints gathered" rather than "moments seen".
+            partners = len(seen) - 1
             for i in seen:
-                self.per_cam_covis[i] += 1
+                self.per_cam_covis[i] += partners
             for a in range(len(seen)):
                 for b in range(a + 1, len(seen)):
                     self.shared[seen[a], seen[b]] += 1
@@ -179,13 +195,17 @@ class BoardDetector:
         self._update_ready()
         return self
 
-    def _update_ready(self):
-        if self.n == 0 or np.any(self.per_cam_covis < self.min_per_cam_shared):
-            self.ready = False
-            return
-        if np.any(self.grid_cells_hit < self.MIN_GRID_CELLS):
-            self.ready = False
-            return
+    def _components(self):
+        """Connected components of the co-visibility graph, as camera indices.
+
+        Computed every tick rather than only at READY, because it is the
+        condition operators cannot see any other way: per-camera counts and grid
+        coverage can all be satisfied while the graph sits in several clusters
+        that never observed the board together. A 9-camera session on 2026-09-10
+        reached `paired 260/250 grid 4/3` on every camera and still solved only
+        4 cameras, because the graph was three separate groups — with nothing on
+        screen saying so.
+        """
         parent = list(range(self.n))
 
         def find(x):
@@ -198,5 +218,38 @@ class BoardDetector:
             for j in range(i + 1, self.n):
                 if self.shared[i, j] >= self.min_edge:
                     parent[find(i)] = find(j)
-        roots = {find(i) for i in range(self.n)}
-        self.ready = (len(roots) == 1)
+
+        groups: dict[int, list[int]] = {}
+        for i in range(self.n):
+            groups.setdefault(find(i), []).append(i)
+        return sorted(groups.values(), key=lambda g: (-len(g), g[0]))
+
+    def bridge_hint(self):
+        """The pair most worth working next, or None once the graph is joined.
+
+        Across every pair of components, the two cameras with the most shared
+        detections are the ones already closest to forming an edge, so naming
+        them turns "the graph is in pieces" into an instruction.
+        """
+        comps = self.components
+        if len(comps) < 2:
+            return None
+        best = None
+        for a_idx in range(len(comps)):
+            for b_idx in range(a_idx + 1, len(comps)):
+                for i in comps[a_idx]:
+                    for j in comps[b_idx]:
+                        n = int(self.shared[i, j])
+                        if best is None or n > best[2]:
+                            best = (i, j, n)
+        return best
+
+    def _update_ready(self):
+        self.components = self._components() if self.n else []
+        if self.n == 0 or np.any(self.per_cam_covis < self.min_per_cam_shared):
+            self.ready = False
+            return
+        if np.any(self.grid_cells_hit < self.MIN_GRID_CELLS):
+            self.ready = False
+            return
+        self.ready = (len(self.components) == 1)

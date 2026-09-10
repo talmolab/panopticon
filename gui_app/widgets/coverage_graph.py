@@ -56,6 +56,9 @@ class CoverageGraphWidget(QWidget):
         self._grid_covered = np.asarray(det.grid_covered, dtype=bool).copy()
         self._grid_cells_hit = np.asarray(det.grid_cells_hit, dtype=int).copy()
         self._min_grid_cells = getattr(det, "MIN_GRID_CELLS", 3)
+        self._components = [list(c) for c in getattr(det, "components", [])]
+        self._bridge = det.bridge_hint() if hasattr(det, "bridge_hint") else None
+        self._min_edge = getattr(det, "min_edge", 80)
         ready_now = bool(det.ready)
         if self._start_time is not None and not ready_now:
             self._elapsed_s = time.monotonic() - self._start_time
@@ -151,7 +154,29 @@ class CoverageGraphWidget(QWidget):
         else:
             mn = int(self._per_cam.min()) if (self._per_cam is not None and self._n) else 0
             min_grid = int(self._grid_cells_hit.min()) if (self._grid_cells_hit is not None and self._n) else 0
+            comps = getattr(self, "_components", []) or []
             p.setPen(QPen(QColor(150, 150, 170)))
             p.drawText(QRectF(0, h - 18, w, 16), Qt.AlignCenter,
-                       f"{timer_str}  paired {mn}/{self._target}  grid {min_grid}/{self._min_grid_cells}")
+                       f"{timer_str}  paired {mn}/{self._target}  "
+                       f"grid {min_grid}/{self._min_grid_cells}  "
+                       f"groups {len(comps)}/1")
+
+            # Connectivity is the one blocker the other two numbers cannot show,
+            # and the one that decides which cameras survive the solve: it kept
+            # a 9-camera session at 4 usable cameras while every per-camera
+            # figure read as satisfied. Say which groups exist and which pair is
+            # closest to joining them, so it reads as an instruction.
+            if len(comps) > 1:
+                bridge = getattr(self, "_bridge", None)
+                groups = "  ".join(
+                    "{" + ",".join(str(i + 1) for i in sorted(g)) + "}"
+                    for g in comps[:4])
+                p.setPen(QPen(QColor(235, 170, 90)))
+                p.setFont(QFont("Segoe UI", 8))
+                p.drawText(QRectF(0, h - 32, w, 14), Qt.AlignCenter, groups)
+                if bridge is not None:
+                    i, j, n = bridge
+                    p.drawText(QRectF(0, h - 45, w, 14), Qt.AlignCenter,
+                               f"show board to cam{i + 1} + cam{j + 1} together "
+                               f"({n}/{self._min_edge})")
         p.end()
