@@ -1607,6 +1607,7 @@ Plain scripts, no pytest. Run them directly.
 | `uv run python test_grab_failure.py` | Every path out of `GrabThread.run()` retires the camera | Qt only, offscreen |
 | `uv run python test_serial_handshake.py` | The four handshake outcomes | Nothing; pyserial is stubbed |
 | `uv run python test_stim_compiler.py` | Graph to sketch: start resolution, cycle-safe chains, integer µs, safe-pin boot order, pin conflicts, sketch structure, the RDY ack, the per-frame trace | numpy for the later cases |
+| `uv run python test_board_coverage.py` | Calibration coverage: partner-weighted co-visibility, connected components, the three READY conditions, `bridge_hint`, plus a regression from a real session that split into three groups | numpy |
 | `uv run python test_sync_router.py` | Router smoke test | NVENC |
 | `uv run probe_lag.py --seconds 120` | The real capture path headlessly, with a per-camera lag trace | Cameras |
 | `uv run python probe_zerocopy.py` | A/B of frame-access routes on a live camera | A camera |

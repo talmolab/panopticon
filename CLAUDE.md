@@ -239,6 +239,12 @@ Plain scripts, no pytest — run directly:
   LOUDLY rather than silently: padding, re-arm exhaustion, retirement. Needs
   PyQt5, so it will not run on a bare python. **Run after touching
   `grab_thread.py`.**
+- `uv run python test_board_coverage.py` — calibration coverage: partner-weighted
+  co-visibility counting, connected components, the three READY conditions, and
+  `bridge_hint`. Includes a regression built from the real 2026-09-10 nine-camera
+  graph, which split into three groups and solved only four cameras while every
+  per-camera figure read as satisfied. Needs numpy only — no OpenCV, no cameras.
+  **Run after touching `board_detector.py`.**
 - `python test_sync_router.py` — encoder router smoke test (needs NVENC).
 
 ## Conventions
