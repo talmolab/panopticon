@@ -8,7 +8,23 @@ quality: 21
 encode_parallel: 3           # concurrent NVENC jobs (raw mode) / .h264->mp4 remux jobs (realtime mode)
 realtime_encode: true        # GPU H.264 encode during capture (no raw.bin, no post-hoc pass). Set false for the raw fallback.
 realtime_kick: true          # default: real-time cross-camera frame kick-out — only frames every camera caught are encoded, so videos come out trigger-aligned with no post-hoc re-encode.
-kick_max_lag: 480            # Coordinator buffer, in frames. RAISED 2026-08-11 when one
+# Driver-side buffers per camera. LOWERED 1000 -> 250 on 2026-09-10, forced by the
+# move to 9 cameras: at 1000 the pylon pool alone is 9 x 1000 x 2.304 MB = 20.7 GiB,
+# and with the NV12 ring on top the capacity preflight refused to start anything on
+# a 63.4 GiB machine. 250 is 5.2 GiB and still 2.5 s of slack at 100 fps (8.3 s at
+# the 30 fps calibration rate) -- 1000 was 10 s, which is far more jitter than this
+# rig has ever shown: Buffer_Underrun_Count has been 0 on every camera since the
+# GetArrayZeroCopy fix. Watch that counter after a session; nonzero means the pool
+# ran dry and this went too low.
+max_num_buffer: 250
+
+kick_max_lag: 240            # Coordinator buffer, in frames. LOWERED 480 -> 240 on
+                             # 2026-09-10 (see the note below): the 480 headroom was
+                             # already known to be buying nothing, and 9 cameras made
+                             # the RAM cost impossible to keep. Ring is
+                             # max_lag + 200 + 64 buffers/cam, so this halves it from
+                             # 23.1 GiB to 15.7 GiB across 9 cameras.
+                             # HISTORY: RAISED 2026-08-11 when one
                              # camera per session drifted to the cap and force-dropped
                              # frames every camera had captured (12.3% loss at 240).
                              # ROOT CAUSE FOUND 2026-09-03: that drift was result.Array's

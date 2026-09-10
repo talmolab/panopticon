@@ -82,13 +82,20 @@ class CameraManager(QObject):
             gt.set_keep_full(flag)
 
     def open_all(self, pfs_path: str, gige_driver: str = "socket",
-                 trigger_rate_limit: float = 165.0, expect_cameras: int = 0):
+                 trigger_rate_limit: float = 165.0, expect_cameras: int = 0,
+                 max_num_buffer: int = MAX_NUM_BUFFER):
         """trigger_rate_limit: AcquisitionFrameRate to apply in trigger mode, or
         0 to disable the limiter altogether — see _set_trigger_mode.
 
         expect_cameras: if nonzero, refuse to start unless exactly this many
-        cameras enumerate."""
+        cameras enumerate.
+
+        max_num_buffer: driver-side buffers per camera. Comes from the profile
+        so a rig can trade pool depth against RAM; MAX_NUM_BUFFER is the default
+        for callers that do not care. The capacity preflight must be given the
+        SAME value or it will refuse (or permit) the wrong recordings."""
         self._trigger_rate_limit = trigger_rate_limit
+        self._max_num_buffer = int(max_num_buffer)
         self._baseline_exp_gain = []
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
@@ -118,7 +125,7 @@ class CameraManager(QObject):
 
         for i, dev in enumerate(sorted_devs):
             try:
-                cam = self._backend.open(dev, pfs_path, MAX_NUM_BUFFER)
+                cam = self._backend.open(dev, pfs_path, self._max_num_buffer)
                 # Read back what the .pfs actually applied. FeaturePersistence
                 # is loaded with validation disabled, and CLAUDE.md tells users
                 # to edit the .pfs in pylon Viewer — where ROI and pixel format

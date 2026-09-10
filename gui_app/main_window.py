@@ -155,7 +155,8 @@ class MainWindow(QMainWindow):
             return self._camera_mgr.open_all(
                 pfs, gige_driver=self._profile.gige_driver,
                 trigger_rate_limit=self._profile.trigger_rate_limit,
-                expect_cameras=self._profile.n_cameras)
+                expect_cameras=self._profile.n_cameras,
+                max_num_buffer=self._profile.max_num_buffer)
         return False
 
     def _apply_camera_open_result(self, ok):
@@ -387,7 +388,7 @@ class MainWindow(QMainWindow):
             blocking, warnings = check_capacity(
                 n_cams=self._camera_mgr.num_cameras,
                 width=p.frame_width, height=p.frame_height,
-                ring_n=ring_n, max_num_buffer=MAX_NUM_BUFFER,
+                ring_n=ring_n, max_num_buffer=p.max_num_buffer,
                 realtime=realtime, output_dir=self._sidebar.output_dir,
                 fps=p.frame_rate)
         except Exception as e:

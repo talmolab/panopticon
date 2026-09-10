@@ -49,6 +49,19 @@ class RigProfile:
     # to ENUMERATE renames every camera after it and silently attaches the
     # calibration extrinsics to the wrong physical cameras.
     n_cameras: int = 0
+    # Driver-side buffers queued per camera. THE LARGEST SINGLE RAM CONSUMER:
+    # n_cams x max_num_buffer x width x height bytes, so 1000 buffers is 20.7 GiB
+    # at nine 1920x1200 cameras, before the NV12 ring is counted at all. It was
+    # hardcoded at 1000 in camera_manager until 2026-09-10, which made the
+    # capacity preflight's own advice ("Lower MaxNumBuffer or kick_max_lag")
+    # impossible to follow.
+    #
+    # Deep slack absorbs genuine GigE jitter, and it is also what let a 1.5%
+    # per-frame deficit hide for ~11 minutes before anything went wrong: nothing
+    # errors, the pool quietly fills, and every frame retrieved gets staler. So
+    # lower it for RAM, not for speed, and read Buffer_Underrun_Count afterwards
+    # — nonzero means the pool ran dry, i.e. the host could not keep up.
+    max_num_buffer: int = 1000
     # Optostim output pins held LOW from the instant the sketch boots — before
     # the serial handshake, which blocks until the GUI connects. Without this a
     # powered laser driver reads the floating pin as ON at power-up. Pins used by
@@ -108,6 +121,7 @@ class RigProfile:
             serial_port=data.get("serial_port", "COM3"),
             trigger_pins=data.get("trigger_pins", [2, 4, 6, 8, 10, 12]),
             n_cameras=data.get("n_cameras", 0),
+            max_num_buffer=int(data.get("max_num_buffer", 1000)),
             stim_safe_pins=data.get("stim_safe_pins", [53]),
             calibration_exposure_us=float(data.get("calibration_exposure_us", 0.0)),
             calibration_gain_db=float(data.get("calibration_gain_db", -1.0)),
