@@ -54,8 +54,18 @@ def main():
                          "QPixmap -> setPixmap for all cameras) so its main-thread "
                          "cost is present; the plain probe has none")
     ap.add_argument("--label", default="run")
+    # PRODUCTION SETS 0.001 (gui.py:97) and this probe did not, which silently
+    # invalidated a 2026-09-10 threads-vs-processes comparison: the default 5 ms
+    # punishes an 18-thread interpreter far harder than a 6-thread one, so the
+    # single-process arm was measured with its own mitigation switched off.
+    # Always state the interval when quoting a number from this probe.
+    ap.add_argument("--switch-interval", type=float, default=0.001,
+                    help="sys.setswitchinterval; 0.001 matches gui.py")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
+    sys.setswitchinterval(args.switch_interval)
+    print(f"sys.setswitchinterval({args.switch_interval})  "
+          f"[gui.py uses 0.001]", flush=True)
 
     prof = next(RigProfile.load(p) for p in RigProfile.list_profiles()
                 if p.stem == args.profile)

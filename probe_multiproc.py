@@ -34,11 +34,14 @@ from pathlib import Path
 REPO = Path(__file__).parent
 
 
-def worker(idx, serials, seconds, profile_name, q):
+def worker(idx, serials, seconds, profile_name, q, switch_interval):
     """One acquisition process owning `serials`. Reports timing back on `q`."""
     import os
     sys.path.insert(0, str(REPO))
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    # Per-process: each interpreter has its own switch interval, and comparing
+    # against the threaded arm is only meaningful when both use production's.
+    sys.setswitchinterval(switch_interval)
 
     from PyQt5.QtWidgets import QApplication
     from gui_app.camera_manager import CameraManager
@@ -79,9 +82,22 @@ def worker(idx, serials, seconds, profile_name, q):
 
     res = mgr.stop_acquisition()
     lags = list(mgr.delivery_lags)
+
+    # G3: report the actual block IDs this group kept. Without this the probe
+    # measures TIMING only and says nothing about alignment -- which is the one
+    # thing a process split endangers, because each worker's coordinator sees
+    # only its own three cameras. The parent intersects across groups below.
+    import numpy as np
+    blocks = {}
+    for c, p in enumerate(paths_out):
+        f = p / "blockids.npy"
+        if f.exists():
+            b = np.load(f)
+            blocks[serials[c]] = (int(b[0]), int(b[-1]), int(b.size),
+                                  int(np.asarray(b).sum()))
     q.put({"worker": idx, "serials": serials,
            "frames": [getattr(r, "frames", None) for r in res] if res else None,
-           "delivery_lags": lags})
+           "delivery_lags": lags, "blocks": blocks})
     try:
         mgr.close_all()
     except Exception:
@@ -93,7 +109,10 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--seconds", type=float, default=60)
     ap.add_argument("--profile", default="3dpose")
+    ap.add_argument("--switch-interval", type=float, default=0.001,
+                    help="sys.setswitchinterval in each worker; gui.py uses 0.001")
     args = ap.parse_args()
+    print(f"switch interval {args.switch_interval} per worker  [gui.py uses 0.001]")
 
     sys.path.insert(0, str(REPO))
     from gui_app.backends import load_backend
@@ -111,21 +130,71 @@ def main() -> int:
     for i, g in enumerate(groups):
         print(f"  worker {i}: {', '.join(g)}")
 
+    # The trigger board is ONE serial port, so exactly one process may own it:
+    # the parent. Workers arm their cameras and report ready; only then do the
+    # triggers start. That ordering is not a nicety — a camera armed AFTER the
+    # first pulse misses those triggers, so its block ID 1 is trigger N+1 and it
+    # reads as permanently N frames behind, which is precisely the corruption
+    # this split has to avoid. (The first version of this probe drove no board
+    # at all and reported Total_Packet_Count=0 on every camera; any number it
+    # produced described a trigger state nobody had set.)
+    from gui_app.serial_controller import TeensyController
+    from gui_app.session_config import RigProfile
+    paths = {p.stem: p for p in RigProfile.list_profiles()}
+    prof = RigProfile.load(paths[args.profile])
+    teensy = TeensyController(port=prof.serial_port)
+
     q = mp.Queue()
-    procs = [mp.Process(target=worker, args=(i, g, args.seconds, args.profile, q),
+    procs = [mp.Process(target=worker,
+                        args=(i, g, args.seconds, args.profile, q,
+                              args.switch_interval),
                         daemon=False) for i, g in enumerate(groups)]
     t0 = time.perf_counter()
     for p in procs:
         p.start()
 
+    # Startup barrier: wait for every worker's "ready" before any trigger fires.
     msgs = []
+    ready = 0
+    barrier_deadline = time.perf_counter() + 240
+    while ready < len(procs) and time.perf_counter() < barrier_deadline:
+        try:
+            m = q.get(timeout=5)
+        except Exception:
+            if not any(p.is_alive() for p in procs):
+                break
+            continue
+        if m.get("ready"):
+            ready += 1
+            print(f"  worker {m['worker']} armed ({ready}/{len(procs)})")
+        else:
+            msgs.append(m)
+    if ready < len(procs):
+        print(f"only {ready}/{len(procs)} workers armed — aborting")
+        for p in procs:
+            p.terminate()
+        return 1
+
+    if not teensy.open():
+        print("failed to open the trigger board serial port — aborting")
+        for p in procs:
+            p.terminate()
+        return 1
+    if not teensy.start_triggers(prof.trigger_pins, prof.frame_rate):
+        print("trigger board did not acknowledge — aborting")
+        for p in procs:
+            p.terminate()
+        return 1
+    print(f"triggers running at {prof.frame_rate} fps")
+
     deadline = time.perf_counter() + args.seconds + 180
-    while len(msgs) < 2 * len(procs) and time.perf_counter() < deadline:
+    while len(msgs) < len(procs) and time.perf_counter() < deadline:
         try:
             msgs.append(q.get(timeout=5))
         except Exception:
             if not any(p.is_alive() for p in procs):
                 break
+    teensy.stop_triggers(prof.trigger_pins)
     for p in procs:
         p.join(timeout=30)
         if p.is_alive():
@@ -138,8 +207,28 @@ def main() -> int:
         elif "delivery_lags" in m:
             dl = [f"{v:+.3f}" for v in m["delivery_lags"]]
             print(f"  worker {m['worker']}: delivery_lag {dl}")
-    print("\nRead `cycle` and `avg_wait` from the per-grab-thread lines above:")
-    print("  threaded 9-camera baseline was cycle ~10.0-10.1, slack 2.9-4.3 ms")
+    # --- G3: did the groups actually stay aligned with each other? -----------
+    allb = {}
+    for m in msgs:
+        allb.update(m.get("blocks") or {})
+    print("\nper-camera block IDs (first, last, count):")
+    for s in sorted(allb):
+        f, l, n_, _ = allb[s]
+        print(f"  {s}: first={f} last={l} count={n_}")
+    if len(allb) >= 2:
+        counts = {v[2] for v in allb.values()}
+        spans = {(v[0], v[1]) for v in allb.values()}
+        sums = {v[3] for v in allb.values()}
+        same = len(counts) == 1 and len(spans) == 1 and len(sums) == 1
+        print(f"\n  ALIGNMENT ACROSS GROUPS: "
+              f"{'IDENTICAL' if same else '*** DIVERGED ***'}")
+        if not same:
+            print(f"    counts {sorted(counts)}  spans {sorted(spans)}")
+            print("    Expected while each worker coordinates only its own"
+                  " cameras — this is the gap a cross-process coordinator"
+                  " would close, and the reason the prototype is not usable"
+                  " for real data.")
+    print("\nRead `cycle` and `avg_wait` from the per-grab-thread lines above.")
     return 0
 
 
