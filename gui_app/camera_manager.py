@@ -100,7 +100,8 @@ class CameraManager(QObject):
 
     def open_all(self, pfs_path: str, gige_driver: str = "socket",
                  trigger_rate_limit: float = 165.0, expect_cameras: int = 0,
-                 max_num_buffer: int = MAX_NUM_BUFFER):
+                 max_num_buffer: int = MAX_NUM_BUFFER,
+                 only_serials=None):
         """trigger_rate_limit: AcquisitionFrameRate to apply in trigger mode, or
         0 to disable the limiter altogether — see _set_trigger_mode.
 
@@ -118,6 +119,13 @@ class CameraManager(QObject):
         if len(devices) == 0:
             self.error.emit("No cameras found")
             return False
+
+        # `expect_cameras` is checked against the FULL enumeration below, before
+        # any subsetting, so the positional-naming interlock still sees the whole
+        # rig. Only then does `only_serials` narrow what THIS process opens —
+        # which is what a multi-process split needs: every worker enumerates all
+        # nine, agrees on the same cam1..camN ordering, and opens its own share.
+        # Subsetting before the count check would defeat the interlock entirely.
 
         # A camera that fails to OPEN is caught below. A camera that never
         # ENUMERATES — dead switch port, unpowered, still booting — is invisible
@@ -139,6 +147,15 @@ class CameraManager(QObject):
             return False
 
         sorted_devs = devices          # backend guarantees a stable order
+        if only_serials:
+            want = {str(s) for s in only_serials}
+            sorted_devs = [d for d in sorted_devs
+                           if d.GetSerialNumber() in want]
+            missing = want - {d.GetSerialNumber() for d in sorted_devs}
+            if missing:
+                self.error.emit("Requested cameras did not enumerate: "
+                                + ", ".join(sorted(missing)))
+                return False
 
         for i, dev in enumerate(sorted_devs):
             try:

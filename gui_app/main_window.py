@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
 
         self._display_timer = QTimer()
         self._display_timer.timeout.connect(self._refresh_displays)
-        self._display_timer.start(33)
+        self._display_timer.start(self._display_interval_ms())
 
         # Prefer whatever profile this machine used last — the profile list is
         # shared with the 3dface rig, so alphabetical order picks the wrong one
@@ -164,6 +164,13 @@ class MainWindow(QMainWindow):
             n = self._camera_mgr.num_cameras
             self._camera_grid.setup_grid(n)
             self._camera_names = [f"cam{i+1}" for i in range(n)]
+            # The camera count is only known now, and the repaint period scales
+            # with it — the timer built in __init__ used the fallback.
+            if not self._busy:
+                ms = self._display_interval_ms()
+                self._display_timer.start(ms)
+                print(f"[ui] preview repaint every {ms} ms for {n} cameras",
+                      flush=True)
             return
         self._camera_grid.setup_grid(0)
         self._camera_names = []
@@ -188,7 +195,25 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         self._sidebar.set_busy(False)
         self._busy = False
-        self._display_timer.start(33)
+        self._display_timer.start(self._display_interval_ms())
+
+    def _display_interval_ms(self) -> int:
+        """Preview repaint period, widened as the camera count grows.
+
+        Repainting is per-pane work on the Qt MAIN thread — QImage conversion
+        plus a widget repaint each — so its cost is linear in camera count while
+        the grab threads' deadline stays fixed at one trigger period. Measured
+        2026-09-10 at nine cameras: identical runs gave 5.07–5.57 ms of grab-loop
+        slack headless against 2.87–4.34 ms with the GUI up, and that ~1.5–2 ms
+        gap is this timer.
+
+        Six cameras keep the historical 33 ms. Beyond that the period grows with
+        the count so total repaint work per second stays roughly flat, capped at
+        100 ms (10 Hz) because the preview's job is aiming and focus, not motion:
+        capture never has priority taken from it for a picture nobody is scoring.
+        """
+        n = max(1, getattr(self._camera_mgr, "num_cameras", 0) or 6)
+        return int(min(100, max(33, round(33 * n / 6))))
 
     def _size_to_screen(self):
         screen = QApplication.primaryScreen().availableGeometry()
