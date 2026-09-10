@@ -1607,6 +1607,7 @@ Plain scripts, no pytest. Run them directly.
 | `uv run probe_lag.py --seconds 120` | The real capture path headlessly, with a per-camera lag trace | Cameras |
 | `uv run python probe_zerocopy.py` | A/B of frame-access routes on a live camera | A camera |
 | `uv run python probe_gil_wait.py` | GIL-held work versus thread count, executing separated from waiting | Nothing |
+| `uv run probe_network.py [--sweep]` | Which switch each camera is on (GVCP discovery, so it sees cameras pylon hides for being out-of-subnet), and whether each path carries 9000-byte packets | Cameras; `--sweep` opens them |
 
 Run `test_serial_handshake.py` after touching `serial_controller.py`; it is the
 guard against silently recording zero frames. Run `test_stim_compiler.py` after

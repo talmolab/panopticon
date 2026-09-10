@@ -24,9 +24,13 @@ kick_max_lag: 480            # Coordinator buffer, in frames. RAISED 2026-08-11 
 # Number of cameras that MUST enumerate before a session starts. Camera names are
 # positional by serial-number order, so a camera that fails to enumerate (dead switch
 # port, unpowered, still booting) renames every camera after it and silently attaches
-# the calibration extrinsics to the wrong physical cameras. Set to 9 when the third
-# switch and cameras 7-9 are installed.
-n_cameras: 6
+# the calibration extrinsics to the wrong physical cameras.
+#
+# RAISED 6 -> 9 on 2026-09-10 when the third switch and cameras 7-9 were installed.
+# The new serials (42017507, 42017508, 42019425) sort AFTER the original six
+# (41920544-41920549), so cam1-cam6 keep the identities their old calibrations were
+# solved against and the new cameras become cam7/cam8/cam9.
+n_cameras: 9
 
 # --- Calibration-only exposure / gain -----------------------------------------
 # The ChArUco board needs far more light than the experiment does, especially
@@ -55,6 +59,23 @@ output_dir: "data"
 board_config: "configs/boards/charuco_8x8_15mm.yaml"
 
 serial_port: COM3
+# Every pin driven as a camera trigger. The ORDER carries no meaning -- all pins
+# are written inside one noInterrupts() block, so every camera takes the same
+# edge. What matters is that no camera's Line1 sits on a pin that is not listed.
+#
+# THIS RIG FANS OUT, so the list did NOT grow when the count went 6 -> 9
+# (2026-09-10): cameras 7-9 share pins 10 and 12 with existing cameras rather
+# than getting their own. Listing a pin with nothing on it is harmless, so this
+# is deliberately a superset of what is wired.
+#
+# WATCH THE CURRENT BUDGET when fanning out. An ATmega2560 output is rated for
+# roughly 20 mA, and a camera's opto-isolated Line1 is driven by CURRENT, not
+# just voltage -- so three inputs on one pin draw three times as much as one.
+# Over budget risks the output driver itself; marginally over shows up as a
+# camera that misses triggers intermittently. That failure does NOT look like a
+# dropped frame: the camera simply never acquires, so its block IDs stay gapless
+# and only frame_sync.check_block_id_rate() catches it, after the recording.
+# 0/1 (Serial0) and 53 (the laser, see stim_safe_pins) are refused outright.
 trigger_pins: [2, 4, 6, 8, 10, 12]
 
 gige_driver: socket          # socket = user-space w/ reliable packet resends (proven). filter = in-kernel pylon GigE Vision driver: less CPU but silently dropped ~23% of frames w/ default resend settings (2026-06-12)

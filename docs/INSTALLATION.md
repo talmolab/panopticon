@@ -89,11 +89,32 @@ but the trigger ordinal is, and it is recorded per frame.
 
 Get this wrong and you cannot repair it afterwards: a camera that misses
 triggers, or exposes on anything other than the shared line, yields a recording
-whose views are not simultaneous. The profile's `trigger_pins` are
-`[2, 4, 6, 8, 10, 12]`, six digital output pins on an Arduino Mega, each running
-to one camera's `Line1`, the input the cameras trigger on (`TriggerSource=Line1`,
-set for you when acquisition starts). `Line1` sits on the camera's I/O
-connector, separate from the network one; the data sheet gives its pinout.
+whose views are not simultaneous. Every camera's `Line1` — the input the cameras
+trigger on (`TriggerSource=Line1`, set for you when acquisition starts) — has to
+be driven by a pin listed in the profile's `trigger_pins`. `Line1` sits on the
+camera's I/O connector, separate from the network one; the data sheet gives its
+pinout.
+
+That is **not** the same as one pin per camera. A single output can feed several
+cameras, and the reference rig does exactly that: nine cameras on the six pins
+`[2, 4, 6, 8, 10, 12]`. What sets the limit is current, not logic — see *One pin
+per camera, or one pin fanned out to several?* below. Whichever you choose, the
+list must cover every pin that has a camera on it; a camera on an unlisted pin
+never fires.
+
+**Which pins you may choose.** Any digital output will do except three
+categories, and two of them are refused outright rather than silently
+misbehaving:
+
+| Unavailable | Why |
+|---|---|
+| The board's UART pins (`0` and `1` on an Arduino Mega) | They carry the serial link that configures the board and acknowledges the start of a recording. Driving them garbles it. Refused by the stim compiler. |
+| Any pin used for stimulation | Refused, and the reverse is refused too: a stimulation block on a trigger pin injects extra edges into one camera, so its block IDs advance faster than everyone else's and the trigger ordinal stops meaning the same instant in every view. Nothing downstream can detect that. |
+| Pins with a conflicting alternate function on your board | Not enforced, so check the pinout. On a Mega, `14`-`19` are the extra hardware serial ports (`Serial1`/`2`/`3`); the shipped firmware uses only `Serial0`, so they *work* as digital outputs, but avoiding them keeps those ports free. |
+
+Beyond that the numbers are arbitrary. Pick a contiguous, easy-to-wire run and
+write down which pin goes to which camera — not because the software cares, but
+because you will need it when one camera stops triggering.
 
 Three things have to be true besides the signal wire.
 
@@ -123,12 +144,25 @@ between pins. The pins being identical in time, a fan-out is equivalent to
 several pins, *provided that one output can source the current every input
 draws*. An ATmega2560 output is rated for roughly 20 mA, so a fan-out is only
 safe if the inputs' combined current stays well inside that, and getting it
-wrong risks the output driver, not just the trigger. One pin per camera, as
-shipped, gives each input the whole 20 mA budget and needs no arithmetic.
+wrong risks the output driver, not just the trigger. One pin per camera gives
+each input the whole 20 mA budget and needs no arithmetic; fanning out trades
+that headroom for fewer wires, which is how the reference rig runs nine cameras
+on six pins.
+
+Marginal current is worth calling out separately, because it does not fail
+cleanly. A camera that is under-driven misses triggers *intermittently*, and a
+missed trigger is not a dropped frame: the camera never acquires, so it consumes
+no block ID, leaves no gap, and moves no error counter. The videos come out
+equal in length and drift apart in time. Only the block-ID rate check catches
+it, and only after the recording — see *The recording looks fine but the views
+are out of sync* in section 4. If you fan out, get the input current from the
+camera's I/O documentation and do the arithmetic rather than trusting that it
+looked fine on the bench.
 
 The *order* of the list carries no meaning; all the pins take the same edge
-together. What matters is one entry per camera and no camera's `Line1` left
-unconnected. A camera fed by a pin outside `trigger_pins` never triggers, and
+together. What matters is that every camera's `Line1` is driven by a pin the
+list names — one entry per camera if you wire it that way, fewer if you fan out.
+A camera fed by a pin outside `trigger_pins` never triggers, and
 because the default mode holds every trigger until all cameras have delivered it
 (see *RAM* below), one camera that never delivers stalls the whole recording.
 
@@ -557,20 +591,152 @@ encoding and calibration all run offline.
 
 ### Step 5 — put the cameras on the network (GigE)
 
-Three things have to be true before a GigE Vision camera will stream. It and its
-adapter need addresses on the same subnet, or the camera never appears. Windows
-has to let its traffic reach the application, or it is discovered but never
-delivers an image. And the adapter has to be configured for the traffic the
-camera sends, or images arrive with packets missing.
+Four things have to be true before a GigE Vision camera will stream. It and its
+adapter need addresses on the same subnet, or the camera never appears. **Every
+switch between them has to pass jumbo frames**, or the camera is discovered and
+delivers nothing. Windows has to let its traffic reach the application. And the
+adapter has to be configured for the traffic the camera sends.
 
-Start with addressing. **In an Administrator PowerShell window**, give the
-adapters and cameras compatible addresses:
+Each of those fails differently, and only the first is obvious.
+
+#### The addressing scheme
+
+Give **each switch its own /24**, with the host adapter always at `.2` and the
+cameras from `.3` upward. One subnet per switch means an address tells you which
+switch a camera is on, and a camera plugged into the wrong switch stops working
+loudly instead of half-working.
+
+The reference rig, nine cameras across three switches:
+
+| Subnet | Host adapter | Switch management | Cameras |
+|---|---|---|---|
+| `192.168.3.0/24` | Ethernet 4 → `.2` | `.250` | `.3` `.4` `.5` |
+| `192.168.4.0/24` | Ethernet 5 → `.2` | `.250` | `.3` `.4` `.5` |
+| `192.168.5.0/24` | Ethernet 3 → `.2` | `.250` | `.3` `.4` `.5` |
+
+Camera *names* do not come from addresses — `cam1`..`camN` are assigned by
+serial-number order (Step 7), independently of which switch a camera sits on. Keep
+the two in sync anyway; a rig where `cam5` is at `192.168.3.5` is much easier to
+reason about at 2 a.m.
+
+If you have a single switch and no wish to plan, pylon can do the whole thing:
 
 ```powershell
 & "C:\Program Files\Basler\pylon\Runtime\x64\PylonGigEConfigurator.exe" auto-all
 ```
 
-Then allow the camera traffic through the firewall. Discovery and streaming are
+That assigns compatible addresses to every adapter and camera it finds. It is
+fine for one switch. It does **not** configure switches, and it gives you no
+say in which camera lands where, so plan the addressing by hand once you have
+more than one segment.
+
+#### Configure the switches
+
+**This is the step most likely to be skipped, and it fails silently.** A managed
+switch left at its default 1500-byte MTU discards every GVSP data packet while
+link lights, enumeration, pylon Viewer's device list and ICMP all look perfectly
+healthy. The cameras appear and deliver nothing.
+
+Set the **maximum frame size to at least 9014** on every port in use, **including
+the uplink to the host**. A jumbo-capable access port behind a 1500-byte uplink
+still fails.
+
+Worked example, NETGEAR MS510TXM (the reference rig's switches; other managed
+switches differ only in menu names):
+
+1. A factory switch is a DHCP client and falls back to **`192.168.0.239` /
+   `255.255.255.0`** when no DHCP server answers — which is the normal case on an
+   isolated camera segment. To reach it, temporarily give that adapter an address
+   in its subnet, from an Administrator PowerShell:
+   ```powershell
+   New-NetIPAddress -InterfaceAlias "Ethernet 3" -IPAddress 192.168.0.100 -PrefixLength 24
+   ```
+2. Browse to `http://192.168.0.239`, user `admin`. First login forces you to set a
+   password. **Record it** — there is no recovery other than a factory reset
+   (reset button, ~10 s), which returns the switch to `192.168.0.239`.
+3. *Switching → Ports → Port Configuration* → set **Maximum Frame Size** to 9216
+   on all ports in use. The label varies by firmware: look for "Frame Size",
+   "MTU" or "Jumbo".
+4. *System → Management → IP Configuration* → set the protocol to **Static**
+   (the fields are often greyed out until you do), address `192.168.5.250`, mask
+   `255.255.255.0`, gateway `0.0.0.0`. An isolated camera segment has no router,
+   and the factory gateway points at a device that does not exist. Applying this
+   drops your browser session — expected, the switch has just moved subnet.
+5. Remove the temporary address and give the adapter its real one:
+   ```powershell
+   Remove-NetIPAddress -InterfaceAlias "Ethernet 3" -IPAddress 192.168.0.100 -Confirm:$false
+   New-NetIPAddress   -InterfaceAlias "Ethernet 3" -IPAddress 192.168.5.2 -PrefixLength 24
+   Set-NetIPInterface -InterfaceAlias "Ethernet 3" -Dhcp Disabled
+   ```
+6. Reconnect on the new address and confirm the frame-size setting survived. Some
+   firmware needs an explicit *Maintenance → Save Configuration* before a reboot.
+
+Repeat per switch, one subnet each. Do not put a `192.168.0.x` address on more
+than one camera adapter at a time, or Windows will have two routes to that subnet
+and choose one arbitrarily.
+
+#### Configure the host adapters
+
+Device Manager (Windows key, type `device manager`), *Network adapters*,
+right-click the camera port, *Properties*, *Advanced* tab. Or PowerShell, which
+is easier to repeat across ports:
+
+```powershell
+Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Jumbo Packet" -DisplayValue "9014 Bytes"
+Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Receive Buffers" -DisplayValue 4096
+Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Energy Efficient Ethernet" -DisplayValue "Disabled"
+Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Interrupt Moderation" -DisplayValue "Disabled"
+```
+
+| Property | Value | Why |
+|---|---|---|
+| Jumbo Packet | 9014 bytes | Matches the camera's `GevSCPSPacketSize 9000` |
+| Receive Buffers | the driver's maximum (4096 here) | Absorbs receive bursts |
+| Energy Efficient Ethernet | **Disabled** | Not cosmetic. EEE caused a catastrophic stall on this rig: worst frame gap 471, resend requests ~100,000. Disabling it cut those to 128 and ~4,000 |
+| Interrupt Moderation | Disabled | Measured no improvement here, but keeps ports comparable |
+
+These are per-port, and a **freshly added port does not inherit them** — EEE and
+interrupt moderation in particular default the wrong way. Set them on every
+camera port, not just the first two.
+
+Optionally spread each port's receive processing across cores:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Ports "Ethernet 3","Ethernet 4","Ethernet 5"
+```
+
+Run it elevated. It prints BEFORE and AFTER tables of `NumberOfReceiveQueues`. A
+driver that only applies RSS to TCP accepts the call and keeps fewer queues,
+reported as `NOT APPLIED on: ...`. On the reference rig this changed nothing
+measurable (DPC stayed at ~46% on the same two cores), so treat it as a
+maybe rather than a requirement. Applying it resets the adapters, so cameras
+disappear and re-enumerate over a few seconds. Never run it during a recording.
+
+#### Give the cameras their addresses
+
+Run the pylon **IP Configurator** (`C:\Program Files\Basler\pylon\Applications\x64\bin\ipconfigurator.exe`)
+as Administrator, select each camera, and set a **static/persistent** address
+from the plan above with mask `255.255.255.0` and gateway `0.0.0.0`. Turn DHCP
+off so the camera does not spend every boot waiting for a server that is not
+there.
+
+Order matters: a camera keeps its address across reboots, so if you change an
+adapter's subnet first, the cameras behind it become unreachable until they are
+renumbered too. The IP Configurator can still reach them — it addresses cameras
+by MAC over broadcast, not by IP — which is what makes it the right tool for a
+camera stranded on the wrong subnet.
+
+The same operation from Python, useful for scripting a rebuild:
+
+```python
+tl = pylon.TlFactory.GetInstance().CreateTl("BaslerGigE")
+tl.BroadcastIpConfiguration(mac, True, False, "192.168.5.3", "255.255.255.0", "0.0.0.0", "")
+tl.RestartIpConfiguration(mac)          # applies without a power cycle
+```
+
+#### Let the traffic through the firewall
+
+Discovery and streaming are
 UDP, and Windows blocks inbound UDP to an unknown program by default. Replace
 the path with your own:
 
@@ -584,29 +750,35 @@ are needed because a program-scoped rule matches one executable: `uv run gui.py`
 runs `python.exe`, while the desktop shortcut and `_launch.bat` run
 `pythonw.exe`.
 
-Now set the adapter properties for each camera port. Device Manager (Windows
-key, type `device manager`), *Network adapters*, right-click the camera port,
-*Properties*, *Advanced* tab:
+#### Verify it, because two of these failures are silent
 
-- **Jumbo Packet** — 9014 bytes, matching the camera's `GevSCPSPacketSize 9000`.
-- **Receive Buffers** — the maximum the driver offers.
-
-Optionally spread each port's receive processing across cores:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File configure_nic.ps1
+```
+uv run probe_network.py --sweep
 ```
 
-Run it elevated. It defaults to ports named `Ethernet 4` and `Ethernet 5`; list
-yours with `Get-NetAdapter` and pass `-Ports "Name1","Name2"`. It prints BEFORE
-and AFTER tables of `NumberOfReceiveQueues` and ends with `OK: every port
-reports 4 receive queues.` A driver that only applies RSS to TCP accepts the
-call and keeps fewer queues, reported as `NOT APPLIED on: ...`. Applying it
-resets the adapters, so the cameras disappear and re-enumerate over a few
-seconds. Never run it during a recording.
+This is the acceptance test for the whole step. It broadcasts a GigE Vision
+discovery request from every host adapter and then, for each camera, sweeps
+`GevSCPSPacketSize` upward while grabbing real frames.
 
-Confirm the cameras are reachable: open pylon Viewer from the Start menu. Every
-camera should be listed, and each should open and show live video.
+What it tells you that nothing else does:
+
+- **Which switch each camera is physically plugged into.** Discovery is answered
+  by every camera on the segment whatever address it holds, so the adapter that
+  hears a camera is the switch it is on. The tool flags any camera whose address
+  is outside that adapter's subnet.
+- **Whether the path carries 9000-byte packets.** Healthy output is
+  `complete=10/10` at every size up to 9000. A clean cutoff — everything passing
+  at 1500 and everything failing from 2000 up — is a switch still at the default
+  MTU.
+
+> **Do not test jumbo frames with `ping`.** These cameras answer only very small
+> ICMP echoes, so `ping -f -l 8972` fails against a camera on a *known-good*
+> jumbo path, and even `-l 1472` fails. A ping-based test reports every switch as
+> broken and will send you chasing a fault that is not there. The only valid test
+> is a real grab at the target packet size, which is what `--sweep` does.
+
+Then open pylon Viewer from the Start menu. Every camera should be listed, and
+each should open and show live video.
 
 ### Step 6 — make the camera settings file (.pfs)
 
@@ -816,16 +988,33 @@ gate is the laser's own interlock. Fit one if you want that guarantee, and until
 you do, key the laser off or block the beam before anything that flashes the
 board. [WORKFLOW.md](WORKFLOW.md) sets out when a session does that.
 
-So installing the firmware means installing the compiler and letting the
-application flash:
+So installing the firmware means wiring the pins, declaring them, installing the
+compiler, and letting the application flash:
 
-1. Install the **Arduino IDE** (which bundles `arduino-cli`) or `arduino-cli`
+1. **Wire every camera's `Line1` to a board output**, with a common ground —
+   one pin each, or several cameras fanned off one pin if the current budget
+   allows. *Wiring the trigger line* in section 1 covers pin choice, ground,
+   power, signal levels and the fan-out arithmetic; read it before cutting wire,
+   because a camera on an undriven pin never triggers.
+2. **Declare every driven pin in your profile.**
+   ```yaml
+   trigger_pins: [2, 4, 6, 8, 10, 12]   # use YOUR pin numbers
+   n_cameras: 6                          # and YOUR camera count
+   ```
+   These two do **not** have to match, and nothing cross-checks them: the pin
+   count equals the camera count only if you wired one pin each. What matters is
+   that no camera sits on a pin missing from the list. The failure is quiet — a
+   camera receiving no triggers delivers no frames, which in the default
+   kick-out mode stalls every other camera until it is retired.
+3. Install the **Arduino IDE** (which bundles `arduino-cli`) or `arduino-cli`
    standalone.
-2. Install the AVR core once: `arduino-cli core install arduino:avr`.
-3. If `arduino-cli` lives somewhere unusual, set `PANOPTICON_ARDUINO_CLI` to its
+4. Install the core for your board once: `arduino-cli core install arduino:avr`
+   for a Mega. A different board class needs its own core, and `FQBN` in
+   `gui_app/stim_compiler.py` changed to match.
+5. If `arduino-cli` lives somewhere unusual, set `PANOPTICON_ARDUINO_CLI` to its
    full path. The search order is `PANOPTICON_ARDUINO_CLI`, then PATH, then the
    bundled Arduino IDE locations.
-4. Close the Arduino IDE's Serial Monitor. It holds the port, and both flashing
+6. Close the Arduino IDE's Serial Monitor. It holds the port, and both flashing
    and recording need it.
 
 Find the board's port for `serial_port`: Device Manager > *Ports (COM & LPT)*, or
@@ -937,6 +1126,50 @@ open for the life of the app, which is what you want when the app fails to start
 and you need to see why.
 
 If the script prints `No venv at ...`, run `uv sync` first.
+
+### Adding cameras to a rig that already works
+
+Scaling up is not a fresh install, and one of the steps below can silently
+invalidate every calibration you have. In order:
+
+1. **Check the serial-number order first, before buying or unboxing anything you
+   can still change.** Cameras are named `cam1`..`camN` by serial-number order,
+   and those names are baked into `calibration.toml`. New cameras keep your
+   existing names only if their serials sort *after* every current one. If a new
+   serial interleaves, every camera after it is renamed, old calibrations
+   silently describe the wrong physical cameras, and triangulation produces a
+   plausible wrong answer. `uv run probe_network.py` lists serials in the order
+   the software will use. If they do interleave, you must recalibrate — and you
+   should also rename or re-map your existing data.
+2. **Work out whether you need another host port and switch.** The arithmetic is
+   in *Network* in section 1: cameras per port is set by pixel rate, not by
+   preference. Keeping the same cameras-per-port ratio as your working segments
+   means the per-port load is unchanged and you are only adding host-side work.
+3. **Give the new segment its own subnet**, following the scheme in Step 5:
+   adapter at `.2`, cameras from `.3`, switch management at `.250`.
+4. **Configure the new switch and the new adapter.** Both default the wrong way.
+   The switch will be at a 1500-byte MTU, which delivers zero complete frames;
+   the adapter will have Energy Efficient Ethernet enabled, which has caused a
+   catastrophic stall on this hardware. Neither is inherited from your working
+   ports. Step 5 covers both.
+5. **Wire the new cameras' `Line1` inputs**, either to new pins added to
+   `trigger_pins` or fanned off existing ones (Step 8). Fanning out needs no
+   profile change at all, which is how this rig went from six cameras to nine
+   without touching the pin list — but check the current budget first, because
+   an under-driven camera misses triggers in a way that leaves no trace until
+   the block-ID rate check runs.
+6. **Raise `n_cameras`** to the new count. Until you do, the application refuses
+   to open any cameras at all and reports the mismatch — that refusal is the
+   interlock from step 1 doing its job, not a bug.
+7. **Re-check capacity.** RAM is the usual binding constraint, and it scales with
+   camera count *and* `kick_max_lag`: see *RAM* in section 1 and redo the
+   arithmetic rather than assuming headroom. Also confirm the GPU will grant one
+   NVENC session per camera; the preflight blocks a recording that would not get
+   them, because the alternative is a camera silently falling back to raw.
+8. **Verify, then recalibrate.** `uv run probe_network.py --sweep` should show
+   every camera complete at 9000 bytes. Then calibrate from scratch: the rig's
+   geometry has changed, and an old `calibration.toml` describes a camera set
+   that no longer exists.
 
 ---
 
@@ -1075,7 +1308,10 @@ of your message.
 | `No cameras found` | Nothing enumerated. Check power and cabling, and close pylon Viewer or anything else holding the cameras. |
 | `No cameras found or .pfs missing. Check connections and profile.` | Either the above, or `pfs_path` does not point at an existing file. |
 | Cameras absent from pylon Viewer as well | GigE addressing or firewall. Re-run `PylonGigEConfigurator auto-all` elevated, and add the inbound UDP rule for both `python.exe` and `pythonw.exe`. |
-| `Expected 6 cameras but 5 enumerated.` | One camera did not appear: dead switch port, unpowered, still booting. Camera names are positional by serial-number order, so starting anyway would rename every later camera and attach the calibration extrinsics to the wrong physical camera. The message lists the serials it found. Power-cycle the missing one and reselect the profile. |
+| `Expected 6 cameras but 5 enumerated.` | One camera did not appear: dead switch port, unpowered, still booting, **or on the wrong subnet** (see the two rows below). Camera names are positional by serial-number order, so starting anyway would rename every later camera and attach the calibration extrinsics to the wrong physical camera. The message lists the serials it found. Run `uv run probe_network.py` to see which cameras answer and where, then power-cycle or re-address the missing one and reselect the profile. |
+| `Expected 6 cameras but 9 enumerated.` | The opposite case, and usually correct behaviour after adding cameras: the profile has not been told about them. Set `n_cameras` to the real count in `profiles/<rig>.yaml`. **Check the serial order before you do** — new cameras only keep the existing `cam1..camN` names if their serials sort *after* the old ones; if they interleave, every later camera is renamed and old calibrations no longer describe the cameras they name. The message lists the serials it found, in order. |
+| A camera is absent from pylon Viewer and the GUI, but its switch port shows link | It is almost certainly on the **wrong subnet** — plugged into a switch whose segment does not match its address. pylon silently omits out-of-subnet cameras, so this looks exactly like a dead camera. `uv run probe_network.py` finds it: GigE Vision discovery is answered whatever address the camera holds, so the tool reports which switch it is on and flags the mismatch. Fix by moving the cable to the matching switch, or by re-addressing the camera with the pylon IP Configurator (which reaches it by MAC over broadcast). This happens most often after cameras are unplugged to be repositioned and go back crossed. |
+| Cameras enumerate and open, but every frame is incomplete — `Failed_Buffer_Count` climbing, zero complete frames | A switch in the path is at the default 1500-byte MTU. GVSP data packets are 9000 bytes and are discarded, while link, discovery and ICMP all look healthy. Set maximum frame size to 9216 on every port **including the uplink**, then confirm with `uv run probe_network.py --sweep`: a clean cutoff between 1500 (passing) and 2000 (failing) is the signature. **Do not test this with `ping`** — these cameras answer only tiny ICMP echoes, so a large ping fails even on a known-good jumbo path. |
 | `Camera <serial> failed to open/configure: ...` | It enumerated but would not configure. Power-cycle it, or close whatever else holds it. The whole set is closed rather than continuing with a partial one. |
 | `PixelFormat is Mono12, not Mono8` | The `.pfs` was saved with the wrong pixel format. Wider than 8-bit is truncated mod 256 with no error, so this refuses instead of recording shredded video. Fix the `.pfs`. |
 | `resolution 1280x1024 differs from camera 1 (1920x1200); all cameras must match` | One camera has a different ROI. Reapply the same `.pfs`. |

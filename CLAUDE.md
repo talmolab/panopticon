@@ -486,6 +486,22 @@ Plain scripts, no pytest — run directly:
     set so the survivors keep recording aligned instead of everyone starving.
     The router logs `lag_behind_leader[...] forced_by[...]` every ~5 s, which is
     what identifies the camera causing forced drops.
+  - **THE CAMERA→PORT MAPPING CHANGED 2026-09-10. Every "cams 1/4/6" and "cams 2/3/5"
+    below is a HISTORICAL label and no longer describes the wiring.** cam5 and cam6 were
+    unplugged to be repositioned, went back into each other's switches, and were
+    re-addressed in software to match where they physically landed rather than being
+    re-cabled. Current mapping, with the third switch added:
+
+    | segment | host port | cameras |
+    |---|---|---|
+    | 192.168.3.0/24 | Ethernet 4 | cam2, cam3, **cam6** |
+    | 192.168.4.0/24 | Ethernet 5 | cam1, cam4, **cam5** |
+    | 192.168.5.0/24 | Ethernet 3 | cam7, cam8, cam9 |
+
+    So the old "Eth5 heavy-resend group" is now cams **1/4/5**, not 1/4/6. Read the
+    historical numbers below as *per-port* findings; re-derive membership with
+    `uv run probe_network.py` rather than trusting a camera list in any older note.
+
   - **MEASURED 2026-07-27 (44 min, 265,586 triggers, 6.34% loss — a 23-min run
     earlier the same day lost 43%): the cameras split into two network groups.**
 
