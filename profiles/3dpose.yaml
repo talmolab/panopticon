@@ -16,14 +16,26 @@ realtime_kick: true          # default: real-time cross-camera frame kick-out â€
 # rig has ever shown: Buffer_Underrun_Count has been 0 on every camera since the
 # GetArrayZeroCopy fix. Watch that counter after a session; nonzero means the pool
 # ran dry and this went too low.
-max_num_buffer: 250
+#
+# RAISED 250 -> 600 on 2026-09-10, same day, after cam9 sat at 2.4 s of delivery
+# lag for a whole recording: the pool at 250 is 2.5 s at 100 fps, so it was one
+# hiccup from running dry. INVARIANT worth keeping: the pool must be at least as
+# deep as kick_max_lag, or the pool empties before the coordinator is willing to
+# give up on the laggard, and a recoverable lag becomes lost frames.
+max_num_buffer: 600
 
-kick_max_lag: 240            # Coordinator buffer, in frames. LOWERED 480 -> 240 on
-                             # 2026-09-10 (see the note below): the 480 headroom was
-                             # already known to be buying nothing, and 9 cameras made
-                             # the RAM cost impossible to keep. Ring is
-                             # max_lag + 200 + 64 buffers/cam, so this halves it from
-                             # 23.1 GiB to 15.7 GiB across 9 cameras.
+kick_max_lag: 480            # Coordinator buffer, in frames.
+                             # Lowered to 240 on 2026-09-10 when observed lag was
+                             # 0-13 and the RAM was needed -- then PUT BACK the same
+                             # day. cam9 spent an entire recording 2.4 s behind, which
+                             # is exactly 240 frames, so the coordinator sat on the cap
+                             # and force-dropped 4,682 triggers that all nine cameras
+                             # had actually captured. At 480 none of those are lost.
+                             # This is MITIGATION, not a fix: cam9 is healthy at 30 fps
+                             # and cannot hold 100 fps, and it is on the new Ethernet 3
+                             # switch along with cam7 and cam8, which both dropped off
+                             # the bus entirely the same day. Fix that and 240 becomes
+                             # reasonable again -- but re-measure, do not assume.
                              # HISTORY: RAISED 2026-08-11 when one
                              # camera per session drifted to the cap and force-dropped
                              # frames every camera had captured (12.3% loss at 240).
@@ -69,6 +81,26 @@ n_cameras: 9
 # 0 / -1 mean "leave the .pfs value alone".
 calibration_exposure_us: 15000     # 15 ms = 5x the 3 ms recording exposure
 calibration_gain_db: -1            # -1 = keep the .pfs gain (6 dB)
+
+# --- Calibration coverage HUD: when to stop waving the board -----------------
+# LOWERED 2026-09-10 from 250/80. Those made a 9-camera calibration take far
+# longer than the data could be used for: 1_calibrate.py caps intrinsics at 60
+# pose-diverse frames per camera and stereo at 30 shared frames per pair, and
+# discards the rest, so 250/80 was asking for ~4x and ~2.7x what the solve ever
+# reads. 120/40 keeps ~2x and ~1.3x margin over those caps.
+#
+# The waving time is dominated by CONNECTIVITY, not by these counts -- the graph
+# must be one component, which is what a lower min_edge helps most: in the
+# 2026-09-10 session two groups sat at 46 shared detections and would have
+# merged instantly at 40 but not at 80.
+#
+# If calibrations start coming out marginal, raise these first and read
+# reprojection_error_histogram.png for the evidence. Leave the grid criterion
+# alone -- it is cheap and it is the one that actually stops a board being waved
+# in a single spot, which yields confident, badly-conditioned intrinsics.
+calibration_min_per_cam_shared: 120
+calibration_min_edge: 40
+calibration_min_grid_cells: 3
 
 pfs_path: "configs/mono8_1920x1200.pfs"
 output_dir: "data"

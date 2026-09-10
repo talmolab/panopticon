@@ -105,8 +105,8 @@ class BoardDetector:
 
     def __init__(self, n_cams, board_config_path,
                  glow_threshold=4, edge_threshold=5,
-                 optimal_shared=200, min_edge=80, min_per_cam_shared=250,
-                 glow_decay_s=0.4):
+                 optimal_shared=200, min_edge=40, min_per_cam_shared=120,
+                 glow_decay_s=0.4, min_grid_cells=None):
         self.n = int(n_cams)
         self.glow_threshold = glow_threshold
         self.edge_threshold = edge_threshold
@@ -114,6 +114,10 @@ class BoardDetector:
         self.min_edge = min_edge
         self.min_per_cam_shared = min_per_cam_shared
         self.glow_decay_s = glow_decay_s
+        # Instance attribute shadows the class default so a rig profile can
+        # raise or lower it without editing code.
+        if min_grid_cells is not None:
+            self.MIN_GRID_CELLS = int(min_grid_cells)
         with open(board_config_path) as f:
             b = yaml.safe_load(f)
         self._engine = _CharucoEngine(

@@ -891,7 +891,12 @@ class MainWindow(QMainWindow):
         if BoardDetector is None or n == 0 or not board_cfg or not Path(board_cfg).exists():
             return
         try:
-            self._detector = BoardDetector(n, board_cfg)
+            p = self._profile
+            self._detector = BoardDetector(
+                n, board_cfg,
+                min_per_cam_shared=p.calibration_min_per_cam_shared,
+                min_edge=p.calibration_min_edge,
+                min_grid_cells=p.calibration_min_grid_cells)
         except Exception as e:
             print(f"[hud] coverage detector unavailable: {e}", flush=True)
             self._detector = None

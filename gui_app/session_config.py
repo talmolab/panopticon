@@ -62,6 +62,24 @@ class RigProfile:
     # lower it for RAM, not for speed, and read Buffer_Underrun_Count afterwards
     # — nonzero means the pool ran dry, i.e. the host could not keep up.
     max_num_buffer: int = 1000
+    # --- Calibration coverage HUD: when has enough board been captured? -------
+    # These decide how long someone stands in the arena waving, so they are
+    # worth setting against what the SOLVE consumes rather than by feel.
+    # 1_calibrate.py caps intrinsics at 60 pose-diverse frames per camera and
+    # stereo at 30 shared frames per pair; everything beyond those caps is
+    # discarded, contributing only a slightly richer pool to sample from. The
+    # defaults therefore sit at roughly 2x and 1.3x the caps, which is margin,
+    # not stinginess. They were 250/80 until 2026-09-10, i.e. ~4x and ~2.7x the
+    # caps, which made a 9-camera calibration take far longer than the data
+    # could be used for. Raise them if calibrations come out marginal; the
+    # per-pair chart in reprojection_error_histogram.png is the evidence.
+    calibration_min_per_cam_shared: int = 120
+    calibration_min_edge: int = 40
+    # Quadrants of its own field of view each camera must see the board in.
+    # This is the criterion that actually prevents degenerate intrinsics from
+    # waving the board in one spot, and it is cheap to satisfy, so it should be
+    # the LAST thing relaxed.
+    calibration_min_grid_cells: int = 3
     # Optostim output pins held LOW from the instant the sketch boots — before
     # the serial handshake, which blocks until the GUI connects. Without this a
     # powered laser driver reads the floating pin as ON at power-up. Pins used by
@@ -122,6 +140,11 @@ class RigProfile:
             trigger_pins=data.get("trigger_pins", [2, 4, 6, 8, 10, 12]),
             n_cameras=data.get("n_cameras", 0),
             max_num_buffer=int(data.get("max_num_buffer", 1000)),
+            calibration_min_per_cam_shared=int(
+                data.get("calibration_min_per_cam_shared", 120)),
+            calibration_min_edge=int(data.get("calibration_min_edge", 40)),
+            calibration_min_grid_cells=int(
+                data.get("calibration_min_grid_cells", 3)),
             stim_safe_pins=data.get("stim_safe_pins", [53]),
             calibration_exposure_us=float(data.get("calibration_exposure_us", 0.0)),
             calibration_gain_db=float(data.get("calibration_gain_db", -1.0)),
