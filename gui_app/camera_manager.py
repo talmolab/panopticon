@@ -71,6 +71,23 @@ class CameraManager(QObject):
     def frame_counts(self) -> list[int]:
         return [gt.frame_count for gt in self._grab_threads]
 
+    def thermals(self) -> list:
+        """Per-camera temperature readings, or [] if the backend has none.
+
+        A cold-path GVCP register read: safe to call while grabbing, but do not
+        put it on any per-frame path.
+        """
+        fn = getattr(self._backend, "thermals", None)
+        if fn is None:
+            return []
+        out = []
+        for cam in self._cameras:
+            try:
+                out.append(fn(cam))
+            except Exception as e:
+                out.append({"error": f"{type(e).__name__}: {e}"})
+        return out
+
     def request_snapshots(self):
         """Ask every camera to stash its next full-resolution frame."""
         for gt in self._grab_threads:

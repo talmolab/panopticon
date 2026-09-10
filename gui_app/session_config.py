@@ -294,6 +294,11 @@ class SessionConfig:
             resolution=[self.frame_width, self.frame_height],
             time_of_day=now.strftime("%H:%M:%S"),
             timestamp_iso=now.isoformat(),
+            # Per-camera thermals, read at stop. Same rationale as the GPU
+            # driver version above: it moves underneath a working rig and is
+            # undiagnosable afterwards. `temp_max_c` is the one to read —
+            # `temp_c` decays as soon as the load comes off.
+            camera_thermals=getattr(self, "camera_thermals", None),
             **_environment_metadata(),
         )
         self.session_dir.mkdir(parents=True, exist_ok=True)

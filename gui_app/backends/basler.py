@@ -262,6 +262,36 @@ class BaslerBackend:
         cam.Close()
 
     # -------------------------------------------------------------- diagnostics
+    @staticmethod
+    def thermals(cam) -> dict:
+        """Core-board temperature, its high-water mark, and the thresholds.
+
+        Worth recording for the same reason as the GPU driver version: it moves
+        underneath a working rig and is undiagnosable afterwards. These cameras
+        have no fan and cool by conduction through the mount, so temperature is
+        a property of the INSTALLATION, not the camera — two identical cameras
+        differ by tens of degrees depending on bracket material, airflow and
+        what is mounted next to them. Nothing read this until 2026-09-10, when
+        three cameras turned out to be sitting above the 76 C `Critical`
+        threshold with no record of whether that was new.
+
+        `DeviceTemperature` decays after a session ends, so `BslTemperatureMax`
+        is the number worth keeping. All keys are optional: a camera that does
+        not expose them returns what it has rather than raising.
+        """
+        out = {}
+        for key, node in (("temp_c", "DeviceTemperature"),
+                          ("temp_max_c", "BslTemperatureMax"),
+                          ("temp_status", "BslTemperatureStatus"),
+                          ("temp_critical_c", "BsliCriticalTemperature"),
+                          ("temp_shutdown_c", "BsliOverTemperature"),
+                          ("temp_error_count", "BslTemperatureStatusErrorCount")):
+            try:
+                out[key] = getattr(cam, node).GetValue()
+            except Exception:
+                pass
+        return out
+
     def stream_stats(self, cam) -> dict:
         """Per-stream counters, read at stop before StopGrabbing resets them.
 

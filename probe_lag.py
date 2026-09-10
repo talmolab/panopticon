@@ -184,9 +184,25 @@ def main():
             row["released"] = co.released_triggers
             row["forced"] = co.forced
             row["forced_by"] = list(co.forced_by)
+        # Temperature every ~5 s. These cameras have no fan and cool by
+        # conduction through the mount, so how hot each gets is a property of
+        # its installation -- and the question this samples is whether the
+        # LAGGARD heats up before it starts falling behind, or is simply the
+        # thread that lost the scheduling lottery. A cold-path register read,
+        # rate-limited so it never competes with streaming.
+        if int(el) % 5 == 0 and int(el) != row.get("_last_temp_s", -1):
+            try:
+                row["temps"] = [t.get("temp_c") for t in mgr.thermals()]
+            except Exception:
+                pass
         trace.append(row)
         if int(el) % 10 == 0 and router is not None:
             print(f"  t={el:6.1f}s  {router.lag_report()}", flush=True)
+            temps = row.get("temps")
+            if temps:
+                print("           temps  "
+                      + " ".join(f"c{i+1}:{t:.0f}" for i, t in enumerate(temps)
+                                 if t is not None), flush=True)
 
     teensy.stop_triggers(prof.trigger_pins)
     time.sleep(0.5)

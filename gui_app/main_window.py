@@ -950,6 +950,14 @@ class MainWindow(QMainWindow):
             # guarantees the surviving cameras' recordings aren't lost.
             cam_results = self._camera_mgr.stop_acquisition()
             self._save_frametimes(cam_results)
+            # Read thermals BEFORE resume_preview: DeviceTemperature starts
+            # decaying the moment the load comes off, and these cameras have no
+            # fan, so how hot they got is a property of the mounting that is
+            # otherwise unrecoverable after the fact.
+            try:
+                self._config.camera_thermals = self._camera_mgr.thermals()
+            except Exception as e:
+                print(f"[acq] thermals unavailable: {e}", flush=True)
             self._config.save_metadata()
             self._write_stim_trace()   # needs blockids, so after _save_frametimes
             self._camera_mgr.resume_preview()
