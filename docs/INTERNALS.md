@@ -467,9 +467,12 @@ everything it loses; chasing it is not worth the rig time. Failed buffers in the
 
 ### The buffer pool
 
-`camera_manager.MAX_NUM_BUFFER = 1000` driver-side buffers per camera, applied at
-open. At 1920x1200 mono8 that is 1000 frames of 2.3 MB, so 2.3 GB per camera:
-12.9 GiB at six cameras and 19.3 GiB at nine, the pool half of the RAM budget in
+The profile's `max_num_buffer` sets the driver-side buffers per camera, applied
+at open (`camera_manager.MAX_NUM_BUFFER = 1000` is only the default for callers
+that do not pass one). At 1920x1200 mono8 each buffer is 2.3 MB, so the pool is
+`n_cameras x max_num_buffer x 2.3 MB` — 19.3 GiB at nine cameras and 1000
+buffers, which is why the reference rig runs 250 instead: 4.8 GiB, and still
+2.5 s of slack at 100 fps. This is the pool half of the RAM budget in
 [INSTALLATION.md](INSTALLATION.md). `GrabStrategy_OneByOne` delivers oldest-first.
 
 Deep slack absorbs network jitter, and it hides a per-frame deficit. A grab loop
@@ -1564,6 +1567,7 @@ rigs, so nothing rig-specific belongs in code (notably not stim pin numbers).
 | `realtime_encode` | GPU encode during capture, or the raw fallback |
 | `realtime_kick` | Real-time cross-camera kick-out, or post-hoc alignment |
 | `kick_max_lag` | Coordinator depth in frames. Ring RAM scales linearly with it |
+| `max_num_buffer` | Driver-side buffers per camera. Pool RAM scales linearly with it, and it is usually the larger of the two |
 | `n_cameras` | Refuse to start unless exactly this many cameras enumerate |
 | `gige_driver` | `socket`, `filter` or `auto` |
 | `trigger_rate_limit` | `AcquisitionFrameRate` in trigger mode; sets the exposure ceiling and paces readout |
