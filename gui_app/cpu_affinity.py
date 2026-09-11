@@ -60,6 +60,26 @@ THREAD_PRIORITY_HIGHEST = 2
 THREAD_PRIORITY_TIME_CRITICAL = 15
 
 _pcores_cache: list[int] | None = None
+#: Optional explicit P-core ORDER for camera assignment. Slot i takes
+#: _core_order[i % len]. Exists because the default sorted order puts camera 0
+#: (and, at nine cameras, camera 8) on logical 0 -- which on this part is also
+#: one of the two cores carrying ~46% NIC DPC time. Set via set_core_order().
+_core_order: list[int] | None = None
+
+
+def set_core_order(order) -> None:
+    """Override which P-cores cameras are assigned to, and in what order.
+
+    Pass None to restore the detected order. Values not present in the
+    detected P-core set are dropped rather than trusted, so a stale order from
+    another machine degrades to the default instead of pinning onto E-cores.
+    """
+    global _core_order
+    if not order:
+        _core_order = None
+        return
+    valid = set(performance_cores())
+    _core_order = [int(c) for c in order if int(c) in valid] or None
 
 
 def _process_mask() -> int:
@@ -198,7 +218,7 @@ def pin_to_performance_core(slot: int, priority: int | None = None) -> dict:
     deterministically instead of competing for whichever the scheduler picks.
     Returns a dict describing what happened — callers log it rather than trust it.
     """
-    cores = performance_cores()
+    cores = _core_order or performance_cores()
     out = {"pinned": False, "cpu": None, "priority": False,
            "n_pcores": len(cores)}
     if not cores:

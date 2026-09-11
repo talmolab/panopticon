@@ -64,6 +64,9 @@ def main():
     ap.add_argument("--pin", nargs="?", const=True, default=False,
                     help="pin grab threads to P-cores: bare flag = one core "
                          "each, 'set' = confined to the P-core set")
+    ap.add_argument("--core-order", default=None,
+                    help="comma-separated P-core order for camera pinning, "
+                         "e.g. 10,11,12,13,22,23 to avoid the DPC-heavy cores")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
     sys.setswitchinterval(args.switch_interval)
@@ -131,6 +134,11 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
         raw_paths.append(d / "raw.bin")
 
+    if args.core_order:
+        from gui_app.cpu_affinity import set_core_order
+        order = [int(x) for x in args.core_order.split(",")]
+        set_core_order(order)
+        print(f"P-core order override: {order}", flush=True)
     mgr.pin_capture_threads = args.pin
     mgr.start_acquisition(
         raw_paths, display_every=10**9 if args.no_display else 10,

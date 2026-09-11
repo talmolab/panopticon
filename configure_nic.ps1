@@ -27,10 +27,36 @@
 #
 # Run ELEVATED:
 #   powershell -ExecutionPolicy Bypass -File configure_nic.ps1
+# ---------------------------------------------------------------------------
+# 2026-09-11: STEER NIC DPC OFF THE P-CORES. This is now the main point of this
+# script; the queue count above changed nothing measurable.
+#
+# The rig CPU is hybrid: 8 P-cores at logicals 0,1,10,11,12,13,22,23 and 16
+# E-cores at 2-9 and 14-21. RSS defaults to BaseProcessorNumber 0, so receive
+# processing lands on logicals 0,1,2 -- and TWO OF THOSE ARE P-CORES.
+#
+# Measured during a NINE-camera recording (2026-09-11, the first time DPC has
+# been sampled at nine; E5's numbers were from six):
+#     core 0  55.2% DPC   <- P-core
+#     core 1  56.3% DPC   <- P-core
+#     core 2  66.4% DPC   <- E-core, the third port as E5 predicted
+#     everything else     <3%
+# At six cameras cores 0/1 were ~46%. So a quarter of the P-core budget is
+# consumed by interrupts before a single frame is grabbed, and the grab threads
+# pinned to those cores are measurably the laggards: moving a camera off core 0
+# took it from 5/9/12 to 1/7/9 frames behind, and the penalty followed the core
+# to whichever camera replaced it.
+#
+# -BaseProcessorNumber 2 -MaxProcessorNumber 9 confines RSS to E-cores 2-9,
+# freeing both P-cores. Reversible with -BaseProcessorNumber 0. Resets the
+# adapters, so never run it with a recording in flight.
+# ---------------------------------------------------------------------------
 [CmdletBinding()]
 param(
-    [string[]] $Ports  = @("Ethernet 4", "Ethernet 5"),
-    [int]      $Queues = 4
+    [string[]] $Ports  = @("Ethernet 3", "Ethernet 4", "Ethernet 5"),
+    [int]      $Queues = 4,
+    [int]      $BaseProcessor = 2,    # first E-core
+    [int]      $MaxProcessor  = 9     # last E-core in the low block
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,16 +75,20 @@ function Show-State($label) {
     Write-Host "=== $label ===" -ForegroundColor Cyan
     Get-NetAdapterRss -Name $Ports |
         Select-Object Name, Enabled, NumberOfReceiveQueues,
-                      MaxProcessorNumber, BaseProcessorNumber |
+                      BaseProcessorNumber, MaxProcessorNumber |
         Format-Table -AutoSize
+    Write-Host "  (P-cores on this part are 0,1,10,11,12,13,22,23 - RSS should avoid them)" -ForegroundColor DarkGray
 }
 
 Show-State "BEFORE"
 
 foreach ($p in $Ports) {
     try {
-        Set-NetAdapterRss -Name $p -NumberOfReceiveQueues $Queues -ErrorAction Stop
-        Write-Host ("  {0}: requested {1} receive queues" -f $p, $Queues) -ForegroundColor Green
+        Set-NetAdapterRss -Name $p -NumberOfReceiveQueues $Queues `
+            -BaseProcessorNumber $BaseProcessor -MaxProcessorNumber $MaxProcessor `
+            -ErrorAction Stop
+        Write-Host ("  {0}: {1} queues on processors {2}-{3}" -f `
+            $p, $Queues, $BaseProcessor, $MaxProcessor) -ForegroundColor Green
     } catch {
         Write-Host ("  {0}: FAILED -- {1}" -f $p, $_.Exception.Message) -ForegroundColor Red
     }
