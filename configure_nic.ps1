@@ -41,6 +41,27 @@
 #     core 1  56.3% DPC   <- P-core
 #     core 2  66.4% DPC   <- E-core, the third port as E5 predicted
 #     everything else     <3%
+#
+# !!! TESTED 2026-09-11 AND REVERTED. DO NOT RE-APPLY WITHOUT READING THIS. !!!
+# Setting -BaseProcessorNumber 2 -MaxProcessorNumber 9 (confining RSS to
+# E-cores) was a REGRESSION on two counts:
+#   1. It did not move the DPC at all. Cores 0/1 stayed at 57.6% each and
+#      core 2 at 68.4%. RSS queue->processor mapping is not the same knob as
+#      MSI-X interrupt affinity, which is what actually places the DPC; that
+#      lives in the device's registry Interrupt Management\Affinity Policy key
+#      and needs a reboot. E6 reached the same conclusion from queue counts.
+#   2. It made packet handling WORSE, because the NIC wants fast cores:
+#        Eth5 resends 12,060 -> 35,080, median lag 1.7 -> 3.3, max 6.0 -> 15.3
+#        worst camera overall 5/9/11 -> 7/18/25
+#      Ethernet 3 improved slightly (24,848 -> 16,603) but nowhere near enough
+#      to pay for Ethernet 5.
+# The DPC sitting on two P-cores is therefore not waste to be reclaimed -- it
+# is the receive path needing the fast cores. Reverted with:
+#   Set-NetAdapterRss -Name <ports> -NumberOfReceiveQueues 1 `
+#       -BaseProcessorNumber 0 -MaxProcessorNumber 23
+# CAVEAT on the measurement: the script changed queue count AND base processor
+# in the same run (1->4 and 0->2), so the regression is not attributed to the
+# base processor alone. If anyone revisits this, move ONE at a time.
 # At six cameras cores 0/1 were ~46%. So a quarter of the P-core budget is
 # consumed by interrupts before a single frame is grabbed, and the grab threads
 # pinned to those cores are measurably the laggards: moving a camera off core 0
@@ -55,8 +76,10 @@
 param(
     [string[]] $Ports  = @("Ethernet 3", "Ethernet 4", "Ethernet 5"),
     [int]      $Queues = 4,
-    [int]      $BaseProcessor = 2,    # first E-core
-    [int]      $MaxProcessor  = 9     # last E-core in the low block
+    # Defaults are the RESTORE values, not the experiment: see the block above.
+    [int]      $Queues2       = 1,
+    [int]      $BaseProcessor = 0,
+    [int]      $MaxProcessor  = 23
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,7 +107,7 @@ Show-State "BEFORE"
 
 foreach ($p in $Ports) {
     try {
-        Set-NetAdapterRss -Name $p -NumberOfReceiveQueues $Queues `
+        Set-NetAdapterRss -Name $p -NumberOfReceiveQueues $Queues2 `
             -BaseProcessorNumber $BaseProcessor -MaxProcessorNumber $MaxProcessor `
             -ErrorAction Stop
         Write-Host ("  {0}: {1} queues on processors {2}-{3}" -f `
