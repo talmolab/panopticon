@@ -246,18 +246,30 @@ def main() -> int:
     print("Answers arrive from every camera on the segment, whatever its address,")
     print("so the adapter that hears a camera is the switch it is plugged into.\n")
 
-    everywhere: dict[str, tuple[str, dict, IPv4Interface]] = {}
+    # Group by ADAPTER, not by address. An adapter with two IPv4 addresses (a
+    # leftover temporary one, say) would otherwise be listed twice and its
+    # cameras flagged WRONG SUBNET against the address they do not belong to --
+    # a false alarm that briefly looked like the rig had been recabled.
+    by_adapter: dict[str, list] = {}
     for name, iface in interfaces:
-        cams = discover(str(iface.ip))
+        by_adapter.setdefault(name, []).append(iface)
+
+    everywhere: dict[str, tuple[str, dict, list]] = {}
+    for name, ifaces in by_adapter.items():
+        cams = {}
+        for iface in ifaces:
+            cams.update(discover(str(iface.ip)))
         if not cams:
             continue
-        print(f"{name}  ({iface.network})")
+        nets = ", ".join(str(i.network) for i in ifaces)
+        print(f"{name}  ({nets})")
         for serial, info in sorted(cams.items()):
-            in_subnet = IPv4Address(info["ip"]) in iface.network
+            # In-subnet for ANY of this adapter's addresses is in-subnet.
+            in_subnet = any(IPv4Address(info["ip"]) in i.network for i in ifaces)
             flag = "" if in_subnet else "   <-- WRONG SUBNET FOR THIS SWITCH"
             print(f"  {serial}  ip={info['ip']:<16} mac={info['mac']}  "
                   f"{info['model']}{flag}")
-            everywhere[serial] = (name, info, iface)
+            everywhere[serial] = (name, info, ifaces)
         print()
 
     if not everywhere:
@@ -268,16 +280,16 @@ def main() -> int:
         return 1
 
     stranded = [(s, v) for s, v in everywhere.items()
-                if IPv4Address(v[1]["ip"]) not in v[2].network]
+                if not any(IPv4Address(v[1]["ip"]) in i.network for i in v[2])]
 
     print("=== summary ===")
     print(f"  {len(everywhere)} camera(s) answered discovery")
     if stranded:
         print(f"  {len(stranded)} on the WRONG SUBNET for the switch they are "
               f"plugged into:")
-        for serial, (name, info, iface) in stranded:
-            print(f"    {serial}  has {info['ip']}, but {name} serves "
-                  f"{iface.network}")
+        for serial, (name, info, ifaces) in stranded:
+            nets = ", ".join(str(i.network) for i in ifaces)
+            print(f"    {serial}  has {info['ip']}, but {name} serves {nets}")
         print("\n  These are invisible to pylon and to the GUI even though the")
         print("  switch is forwarding their traffic perfectly. Either move the")
         print("  cable to the matching switch, or give the camera an address on")
