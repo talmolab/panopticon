@@ -641,6 +641,15 @@ Set the **maximum frame size to at least 9014** on every port in use, **includin
 the uplink to the host**. A jumbo-capable access port behind a 1500-byte uplink
 still fails.
 
+Also check **which physical ports you used.** Multi-gigabit switches commonly
+split their ports into speed blocks — the reference rig's are four 100M/1G/2.5G
+ports plus four 1/2.5/5/10G ports — and the faster block is usually the higher
+numbers. A camera that negotiates 2.5 Gbit/s where its siblings get 5 Gbit/s is
+not an error anywhere; it simply has less headroom for retransmission, and that
+shows up as resend requests under load rather than as a failure. Put every camera
+*and* the host uplink in the fastest block, and verify the **negotiated** speed
+in the switch UI (*Switching -> Ports*) rather than assuming it from the label.
+
 Worked example, NETGEAR MS510TXM (the reference rig's switches; other managed
 switches differ only in menu names):
 
@@ -674,6 +683,36 @@ switches differ only in menu names):
 Repeat per switch, one subnet each. Do not put a `192.168.0.x` address on more
 than one camera adapter at a time, or Windows will have two routes to that subnet
 and choose one arbitrarily.
+
+Give every switch a management address on **its own camera subnet** (step 4
+above), not on a shared one. Each then stays reachable with no temporary address,
+and because the subnets differ you can have all of their web UIs open at once to
+compare settings — which you will want to do the first time one switch behaves
+differently from another.
+
+##### Finding a switch whose address you have lost
+
+Sweep the camera subnet and look for a live host that is neither the adapter nor
+a camera. No temporary address is needed, because you are already on that subnet:
+
+```bash
+for i in $(seq 1 254); do
+  ( ping -n 1 -w 250 "192.168.5.$i" | grep -qa "TTL=" && echo "ALIVE 192.168.5.$i" ) &
+  (( i % 64 == 0 )) && wait
+done; wait
+```
+
+Then tell switch from camera by MAC prefix — `arp -a` after the sweep. Basler
+cameras are `00-30-53-*`; your switch vendor has its own OUI. Confirm with
+`curl -s -o /dev/null -w '%{http_code}' http://<ip>/`, which answers `200` for a
+web UI.
+
+Do **not** bother with vendor layer-2 discovery protocols. NETGEAR's NSDP (UDP
+63321/63322) is unimplemented on the Smart Managed Pro line: on the reference rig
+it returned zero replies even from a switch that was answering HTTP on the same
+segment at that moment, and with an inbound firewall rule explicitly allowing it.
+If the subnet sweep fails, the switch has no management address on that segment
+at all, and your options are the vendor's discovery utility or a factory reset.
 
 #### Configure the host adapters
 
