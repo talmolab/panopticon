@@ -161,3 +161,12 @@ trigger_rate_limit: 165      # REVERTED 2026-08-11: setting this to 0 (limiter o
 # cache locality. Encoders are deliberately left unpinned -- see
 # pin_encoder_threads in session_config.py for the numbers.
 pin_capture_threads: true
+
+# Seconds between camera temperature polls while acquiring; 0 disables. These
+# cameras have no fan and cool by conduction through the mount, so temperature
+# is a property of the installation: measured 2026-09-11 over a 600 s run, four
+# of the nine sit above the vendor's 76 C Critical threshold and cam6 peaked at
+# 80 C against an 81 C shutdown, while cam9 never passed 70 C. The GUI used to
+# read temperatures only at stop, which is too late to act on. Thresholds are
+# read from each camera, never from this file.
+thermal_poll_s: 20.0

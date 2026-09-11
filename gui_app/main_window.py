@@ -110,6 +110,17 @@ class MainWindow(QMainWindow):
         self._display_timer.timeout.connect(self._refresh_displays)
         self._display_timer.start(self._display_interval_ms())
 
+        # Temperature gets its own slow timer and is deliberately kept off the
+        # preview timer: thermals() is a GVCP register read per camera, while
+        # the preview repaints up to ten times a second. The interval is read
+        # from the profile when acquisition starts, because _profile is not
+        # assigned yet at this point in __init__.
+        self._thermal_alert: str | None = None
+        self._thermal_warnings: list = []
+        self._thermal_reported: set = set()
+        self._thermal_timer = QTimer()
+        self._thermal_timer.timeout.connect(self._poll_thermals)
+
         # Prefer whatever profile this machine used last — the profile list is
         # shared with the 3dface rig, so alphabetical order picks the wrong one
         # here. Fall back to the first profile whose .pfs actually exists.
@@ -337,19 +348,127 @@ class MainWindow(QMainWindow):
             return
         worst = max(lags)
         if worst < 0.25:
-            self.statusBar().showMessage(
-                f"Capture healthy — keeping up with the trigger "
-                f"(max lag {worst * 1000:.0f} ms)")
+            msg = (f"Capture healthy — keeping up with the trigger "
+                   f"(max lag {worst * 1000:.0f} ms)")
         elif worst < 1.0:
-            self.statusBar().showMessage(
-                f"CAPTURE FALLING BEHIND: cam{lags.index(worst) + 1} is "
-                f"{worst:.2f} s behind real time and growing. Close other "
-                f"applications.")
+            msg = (f"CAPTURE FALLING BEHIND: cam{lags.index(worst) + 1} is "
+                   f"{worst:.2f} s behind real time and growing. Close other "
+                   f"applications.")
         else:
-            self.statusBar().showMessage(
-                f"CAPTURE {worst:.1f} s BEHIND REAL TIME (cam"
-                f"{lags.index(worst) + 1}). Frames will be lost when the buffer "
-                f"pool fills. Stop and investigate.")
+            msg = (f"CAPTURE {worst:.1f} s BEHIND REAL TIME (cam"
+                   f"{lags.index(worst) + 1}). Frames will be lost when the "
+                   f"buffer pool fills. Stop and investigate.")
+        # An overheating camera outranks a lag report: lag costs alignment,
+        # thermal shutdown costs that camera for the rest of the session.
+        if self._thermal_alert:
+            msg = f"{self._thermal_alert}  |  {msg}"
+        self.statusBar().showMessage(msg)
+
+    def _start_thermal_watch(self):
+        """Begin polling temperatures for this acquisition, if enabled."""
+        secs = float(getattr(self._profile, "thermal_poll_s", 0.0) or 0.0)
+        if secs <= 0:
+            return
+        self._thermal_timer.start(int(secs * 1000))
+
+    def _poll_thermals(self):
+        """Warn about an overheating camera while there is still time to act.
+
+        The GUI used to read temperatures only at stop, which records the
+        problem but cannot prevent it: a camera that reaches its shutdown
+        threshold stops delivering, so by the time the number is visible the
+        session is already short a camera and the block-ID bookkeeping has had
+        to truncate.
+
+        Every threshold comes from the camera itself -- `BslTemperatureStatus`
+        is the vendor's own verdict and `BsliOverTemperature` its shutdown
+        point -- so this is not tied to one model or one rig. These cameras
+        have no fan and cool by conduction through the mount, which makes
+        temperature a property of the INSTALLATION: on the reference rig four
+        of nine sit above Critical while three never pass 73 C.
+        """
+        if self._state not in (State.RECORDING, State.CALIBRATING):
+            self._thermal_timer.stop()
+            return
+        try:
+            readings = self._camera_mgr.thermals()
+        except Exception as e:
+            print(f"[acq] thermal poll failed: {type(e).__name__}: {e}",
+                  flush=True)
+            return
+
+        hot = []
+        for idx, t in enumerate(readings, start=1):
+            if not isinstance(t, dict) or t.get("error"):
+                continue
+            temp = t.get("temp_c")
+            status = str(t.get("temp_status", "") or "").strip()
+            shutdown = t.get("temp_shutdown_c")
+            # The camera's own verdict is authoritative; the numeric comparison
+            # is a fallback for a model that does not expose the status node.
+            over = status.lower() not in ("", "ok")
+            if temp is not None and shutdown is not None and temp >= shutdown:
+                over = True
+            if not over:
+                continue
+            margin = (shutdown - temp) if (temp is not None
+                                           and shutdown is not None) else None
+            # Sort key first: closest to shutdown is the one to name.
+            hot.append((margin if margin is not None else 999.0,
+                        idx, temp, status, margin))
+
+        if not hot:
+            self._thermal_alert = None
+            return
+        hot.sort()
+
+        _key, idx, temp, status, margin = hot[0]
+        name = self._camera_label(idx)
+        if margin is None:
+            gap = ""
+        elif margin <= 0:
+            # Past the vendor's own shutdown point: a negative margin read as
+            # though there were headroom left, which is the opposite of true.
+            gap = ", AT OR PAST ITS SHUTDOWN POINT"
+        else:
+            gap = f", {margin:.0f} C from shutdown"
+        extra = "" if len(hot) == 1 else f" (+{len(hot) - 1} more)"
+        temp_s = "?" if temp is None else f"{temp:.0f}"
+        self._thermal_alert = (
+            f"CAMERA TEMPERATURE: {name} {temp_s} C "
+            f"{status or 'over limit'}{gap}{extra}")
+
+        # One durable warning per camera per session, so this reaches
+        # WARNINGS.txt and the post-session dialog and not just a status bar
+        # message that scrolls past unread.
+        for _key, idx, temp, status, margin in hot:
+            if idx in self._thermal_reported:
+                continue
+            self._thermal_reported.add(idx)
+            name = self._camera_label(idx)
+            temp_s = "?" if temp is None else f"{temp:.1f}"
+            tail = ""
+            if temp is not None and margin is not None:
+                if margin <= 0:
+                    tail = (f", which is AT OR PAST its "
+                            f"{temp + margin:.0f} C shutdown point")
+                else:
+                    tail = (f", {margin:.1f} C below its "
+                            f"{temp + margin:.0f} C shutdown point")
+            self._thermal_warnings.append(
+                f"{name} reached {temp_s} C during this acquisition, which its "
+                f"own firmware reports as '{status or 'over limit'}'{tail}. "
+                f"These cameras have no fan and cool through the mount, so "
+                f"this is an airflow or mounting problem rather than a camera "
+                f"fault. A camera that reaches its shutdown point stops "
+                f"delivering mid-session.")
+            print(f"[acq] THERMAL: {self._thermal_warnings[-1]}", flush=True)
+
+    def _camera_label(self, idx: int) -> str:
+        """Operator-facing name for a 1-based camera index."""
+        if 0 < idx <= len(self._camera_names):
+            return self._camera_names[idx - 1]
+        return f"cam{idx}"
 
     def _build_config(self) -> SessionConfig:
         vals = self._sidebar.get_field_values()
@@ -513,6 +632,9 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
         self._capture_warnings = []
+        self._thermal_warnings = []
+        self._thermal_reported = set()
+        self._thermal_alert = None
         for cam in self._camera_names:
             cam_dir = self._video_dir / cam
             cam_dir.mkdir(parents=True, exist_ok=True)
@@ -588,6 +710,7 @@ class MainWindow(QMainWindow):
         print(f"[acq] start_acquisition done", flush=True)
 
         self._sidebar.set_fields_editable(False)
+        self._start_thermal_watch()
         if acq_type == "calibration":
             self._state = State.CALIBRATING
             self._sidebar.set_status("CALIBRATING", "#4488ff")
@@ -1141,6 +1264,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(status)
 
         problems = list(getattr(self, "_capture_warnings", []))
+        problems += list(getattr(self, "_thermal_warnings", []))
         if failed:
             problems.append(
                 f"{len(failed)} camera(s) produced no usable video: "

@@ -33,3 +33,8 @@ calibration_min_grid_cells: 3
 
 # 3dface has not been characterised for hybrid-CPU thread placement; leave off.
 pin_capture_threads: false
+
+# Pinned explicitly rather than inherited: 3dface's cameras and mounts are not
+# the 3dpose rig's, so its thermal behaviour is uncharacterised. The poll is
+# cheap and the thresholds come from the cameras themselves, so leave it on.
+thermal_poll_s: 20.0

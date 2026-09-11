@@ -86,6 +86,18 @@ class RigProfile:
     # launch — which is the shape of the rotating laggard. See cpu_affinity.py.
     # No effect on a non-hybrid CPU or off Windows.
     pin_capture_threads: bool = False
+    # Seconds between temperature polls while acquiring; 0 disables the check.
+    # These cameras have no fan and cool by conduction through the mount, so
+    # temperature is a property of the INSTALLATION: on the reference rig four
+    # of nine cameras sit above the vendor's Critical threshold and one peaked
+    # 1 C below thermal shutdown, while three others never pass 73 C. A camera
+    # that reaches shutdown stops delivering mid-session, and until now the GUI
+    # read temperatures only AFTER the recording -- too late to act on. The
+    # thresholds are never hardwired here: every Basler camera reports its own
+    # BslTemperatureStatus, BsliCriticalTemperature and BsliOverTemperature, so
+    # this works on any model. A GVCP register read is a cold path, hence the
+    # slow default rather than the preview timer.
+    thermal_poll_s: float = 20.0
     # Confine ENCODER threads to the E-core set. Separate from the above, and
     # default OFF because it MEASURED WORSE. 2026-09-11, nine cameras, grab
     # threads pinned in every arm:
@@ -162,6 +174,7 @@ class RigProfile:
             calibration_min_grid_cells=int(
                 data.get("calibration_min_grid_cells", 3)),
             pin_capture_threads=bool(data.get("pin_capture_threads", False)),
+            thermal_poll_s=float(data.get("thermal_poll_s", 20.0)),
             pin_encoder_threads=bool(data.get("pin_encoder_threads", False)),
             stim_safe_pins=data.get("stim_safe_pins", [53]),
             calibration_exposure_us=float(data.get("calibration_exposure_us", 0.0)),

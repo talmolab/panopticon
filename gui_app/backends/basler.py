@@ -299,9 +299,19 @@ class BaslerBackend:
         the distinction every capture problem here has eventually reduced to:
           Buffer_Underrun_Count  — the pool ran dry: the HOST could not keep up.
           Failed_Buffer_Count    — a frame was given up on (resends exhausted).
-          Resend_Request_Count   — packets lost but recovered; high with a
-                                   Failed_Buffer_Count near zero is a noisy link
-                                   doing its job, not a problem.
+          Resend_Request_Count   — packets lost and asked for again. A high
+                                   count with Failed_Buffer_Count near zero is
+                                   NOT harmless: the resend arrives after the
+                                   rest of the buffer, so that camera completes
+                                   late, and a camera completing late every few
+                                   frames IS per-camera drift. On 2026-09-11 the
+                                   cameras behind a switch with flow control
+                                   disabled ran 16,800 resends per 90 s against
+                                   10 for their siblings and were the laggards,
+                                   having lost no frames at all. Treat a count
+                                   three orders of magnitude above the other
+                                   cameras as a fault; check switch flow
+                                   control first.
         Statistic_Failed_Packet_Count is NOT included: it reads absurd values on
         this hardware (tens of millions against 11 M total) and is untrustworthy.
         """
