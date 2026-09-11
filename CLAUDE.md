@@ -500,9 +500,20 @@ Plain scripts, no pytest — run directly:
 
     | segment | host port | cameras |
     |---|---|---|
-    | 192.168.3.0/24 | Ethernet 4 | cam2, cam3, **cam6** |
-    | 192.168.4.0/24 | Ethernet 5 | cam1, cam4, **cam5** |
+    | 192.168.3.0/24 | Ethernet 4 | cam1, cam4, cam5 |
+    | 192.168.4.0/24 | Ethernet 5 | cam2, cam3, cam6 |
     | 192.168.5.0/24 | Ethernet 3 | cam7, cam8, cam9 |
+
+    **CHANGED AGAIN 2026-09-11**, when the two original switches were swapped
+    between NIC ports to settle whether the long-standing resend asymmetry was
+    the port or the switch. It is the SWITCH: the clean group stayed clean on the
+    formerly-bad port (4-10 resends before, 6-14 after) and the noisy group
+    stayed noisy on the formerly-good one (~11,000 either side). The NIC ports
+    and their interrupt placement are innocent -- do not investigate the host
+    side of the network again on the strength of the old notes.
+
+    Do not trust any camera-to-port mapping written down here or anywhere else.
+    Derive it with `uv run probe_network.py`, which reads it off the wire.
 
     So the old "Eth5 heavy-resend group" is now cams **1/4/5**, not 1/4/6. Read the
     historical numbers below as *per-port* findings; re-derive membership with
