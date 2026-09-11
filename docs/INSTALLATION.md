@@ -641,6 +641,28 @@ Set the **maximum frame size to at least 9014** on every port in use, **includin
 the uplink to the host**. A jumbo-capable access port behind a 1500-byte uplink
 still fails.
 
+Set **flow control to `symmetric` on every port in use, including the uplink.**
+This is the single highest-impact switch setting on this rig and it is off by
+default on most managed switches. Measured on three otherwise identically
+configured switches, same model, same firmware, same ports, nine cameras, 90 s:
+
+| flow control | GVSP resend requests per camera | worst per-camera lag |
+|---|---|---|
+| **symmetric** | **8-10** | 1-4 frames |
+| disabled | **16,700-16,900** | 5-12 frames |
+
+That is a **1,100x** difference, and the three cameras behind the switch we
+changed went from the worst in the rig to the best. The mechanism: several
+cameras burst simultaneously into one uplink, and 802.3x PAUSE lets the switch
+ask a camera to hold off for microseconds while its egress queue drains. Without
+it the switch's only option is to discard the frame, which becomes a GVSP resend,
+which completes that camera's buffer late — indistinguishable from a slow camera.
+
+The tell is in the stream counters the grab threads print at the end of every
+recording: `Resend_Request_Count` in the thousands while
+`Buffer_Underrun_Count` stays at 0 means loss in the **network**, not starvation
+in the host, and flow control is the first thing to check.
+
 Also check **which physical ports you used.** Multi-gigabit switches commonly
 split their ports into speed blocks — the reference rig's are four 100M/1G/2.5G
 ports plus four 1/2.5/5/10G ports — and the faster block is usually the higher
@@ -666,6 +688,9 @@ switches differ only in menu names):
 3. *Switching → Ports → Port Configuration* → set **Maximum Frame Size** to 9216
    on all ports in use. The label varies by firmware: look for "Frame Size",
    "MTU" or "Jumbo".
+   On the same page set **Flow Control** to **Symmetric** on every port in use,
+   including the uplink. See the measurement above; this one setting is worth
+   three orders of magnitude in resend requests.
 4. *System → Management → IP Configuration* → set the protocol to **Static**
    (the fields are often greyed out until you do), address `192.168.5.250`, mask
    `255.255.255.0`, gateway `0.0.0.0`. An isolated camera segment has no router,
@@ -1309,9 +1334,16 @@ released=6022  dropped=0  forced=0  queue_full_drops=0
 with per-camera lag behind the leader at median 0, p95 1, max 2 frames.
 
 Two numbers in the stream statistics are easy to misread.
-`Resend_Request_Count` counts packets that were lost and asked for again; a high
-count with `Failed_Buffer_Count` at 0 is a noisy link recovering everything,
-which costs nothing. `Failed_Buffer_Count` above 0 is a frame given up on.
+`Resend_Request_Count` counts packets that were lost and asked for again, and
+`Failed_Buffer_Count` above 0 is a frame given up on entirely. A high resend
+count with `Failed_Buffer_Count` at 0 means the link is noisy but recovering
+everything — **which is not free.** A resend arrives after the rest of the
+buffer, so it completes that camera's frame late, and a camera completing late
+every few frames is exactly what per-camera drift looks like. On this rig the
+cameras behind a switch with flow control disabled ran 16,800 resends per 90 s
+against 10 for their siblings, and they were the laggards, with no frames lost at
+all. Treat a resend count three orders of magnitude above the other cameras as a
+fault even when every frame arrives.
 
 Measure on an otherwise idle machine. Competing CPU load has moved the cycle
 from 10.00 to 10.32 ms, which accumulates 5.6 seconds of backlog over
@@ -1392,7 +1424,7 @@ of your message.
 | `cycle` above the frame period | The grab loop is not finishing inside one period. Something else is using the CPU, or a change added work to the hot path. |
 | Frame rate about half of what was asked | Exposure is over the ceiling, so the camera is still busy when the next trigger fires and skips it. Lower `ExposureTime` in the `.pfs`. Raising `trigger_rate_limit` buys headroom only on a camera whose maximum frame rate is above the current limiter; the reference a2A1920-165g5m is already at its maximum of 165, and a higher value is clamped silently by the camera, so the change appears to apply and does nothing. Never set the limiter to `0`; see step 6. |
 | `Buffer_Underrun_Count` nonzero | The driver's buffer pool ran dry: a host-side problem, not the network. |
-| Frames lost with high `Resend_Request_Count` and nonzero `Failed_Buffer_Count` | Network. Check RSS receive queues, jumbo frames end to end, Energy Efficient Ethernet, and cameras per port. |
+| High `Resend_Request_Count`, with or without lost frames | Network. **Check switch flow control first — `symmetric` on every port in use including the uplink.** Disabled flow control measured 16,800 resends per camera per 90 s against 10 with it on, and the affected cameras were the ones drifting. Then jumbo frames end to end, Energy Efficient Ethernet, RSS receive queues, and cameras per port. |
 | Roughly a quarter of frames missing, in single-frame gaps | `gige_driver: filter` discards a frame with a lost packet instead of asking for it again. Use `socket`. |
 | `camera did not start grabbing` / `stream dead after N re-arms` | That camera was retired from the alignment set so the others keep recording aligned. The session yields N-1 cameras instead of nothing. |
 | `block-ID bookkeeping claimed X frames but only Y were persisted` | An encoder fell behind or died. The metadata is truncated to what is in the video and a `WARNINGS.txt` is written beside it. |
