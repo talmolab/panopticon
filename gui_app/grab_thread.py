@@ -323,9 +323,10 @@ class GrabThread(QThread):
         # and ignored -- it is a performance regression, never a correctness one.
         if self._pin_cpu:
             try:
+                import gui_app.cpu_affinity as _ca
                 from gui_app.cpu_affinity import (
-                    pin_to_performance_core, restrict_to_performance_cores,
-                    THREAD_PRIORITY_HIGHEST)
+                    pin_to_performance_core, restrict_to_performance_cores)
+                THREAD_PRIORITY_HIGHEST = _ca.GRAB_THREAD_PRIORITY
                 if self._pin_cpu == "set":
                     r = restrict_to_performance_cores(
                         priority=THREAD_PRIORITY_HIGHEST)

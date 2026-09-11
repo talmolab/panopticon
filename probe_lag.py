@@ -67,6 +67,18 @@ def main():
     ap.add_argument("--core-order", default=None,
                     help="comma-separated P-core order for camera pinning, "
                          "e.g. 10,11,12,13,22,23 to avoid the DPC-heavy cores")
+    ap.add_argument("--hires-timer", action="store_true",
+                    help="timeBeginPeriod(1): 1 ms system tick instead of ~15.6")
+    ap.add_argument("--proc-prio", action="store_true",
+                    help="HIGH_PRIORITY_CLASS for the whole process")
+    ap.add_argument("--thread-prio", default="highest",
+                    choices=["highest", "timecritical", "abovenormal"],
+                    help="grab-thread priority tier")
+    ap.add_argument("--gev-scpd", type=int, default=None,
+                    help="override GevSCPD (inter-packet delay, 1 ns ticks). "
+                         "Spreads each frame over more of the trigger period, "
+                         "cutting the synchronised burst three cameras make "
+                         "into one 10 GbE uplink.")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
     sys.setswitchinterval(args.switch_interval)
@@ -119,6 +131,22 @@ def main():
         except Exception as e:
             print(f"nvenc pre-warm failed (continuing): {e}", flush=True)
 
+    if args.gev_scpd is not None:
+        for i, cam in enumerate(mgr._cameras):
+            try:
+                cam.GevSCPD.SetValue(args.gev_scpd)
+            except Exception as e:
+                print(f"[cam{i+1}] GevSCPD override failed: {e}", flush=True)
+        try:
+            pkt = mgr._cameras[0].GevSCPSPacketSize.GetValue()
+            npkt = (prof.frame_width * prof.frame_height + pkt - 1) // pkt
+            per_pkt_ns = args.gev_scpd + pkt * 8 / 5.0   # 5 Gbit/s = 1.6 ns/byte
+            print(f"GevSCPD={args.gev_scpd} -> ~{npkt} packets x "
+                  f"{per_pkt_ns/1000:.1f} us = {npkt*per_pkt_ns/1e6:.2f} ms per "
+                  f"frame (period {1000/prof.frame_rate:.1f} ms)", flush=True)
+        except Exception:
+            pass
+
     if args.max_buffer:
         for i, cam in enumerate(mgr._cameras):
             try:
@@ -134,6 +162,17 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
         raw_paths.append(d / "raw.bin")
 
+    from gui_app import cpu_affinity as _ca
+    if args.hires_timer:
+        print(f"timeBeginPeriod(1) -> {_ca.begin_high_resolution_timers(1)}", flush=True)
+    if args.proc_prio:
+        print(f"HIGH_PRIORITY_CLASS -> {_ca.set_process_priority()}", flush=True)
+    _ca.GRAB_THREAD_PRIORITY = {
+        "highest": _ca.THREAD_PRIORITY_HIGHEST,
+        "timecritical": _ca.THREAD_PRIORITY_TIME_CRITICAL,
+        "abovenormal": _ca.THREAD_PRIORITY_ABOVE_NORMAL,
+    }[args.thread_prio]
+    print(f"grab thread priority tier: {args.thread_prio}", flush=True)
     if args.core_order:
         from gui_app.cpu_affinity import set_core_order
         order = [int(x) for x in args.core_order.split(",")]

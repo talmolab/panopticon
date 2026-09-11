@@ -59,6 +59,10 @@ THREAD_PRIORITY_ABOVE_NORMAL = 1
 THREAD_PRIORITY_HIGHEST = 2
 THREAD_PRIORITY_TIME_CRITICAL = 15
 
+#: Tier applied to grab threads. Overridable so an arm can be A/B'd
+#: without editing the call site.
+GRAB_THREAD_PRIORITY = THREAD_PRIORITY_HIGHEST
+
 _pcores_cache: list[int] | None = None
 #: Optional explicit P-core ORDER for camera assignment. Slot i takes
 #: _core_order[i % len]. Exists because the default sorted order puts camera 0
@@ -286,6 +290,32 @@ def pin_to_efficiency_core(slot: int) -> dict:
         out["cpu"] = f"set[{len(cores)}]"
         out["pinned"] = restrict_current_thread(cores)
     return out
+
+
+ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+HIGH_PRIORITY_CLASS = 0x00000080
+
+
+def set_process_priority(cls: int = HIGH_PRIORITY_CLASS) -> bool:
+    """Raise the whole process's priority class.
+
+    Thread priority is relative to the process class, so HIGHEST inside a
+    NORMAL-class process still loses to a normal thread in a HIGH-class one.
+    Deliberately NOT offering REALTIME_PRIORITY_CLASS: it outranks most kernel
+    worker threads, and this machine is simultaneously servicing ~230k
+    interrupts/s of NIC receive traffic -- starving those DPCs would trade a
+    lagging camera for lost packets.
+    """
+    if not _IS_WINDOWS:
+        return False
+    try:
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        k.SetPriorityClass.restype = ctypes.c_bool
+        return bool(k.SetPriorityClass(k.GetCurrentProcess(), cls))
+    except Exception:
+        return False
 
 
 def begin_high_resolution_timers(ms: int = 1) -> bool:
