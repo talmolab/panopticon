@@ -138,6 +138,27 @@ def set_current_thread_priority(level: int) -> bool:
         return False
 
 
+def restrict_to_performance_cores(priority: int | None = None) -> dict:
+    """Confine the calling thread to the P-core SET, without fixing one core.
+
+    The alternative to one-core-per-camera. With nine cameras on eight P-cores
+    the round-robin doubles two cameras onto one core, and on this part the
+    first two P-cores are also the ones carrying ~46% NIC DPC -- so the naive
+    mapping puts cam1 and cam9 on the busiest core in the machine. Handing the
+    scheduler the whole P-core set keeps threads off E-cores (the thing that
+    actually matters) while letting it balance around DPC load.
+    """
+    cores = performance_cores()
+    out = {"pinned": False, "cpu": None, "priority": False,
+           "n_pcores": len(cores)}
+    if cores:
+        out["cpu"] = f"Pset[{len(cores)}]"
+        out["pinned"] = restrict_current_thread(cores)
+    if priority is not None:
+        out["priority"] = set_current_thread_priority(priority)
+    return out
+
+
 def pin_to_performance_core(slot: int, priority: int | None = None) -> dict:
     """Pin the calling thread to the slot-th P-core, round-robin if oversubscribed.
 
@@ -154,6 +175,59 @@ def pin_to_performance_core(slot: int, priority: int | None = None) -> dict:
         out["pinned"] = pin_current_thread(cpu)
     if priority is not None:
         out["priority"] = set_current_thread_priority(priority)
+    return out
+
+
+def efficiency_cores() -> list[int]:
+    """Logical CPUs in the LOWEST efficiency class, or [] if not hybrid."""
+    if not _IS_WINDOWS:
+        return []
+    fast = set(performance_cores())
+    if not fast:
+        return []
+    try:
+        import os
+        return [c for c in range(os.cpu_count() or 0) if c not in fast]
+    except Exception:
+        return []
+
+
+def restrict_current_thread(cpus) -> bool:
+    """Confine the calling thread to a SET of logical CPUs."""
+    if not _IS_WINDOWS or not cpus:
+        return False
+    try:
+        k32 = _k32()
+        mask = 0
+        for c in cpus:
+            mask |= 1 << c
+        return k32.SetThreadAffinityMask(k32.GetCurrentThread(), mask) != 0
+    except Exception:
+        return False
+
+
+def pin_to_efficiency_core(slot: int) -> dict:
+    """Confine the calling thread to the E-core SET (not one E-core).
+
+    For the ENCODER threads. They are not latency-critical — `Encode()` and
+    `os.write()` both release the GIL and the real work is on the GPU — but
+    there is one per camera, so left unpinned they compete with the grab
+    threads for the eight P-cores, which would undo the grab-thread pinning.
+
+    **Measured 2026-09-11: pinning each encoder to ONE E-core is much worse
+    than not pinning them at all** — cam9 blew out to 321 frames behind and
+    avg_proc went 2.19 -> 3.48 ms. A single E-core cannot sustain encode
+    submission for one 1920x1200 stream at 100 fps, so the encoder backs up and
+    drags its camera with it. The set keeps them off the P-cores while letting
+    the scheduler move them freely among the sixteen E-cores.
+
+    Deliberately no priority bump: the point is to yield to capture.
+    """
+    cores = efficiency_cores()
+    out = {"pinned": False, "cpu": None, "n_ecores": len(cores)}
+    if cores:
+        out["cpu"] = f"set[{len(cores)}]"
+        out["pinned"] = restrict_current_thread(cores)
     return out
 
 

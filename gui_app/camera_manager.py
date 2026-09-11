@@ -245,6 +245,8 @@ class CameraManager(QObject):
     #: Set from the profile before start_acquisition(). Off by default so a
     #: non-hybrid or non-Windows host behaves exactly as before.
     pin_capture_threads = False
+    #: Confine encoder threads to E-cores. Measured WORSE; see session_config.
+    pin_encoder_threads = False
 
     def _stop_grab_threads(self):
         for gt in self._grab_threads:
@@ -314,7 +316,8 @@ class CameraManager(QObject):
             # fails for any camera.
             from gui_app.sync_encode import SyncEncodeRouter
             router = SyncEncodeRouter(raw_paths, width, height, quality,
-                                      fps=fps, max_lag=kick_max_lag)
+                                      fps=fps, max_lag=kick_max_lag,
+                                      pin_encoders=self.pin_encoder_threads)
             if router.available:
                 router.start()
                 self._router = router

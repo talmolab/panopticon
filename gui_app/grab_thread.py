@@ -100,6 +100,20 @@ class _EncoderThread(threading.Thread):
         del enc
 
     def run(self):
+        # Encoders go on E-cores. They are not latency-critical (Encode() and
+        # os.write() both release the GIL; the work is on the GPU) but there is
+        # one per camera, so unpinned they compete with the grab threads for
+        # the eight P-cores -- which would undo the grab-thread pinning
+        # entirely. No priority bump: the point is to yield to capture.
+        if getattr(self, "_pin_ecore", False):
+            try:
+                from gui_app.cpu_affinity import pin_to_efficiency_core
+                r = pin_to_efficiency_core(self._cam_index)
+                print(f"[enc{self._cam_index}] affinity cpu={r['cpu']} "
+                      f"pinned={r['pinned']} (of {r['n_ecores']} E-cores)",
+                      flush=True)
+            except Exception as e:
+                print(f"[enc{self._cam_index}] affinity failed: {e}", flush=True)
         spill_fd = None
         try:
             while True:
@@ -308,9 +322,14 @@ class GrabThread(QThread):
         if self._pin_cpu:
             try:
                 from gui_app.cpu_affinity import (
-                    pin_to_performance_core, THREAD_PRIORITY_HIGHEST)
-                r = pin_to_performance_core(self._cam_index,
-                                            priority=THREAD_PRIORITY_HIGHEST)
+                    pin_to_performance_core, restrict_to_performance_cores,
+                    THREAD_PRIORITY_HIGHEST)
+                if self._pin_cpu == "set":
+                    r = restrict_to_performance_cores(
+                        priority=THREAD_PRIORITY_HIGHEST)
+                else:
+                    r = pin_to_performance_core(
+                        self._cam_index, priority=THREAD_PRIORITY_HIGHEST)
                 print(f"[grab{self._cam_index}] affinity cpu={r['cpu']} "
                       f"pinned={r['pinned']} prio={r['priority']} "
                       f"(of {r['n_pcores']} P-cores)", flush=True)

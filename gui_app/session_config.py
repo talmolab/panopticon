@@ -83,9 +83,19 @@ class RigProfile:
     # Pin each grab thread to a performance core and raise its priority.
     # On a hybrid CPU (P-cores + E-cores) the scheduler must place most of our
     # ~19 busy threads on E-cores at nine cameras, and picks differently each
-    # launch � which is the shape of the rotating laggard. See cpu_affinity.py.
+    # launch — which is the shape of the rotating laggard. See cpu_affinity.py.
     # No effect on a non-hybrid CPU or off Windows.
     pin_capture_threads: bool = False
+    # Confine ENCODER threads to the E-core set. Separate from the above, and
+    # default OFF because it MEASURED WORSE. 2026-09-11, nine cameras, grab
+    # threads pinned in every arm:
+    #   encoders unpinned          avg_proc 2.19 ms  slack 7.03  worst lag 10
+    #   encoders on the E-core set          2.53        6.62               10
+    #   encoders one per E-core             3.48        5.52              321
+    # A single E-core cannot sustain encode submission for one 1920x1200
+    # stream at 100 fps, so that camera backs up and drags its grab thread
+    # with it. Kept as a knob for a rig with more cameras than P-cores.
+    pin_encoder_threads: bool = False
     # Optostim output pins held LOW from the instant the sketch boots — before
     # the serial handshake, which blocks until the GUI connects. Without this a
     # powered laser driver reads the floating pin as ON at power-up. Pins used by
@@ -152,6 +162,7 @@ class RigProfile:
             calibration_min_grid_cells=int(
                 data.get("calibration_min_grid_cells", 3)),
             pin_capture_threads=bool(data.get("pin_capture_threads", False)),
+            pin_encoder_threads=bool(data.get("pin_encoder_threads", False)),
             stim_safe_pins=data.get("stim_safe_pins", [53]),
             calibration_exposure_us=float(data.get("calibration_exposure_us", 0.0)),
             calibration_gain_db=float(data.get("calibration_gain_db", -1.0)),

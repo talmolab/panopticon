@@ -61,8 +61,9 @@ def main():
     # Always state the interval when quoting a number from this probe.
     ap.add_argument("--switch-interval", type=float, default=0.001,
                     help="sys.setswitchinterval; 0.001 matches gui.py")
-    ap.add_argument("--pin", action="store_true",
-                    help="pin grab threads to P-cores (see cpu_affinity.py)")
+    ap.add_argument("--pin", nargs="?", const=True, default=False,
+                    help="pin grab threads to P-cores: bare flag = one core "
+                         "each, 'set' = confined to the P-core set")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
     sys.setswitchinterval(args.switch_interval)
