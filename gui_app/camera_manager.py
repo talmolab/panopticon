@@ -237,8 +237,14 @@ class CameraManager(QObject):
             gt = GrabThread(i, cam, raw_path=rp, display_every=display_every,
                             realtime=realtime, width=width, height=height,
                             quality=quality, fps=fps, router=self._router)
+            gt._pin_cpu = self.pin_capture_threads
             gt.start()
             self._grab_threads.append(gt)
+
+    #: Pin each grab thread to a performance core (see cpu_affinity.py).
+    #: Set from the profile before start_acquisition(). Off by default so a
+    #: non-hybrid or non-Windows host behaves exactly as before.
+    pin_capture_threads = False
 
     def _stop_grab_threads(self):
         for gt in self._grab_threads:

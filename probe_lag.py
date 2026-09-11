@@ -61,6 +61,8 @@ def main():
     # Always state the interval when quoting a number from this probe.
     ap.add_argument("--switch-interval", type=float, default=0.001,
                     help="sys.setswitchinterval; 0.001 matches gui.py")
+    ap.add_argument("--pin", action="store_true",
+                    help="pin grab threads to P-cores (see cpu_affinity.py)")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
     sys.setswitchinterval(args.switch_interval)
@@ -128,6 +130,7 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
         raw_paths.append(d / "raw.bin")
 
+    mgr.pin_capture_threads = args.pin
     mgr.start_acquisition(
         raw_paths, display_every=10**9 if args.no_display else 10,
         realtime=prof.realtime_encode, width=prof.frame_width,

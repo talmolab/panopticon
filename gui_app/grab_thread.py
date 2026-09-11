@@ -182,6 +182,10 @@ class GrabThread(QThread):
                  fps: int = 100, router=None):
         super().__init__()
         self._cam_index = cam_index
+        # Set by CameraManager from the profile. See cpu_affinity.py for why
+        # this exists at all: on a hybrid CPU the scheduler puts most of our
+        # threads on E-cores and picks differently every launch.
+        self._pin_cpu = False
         self._camera = camera
         self._raw_path = raw_path
         self._display_every = display_every
@@ -294,6 +298,25 @@ class GrabThread(QThread):
             print(f"[grab{self._cam_index}] stream stats: {stats}", flush=True)
 
     def run(self):
+        # Hybrid-CPU placement. 9 grab + 9 encoder + Qt is ~19 busy threads on
+        # 8 P-cores, so Windows must put most of them on E-cores and picks
+        # differently every launch. A grab thread on an E-core runs a few
+        # percent slow, and a few percent is unrecoverable here: the loop
+        # retrieves at exactly the rate frames arrive, so it never catches up.
+        # That is the shape of the rotating laggard. Failure to pin is logged
+        # and ignored -- it is a performance regression, never a correctness one.
+        if self._pin_cpu:
+            try:
+                from gui_app.cpu_affinity import (
+                    pin_to_performance_core, THREAD_PRIORITY_HIGHEST)
+                r = pin_to_performance_core(self._cam_index,
+                                            priority=THREAD_PRIORITY_HIGHEST)
+                print(f"[grab{self._cam_index}] affinity cpu={r['cpu']} "
+                      f"pinned={r['pinned']} prio={r['priority']} "
+                      f"(of {r['n_pcores']} P-cores)", flush=True)
+            except Exception as e:
+                print(f"[grab{self._cam_index}] affinity failed: {e}",
+                      flush=True)
         self._running = True
         self._triggers_stopped = False
         self.frame_count = 0
