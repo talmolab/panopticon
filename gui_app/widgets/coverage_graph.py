@@ -50,7 +50,9 @@ class CoverageGraphWidget(QWidget):
         self._n = det.n
         self._glow = np.asarray(det.glow, dtype=float).copy()
         self._shared = np.asarray(det.shared, dtype=int).copy()
-        self._per_cam = np.asarray(det.per_cam_covis, dtype=int).copy()
+        # Show the counter READY actually tests, or the caption lies.
+        self._per_cam = np.asarray(
+            getattr(det, "per_cam_frames", det.per_cam_covis), dtype=int).copy()
         self._optimal = det.optimal_shared or 1
         self._target = getattr(det, "min_per_cam_shared", 40)
         self._grid_covered = np.asarray(det.grid_covered, dtype=bool).copy()

@@ -132,7 +132,8 @@ class BoardDetector:
         n = self.n
         self.glow = np.zeros(n)
         self.shared = np.zeros((n, n), dtype=int)
-        self.per_cam_covis = np.zeros(n, dtype=int)
+        self.per_cam_covis = np.zeros(n, dtype=int)   # partner-weighted: display
+        self.per_cam_frames = np.zeros(n, dtype=int)  # ticks: what READY uses
         #: Connected components of the co-visibility graph, refreshed each tick.
         #: One component is the READY condition; more than one means the solve
         #: will keep the largest and silently drop the rest.
@@ -187,6 +188,21 @@ class BoardDetector:
             # "constraints gathered" rather than "moments seen".
             partners = len(seen) - 1
             for i in seen:
+                # TWO counters, deliberately. `per_cam_frames` counts TICKS and
+                # is what READY thresholds on, because the solve consumes
+                # FRAMES: 1_calibrate.py caps intrinsics at 60 per camera.
+                # `per_cam_covis` is partner-weighted and is for the display
+                # and the bridge hint -- it says how many pairwise constraints
+                # this camera has gathered, which is the right thing to steer
+                # by but the WRONG thing to threshold.
+                #
+                # Thresholding the weighted number was a real bug (found in
+                # review 2026-09-11): at nine cameras all seeing the board,
+                # partners=8, so a target of 120 was met in FIFTEEN ticks --
+                # a 16.7x drop in the actual bar, which would have greenlit a
+                # calibration on almost no data and produced a confident,
+                # badly-conditioned solve.
+                self.per_cam_frames[i] += 1
                 self.per_cam_covis[i] += partners
             for a in range(len(seen)):
                 for b in range(a + 1, len(seen)):
@@ -250,7 +266,7 @@ class BoardDetector:
 
     def _update_ready(self):
         self.components = self._components() if self.n else []
-        if self.n == 0 or np.any(self.per_cam_covis < self.min_per_cam_shared):
+        if self.n == 0 or np.any(self.per_cam_frames < self.min_per_cam_shared):
             self.ready = False
             return
         if np.any(self.grid_cells_hit < self.MIN_GRID_CELLS):

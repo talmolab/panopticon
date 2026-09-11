@@ -238,6 +238,7 @@ class CameraManager(QObject):
                             realtime=realtime, width=width, height=height,
                             quality=quality, fps=fps, router=self._router)
             gt._pin_cpu = self.pin_capture_threads
+            gt._pin_ecore = self.pin_encoder_threads
             gt.start()
             self._grab_threads.append(gt)
 
@@ -247,6 +248,25 @@ class CameraManager(QObject):
     pin_capture_threads = False
     #: Confine encoder threads to E-cores. Measured WORSE; see session_config.
     pin_encoder_threads = False
+
+    def pinning_report(self) -> str:
+        """One line saying how many grab threads actually pinned.
+
+        Nine separate per-thread lines make a PARTIAL pin invisible -- eight
+        successes and one silent failure reads as success at a glance, and the
+        one that failed is exactly the camera that will lag.
+        """
+        want = bool(self.pin_capture_threads)
+        if not want:
+            return "cpu pinning: off"
+        from gui_app.cpu_affinity import performance_cores
+        n_p = len(performance_cores())
+        got = sum(1 for gt in self._grab_threads
+                  if getattr(gt, "pin_result", None)
+                  and gt.pin_result.get("pinned"))
+        flag = "" if got == len(self._grab_threads) else "  *** PARTIAL ***"
+        return (f"cpu pinning: {got}/{len(self._grab_threads)} grab threads on "
+                f"{n_p} P-cores{flag}")
 
     def _stop_grab_threads(self):
         for gt in self._grab_threads:

@@ -57,8 +57,9 @@ def edge(d, i, j, n):
 failures = []
 
 
-def check(num, name, ok):
-    print(f"{num}) {name}: {'PASS' if ok else 'FAIL'}")
+def check(num, name, ok, detail=""):
+    print(f"{num}) {name}: {'PASS' if ok else 'FAIL'}"
+          + (f"  [{detail}]" if detail else ""))
     if not ok:
         failures.append(name)
 
@@ -125,6 +126,7 @@ check(8, "an edge at exactly min_edge does join them",
 # Everything per-camera satisfied, graph split: READY must stay false. This is
 # the exact shape of the 2026-09-10 session.
 d = make(6)
+d.per_cam_frames = np.full(6, 999)
 d.per_cam_covis = np.full(6, 999)
 d.grid_cells_hit = np.full(6, 4)
 for i, j in [(0, 1), (1, 2), (3, 4), (4, 5)]:
@@ -138,6 +140,7 @@ check(10, "joining the last two groups flips READY", d.ready)
 
 # 11 ------------------------------------------------------------------------
 d = make(6)
+d.per_cam_frames = np.full(6, 999)
 d.per_cam_covis = np.full(6, 999)
 d.grid_cells_hit = np.full(6, 4)
 d.grid_cells_hit[4] = 2                # one camera short on spatial spread
@@ -169,6 +172,7 @@ check(13, "bridge_hint is None once the graph is connected",
 # Regression: the real 2026-09-10 nine-camera graph must reproduce the three
 # groups, and the largest must be the four cameras the solve actually kept.
 d = make(9)
+d.per_cam_frames = np.full(9, 999)
 d.per_cam_covis = np.full(9, 999)
 d.grid_cells_hit = np.full(9, 4)
 real = {(0, 3): 156, (0, 6): 102, (0, 8): 170, (1, 2): 256, (1, 5): 207,
@@ -182,6 +186,25 @@ check(14, "2026-09-10 session reproduces its three groups",
       comps == [[0, 3, 6, 8], [1, 2, 5], [4, 7]] and not d.ready)
 check(15, "and its largest group is the four cameras the solve kept",
       sorted(max(d.components, key=len)) == [0, 3, 6, 8])
+
+# 16 — REGRESSION: partner weighting must not shortcut the READY threshold.
+# Review 2026-09-11 found per_cam_covis (weighted by partner count) was being
+# thresholded against min_per_cam_shared, so at nine cameras all seeing the
+# board partners=8 and a target of 120 was met in FIFTEEN ticks. READY must
+# count FRAMES; the weighted number is for display only.
+d = make(9, min_per_cam_shared=120)
+for _ in range(20):
+    tick(d, list(range(9)))
+for i in range(9):
+    edge(d, i, (i + 1) % 9, 999)
+d.grid_cells_hit = np.full(9, 4)
+d._update_ready()
+check(16, "20 all-camera ticks must NOT satisfy a 120-frame bar",
+      not d.ready,
+      f"frames={int(d.per_cam_frames.min())} weighted={int(d.per_cam_covis.min())}")
+check(17, "weighted counter still records partner count for display",
+      int(d.per_cam_covis.min()) == 20 * 8 and int(d.per_cam_frames.min()) == 20,
+      f"weighted={int(d.per_cam_covis.min())} frames={int(d.per_cam_frames.min())}")
 
 print()
 if failures:

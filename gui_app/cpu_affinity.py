@@ -62,6 +62,30 @@ THREAD_PRIORITY_TIME_CRITICAL = 15
 _pcores_cache: list[int] | None = None
 
 
+def _process_mask() -> int:
+    """The affinity mask this PROCESS is allowed to use, or 0 if unknown.
+
+    Pinning to a CPU outside the process mask FAILS -- SetThreadAffinityMask
+    returns 0 -- so under a job object, a Docker cpuset, or a user-set
+    affinity, some cameras would pin and others silently would not. A partial
+    pin is worse than none: the unpinned thread is exactly the one that lags.
+    """
+    try:
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        proc = ctypes.c_size_t(0)
+        sysm = ctypes.c_size_t(0)
+        k.GetProcessAffinityMask.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_size_t)]
+        if k.GetProcessAffinityMask(k.GetCurrentProcess(),
+                                    ctypes.byref(proc), ctypes.byref(sysm)):
+            return proc.value
+    except Exception:
+        pass
+    return 0
+
+
 def performance_cores() -> list[int]:
     """Logical CPU indices whose efficiency class is above the minimum.
 
@@ -100,10 +124,18 @@ def performance_cores() -> list[int]:
         if len(by_class) < 2:
             _pcores_cache = []          # not hybrid: nothing to prefer
         else:
-            best = max(by_class)
             fast = sorted(x for c, xs in by_class.items() if c > min(by_class)
                           for x in xs)
-            _pcores_cache = fast or sorted(by_class[best])
+            # Intersect with the process mask, or some threads pin and some
+            # silently do not -- see _process_mask.
+            pm = _process_mask()
+            if pm:
+                fast = [c for c in fast if pm & (1 << c)]
+            # >64 logical CPUs means processor groups, which a single 64-bit
+            # mask cannot address. Refuse rather than pin to the wrong group.
+            if any(c >= 64 for c in fast):
+                fast = []
+            _pcores_cache = fast
     except Exception:
         _pcores_cache = []
     return _pcores_cache
@@ -169,10 +201,15 @@ def pin_to_performance_core(slot: int, priority: int | None = None) -> dict:
     cores = performance_cores()
     out = {"pinned": False, "cpu": None, "priority": False,
            "n_pcores": len(cores)}
-    if cores:
-        cpu = cores[slot % len(cores)]
-        out["cpu"] = cpu
-        out["pinned"] = pin_current_thread(cpu)
+    if not cores:
+        # Not hybrid, or pinning unavailable. Do NOTHING -- including no
+        # priority bump. session_config advertises this as a no-op in that
+        # case, and quietly raising priority anyway would make that false and
+        # change scheduling on machines nobody measured.
+        return out
+    cpu = cores[slot % len(cores)]
+    out["cpu"] = cpu
+    out["pinned"] = pin_current_thread(cpu)
     if priority is not None:
         out["priority"] = set_current_thread_priority(priority)
     return out

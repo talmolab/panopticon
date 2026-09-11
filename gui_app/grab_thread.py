@@ -200,6 +200,8 @@ class GrabThread(QThread):
         # this exists at all: on a hybrid CPU the scheduler puts most of our
         # threads on E-cores and picks differently every launch.
         self._pin_cpu = False
+        self._pin_ecore = False
+        self.pin_result = None
         self._camera = camera
         self._raw_path = raw_path
         self._display_every = display_every
@@ -330,6 +332,7 @@ class GrabThread(QThread):
                 else:
                     r = pin_to_performance_core(
                         self._cam_index, priority=THREAD_PRIORITY_HIGHEST)
+                self.pin_result = r
                 print(f"[grab{self._cam_index}] affinity cpu={r['cpu']} "
                       f"pinned={r['pinned']} prio={r['priority']} "
                       f"(of {r['n_pcores']} P-cores)", flush=True)
@@ -385,6 +388,11 @@ class GrabThread(QThread):
                     self._cam_index, enc, h264_fd,
                     self._raw_path.parent / "raw_tail.bin",
                     self._width, self._height)
+                # The kick-out router sets this on ITS encoders
+                # (sync_encode.py); this decoupled path had been missed, so the
+                # flag was inert here and would have been silently wrong the
+                # day someone turned it on.
+                enc_thread._pin_ecore = self._pin_ecore
                 # NV12 ring: grab copies gray directly into these (UV preset to
                 # 128); +4 slack over queue capacity so reuse can't catch up.
                 self._nv12_ring = [

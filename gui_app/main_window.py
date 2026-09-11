@@ -151,6 +151,13 @@ class MainWindow(QMainWindow):
     def _open_cameras_bg(self) -> bool:
         """Blocking open (run on a worker thread for live profile switches)."""
         pfs = self._profile.pfs_path
+        # These are read by start_acquisition, and setting them here covers a
+        # profile switch too (which re-enters this function). Forgetting them
+        # is invisible: every probe number would look right while the GUI --
+        # the thing that actually records -- ran unpinned. That happened
+        # between 6b08123 and this commit.
+        self._camera_mgr.pin_capture_threads = self._profile.pin_capture_threads
+        self._camera_mgr.pin_encoder_threads = self._profile.pin_encoder_threads
         if pfs and Path(pfs).exists():
             return self._camera_mgr.open_all(
                 pfs, gige_driver=self._profile.gige_driver,
