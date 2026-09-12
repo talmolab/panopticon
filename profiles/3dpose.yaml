@@ -169,4 +169,10 @@ pin_capture_threads: true
 # 80 C against an 81 C shutdown, while cam9 never passed 70 C. The GUI used to
 # read temperatures only at stop, which is too late to act on. Thresholds are
 # read from each camera, never from this file.
-thermal_poll_s: 20.0
+# Turned OFF 2026-09-11 at Isaac's request: the warnings were firing constantly
+# because four of nine cameras genuinely sit above the vendor's Critical
+# threshold, which he is addressing with heatsinks rather than in software. The
+# watch itself is kept and tested (test_thermal_watch.py) -- set this back to
+# 20.0 to re-enable it once the cameras are cooler, so a NEW thermal problem
+# still gets caught. Temperatures are recorded in session metadata either way.
+thermal_poll_s: 0

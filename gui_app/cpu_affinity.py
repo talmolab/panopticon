@@ -239,6 +239,40 @@ def pin_to_performance_core(slot: int, priority: int | None = None) -> dict:
     return out
 
 
+def place_capture_thread(slot: int, priority: int | None = None) -> dict:
+    """Placement policy for capture threads: exclusive core, else float.
+
+    `pin_to_performance_core` wraps with `slot % len(cores)`, which is correct
+    only while there are at least as many P-cores as cameras. At nine cameras
+    on eight P-cores it pins cam1 and cam9 to the SAME core, both at
+    GRAB_THREAD_PRIORITY, and that core is CPU 0 -- which on this part also
+    carries the largest share of NIC DPC. Measured 2026-09-11 in a GUI
+    recording: cam1 accumulated lag monotonically (67 -> 96 -> 153 -> 173
+    frames) while the other eight sat at 0-4, with resends at 9-15 and zero
+    buffer underruns, so it was pure CPU contention and not the network.
+
+    Two whole-rig alternatives were already measured and rejected: confining
+    every thread to the P-core set was worse than baseline, and reordering the
+    cores only moves which camera is the victim -- with nine threads on eight
+    cores, somebody always doubles up.
+
+    So do neither. Give every camera that fits a core of its own, and let only
+    the overflow float across the whole P-core set, where the scheduler can
+    slot it into whichever core is momentarily free. Nothing changes at all
+    for a rig with no more cameras than P-cores.
+    """
+    cores = _core_order or performance_cores()
+    if not cores:
+        # Not hybrid, or pinning unavailable: no-op, exactly as
+        # pin_to_performance_core would.
+        return {"pinned": False, "cpu": None, "priority": False, "n_pcores": 0}
+    if slot < len(cores):
+        return pin_to_performance_core(slot, priority)
+    out = restrict_to_performance_cores(priority)
+    out["overflow"] = True
+    return out
+
+
 def efficiency_cores() -> list[int]:
     """Logical CPUs in the LOWEST efficiency class, or [] if not hybrid."""
     if not _IS_WINDOWS:

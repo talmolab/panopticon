@@ -325,13 +325,16 @@ class GrabThread(QThread):
             try:
                 import gui_app.cpu_affinity as _ca
                 from gui_app.cpu_affinity import (
-                    pin_to_performance_core, restrict_to_performance_cores)
+                    place_capture_thread, restrict_to_performance_cores)
                 THREAD_PRIORITY_HIGHEST = _ca.GRAB_THREAD_PRIORITY
                 if self._pin_cpu == "set":
                     r = restrict_to_performance_cores(
                         priority=THREAD_PRIORITY_HIGHEST)
                 else:
-                    r = pin_to_performance_core(
+                    # Not pin_to_performance_core: its round-robin doubles two
+                    # cameras onto one core once there are more cameras than
+                    # P-cores. See place_capture_thread.
+                    r = place_capture_thread(
                         self._cam_index, priority=THREAD_PRIORITY_HIGHEST)
                 self.pin_result = r
                 print(f"[grab{self._cam_index}] affinity cpu={r['cpu']} "
