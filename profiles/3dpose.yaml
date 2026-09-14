@@ -170,11 +170,14 @@ trigger_rate_limit: 165      # REVERTED 2026-08-11: setting this to 0 (limiter o
 # pin_encoder_threads in session_config.py for the numbers.
 pin_capture_threads: true
 
-# Keep the nine encoder threads on the P-core set. Unpinned, Windows may exile
-# one to an E-core, which cannot sustain encode submission for a 1920x1200
-# stream at 100 fps; the encode queue then fills and every camera stalls on the
-# shared ring. See encoder_pcores in session_config.py for the measurement.
-encoder_pcores: true
+# OFF: confining encoders to the P-core set was tried on 2026-09-14 and is a
+# REGRESSION. It raised the grab threads' copy time from 0.7 ms to 2.8-2.9 ms
+# in EVERY recording -- nine encoders sharing eight P-cores with nine pinned
+# grab threads -- and it did not stop the divergence it was aimed at: cam5
+# still reached 296 and cam2 185 in the two recordings that followed. The
+# option is kept in the code because the E-core failure mode it addresses is
+# real, but it is not the answer here.
+encoder_pcores: false
 
 # Keep capture threads off CPU 0 and CPU 1, which carry ~46% of NIC DPC time on
 # this machine. Measured 2026-09-14, nine cameras, 90 s, pinned, lag behind the
