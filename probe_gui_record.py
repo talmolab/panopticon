@@ -43,6 +43,15 @@ def main():
     # m1_m2 path, and _start_acquisition would block forever on the "Overwrite?"
     # dialog with nobody to click it ... and would clobber real data if answered.
     scratch = Path("probe_out") / "gui_scratch"
+    # Clear it first. The GUI raises a MODAL "Overwrite?" dialog when the
+    # session directory already holds data, and an unattended probe has nobody
+    # to answer it: on 2026-09-14 two 600 s runs sat on that dialog forever and
+    # were misread as an NVENC hang, until py-spy showed the main thread parked
+    # in QMessageBox.question at main_window.py:630. Leave no data behind and
+    # the prompt cannot fire.
+    if scratch.exists():
+        import shutil
+        shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True, exist_ok=True)
     win._sidebar._output_dir = str(scratch)
     win._sidebar._fields["mouse_1"].setText("lagprobe")

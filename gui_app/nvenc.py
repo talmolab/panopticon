@@ -9,6 +9,7 @@ Everything is guarded: if PyNvVideoCodec or the runtime is missing, available()
 returns False and the caller falls back to raw-to-disk. The GUI never breaks just
 because the GPU encode path is unavailable.
 """
+from pathlib import Path
 import gc
 import os
 import re
@@ -191,6 +192,56 @@ def create_h264_encoder(width: int, height: int, qp: int,
             continue
     # Last attempt: surface the real error.
     return _nvc.CreateEncoder(width, height, "NV12", True, codec="h264")
+
+
+def probe_max_sessions_isolated(width: int = 1920, height: int = 1200,
+                                limit: int = 24, timeout: float = 120.0) -> int:
+    """`probe_max_sessions` in a child process, so release is guaranteed.
+
+    Counting the cap means allocating every session the driver will grant, and
+    the caller needs most of them back moments later. `EndEncode()` does not
+    free a session -- only the encoder's destructor does -- so in-process the
+    release always races the next allocation, no matter how carefully the
+    references are dropped. That race was documented on 2026-09-10, addressed
+    with an explicit pop-and-delete plus a collect, and recurred on 2026-09-14:
+    two 600 s GUI recordings hung at exactly the `[hw] NVENC sessions:` line,
+    before start_triggers, while shorter runs on the same build passed.
+
+    Process exit frees GPU sessions unconditionally, which turns that race into
+    a guarantee. The cost is one interpreter start, paid once per GUI session
+    because hardware_check caches the answer.
+
+    Returns -1 if the child cannot be run at all, so the caller can fall back
+    to the in-process probe rather than refusing to record.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "from gui_app import nvenc;"
+        f"print('NVENC_SESSIONS=%d' % nvenc.probe_max_sessions({width},"
+        f" {height}, limit={limit}))"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+    except Exception as exc:
+        print(f"[nvenc] isolated probe could not run ({exc}); "
+              f"falling back in-process", flush=True)
+        return -1
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("NVENC_SESSIONS="):
+            try:
+                return int(line.split("=", 1)[1])
+            except ValueError:
+                break
+    tail = (proc.stderr or "").strip().splitlines()[-1:] or ["no output"]
+    print(f"[nvenc] isolated probe gave no count ({tail[0]}); "
+          f"falling back in-process", flush=True)
+    return -1
 
 
 def probe_max_sessions(width: int = 1920, height: int = 1200, limit: int = 24) -> int:

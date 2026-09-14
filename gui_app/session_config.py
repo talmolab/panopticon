@@ -98,6 +98,18 @@ class RigProfile:
     # this works on any model. A GVCP register read is a cold path, hence the
     # slow default rather than the preview timer.
     thermal_poll_s: float = 20.0
+    # Logical CPUs that capture threads are kept OFF, when pinning is enabled.
+    # CPU 0 is the Windows boot processor and the default target for timer and
+    # DPC work, so a grab thread pinned there is descheduled by exactly the
+    # network traffic it is trying to receive. Measured 2026-09-14, nine
+    # cameras, 90 s, pinned, lag behind leader as median/p95/max -- the victim
+    # followed the CORE, not the camera:
+    #   exclude nothing (cam1 on CPU 0)   cam1 0/6/12, others 0/1/1
+    #   exclude [0]     (cam1 on CPU 1)   cam1 0/3/4,  others 0/1/1
+    #   exclude [0, 1]                    ALL NINE 0/1/1
+    # Under the GUI the unexcluded case was far worse than headless: the same
+    # camera diverged to kick_max_lag (480) and was force-dropped.
+    capture_core_exclude: list = field(default_factory=lambda: [0])
     # Confine ENCODER threads to the E-core set. Separate from the above, and
     # default OFF because it MEASURED WORSE. 2026-09-11, nine cameras, grab
     # threads pinned in every arm:
@@ -175,6 +187,8 @@ class RigProfile:
                 data.get("calibration_min_grid_cells", 3)),
             pin_capture_threads=bool(data.get("pin_capture_threads", False)),
             thermal_poll_s=float(data.get("thermal_poll_s", 20.0)),
+            capture_core_exclude=[
+                int(c) for c in data.get("capture_core_exclude", [0])],
             pin_encoder_threads=bool(data.get("pin_encoder_threads", False)),
             stim_safe_pins=data.get("stim_safe_pins", [53]),
             calibration_exposure_us=float(data.get("calibration_exposure_us", 0.0)),

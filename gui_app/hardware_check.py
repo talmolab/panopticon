@@ -151,7 +151,13 @@ def nvenc_session_capacity(width: int, height: int, want: int,
             _nvenc_sessions, _nvenc_saturated = -1, False
         else:
             limit = max(1, want)
-            got = nvenc.probe_max_sessions(width, height, limit=limit)
+            # Isolated by default: counting the cap allocates every session the
+            # driver will grant, and the router asks for n_cams of them moments
+            # later. In-process that release races the allocation and hangs at
+            # this very line; a child process's exit frees them for certain.
+            got = nvenc.probe_max_sessions_isolated(width, height, limit=limit)
+            if got < 0:
+                got = nvenc.probe_max_sessions(width, height, limit=limit)
             _nvenc_sessions = max(got, _nvenc_sessions or 0)
             _nvenc_saturated = (got >= limit)
         print(f"[hw] NVENC sessions: {_nvenc_sessions}"

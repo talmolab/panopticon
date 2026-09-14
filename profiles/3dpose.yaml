@@ -162,6 +162,15 @@ trigger_rate_limit: 165      # REVERTED 2026-08-11: setting this to 0 (limiter o
 # pin_encoder_threads in session_config.py for the numbers.
 pin_capture_threads: true
 
+# Keep capture threads off CPU 0 and CPU 1, which carry ~46% of NIC DPC time on
+# this machine. Measured 2026-09-14, nine cameras, 90 s, pinned, lag behind the
+# leader as median/p95/max: excluding nothing gave the CPU-0 camera 0/6/12 and
+# under the GUI it diverged to kick_max_lag and was force-dropped; excluding
+# [0] gave 0/3/4; excluding [0, 1] gave ALL NINE 0/1/1. Leaves 6 cores for 9
+# cameras, so three float across the pool -- a far better trade than parking a
+# camera on the busiest core in the machine.
+capture_core_exclude: [0, 1]
+
 # Seconds between camera temperature polls while acquiring; 0 disables. These
 # cameras have no fan and cool by conduction through the mount, so temperature
 # is a property of the installation: measured 2026-09-11 over a 600 s run, four

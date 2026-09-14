@@ -70,6 +70,14 @@ _pcores_cache: list[int] | None = None
 #: one of the two cores carrying ~46% NIC DPC time. Set via set_core_order().
 _core_order: list[int] | None = None
 
+#: Logical CPUs capture threads are kept off by default. CPU 0 is the Windows
+#: boot processor and the default target for timer and DPC work; on the
+#: reference machine CPU 0 and CPU 1 together carry ~46% of NIC DPC time. A
+#: profile can override this with capture_core_exclude -- measure before
+#: changing it, because the cost of guessing wrong is one camera diverging to
+#: kick_max_lag under the GUI while headless runs look clean.
+DEFAULT_EXCLUDED_CORES: tuple = (0,)
+
 
 def set_core_order(order) -> None:
     """Override which P-cores cameras are assigned to, and in what order.
@@ -239,6 +247,39 @@ def pin_to_performance_core(slot: int, priority: int | None = None) -> dict:
     return out
 
 
+def capture_core_pool(exclude=None) -> list[int]:
+    """P-cores a capture thread may use: the P-cores, minus logical CPU 0.
+
+    CPU 0 is not an ordinary core on Windows. It is the boot processor and the
+    default target for timer interrupts and much DPC work, including the NIC's
+    -- on this part the first two P-cores carry ~46% of NIC DPC time. A grab
+    thread pinned there is descheduled by exactly the traffic it is trying to
+    receive, and because the loop retrieves at the rate frames arrive it can
+    never catch the deficit up.
+
+    Measured 2026-09-14, nine cameras, 90 s, grab threads pinned, lag behind
+    the leader as median/p95/max. The victim followed the CORE, not the camera:
+
+      default order, cam1 on CPU 0    cam1 0/6/12    cam7 0/1/1
+      rotated,       cam7 on CPU 0    cam1 0/0/1     cam7 0/3/12
+
+    Headless the penalty is a few frames. Under the GUI, whose main thread adds
+    ~1.5-2 ms of repaint work per cycle, the same camera diverged to
+    kick_max_lag (480) and was force-dropped.
+
+    Dropping CPU 0 leaves 7 cores for 9 cameras here, so two float. That is a
+    far better trade than one camera parked on the busiest core in the machine.
+    An explicit set_core_order() wins over this, so a rig that has measured
+    something different can override it.
+    """
+    cores = performance_cores()
+    if len(cores) <= 1:
+        return cores
+    drop = set(DEFAULT_EXCLUDED_CORES if exclude is None else exclude)
+    pruned = [c for c in cores if c not in drop]
+    return pruned or cores
+
+
 def place_capture_thread(slot: int, priority: int | None = None) -> dict:
     """Placement policy for capture threads: exclusive core, else float.
 
@@ -261,14 +302,26 @@ def place_capture_thread(slot: int, priority: int | None = None) -> dict:
     slot it into whichever core is momentarily free. Nothing changes at all
     for a rig with no more cameras than P-cores.
     """
-    cores = _core_order or performance_cores()
+    cores = _core_order or capture_core_pool()
+    out = {"pinned": False, "cpu": None, "priority": False,
+           "n_pcores": len(cores)}
     if not cores:
         # Not hybrid, or pinning unavailable: no-op, exactly as
         # pin_to_performance_core would.
-        return {"pinned": False, "cpu": None, "priority": False, "n_pcores": 0}
+        return out
     if slot < len(cores):
-        return pin_to_performance_core(slot, priority)
-    out = restrict_to_performance_cores(priority)
+        cpu = cores[slot]
+        out["cpu"] = cpu
+        out["pinned"] = pin_current_thread(cpu)
+        if priority is not None:
+            out["priority"] = set_current_thread_priority(priority)
+        return out
+    # Overflow: float across the SAME pool, not the raw P-core set -- otherwise
+    # the excluded core comes back in through the overflow path.
+    out["cpu"] = f"pool[{len(cores)}]"
+    out["pinned"] = restrict_current_thread(cores)
+    if priority is not None:
+        out["priority"] = set_current_thread_priority(priority)
     out["overflow"] = True
     return out
 
