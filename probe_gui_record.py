@@ -19,56 +19,9 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
 
 
-def _refuse_if_already_running():
-    """Abort if another Panopticon probe is already up, via a PID lock file.
-
-    Two instances enumerate the same cameras and fight over them, and the
-    resulting lag looks exactly like a laggard bug. On 2026-09-14 three
-    concurrent instances -- launched by chain scripts that outlived the pkill
-    meant to stop them -- produced two "divergence" findings that drove two code
-    changes before the overlap was noticed. Both had to be reverted.
-
-    A lock file rather than scanning process command lines: `uv run` starts two
-    python processes per run, so a command-line scan sees its OWN sibling and
-    refuses to start. That is exactly what the first version of this guard did.
-    """
-    import atexit
-    import os
-    import sys
-
-    lock = Path("probe_out") / ".gui_probe.lock"
-    lock.parent.mkdir(parents=True, exist_ok=True)
-
-    def _alive(pid: int) -> bool:
-        try:
-            import subprocess
-            r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                                f"(Get-Process -Id {pid} -ErrorAction "
-                                f"SilentlyContinue | Measure-Object).Count"],
-                               capture_output=True, text=True, timeout=30)
-            return r.stdout.strip().startswith("1")
-        except Exception:
-            return False        # cannot tell: assume stale, do not block
-
-    if lock.exists():
-        try:
-            held = int(lock.read_text().split()[0])
-        except Exception:
-            held = None
-        if held and held != os.getpid() and _alive(held):
-            print(f"[probe] REFUSING TO START: another probe holds {lock} "
-                  f"(pid {held}). Two instances fight over the same cameras.",
-                  flush=True)
-            sys.exit(3)
-        print(f"[probe] clearing a stale lock from pid {held}", flush=True)
-
-    lock.write_text(str(os.getpid()), encoding="utf-8")
-    atexit.register(lambda: lock.unlink(missing_ok=True))
-    print(f"[probe] holding {lock} (pid {os.getpid()})", flush=True)
-
-
 def main():
-    _refuse_if_already_running()
+    from gui_app.probe_guard import refuse_if_panopticon_running
+    refuse_if_panopticon_running()
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=300)
     ap.add_argument("--warmup", type=float, default=8, help="settle before Record")
