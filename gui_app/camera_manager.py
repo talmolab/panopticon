@@ -239,6 +239,7 @@ class CameraManager(QObject):
                             quality=quality, fps=fps, router=self._router)
             gt._pin_cpu = self.pin_capture_threads
             gt._pin_ecore = self.pin_encoder_threads
+            gt._enc_pcores = self.encoder_pcores
             gt.start()
             self._grab_threads.append(gt)
 
@@ -248,6 +249,10 @@ class CameraManager(QObject):
     pin_capture_threads = False
     #: Confine encoder threads to E-cores. Measured WORSE; see session_config.
     pin_encoder_threads = False
+    #: Confine encoder threads to the P-core SET. Separate from
+    #: pin_encoder_threads, which pins one per E-CORE and measured
+    #: catastrophic. See _EncoderThread.run.
+    encoder_pcores = False
 
     def pinning_report(self) -> str:
         """One line saying how many grab threads actually pinned.
@@ -337,7 +342,8 @@ class CameraManager(QObject):
             from gui_app.sync_encode import SyncEncodeRouter
             router = SyncEncodeRouter(raw_paths, width, height, quality,
                                       fps=fps, max_lag=kick_max_lag,
-                                      pin_encoders=self.pin_encoder_threads)
+                                      pin_encoders=self.pin_encoder_threads,
+                                      enc_pcores=self.encoder_pcores)
             if router.available:
                 router.start()
                 self._router = router

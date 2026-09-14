@@ -97,6 +97,22 @@ class RigProfile:
     # BslTemperatureStatus, BsliCriticalTemperature and BsliOverTemperature, so
     # this works on any model. A GVCP register read is a cold path, hence the
     # slow default rather than the preview timer.
+    # Confine ENCODER threads to the P-core set -- not one per core, and not
+    # the E-cores. Distinct from pin_encoder_threads above, which pins one
+    # encoder per E-core and measured catastrophic (worst lag 321).
+    #
+    # Leaving encoders unpinned is not neutral: Windows is then free to place
+    # one on an E-core, and _EncoderThread.run's own note is that a single
+    # E-core cannot sustain encode submission for one 1920x1200 stream at
+    # 100 fps. Measured 2026-09-14 in one GUI process running
+    # recording -> calibration -> solve -> recording: the first recording held
+    # every camera at 0 with qsize 0-1, and the second, with identical
+    # grab-thread affinity, filled the encode queue (qsize 183-204 against
+    # ENCODE_QUEUE_DEPTH 200) and ran 3-6x slower on every operation as the
+    # grab threads blocked on ring slots the coordinator could not release.
+    # Placement of unpinned encoders is a fresh lottery each acquisition, which
+    # is why one recording passes and the next does not.
+    encoder_pcores: bool = False
     thermal_poll_s: float = 20.0
     # Logical CPUs that capture threads are kept OFF, when pinning is enabled.
     # CPU 0 is the Windows boot processor and the default target for timer and
@@ -187,6 +203,7 @@ class RigProfile:
                 data.get("calibration_min_grid_cells", 3)),
             pin_capture_threads=bool(data.get("pin_capture_threads", False)),
             thermal_poll_s=float(data.get("thermal_poll_s", 20.0)),
+            encoder_pcores=bool(data.get("encoder_pcores", False)),
             capture_core_exclude=[
                 int(c) for c in data.get("capture_core_exclude", [0])],
             pin_encoder_threads=bool(data.get("pin_encoder_threads", False)),

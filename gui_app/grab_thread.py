@@ -114,6 +114,20 @@ class _EncoderThread(threading.Thread):
                       flush=True)
             except Exception as e:
                 print(f"[enc{self._cam_index}] affinity failed: {e}", flush=True)
+        elif getattr(self, "_enc_pcores", False):
+            # Confined to the P-core set, deliberately NOT one core each: one
+            # encoder per E-core measured catastrophic (worst lag 321), and
+            # leaving them unpinned lets Windows exile one to an E-core, which
+            # fills the encode queue and stalls every camera through the shared
+            # ring. Confinement keeps them on fast cores while the scheduler
+            # still balances them around the pinned grab threads.
+            try:
+                from gui_app.cpu_affinity import restrict_to_performance_cores
+                r = restrict_to_performance_cores()
+                print(f"[enc{self._cam_index}] affinity cpu={r['cpu']} "
+                      f"pinned={r['pinned']} (P-core set)", flush=True)
+            except Exception as e:
+                print(f"[enc{self._cam_index}] affinity failed: {e}", flush=True)
         spill_fd = None
         try:
             while True:
@@ -201,6 +215,9 @@ class GrabThread(QThread):
         # threads on E-cores and picks differently every launch.
         self._pin_cpu = False
         self._pin_ecore = False
+        #: Confine the encoder to the P-core SET (not one core each, and not
+        #: the E-cores). See _EncoderThread.run for why this exists.
+        self._enc_pcores = False
         self.pin_result = None
         self._camera = camera
         self._raw_path = raw_path
@@ -403,6 +420,7 @@ class GrabThread(QThread):
                 # flag was inert here and would have been silently wrong the
                 # day someone turned it on.
                 enc_thread._pin_ecore = self._pin_ecore
+                enc_thread._enc_pcores = self._enc_pcores
                 # NV12 ring: grab copies gray directly into these (UV preset to
                 # 128); +4 slack over queue capacity so reuse can't catch up.
                 self._nv12_ring = [

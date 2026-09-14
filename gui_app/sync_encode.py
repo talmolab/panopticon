@@ -30,7 +30,8 @@ from gui_app.grab_thread import _EncoderThread
 
 class SyncEncodeRouter:
     def __init__(self, raw_paths, width: int, height: int, quality: int,
-                 fps: int = 100, max_lag: int = 240, pin_encoders: bool = False):
+                 fps: int = 100, max_lag: int = 240, pin_encoders: bool = False,
+                 enc_pcores: bool = False):
         self._n = len(raw_paths)
         self._w, self._h, self._q = width, height, quality
         self._fps = int(fps)   # stop() checks block-ID rate against it
@@ -63,6 +64,7 @@ class SyncEncodeRouter:
                 # Keep encoders off the P-cores the grab threads are pinned to;
                 # see cpu_affinity.pin_to_efficiency_core.
                 et._pin_ecore = pin_encoders
+                et._enc_pcores = enc_pcores
                 self._encoders.append(et)
                 self._fds.append(fd)
             self.available = True

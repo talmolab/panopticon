@@ -170,6 +170,12 @@ trigger_rate_limit: 165      # REVERTED 2026-08-11: setting this to 0 (limiter o
 # pin_encoder_threads in session_config.py for the numbers.
 pin_capture_threads: true
 
+# Keep the nine encoder threads on the P-core set. Unpinned, Windows may exile
+# one to an E-core, which cannot sustain encode submission for a 1920x1200
+# stream at 100 fps; the encode queue then fills and every camera stalls on the
+# shared ring. See encoder_pcores in session_config.py for the measurement.
+encoder_pcores: true
+
 # Keep capture threads off CPU 0 and CPU 1, which carry ~46% of NIC DPC time on
 # this machine. Measured 2026-09-14, nine cameras, 90 s, pinned, lag behind the
 # leader as median/p95/max: excluding nothing gave the CPU-0 camera 0/6/12 and

@@ -169,6 +169,8 @@ class MainWindow(QMainWindow):
         # the thing that actually records -- ran unpinned. That happened
         # between 6b08123 and this commit.
         self._camera_mgr.pin_capture_threads = self._profile.pin_capture_threads
+        self._camera_mgr.encoder_pcores = getattr(
+            self._profile, 'encoder_pcores', False)
         # Keep capture threads off the DPC-heavy cores. Without this the GUI
         # is far worse than headless: a camera pinned to CPU 0 diverged to
         # kick_max_lag and was force-dropped, while probe_lag.py looked clean.
