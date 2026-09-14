@@ -356,6 +356,33 @@ class CameraManager(QObject):
                                  realtime=realtime, width=width, height=height, quality=quality,
                                  fps=fps)
 
+    def wait_until_ready(self, timeout_s: float = 30.0) -> tuple[int, int]:
+        """Block until every grab thread has its ring and its stream, or time out.
+
+        Returns (ready, total). The caller starts the trigger board only after
+        this, because starting it earlier is what produced the startup backlog:
+        each thread writes a 2.57 GiB NV12 ring at nine cameras, and frames
+        delivered during that allocation queue in the driver. The grab loop
+        retrieves at exactly the arrival rate, so a backlog created here is
+        never recovered -- on 2026-09-14 one camera began 124 frames behind and
+        rode kick_max_lag for the whole session, force-dropping 2,036 frames.
+
+        A timeout is not fatal: a thread that cannot become ready sets its event
+        anyway, and the coordinator retires a camera that never publishes, so
+        the remaining cameras still record aligned.
+        """
+        import time as _time
+        deadline = _time.monotonic() + max(0.0, timeout_s)
+        total = len(self._grab_threads)
+        for gt in self._grab_threads:
+            ev = getattr(gt, "ready", None)
+            if ev is None:
+                continue
+            ev.wait(max(0.0, deadline - _time.monotonic()))
+        ready = sum(1 for gt in self._grab_threads
+                    if getattr(getattr(gt, "ready", None), "is_set", bool)())
+        return ready, total
+
     def stop_acquisition(self) -> list[tuple[int, list[float], list[int]]]:
         """Stop the grab threads and return each camera's
         (frame_count, timestamps, block_ids).

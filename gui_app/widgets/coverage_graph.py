@@ -169,16 +169,18 @@ class CoverageGraphWidget(QWidget):
             # figure read as satisfied. Say which groups exist and which pair is
             # closest to joining them, so it reads as an instruction.
             if len(comps) > 1:
-                bridge = getattr(self, "_bridge", None)
+                # The group list stays -- it is what caught a nine-camera
+                # session solving only four cameras while every per-camera
+                # number read as satisfied. The per-pair "show board to camX +
+                # camY together" instruction that used to sit above it was
+                # removed at Isaac's request on 2026-09-14: it nagged on every
+                # repaint and named a pair that was often not the one he was
+                # working on. `groups N/1` in the line below carries the same
+                # information without telling the operator what to do.
                 groups = "  ".join(
                     "{" + ",".join(str(i + 1) for i in sorted(g)) + "}"
                     for g in comps[:4])
                 p.setPen(QPen(QColor(235, 170, 90)))
                 p.setFont(QFont("Segoe UI", 8))
                 p.drawText(QRectF(0, h - 32, w, 14), Qt.AlignCenter, groups)
-                if bridge is not None:
-                    i, j, n = bridge
-                    p.drawText(QRectF(0, h - 45, w, 14), Qt.AlignCenter,
-                               f"show board to cam{i + 1} + cam{j + 1} together "
-                               f"({n}/{self._min_edge})")
         p.end()

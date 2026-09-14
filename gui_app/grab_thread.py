@@ -227,6 +227,11 @@ class GrabThread(QThread):
         self._snapshot_requested = False
         self.snapshot_frame = None
         self._keep_full = False
+        #: Set once this thread has allocated its ring and called
+        #: StartGrabbing, i.e. once it can actually keep up with triggers.
+        #: start_acquisition waits on these before the board is started; see
+        #: CameraManager.wait_until_ready.
+        self.ready = threading.Event()
         self.latest_full_frame = None
         # Stall recovery state (see _rearm_stream / _resync_offset).
         self._last_ts = None          # device timestamp of the last good frame
@@ -378,6 +383,7 @@ class GrabThread(QThread):
                       f"{ring_n}-buffer NV12 ring ({gib:.2f} GiB): {e}", flush=True)
                 self._router.retire(self._cam_index,
                                     "could not allocate its NV12 ring")
+                self.ready.set()        # never hold the barrier open
                 return
             self._ring_i = 0
             print(f"[grab{self._cam_index}] real-time kick-out -> shared router "
@@ -418,7 +424,14 @@ class GrabThread(QThread):
         print(f"[grab{self._cam_index}] StartGrabbing (recording={recording})", flush=True)
         try:
             self._camera.StartGrabbing(GRAB_STRATEGY)
+            # Ring allocated, stream started: this thread can now keep up with
+            # the trigger rate. Announce it BEFORE the retrieve loop so the
+            # board is not started against a thread still writing 2.57 GiB of
+            # ring. Set on the failure paths too -- a thread that will never be
+            # ready must not hold the barrier until it times out.
+            self.ready.set()
         except Exception as e:
+            self.ready.set()
             # Camera offline / in a bad transport state: exit this thread cleanly
             # rather than letting the exception escape run() and abort Qt.
             print(f"[grab{self._cam_index}] StartGrabbing failed (camera offline?): {e}", flush=True)

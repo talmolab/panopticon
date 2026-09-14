@@ -99,7 +99,15 @@ calibration_gain_db: -1            # -1 = keep the .pfs gain (6 dB)
 # alone -- it is cheap and it is the one that actually stops a board being waved
 # in a single spot, which yields confident, badly-conditioned intrinsics.
 calibration_min_per_cam_shared: 120
-calibration_min_edge: 40
+# Shared board sightings needed before a camera PAIR counts as connected.
+# Halved from 40 on 2026-09-14: Isaac reported the board-waving still demanded
+# far too many pairings, and connecting nine cameras needs at least eight edges,
+# so this number multiplies through the whole exercise. 40 was already a
+# reduction from 80, and a 9/9 solve landed at 40 -- so 20 keeps real margin
+# over whatever the solver actually needs while halving the work. If waving is
+# still slow, 15 is the next step; the true floor is what the solve needs for a
+# stable relative pose per pair, which nobody has measured yet.
+calibration_min_edge: 20
 calibration_min_grid_cells: 3
 
 pfs_path: "configs/mono8_1920x1200.pfs"

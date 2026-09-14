@@ -1,6 +1,7 @@
 """Main application window — wires cameras, sidebar, state machine, and encoding."""
 import json
 import shutil
+import time
 from datetime import datetime
 import numpy as np
 from enum import Enum
@@ -710,6 +711,18 @@ class MainWindow(QMainWindow):
                 f"Could not open serial port {self._profile.serial_port}.\n"
                 "Close Arduino Serial Monitor / other apps holding the port and retry.")
             return
+        # Barrier: never start the board while a grab thread is still
+        # allocating. See CameraManager.wait_until_ready for the measurement.
+        t_bar = time.perf_counter()
+        try:
+            n_ready, n_tot = self._camera_mgr.wait_until_ready(30.0)
+            waited = time.perf_counter() - t_bar
+            flag = "" if n_ready == n_tot else "  *** NOT ALL READY ***"
+            print(f"[acq] grab threads ready {n_ready}/{n_tot} after "
+                  f"{waited:.2f}s{flag}", flush=True)
+        except Exception as e:
+            print(f"[acq] readiness barrier failed, starting anyway: {e}",
+                  flush=True)
         print(f"[acq] sending start_triggers pins={self._profile.trigger_pins} fps={fps}", flush=True)
         if not teensy.start_triggers(self._profile.trigger_pins, fps):
             # The board never confirmed the config, even after a forced reset.
