@@ -837,6 +837,12 @@ class StimulationWindow(QDialog):
         # the board holds the stim-free sketch while this still holds the
         # paradigm. invalidate_upload() clears it when a reflash fails.
         self._uploaded_ino:   str | None = None
+        #: True once an Apply has FAILED and no later Apply has succeeded, i.e.
+        #: we positively know the board does not carry this canvas. Distinct
+        #: from `_uploaded_ino is None`, which only means "nothing was uploaded
+        #: this session" -- a paradigm Applied in an earlier session is still on
+        #: the board, so that case must stay recordable.
+        self._apply_failed:   bool = False
         self._test_after_upload = False
         self._test_serial: TeensyController | None = None
         self._test_timer:  QTimer | None = None
@@ -1104,7 +1110,25 @@ class StimulationWindow(QDialog):
         means the .ino on the board may be driving a camera trigger line, which
         silently breaks the block-ID identity every downstream consumer assumes.
         CLAUDE.md already claims Record warns here; this makes that true.
+
+        A failed Apply also blocks. `stim_trace.csv` marks which frames were
+        stimulated by reading the CANVAS, not the board, so after a failed
+        upload it happily reports "900 frames with stimulation active" for a
+        session in which the board never received the paradigm and nothing
+        fired. Observed 2026-09-14: arduino-cli lost a race for the serial port,
+        the upload failed, and the recording went ahead and was labelled
+        stimulated. Data mislabelled as stimulated is worse than no data, so
+        refuse until an Apply succeeds. Only a KNOWN failure blocks -- a
+        paradigm Applied in a previous session is still on the board and stays
+        recordable, which is why this is a separate flag from `_uploaded_ino`.
         """
+        if self._apply_failed:
+            return ("The last Apply FAILED, so the board does not carry this "
+                    "paradigm.\n\nRecording now would produce a session "
+                    "labelled as stimulated in which nothing was actually "
+                    "driven. Press Apply again and let it succeed first.\n\n"
+                    "If arduino-cli reported a port error, close anything else "
+                    "using the board's serial port and retry.")
         return self._blocking_problem()
 
     def provenance(self) -> dict:
@@ -1243,9 +1267,11 @@ class StimulationWindow(QDialog):
         self._upload_worker = None
         if not ok:
             self._test_after_upload = False
+            self._apply_failed = True
             self._set_status("Upload failed — see details.", error=True)
             QMessageBox.critical(self, "Upload failed", msg)
             return
+        self._apply_failed = False
         self._uploaded_ino = ino
         # Hand the applied paradigm to the main window. It records what the
         # board now holds and keeps the source for the session, so a later

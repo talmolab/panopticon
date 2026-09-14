@@ -19,7 +19,48 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
 
 
+def _refuse_if_already_running():
+    """Abort if another Panopticon is already up.
+
+    Two instances enumerate the same nine cameras and fight over them, and the
+    resulting lag numbers look exactly like a laggard bug. On 2026-09-14 three
+    concurrent instances -- launched by chain scripts that outlived the pkill
+    meant to stop them -- produced two "divergence" findings that drove two
+    code changes before the overlap was noticed. Both had to be reverted. A
+    measurement harness that cannot prove it was alone is not a measurement.
+    """
+    import os
+    import subprocess
+    import sys
+
+    me = os.getpid()
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+             "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"],
+            capture_output=True, text=True, timeout=60).stdout
+    except Exception as e:
+        print(f"[probe] could not check for other instances: {e}", flush=True)
+        return
+    others = []
+    for line in out.splitlines():
+        pid, _, cmd = line.partition("	")
+        if not pid.strip().isdigit() or int(pid) == me:
+            continue
+        if "probe_gui_record.py" in cmd or "gui.py" in cmd:
+            others.append((pid.strip(), cmd.strip()[:70]))
+    if others:
+        print("[probe] REFUSING TO START: another Panopticon is already "
+              "running, and two instances fight over the same cameras:",
+              flush=True)
+        for pid, cmd in others:
+            print(f"[probe]   pid {pid}  {cmd}", flush=True)
+        sys.exit(3)
+
+
 def main():
+    _refuse_if_already_running()
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=300)
     ap.add_argument("--warmup", type=float, default=8, help="settle before Record")
@@ -101,8 +142,26 @@ def main():
               flush=True)
 
         def after_upload(ok, msg):
-            print(f"[probe] stim upload ok={ok}: {msg[:120]}", flush=True)
+            print(f"[probe] stim upload ok={ok}: {msg[:200]}", flush=True)
+            if not ok:
+                # Do NOT record behind a failed upload. The GUI shows a MODAL
+                # error dialog here, and a modal runs a nested event loop in
+                # which QTimer still fires -- so on 2026-09-14 the recording
+                # started while the "Upload failed" box was open, and the trace
+                # labelled it stimulated although nothing was ever flashed.
+                print("[probe] ABORTING: refusing to record without the "
+                      "paradigm on the board", flush=True)
+                QApplication.instance().exit(2)
+                return
             QTimer.singleShot(int(args.warmup * 1000), start)
+        # arduino-cli needs the serial port to itself; the GUI holds it warm
+        # after startup. Without this the upload loses the race and fails with
+        # "exit 1", which is exactly what happened on 2026-09-14.
+        try:
+            win.release_serial_port()
+            print("[probe] released serial port for arduino-cli", flush=True)
+        except Exception as e:
+            print(f"[probe] could not release serial port: {e}", flush=True)
         sw._apply_btn.click()
         if sw._upload_worker is not None:
             sw._upload_worker.done.connect(after_upload)
