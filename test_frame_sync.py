@@ -138,14 +138,16 @@ def main():
     test_retired_camera_submissions_ignored()
     test_forced_drops_are_attributed()
     test_block_rate_catches_skipped_triggers()
+    test_non_positive_block_ids_refused()
+    test_lag_frames_and_quiet_retire()
 
     print("\nALL FRAMESYNC EQUIVALENCE TESTS PASS")
 
 
-# ── camera retirement (added 2026-07-27) ─────────────────────────────────────
-# A stalled camera used to pin the watermark forever, so every later trigger was
-# force-dropped and the recording yielded nothing from the stall onward. Retiring
-# it keeps the survivors aligned.
+# ── camera retirement ────────────────────────────────────────────────────────
+# A stalled camera must not pin the watermark: without retire() every later
+# trigger is force-dropped and the recording yields nothing from the stall
+# onward. Retiring it keeps the survivors aligned.
 
 def test_retire_keeps_survivors_aligned():
     co = FrameSyncCoordinator(3, max_lag=10)
@@ -203,7 +205,7 @@ def test_forced_drops_are_attributed():
     print("9) forced drops are attributed to the lagging camera: PASS")
 
 
-# ── block ID == trigger ordinal (added 2026-09-04) ───────────────────────────
+# ── block ID == trigger ordinal ──────────────────────────────────────────────
 # The release rule matches on block ID alone. A camera that IGNORES triggers
 # (exposure over the ceiling) keeps its block IDs gapless and ends up with the
 # same frame count as everyone else, so the coordinator, the intersection and
@@ -245,6 +247,49 @@ def test_block_rate_catches_skipped_triggers():
     assert msg and "cannot outrun" in msg, f"wrong diagnosis: {msg}"
 
     print("10) block-ID rate check catches ignored triggers: PASS")
+
+
+# ── the -1 / 0 placeholder must never enter the unwrap ───────────────────────
+# GVSP reserves 0 and no camera reports a negative ID, so either value means
+# "no ordinal". Unwrapped, it reads as a 16-bit wrap and places the camera far
+# ahead, force-dropping every other camera. Refusing it is the live half of the
+# guard alignment._unwrap_blockids applies post hoc.
+
+def test_non_positive_block_ids_refused():
+    co = FrameSyncCoordinator(2, max_lag=10)
+    for t in range(1, 4):
+        for c in range(2):
+            co.submit(c, t, None)
+    for bad in (0, -1):
+        try:
+            co.submit(0, bad, None)
+        except ValueError as e:
+            assert "ordinal" in str(e), e
+        else:
+            raise AssertionError(f"block ID {bad} was accepted")
+    # The refused value left no trace: the camera's frontier and the release
+    # rule are untouched, so the next good frame releases normally.
+    out = co.submit(0, 4, None) + co.submit(1, 4, None)
+    assert {t for _c, t, _f in out} == {4}, out
+    assert co.released_triggers == 4
+    print("11) block IDs <= 0 raise instead of unwrapping as a wrap: PASS")
+
+
+def test_lag_frames_and_quiet_retire():
+    co = FrameSyncCoordinator(3, max_lag=50)
+    for t in range(1, 11):
+        co.submit(0, t, None)
+        co.submit(1, t, None)
+    for t in range(1, 4):
+        co.submit(2, t, None)
+    assert co.lag_frames() == [0, 0, 7], co.lag_frames()
+    assert co.decided_upto == 3
+    msg = co.retire(2, "quiet test", announce=False)
+    assert msg and "RETIRED" in msg and "cam3" in msg, msg
+    assert co.retire(2, "again", announce=False) is None
+    assert co.lag_frames() == [0, 0, -1], co.lag_frames()
+    print("12) lag_frames() counts triggers behind the leader; retire() can hand "
+          "its log line to the caller: PASS")
 
 
 if __name__ == "__main__":
