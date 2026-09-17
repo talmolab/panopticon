@@ -308,14 +308,14 @@ def detect_all_cameras(cam_dirs, board_cfg, excluded, hints=None,
 # Correspondences: charuco corner -> 3D/2D point arrays
 # ---------------------------------------------------------------------------
 
-def _build_pts(corners, ids, marker_obj):
+def _build_pts(corners, ids, corner_obj):
     """Build (obj_pts, img_pts) for one frame. Returns None pair if empty."""
-    mask = np.isin(ids, list(marker_obj.keys()))
+    mask = np.isin(ids, list(corner_obj.keys()))
     valid_ids = ids[mask]
     valid_corners = corners[mask]  # (M, 2)
     if len(valid_ids) == 0:
         return None, None
-    obj = np.stack([marker_obj[int(m)] for m in valid_ids])  # (M, 3)
+    obj = np.stack([corner_obj[int(m)] for m in valid_ids])  # (M, 3)
     return (obj.reshape(-1, 1, 3).astype(np.float32),
             valid_corners.reshape(-1, 1, 2).astype(np.float32))
 
@@ -373,13 +373,13 @@ def _pose_diverse_sample(poses, k, reproj_percentile=90):
     return sorted(filtered[s][0] for s in sel)
 
 
-def calibrate_intrinsics(fns, corners_list, ids_list, marker_obj, image_size,
+def calibrate_intrinsics(corners_list, ids_list, corner_obj, image_size,
                          min_markers=6, max_frames=60, min_frames=20):
     obj_all, img_all = [], []
     for corners, ids in zip(corners_list, ids_list):
         if len(ids) < min_markers:
             continue
-        obj, img = _build_pts(corners, ids, marker_obj)
+        obj, img = _build_pts(corners, ids, corner_obj)
         if obj is None:
             continue
         obj_all.append(obj)
@@ -420,7 +420,7 @@ MIN_TREE_FRAMES = 10
 STEREO_MAX_FRAMES = 30
 
 
-def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
+def calibrate_pair(data_a, data_b, corner_obj, K_a, d_a, K_b, d_b,
                    image_size, min_markers=6, min_frames=PAIR_MIN_FRAMES):
     fns_a, corners_a, ids_a = data_a
     fns_b, corners_b, ids_b = data_b
@@ -442,7 +442,7 @@ def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
         cb, idb = corners_b[ib], ids_b[ib]
 
         common = np.intersect1d(ida, idb)
-        common = common[np.isin(common, list(marker_obj.keys()))]
+        common = common[np.isin(common, list(corner_obj.keys()))]
         if len(common) < min_markers:
             continue
 
@@ -455,7 +455,7 @@ def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
         sort_order_b = np.argsort(idb)
         idx_in_b = sort_order_b[idx_in_b]
 
-        obj = np.stack([marker_obj[int(m)] for m in common])  # (M, 3)
+        obj = np.stack([corner_obj[int(m)] for m in common])  # (M, 3)
         obj_list.append(obj.reshape(-1, 1, 3).astype(np.float32))
         img_a_list.append(ca[idx_in_a].reshape(-1, 1, 2).astype(np.float32))
         img_b_list.append(cb[idx_in_b].reshape(-1, 1, 2).astype(np.float32))
@@ -816,8 +816,8 @@ def main():
         board, _ = create_board_and_dict(board_cfg)
     except (ValueError, RuntimeError) as e:
         fail("BAD_BOARD_CONFIG", "{}: {}".format(args.board_config, e))
-    marker_obj = get_charuco_obj_points(board)
-    print("  {} charuco corners".format(len(marker_obj)))
+    corner_obj = get_charuco_obj_points(board)
+    print("  {} charuco corners".format(len(corner_obj)))
 
     calib_dir = args.session_dir / "calibration"
     if not calib_dir.exists():
@@ -861,8 +861,8 @@ def main():
     print("\nIntrinsics...")
 
     def _intrinsic_job(cam):
-        fns, corners, ids = all_dets[cam]
-        return cam, calibrate_intrinsics(fns, corners, ids, marker_obj,
+        _fns, corners, ids = all_dets[cam]
+        return cam, calibrate_intrinsics(corners, ids, corner_obj,
                                          all_sizes[cam])
 
     intrinsics = {}
@@ -896,7 +896,7 @@ def main():
         Ka, da = intrinsics[ca]
         Kb, db = intrinsics[cb]
         result = calibrate_pair(
-            all_dets[ca], all_dets[cb], marker_obj,
+            all_dets[ca], all_dets[cb], corner_obj,
             Ka, da, Kb, db, all_sizes[ca])
         return ca, cb, result
 

@@ -111,9 +111,6 @@ class _CharucoEngine:
         except cv2.error:
             return 0, None
 
-    def count(self, gray):
-        return self.detect(gray)[0]
-
 
 class BoardDetector:
     GRID_ROWS = 2
