@@ -71,6 +71,18 @@ class CameraManager(QObject):
     def frame_counts(self) -> list[int]:
         return [gt.frame_count for gt in self._grab_threads]
 
+    @property
+    def frontier_lags(self) -> list:
+        """Per-camera triggers behind the leading camera in kick mode, -1 for a
+        retired camera; [] outside kick mode. Counted in block IDs, so it has
+        none of the clock drift delivery_lags accumulates."""
+        if self._router is None:
+            return []
+        try:
+            return self._router.lag_frames()
+        except Exception:
+            return []
+
     def thermals(self) -> list:
         """Per-camera temperature readings, or [] if the backend has none.
 
@@ -101,9 +113,14 @@ class CameraManager(QObject):
     def open_all(self, pfs_path: str, gige_driver: str = "socket",
                  trigger_rate_limit: float = 165.0, expect_cameras: int = 0,
                  max_num_buffer: int = MAX_NUM_BUFFER,
-                 only_serials=None):
+                 only_serials=None, backend: str | None = None):
         """trigger_rate_limit: AcquisitionFrameRate to apply in trigger mode, or
         0 to disable the limiter altogether — see _set_trigger_mode.
+
+        backend: camera backend NAME (see gui_app.backends.load_backend) to use
+        from here on, or None to keep the one this manager was constructed
+        with. A profile selects its vendor here; the grab threads receive the
+        same backend instance, so nothing else in the application changes.
 
         expect_cameras: if nonzero, refuse to start unless exactly this many
         cameras enumerate.
@@ -115,6 +132,8 @@ class CameraManager(QObject):
         self._trigger_rate_limit = trigger_rate_limit
         self._max_num_buffer = int(max_num_buffer)
         self._baseline_exp_gain = []
+        if backend is not None and backend != getattr(self._backend, "name", None):
+            self._backend = load_backend(backend)
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
             self.error.emit("No cameras found")
@@ -234,9 +253,11 @@ class CameraManager(QObject):
         self._stop_grab_threads()
         for i, cam in enumerate(self._cameras):
             rp = raw_paths[i] if raw_paths else None
-            gt = GrabThread(i, cam, raw_path=rp, display_every=display_every,
+            gt = GrabThread(i, cam, self._backend, raw_path=rp,
+                            display_every=display_every,
                             realtime=realtime, width=width, height=height,
-                            quality=quality, fps=fps, router=self._router)
+                            quality=quality, fps=fps, router=self._router,
+                            encoder_factory=self.encoder_factory)
             gt._pin_cpu = self.pin_capture_threads
             gt._pin_ecore = self.pin_encoder_threads
             gt._enc_pcores = self.encoder_pcores
@@ -253,6 +274,9 @@ class CameraManager(QObject):
     #: pin_encoder_threads, which pins one per E-CORE and measured
     #: catastrophic. See _EncoderThread.run.
     encoder_pcores = False
+    #: Encoder factory handed to the router and the grab threads; None means
+    #: the process default in gui_app.encoders (NVENC).
+    encoder_factory = None
 
     def pinning_report(self) -> str:
         """One line saying how many grab threads actually pinned.
@@ -343,7 +367,8 @@ class CameraManager(QObject):
             router = SyncEncodeRouter(raw_paths, width, height, quality,
                                       fps=fps, max_lag=kick_max_lag,
                                       pin_encoders=self.pin_encoder_threads,
-                                      enc_pcores=self.encoder_pcores)
+                                      enc_pcores=self.encoder_pcores,
+                                      encoder_factory=self.encoder_factory)
             if router.available:
                 router.start()
                 self._router = router

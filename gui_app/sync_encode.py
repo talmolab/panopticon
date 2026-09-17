@@ -1,6 +1,6 @@
 """Router for the real-time frame kick-out path.
 
-Owns one NVENC encoder thread per camera and a shared FrameSyncCoordinator.
+Owns one encoder thread per camera and a shared FrameSyncCoordinator.
 Grab threads call submit() with each successfully-grabbed frame; the coordinator
 releases a trigger only once every camera has it, and the router routes those
 (and only those) frames to the per-camera encoders — so each stream.h264 holds
@@ -10,6 +10,8 @@ submit() holds a short lock: the coordinator step is integer-only and routing is
 put_nowait into queues the encoders drain faster than the 100 fps inflow, so the
 lock is held for microseconds and never blocks on a full queue. Releases are
 routed under the lock so each encoder receives its frames in trigger order.
+Nothing prints under the lock: a console write can take milliseconds, and
+every other grab thread would spend them blocked while holding a driver buffer.
 """
 import gc
 import os
@@ -23,15 +25,16 @@ import numpy as np
 #: no-op there, so this is all that stands between these modules and Linux.
 _O_BINARY = getattr(os, "O_BINARY", 0)
 
-from gui_app import nvenc
+from gui_app import encoders
 from gui_app.frame_sync import FrameSyncCoordinator
-from gui_app.grab_thread import _EncoderThread
+from gui_app.grab_thread import (_EncoderThread, write_split_point,
+                                 DRAIN_SENTINEL_TIMEOUT_S, DRAIN_JOIN_TIMEOUT_S)
 
 
 class SyncEncodeRouter:
     def __init__(self, raw_paths, width: int, height: int, quality: int,
                  fps: int = 100, max_lag: int = 240, pin_encoders: bool = False,
-                 enc_pcores: bool = False):
+                 enc_pcores: bool = False, encoder_factory=None):
         self._n = len(raw_paths)
         self._w, self._h, self._q = width, height, quality
         self._fps = int(fps)   # stop() checks block-ID rate against it
@@ -40,10 +43,14 @@ class SyncEncodeRouter:
         self._lock = threading.Lock()
         self._encoders = []
         self._fds = []
+        self._h264_paths = []
         self.timestamps = [[] for _ in range(self._n)]
         self.block_ids = [[] for _ in range(self._n)]
         self.available = False
+        #: Reason `available` is False, for a caller that refuses to start.
+        self.unavailable_reason = ""
         self.dropped_full = 0  # frames lost to a wedged encoder queue (should be 0)
+        self._dropped_full_by = [0] * self._n
         self._log_every = max(int(fps), 1) * 5 * self._n   # ~5 s of submissions
         self._since_log = 0
 
@@ -52,15 +59,24 @@ class SyncEncodeRouter:
         #: Human-readable problems found at stop(). Empty means the recording's
         #: block-ID bookkeeping matches what was actually persisted.
         self.warnings: list[str] = []
+        #: Per-camera warnings destined for that camera's WARNINGS.txt.
+        self._cam_warnings: list[list[str]] = [[] for _ in range(self._n)]
 
+        factory = encoder_factory or encoders.get_default_factory()
         try:
             for i, rp in enumerate(raw_paths):
-                enc = nvenc.create_h264_encoder(width, height, quality, fps=fps)
+                notes: list = []
+                enc = factory(width, height, quality, fps, notes)
+                for note in notes:
+                    # A degraded encoder config is a property of the recording,
+                    # not of the console: it reaches WARNINGS.txt at stop.
+                    self._warn(i, f"cam{i+1}: {note}")
                 h264_path = Path(rp).parent / "stream.h264"
                 fd = os.open(str(h264_path),
                              os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_BINARY)
+                self._h264_paths.append(h264_path)
                 et = _EncoderThread(i, enc, fd, Path(rp).parent / "raw_tail.bin",
-                                    width, height)
+                                    height)
                 # Keep encoders off the P-cores the grab threads are pinned to;
                 # see cpu_affinity.pin_to_efficiency_core.
                 et._pin_ecore = pin_encoders
@@ -69,20 +85,32 @@ class SyncEncodeRouter:
                 self._fds.append(fd)
             self.available = True
         except Exception as e:
-            print(f"[sync] NVENC init failed, kick-out unavailable: {e}", flush=True)
+            self.unavailable_reason = f"{type(e).__name__}: {e}"
+            print(f"[sync] encoder init failed, kick-out unavailable: {e}", flush=True)
             for fd in self._fds:
                 try:
                     os.close(fd)
                 except Exception:
                     pass
-            # Release the sessions we DID get before reporting unavailable.
-            # Closing the fds is not enough: an NVENC session is freed by the
-            # encoder object's destructor, so a partial failure used to hold
-            # every already-created session for an indeterminate time. The grab
-            # threads then fall back to creating their own encoders — against
-            # the same driver cap (12 here) — so at least one camera silently
-            # degrades to raw.bin at ~129 GiB per 10 minutes with no disk guard.
-            # None of these threads were started, so releasing is safe.
+            # The files this constructor created are empty and must not
+            # survive: the post-hoc encoder prefers an existing stream.h264 and
+            # would remux a zero-byte file, reporting the camera as failed with
+            # its raw.bin never touched.
+            for p in self._h264_paths:
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+            self._fds = []
+            self._h264_paths = []
+            # Release the sessions that WERE created before reporting
+            # unavailable. Closing the fds is not enough: an NVENC session is
+            # freed by the encoder object's destructor, so a partial failure
+            # that does not `del` its encoders holds every already-created
+            # session for an indeterminate time and the grab threads' fallback
+            # encoders then fail against the cap, degrading at least one camera
+            # to raw.bin at ~129 GiB per 10 minutes with no disk guard. None of
+            # these threads were started, so releasing is safe.
             for et in self._encoders:
                 try:
                     et.release_encoder()
@@ -101,10 +129,17 @@ class SyncEncodeRouter:
     def retire(self, cam: int, reason: str = ""):
         """Drop a camera from the alignment set (stalled and unrecoverable)."""
         with self._lock:
-            self._coord.retire(cam, reason)
+            msg = self._coord.retire(cam, reason, announce=False)
+        if msg:
+            print(msg, flush=True)
 
     def lag_report(self) -> str:
         return self._coord.lag_report()
+
+    def lag_frames(self) -> list:
+        """Per-camera triggers behind the leader (drift-free health signal)."""
+        with self._lock:
+            return self._coord.lag_frames()
 
     def _route(self, releases):
         for cam, bid, payload in releases:
@@ -115,36 +150,69 @@ class SyncEncodeRouter:
                 self.timestamps[cam].append(ts)
             except Exception:
                 # Encoder queue full => encoder wedged (GPU stall). Dropping
-                # here desyncs this camera; it should never happen because the
-                # encoder drains faster than inflow. Count it loudly.
+                # here desyncs this camera's video length from the others; it
+                # should never happen because the encoder drains faster than
+                # inflow. The block ID is NOT recorded (the frame was not
+                # persisted), and stop() turns the count into a warning.
                 self.dropped_full += 1
-                if self.dropped_full in (1, 100):
-                    print(f"[sync] cam{cam+1} encoder queue full, dropped a "
-                          f"released frame ({self.dropped_full})", flush=True)
+                self._dropped_full_by[cam] += 1
 
     def submit(self, cam: int, block_id: int, ts: float, buf: np.ndarray):
+        report = None
         with self._lock:
             releases = self._coord.submit(cam, block_id, (ts, buf))
             if releases:
                 self._route(releases)
-            # Periodic lag report. Cross-camera skew beyond max_lag is what
-            # force-drops frames every camera actually captured (43% of a
-            # 23-min session on 2026-07-27), and nothing in the old logs said
-            # which camera was behind.
+            # Periodic lag report: cross-camera skew beyond max_lag force-drops
+            # frames every camera captured (up to 43% of a session), and only
+            # this line names the camera that is behind. Built under the lock,
+            # printed outside it.
             self._since_log += 1
             if self._since_log >= self._log_every:
                 self._since_log = 0
-                print(self._coord.lag_report(), flush=True)
+                report = self._coord.lag_report()
+        if report is not None:
+            print(report, flush=True)
 
     def abandon(self):
-        """Tear down WITHOUT draining (app quit mid-recording): close the output
-        fds so stream.h264 unlocks and can be deleted. Encoder threads are
-        daemon and die on process exit."""
-        for fd in self._fds:
+        """Tear down WITHOUT draining (app quit, or a finalize that failed).
+
+        Order matters. Each encoder thread is stopped FIRST (abort flag, queue
+        emptied, sentinel, short join) and its encoder released if it exited;
+        only then are the output fds closed. Closing an fd under a live writer
+        makes its next os.write fail as "encoder died", which spills raw planes
+        into a directory about to be deleted, and a reused fd number could
+        receive H.264 bytes meant for the stream. A thread still inside
+        Encode() after the join keeps its fd and session until process exit;
+        the process does not always exit here (the failed-finalize path returns
+        to IDLE), so a leaked session is reported rather than assumed harmless.
+        """
+        for i, et in enumerate(self._encoders):
+            exited = True
             try:
-                os.close(fd)
+                exited = et.abandon(timeout=5.0)
             except Exception:
-                pass
+                exited = False
+            if exited:
+                try:
+                    et.release_encoder()
+                except Exception:
+                    pass
+                if i < len(self._fds):
+                    try:
+                        os.close(self._fds[i])
+                    except Exception:
+                        pass
+            else:
+                print(f"[sync] cam{i+1}: encoder thread still running at "
+                      f"abandon; its fd and encoder session are leaked until "
+                      f"the application exits", flush=True)
+        self._fds = []
+        gc.collect()
+
+    def live_encoders(self) -> int:
+        """Encoder threads still running (0 after a clean stop or abandon)."""
+        return sum(1 for et in self._encoders if et.is_alive())
 
     def stop(self):
         """Flush the coordinator, drain + join encoders, return per-camera
@@ -153,7 +221,7 @@ class SyncEncodeRouter:
             self._route(self._coord.flush())
         for i, et in enumerate(self._encoders):
             try:
-                et.queue.put(None, timeout=30)
+                et.queue.put(None, timeout=DRAIN_SENTINEL_TIMEOUT_S)
             except Exception as e:
                 # Not silent: a wedged queue means this camera never gets its
                 # sentinel, so it will not finish and everything below has to
@@ -162,7 +230,7 @@ class SyncEncodeRouter:
                       f"({type(e).__name__}) — encoder will not finish cleanly",
                       flush=True)
         for et in self._encoders:
-            et.join(timeout=60)
+            et.join(timeout=DRAIN_JOIN_TIMEOUT_S)
 
         # Establish ONCE who actually finished, then gate everything on it.
         # A thread can outlive its join, and every step below is unsafe against
@@ -176,16 +244,16 @@ class SyncEncodeRouter:
         for i, (fd, is_alive) in enumerate(zip(self._fds, alive)):
             if is_alive:
                 print(f"[sync] cam{i+1}: encoder still running after join; "
-                      f"leaking its fd and NVENC session rather than pulling "
+                      f"leaking its fd and encoder session rather than pulling "
                       f"them out from under a live writer", flush=True)
                 continue
             try:
                 os.close(fd)
             except Exception:
                 pass
-        # Hand the NVENC sessions back now rather than whenever the router
+        # Hand the encoder sessions back now rather than whenever the router
         # happens to become unreachable: the next acquisition needs them and the
-        # driver cap (12 here) leaves no slack at 9 cameras.
+        # NVENC driver cap leaves no slack at 9 cameras.
         for et, is_alive in zip(self._encoders, alive):
             if is_alive:
                 continue
@@ -224,31 +292,40 @@ class SyncEncodeRouter:
                        f"frame-to-trigger mapping is UNVERIFIED. Do not trust "
                        f"this camera's alignment without checking the mp4 frame "
                        f"count against blockids.npy.")
-                print(f"[sync] WARNING: {msg}", flush=True)
-                self.warnings.append(msg)
-                try:
-                    (self._dirs[i] / "WARNINGS.txt").write_text(msg + "\n")
-                except Exception:
-                    pass
+                self._warn(i, msg)
                 continue
             persisted = et.encoded + et.spilled
             claimed = len(self.block_ids[i])
-            if persisted == claimed:
-                continue
-            msg = (f"cam{i+1}: block-ID bookkeeping claimed {claimed} frames but "
-                   f"only {persisted} were persisted (encoded={et.encoded} "
-                   f"spilled={et.spilled}, encoder_failed={et.failed}); "
-                   f"truncated to {persisted} so frame indices still map to the "
-                   f"correct triggers")
-            print(f"[sync] WARNING: {msg}", flush=True)
-            self.warnings.append(msg)
-            del self.block_ids[i][persisted:]
-            del self.timestamps[i][persisted:]
-            try:
-                (self._dirs[i] / "WARNINGS.txt").write_text(msg + "\n")
-            except Exception as e:
-                print(f"[sync] could not write WARNINGS.txt for cam{i+1}: {e}",
-                      flush=True)
+            if persisted != claimed:
+                msg = (f"cam{i+1}: block-ID bookkeeping claimed {claimed} frames but "
+                       f"only {persisted} were persisted (encoded={et.encoded} "
+                       f"spilled={et.spilled}, encoder_failed={et.failed}); "
+                       f"truncated to {persisted} so frame indices still map to the "
+                       f"correct triggers")
+                self._warn(i, msg)
+                del self.block_ids[i][persisted:]
+                del self.timestamps[i][persisted:]
+            if et.spilled > 0:
+                # The split point between stream.h264 and raw_tail.bin, for
+                # the post-hoc encoder: if the tail cannot be merged it
+                # truncates the metadata to `encoded` rather than over-claim.
+                write_split_point(self._dirs[i], et.encoded, et.spilled)
+                self._warn(i, f"cam{i+1}: the encoder failed after {et.encoded} "
+                              f"frames; {et.spilled} frames were spilled raw to "
+                              f"raw_tail.bin and are merged at encode time")
+
+        # A frame dropped because an encoder queue was full is a frame every
+        # camera captured and every OTHER camera encoded, so this camera's
+        # video is shorter than the rest and frame i no longer means the same
+        # trigger across cameras — the property kick mode promises. blockids.npy
+        # is still right for this camera; the operator must still be told.
+        for i, n in enumerate(self._dropped_full_by):
+            if n:
+                self._warn(i, f"cam{i+1}: {n} released frames were dropped because "
+                              f"its encoder queue was full (encoder wedged). Its "
+                              f"video is {n} frames shorter than the others; frame "
+                              f"indices are NOT aligned across cameras for this "
+                              f"recording, use blockids.npy to align.")
 
         # Does each camera's block-ID counter actually keep step with the
         # trigger board? Every other loss mode leaves a gap in blockids.npy;
@@ -272,5 +349,21 @@ class SyncEncodeRouter:
                 f"ends at that point; the other cameras continued and stay "
                 f"aligned with each other.")
 
+        # One WARNINGS.txt per affected camera, holding every warning about it
+        # (a second write_text would overwrite the first).
+        for i, msgs in enumerate(self._cam_warnings):
+            if not msgs:
+                continue
+            try:
+                (self._dirs[i] / "WARNINGS.txt").write_text("\n".join(msgs) + "\n")
+            except Exception as e:
+                print(f"[sync] could not write WARNINGS.txt for cam{i+1}: {e}",
+                      flush=True)
+
         return [(len(self.block_ids[i]), self.timestamps[i], self.block_ids[i])
                 for i in range(self._n)]
+
+    def _warn(self, cam: int, msg: str) -> None:
+        print(f"[sync] WARNING: {msg}", flush=True)
+        self.warnings.append(msg)
+        self._cam_warnings[cam].append(msg)
