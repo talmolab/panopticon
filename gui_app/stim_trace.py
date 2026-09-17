@@ -82,9 +82,36 @@ def ttl_level(step: dict, t_into_step: float) -> int:
     return 1 if (t_into_step * 1000.0) % period_ms < pw_ms else 0
 
 
+def step_active(step: dict) -> bool:
+    """Whether a step drives its pin at all.
+
+    Decided from the numbers the firmware uses (a positive frequency AND a
+    positive pulse width), never from the human-readable ``mode`` label:
+    the label is display text that can be reworded, and a trace that keyed
+    on it would flip every off-period frame to active without a test noticing.
+    """
+    return float(step["freq_hz"]) > 0 and float(step["pulse_width_ms"]) > 0
+
+
+def resolve_chains(paradigm: dict) -> list[dict]:
+    """The chains a paradigm describes, rebuilt from its node graph when present.
+
+    ``stim_paradigm.json`` stores both the graph (``blocks``/``edges``) and
+    the pre-resolved ``chains`` the editor derived from it at record time.
+    The graph is the editable half, so regenerating a trace after editing the
+    file must compile the graph again; the stored ``chains`` are used only for
+    a file that has no graph.
+    """
+    blocks, edges = paradigm.get("blocks"), paradigm.get("edges")
+    if isinstance(blocks, list) and isinstance(edges, list):
+        from gui_app.stim_compiler import describe
+        return describe(blocks, edges)
+    return list(paradigm.get("chains", []))
+
+
 def build_rows(paradigm: dict, blockids: np.ndarray, fps: float):
     """Return (fieldnames, rows) — one row per recorded frame."""
-    chains = paradigm.get("chains", [])
+    chains = resolve_chains(paradigm)
     pins = sorted({int(s["pin"]) for c in chains for s in c["steps"]})
 
     fields = ["frame", "blockid", "t_s", "any_active"]
@@ -107,7 +134,7 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float):
                         f"chain{i}_freq_hz": "", f"chain{i}_pw_ms": ""}
                 continue
             step = ch["steps"][idx]
-            active = step["mode"] != "off (pin LOW)"
+            active = step_active(step)
             any_active |= active
             row |= {f"chain{i}_step": idx,
                     f"chain{i}_active": int(active),
