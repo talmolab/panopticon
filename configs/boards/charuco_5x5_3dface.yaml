@@ -4,5 +4,7 @@ square_length: 0.5    # mm
 marker_length: 0.4    # mm
 marker_bits: 4
 dict_size: 1000
-board_legacy: true    # printed before OpenCV 4.6 layout change
-max_frames: 500
+# The physical board is printed in the pre-OpenCV-4.6 ChArUco layout, so the
+# >=4.7 detector must be told; without it every marker is found and ZERO
+# charuco corners come back, with no error. Needs opencv-contrib-python >= 4.7.
+board_legacy: true
