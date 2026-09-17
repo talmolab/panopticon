@@ -169,6 +169,46 @@ check(9, "a worker lagged past the ring reports an error, not a guess",
       led.check_lag(1) is False and led.lag_error is not None,
       str(led.lag_error))
 
+# 10a — past one ring wrap: a presence bit must not alias to T + ring_bits ----
+# Presence is indexed by T % ring_bits and only the worker that set a bit may
+# clear it. A bit left set from trigger T reads as "present" for T + ring_bits,
+# so a camera that dropped that later trigger would be released by the others
+# and not by itself: equal counts, gapless IDs, drifting videos. A run only has
+# to outlast ring_bits triggers (41 s at 100 fps) for this to matter.
+n, ml = 2, 100
+rb = make_layout(n, ml).ring_bits
+total = 2 * rb + 50
+tr = [set(range(1, total + 1)) for _ in range(n)]
+tr[1].discard(1 + rb)                   # cam2 misses the alias of trigger 1
+tr[1].discard(7 + 2 * rb)               # and one two wraps out
+ref, _ = reference(n, ml, tr)
+got, _h, _c = through_shm(n, ml, tr)
+check("10a", "one deliberate drop at T + ring_bits of an announced T agrees "
+             "past two ring wraps", ref == got,
+      f"ref={len(ref)} shm={len(got)} diff={sorted(set(ref) ^ set(got))[:5]}")
+
+# 10b — randomised drops over > 2 ring wraps
+rng2 = random.Random(20260917)
+ok_wrap = True
+detail = ""
+for trial in range(4):
+    n = rng2.choice([2, 3, 5])
+    ml = rng2.choice([100, 240, 480])
+    rb = make_layout(n, ml).ring_bits
+    total = 2 * rb + rng2.randint(1, 300)
+    rate = rng2.uniform(0.005, 0.05)
+    tr = [set(t for t in range(1, total + 1) if rng2.random() >= rate)
+          for _ in range(n)]
+    ref, _ = reference(n, ml, tr)
+    got, _h, _c = through_shm(n, ml, tr)
+    if ref != got:
+        ok_wrap = False
+        detail = (f"trial {trial}: n={n} max_lag={ml} total={total} "
+                  f"ref={len(ref)} shm={len(got)}")
+        break
+check("10b", "randomised drops over more than two ring wraps agree exactly",
+      ok_wrap, detail)
+
 # 10 — a stale/foreign segment is rejected ------------------------------------
 from gui_app.mp_framesync import attach            # noqa: E402
 try:
