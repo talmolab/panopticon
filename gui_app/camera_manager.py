@@ -7,6 +7,18 @@ from PyQt5.QtCore import QObject, pyqtSignal
 from gui_app.backends import load_backend
 from gui_app.grab_thread import GrabThread
 
+
+class AcquisitionStartRefused(RuntimeError):
+    """start_acquisition() could not put every camera into the requested state.
+
+    Raised AFTER the cameras have been returned to free-run preview, so the
+    caller only has to report it. A partial start must never record: camera
+    names are positional, so a session missing one camera would attach every
+    later camera's extrinsics to the wrong physical camera, and in kick mode a
+    free-running camera's block IDs would force-drop every other camera's
+    frames.
+    """
+
 #: Driver-side buffers per camera. 1000 is 10 s of slack at 100 fps, and it
 #: costs n_cams x 1000 x 2.304 MB of RAM — 12.9 GiB at 6 cameras, 19.3 GiB at 9.
 #: Exported so the capacity preflight can do that arithmetic before a recording
@@ -238,14 +250,25 @@ class CameraManager(QObject):
                 print(f"[cam{i+1}] free-run config failed (camera offline?): {e}",
                       flush=True)
 
-    def _set_trigger_mode(self):
+    def _set_trigger_mode(self) -> list:
+        """Put every camera into hardware-trigger mode.
+
+        Returns the (index, error) pairs of cameras that refused. The caller
+        decides what to do; a camera left free-running would deliver 30 fps
+        block IDs that mean nothing relative to the trigger ordinal, and in
+        kick mode the coordinator would force-drop every other camera's frames
+        waiting for it.
+        """
         limit = getattr(self, "_trigger_rate_limit", 165.0)
+        failed = []
         for i, cam in enumerate(self._cameras):
             try:
                 self._backend.set_triggered(cam, limit, announce=(i == 0))
             except Exception as e:
-                print(f"[cam{i+1}] trigger config failed (camera offline?): {e}",
+                print(f"[cam{i+1}] trigger config failed: {type(e).__name__}: {e}",
                       flush=True)
+                failed.append((i, f"{type(e).__name__}: {e}"))
+        return failed
 
     def _start_grab_threads(self, raw_paths=None, display_every=1,
                             realtime=False, width=0, height=0, quality=21,
@@ -356,26 +379,64 @@ class CameraManager(QObject):
                           realtime_kick: bool = False,
                           kick_max_lag: int = 240,
                           exposure_us=None, gain_db=None):
+        if self._router is not None:
+            # A router from an acquisition that was never stopped holds one
+            # encoder session and one open stream.h264 per camera. Dropping the
+            # reference would keep its encoder threads blocked on their queues
+            # for the life of the process, and the new router would then hit
+            # the NVENC session cap and every camera would fall to raw.bin.
+            print("[acq] WARNING: start_acquisition called with a live router; "
+                  "abandoning it and releasing its encoders first", flush=True)
+            try:
+                self._router.abandon()
+            except Exception as e:
+                print(f"[acq] abandoning the stale router failed: {e}", flush=True)
+            self._router = None
         self._stop_grab_threads()
-        self._router = None
+        self.last_warnings = []
         if realtime and realtime_kick:
             # Shared router gates frames through the cross-camera coordinator so
             # only frames every camera captured get encoded (already aligned, no
-            # post-hoc re-encode). Falls back to the decoupled path if NVENC init
-            # fails for any camera.
+            # post-hoc re-encode). The profile asked for kick-out, so anything
+            # less is refused: the decoupled fallback would try one encoder per
+            # grab thread against the same exhausted session cap and end in
+            # raw.bin at ~129 GiB per 10 minutes, unaligned, with the capacity
+            # preflight having budgeted for H.264.
             from gui_app.sync_encode import SyncEncodeRouter
             router = SyncEncodeRouter(raw_paths, width, height, quality,
                                       fps=fps, max_lag=kick_max_lag,
                                       pin_encoders=self.pin_encoder_threads,
                                       enc_pcores=self.encoder_pcores,
                                       encoder_factory=self.encoder_factory)
-            if router.available:
-                router.start()
-                self._router = router
-                print("[acq] real-time kick-out router active", flush=True)
-            else:
-                print("[acq] kick-out unavailable, using decoupled encode", flush=True)
-        self._set_trigger_mode()
+            if not router.available:
+                self._start_grab_threads()      # back to preview
+                raise AcquisitionStartRefused(
+                    f"Real-time kick-out was requested but its encoders could "
+                    f"not be created: {router.unavailable_reason}\n\nNothing "
+                    f"was recorded. If this is the NVENC session cap, close "
+                    f"other GPU-encoding applications or restart this one.")
+            router.start()
+            self._router = router
+            print("[acq] real-time kick-out router active", flush=True)
+        failed = self._set_trigger_mode()
+        if failed:
+            # Refuse rather than record a partial set: names are positional
+            # and a free-running camera poisons the coordinator (see the
+            # exception's docstring). Undo everything done so far.
+            names = ", ".join(f"cam{i+1} ({err})" for i, err in failed)
+            print(f"[acq] REFUSING to start: trigger mode failed on {names}",
+                  flush=True)
+            if self._router is not None:
+                try:
+                    self._router.abandon()
+                except Exception:
+                    pass
+                self._router = None
+            self._set_freerun_mode()
+            self._start_grab_threads()
+            raise AcquisitionStartRefused(
+                f"Could not put every camera into trigger mode:\n{names}\n\n"
+                f"Nothing was recorded. Power-cycle the camera and retry.")
         # AFTER trigger mode, and the order is load-bearing: _set_trigger_mode
         # rewrites AcquisitionFrameRate and StopGrabbing()s the camera, so an
         # exposure applied before it would be set against the free-run
@@ -423,22 +484,42 @@ class CameraManager(QObject):
         reconfigure means a camera that dropped off the bus can't crash teardown
         (or take the other cameras' data down with it) before the data is written.
         """
+        warnings: list = []
+        counts = [gt.frame_count for gt in self._grab_threads]
         for gt in self._grab_threads:
             gt.signal_triggers_stopped()
+        # Normal exit: the board has stopped, the loop drains what is left in
+        # the pool and leaves on its first retrieve timeout (200 ms).
         for gt in self._grab_threads:
             gt.wait(5000)
-        # A thread still draining its encoder MUST be waited out: proceeding
-        # would reconfigure/restart the camera while the old thread still calls
-        # into pylon on it — concurrent native access, hard crash. The encoder
-        # drain path is bounded (~95 s worst case: 30 s sentinel put + 60 s
-        # join), so wait it out loudly rather than racing it.
+        # Escalation. The loop only honours signal_triggers_stopped() on a
+        # timeout, so a camera still receiving frames (the board ignored the
+        # stop, or a camera never left free-run) never times out and the
+        # thread never exits on its own. Frames after the stop command are not
+        # wanted, so tell it to stop outright; that ends the loop within one
+        # retrieve (at most 200 ms) unless it is wedged in a native call.
+        for i, gt in enumerate(self._grab_threads):
+            if not gt.isRunning():
+                continue
+            if gt.frame_count > counts[i]:
+                msg = (f"cam{i+1}: frames kept arriving after the trigger board "
+                       f"was told to stop ({gt.frame_count - counts[i]} more); "
+                       f"the board may still be triggering, or the camera was "
+                       f"not in trigger mode. Its grab thread was stopped "
+                       f"outright.")
+                print(f"[acq] WARNING: {msg}", flush=True)
+                warnings.append(msg)
+            gt.stop()
+        for gt in self._grab_threads:
+            if gt.isRunning():
+                gt.wait(10000)
+        # A thread still running now is inside its decoupled-encoder drain,
+        # which is bounded (~95 s worst case: 30 s sentinel put + 60 s join),
+        # or wedged in a native call. Wait the bound out loudly.
         for i, gt in enumerate(self._grab_threads):
             if gt.isRunning():
                 print(f"[cam{i+1}] grab thread still draining at stop, waiting...", flush=True)
-                if not gt.wait(100000):
-                    print(f"[cam{i+1}] grab thread DID NOT EXIT after 100 s "
-                          f"(GPU wedged?) — preview restart may be unstable, "
-                          f"consider restarting the app", flush=True)
+                gt.wait(100000)
 
         if self._router is not None:
             # Kick-out mode: grab threads have stopped submitting; flush the
@@ -448,11 +529,31 @@ class CameraManager(QObject):
             # Read the warnings BEFORE dropping the router, or they are lost
             # with it — which is how a truncated or retired camera used to
             # degrade to a line on stdout that nobody was watching.
-            self.last_warnings = list(self._router.warnings)
+            warnings.extend(self._router.warnings)
             self._router = None
         else:
             results = [(gt.frame_count, gt.timestamps, gt.block_ids)
                        for gt in self._grab_threads]
+            # Decoupled/raw modes: each thread reconciled its own bookkeeping
+            # (truncation, failed resync, spilled tail) and carries the result.
+            for gt in self._grab_threads:
+                warnings.extend(gt.warnings)
+        self.last_warnings = warnings
+
+        stuck = [i for i, gt in enumerate(self._grab_threads) if gt.isRunning()]
+        if stuck:
+            # Never hand the cameras back to preview under a live grab thread:
+            # set_freerun() calls StopGrabbing() on the same handle the thread
+            # is inside RetrieveResult on, which is concurrent native access.
+            # The thread list is kept so abandon() can still find them. The
+            # caller treats an exception here as "abandon and tell the
+            # operator"; the router's data above is already persisted.
+            names = ", ".join(f"cam{i+1}" for i in stuck)
+            raise RuntimeError(
+                f"grab thread(s) for {names} did not exit after the stop "
+                f"timeouts (GPU or driver wedged?). The cameras were NOT "
+                f"reconfigured; restart the application before recording "
+                f"again. Captured data up to the stop is on disk.")
         self._grab_threads.clear()
         return results
 
@@ -467,7 +568,16 @@ class CameraManager(QObject):
         brighter than what a recording will actually capture, which is exactly
         the misreading the "judge exposure from a recording, not the preview"
         rule exists to prevent. Passing None restores the baseline read at open.
+
+        Refuses while any grab thread is still running: reconfiguring a camera
+        under a thread inside RetrieveResult is concurrent native access.
         """
+        live = [i for i, gt in enumerate(self._grab_threads) if gt.isRunning()]
+        if live:
+            raise RuntimeError(
+                "resume_preview() called while grab thread(s) "
+                + ", ".join(f"cam{i+1}" for i in live)
+                + " are still running; the cameras were not reconfigured")
         self._set_freerun_mode()
         self.apply_exposure_gain(preview_fps, None, None)
         self._start_grab_threads()
@@ -482,11 +592,14 @@ class CameraManager(QObject):
         self._cameras.clear()
 
     def abandon(self):
-        """Tear down capture immediately, WITHOUT draining encoders (for app
-        quit mid-session). Closes the kick-out router's output fds so the
-        half-baked stream files unlock and can be deleted."""
+        """Tear down capture immediately, WITHOUT draining encoders (app quit
+        mid-session, or a finalize that failed). The grab threads skip their
+        encoder drain and close their stream fds at once, and the kick-out
+        router stops its encoder threads, releases their sessions and closes
+        its fds, so the half-baked stream files unlock and can be deleted and
+        the sessions are available to the next acquisition in this process."""
         for gt in self._grab_threads:
-            gt.stop()
+            gt.abandon()
         for gt in self._grab_threads:
             gt.wait(3000)
         self._grab_threads.clear()
