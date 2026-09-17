@@ -10,86 +10,91 @@
 #     and 4.6 moved chessboardCorners from an attribute to a method.
 #   matplotlib -- only for the reprojection histogram, which is skipped if
 #     absent. Nothing else needs it.
-"""Multi-view camera calibration using ArUco marker corners directly.
+"""Multi-view camera calibration from ChArUco corner detections.
 
 Run with: uv run 1_calibrate.py <session_dir> --board-config <board.yaml>
 
 The session directory should contain a calibration/ subfolder with per-camera
 video subdirectories (cam1/, cam2/, ...) produced by the Panopticon GUI.
 
-Outputs calibration.toml into the calibration directory.
+Outputs, all into the calibration directory:
+  calibration.toml          aniposelib-compatible cameras plus a [metadata]
+                            block with every quality figure of the solve
+  calibration_report.json   the same figures as JSON for the GUI
+  reprojection_error_histogram.png   pairwise stereo RMS bar chart
+
+Exit protocol: every failure prints ``ERROR_CODE=<code>`` to stderr before
+exiting 1, so the GUI classifies the failure from the code instead of guessing
+from traceback text. A solve that drops cameras (too few detections, failed
+intrinsics, unreadable video, a disconnected coverage graph) still exits 0 and
+writes ``partial = true`` with the dropped list into the metadata, because the
+solved cameras are usable and the GUI reports "solved N of M".
 """
 import argparse
-import os
+import json
+import math
 import sys
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 import yaml
 
+# The script lives at the repository root next to gui_app/; make that import
+# work whatever the caller's cwd is.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gui_app import charuco  # noqa: E402
+from gui_app.board_detector import calibration_video  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Failure protocol
+# ---------------------------------------------------------------------------
+
+#: Machine-readable failure codes, printed as ``ERROR_CODE=<code>`` on stderr.
+ERROR_CODES = {
+    "NO_CALIB_DIR": "calibration/ not found in the session directory",
+    "NO_VIDEOS": "no calibration videos found",
+    "BAD_BOARD_CONFIG": "the board config names a dictionary or layout this "
+                        "OpenCV build cannot express",
+    "NO_DETECTIONS": "fewer than 2 cameras with board detections",
+    "NO_INTRINSICS": "fewer than 2 cameras with valid intrinsics",
+    "NO_PAIRS": "no camera pair with co-detections",
+    "DISCONNECTED": "fewer than 2 cameras in the largest connected group",
+}
+
+
+def fail(code: str, message: str):
+    """Print the code and message to stderr and exit 1."""
+    assert code in ERROR_CODES, code
+    print("ERROR_CODE={}".format(code), file=sys.stderr, flush=True)
+    print("ERROR: {}".format(message), file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def warn(message: str, warnings: list | None = None):
+    """Print a diagnostic to stderr (the stream the GUI shows) and record it."""
+    print("  WARNING: {}".format(message), file=sys.stderr, flush=True)
+    if warnings is not None:
+        warnings.append(message)
+
 
 # ---------------------------------------------------------------------------
 # Board setup
 # ---------------------------------------------------------------------------
 
-def _apply_legacy_pattern(board, legacy: bool):
-    """Opt the board into the pre-4.6 ChArUco corner layout.
-
-    Loud on purpose. The physical 3dpose board uses the legacy layout, and on
-    OpenCV >= 4.7 a board built without this detects every marker fine but maps
-    them onto the new layout and returns ZERO charuco corners — no error, no
-    warning, just an empty calibration (diagnosed 2026-06-12). Skipping it
-    silently because the build is too old to support it would reintroduce
-    exactly that failure, so refuse instead.
-    """
-    if not legacy:
-        return
-    if not hasattr(board, "setLegacyPattern"):
-        raise RuntimeError(
-            f"board_legacy: true needs OpenCV >= 4.7 for setLegacyPattern, but "
-            f"this environment resolved {cv2.__version__}. Pre-4.7 builds use "
-            f"the legacy layout natively, but that cannot be confirmed from "
-            f"here — pin opencv-contrib-python>=4.7 rather than guess.")
-    board.setLegacyPattern(True)
-
-
 def create_board_and_dict(cfg):
-    aruco = cv2.aruco
-    bits = cfg.get("marker_bits", 4)
-    dsz = cfg.get("dict_size", 1000)
-    dict_name = "DICT_{}X{}_{}".format(bits, bits, dsz)
-    aruco_dict = aruco.getPredefinedDictionary(
-        getattr(aruco, dict_name, aruco.DICT_4X4_1000))
-
-    bx, by = cfg["board_x"], cfg["board_y"]
-    sq, mk = float(cfg["square_length"]), float(cfg["marker_length"])
-    legacy = cfg.get("board_legacy", False)
-
-    if hasattr(aruco, "CharucoBoard") and not hasattr(aruco, "CharucoBoard_create"):
-        board = aruco.CharucoBoard((bx, by), sq, mk, aruco_dict)
-    else:
-        board = aruco.CharucoBoard_create(bx, by, sq, mk, aruco_dict)
-    _apply_legacy_pattern(board, legacy)
-
-    return board, aruco_dict
-
-
-def get_marker_obj_points(board):
-    """Return {marker_id: ndarray(4,3)} — each marker's 4 corner 3D positions."""
-    ids = board.getIds().ravel()
-    all_obj = board.getObjPoints()
-    return {int(mid): np.asarray(pts, dtype=np.float32)
-            for mid, pts in zip(ids, all_obj)}
+    """Build the board through the shared helper so the solve and the live HUD
+    can never disagree about dictionary, layout or legacy policy."""
+    return charuco.make_board(cfg)
 
 
 def get_charuco_obj_points(board):
     """Return {corner_id: ndarray(3,)} — each charuco corner's 3D position."""
-    # OpenCV renamed this across the 4.6/4.7 boundary (attribute -> getter). The
-    # board constructor above is already version-split; match it here rather than
-    # crash on whichever build uv happens to resolve.
+    # OpenCV renamed this across the 4.6/4.7 boundary (attribute -> getter).
     pts = (board.getChessboardCorners() if hasattr(board, "getChessboardCorners")
            else board.chessboardCorners)
     return {i: pts[i].ravel().astype(np.float32) for i in range(len(pts))}
@@ -100,39 +105,39 @@ def get_charuco_obj_points(board):
 # ---------------------------------------------------------------------------
 
 def _detect_one_camera(args_tuple):
-    """Detect CharuCo corners in a camera's video.
-    If target_frames is provided, only those frame numbers are decoded
-    (sequential grab-skip). Otherwise every skip-th frame is processed."""
+    """Detect ChArUco corners in one camera's video.
+
+    Returns a dict: cam, frames (mp4 indices with a detection), corners, ids,
+    total, size, error (None or a message), clamped (hints pulled into range).
+
+    ``target_frames`` are the HUD's co-detection hints. They are GRABBED-frame
+    ordinals read after the frame copy, so they sit +1 above the 0-based mp4
+    index (and further off by any force-dropped frames in kick mode). They are
+    clamped into ``range(total)`` and treated as neighbourhood hints: pairing
+    survives because both cameras of a tick carry the same offset, and the last
+    hint would otherwise point one past the end and be lost.
+    """
     video_path, board_cfg, target_frames = args_tuple
+    # Each worker process is one camera; two OpenCV threads apiece keeps nine
+    # workers from oversubscribing the host.
     cv2.setNumThreads(2)
     aruco = cv2.aruco
-    bits = board_cfg.get("marker_bits", 4)
-    dsz = board_cfg.get("dict_size", 1000)
-    dict_name = "DICT_{}X{}_{}".format(bits, bits, dsz)
-    aruco_dict = aruco.getPredefinedDictionary(
-        getattr(aruco, dict_name, aruco.DICT_4X4_1000))
-
-    bx, by = board_cfg["board_x"], board_cfg["board_y"]
-    sq = float(board_cfg["square_length"])
-    mk = float(board_cfg["marker_length"])
-    legacy = board_cfg.get("board_legacy", False)
-    if hasattr(aruco, "CharucoBoard") and not hasattr(aruco, "CharucoBoard_create"):
-        board = aruco.CharucoBoard((bx, by), sq, mk, aruco_dict)
-    else:
-        board = aruco.CharucoBoard_create(bx, by, sq, mk, aruco_dict)
-    _apply_legacy_pattern(board, legacy)
+    cam_name = Path(video_path).parent.name
+    board, aruco_dict = charuco.make_board(board_cfg)
 
     if hasattr(aruco, "ArucoDetector"):
         _adet = aruco.ArucoDetector(aruco_dict, aruco.DetectorParameters())
+
         def _detect_markers(gray):
             return _adet.detectMarkers(gray)[:2]
     else:
         _params = aruco.DetectorParameters_create()
+
         def _detect_markers(gray):
             c, i, _ = aruco.detectMarkers(gray, aruco_dict, parameters=_params)
             return c, i
 
-    min_corners = board_cfg.get("_min_charuco", 6)
+    min_corners = 6
 
     def _detect(gray):
         mc, mi = _detect_markers(gray)
@@ -143,18 +148,28 @@ def _detect_one_camera(args_tuple):
             return None, None
         return cc.reshape(-1, 2), ci.ravel()
 
+    out = {"cam": cam_name, "frames": [], "corners": [], "ids": [],
+           "total": 0, "size": (0, 0), "error": None, "clamped": 0}
+
     cap = cv2.VideoCapture(str(video_path))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    out["total"], out["size"] = total, (w, h)
+    if not cap.isOpened() or total <= 0:
+        cap.release()
+        out["error"] = "could not open {} (opened={}, frames={})".format(
+            video_path, cap.isOpened(), total)
+        return out
 
-    frames_with_det = []
-    all_corners = []
-    all_ids = []
+    frames_with_det, all_corners, all_ids = [], [], []
 
     if target_frames is not None:
-        targets = set(target_frames)
-        last_target = max(targets)
+        clamped = [min(max(int(t), 0), total - 1) for t in target_frames]
+        out["clamped"] = sum(1 for t in target_frames
+                             if not 0 <= int(t) < total)
+        targets = set(clamped)
+        last_target = max(targets) if targets else -1
         frame_n = 0
         while frame_n <= last_target:
             if frame_n in targets:
@@ -172,8 +187,12 @@ def _detect_one_camera(args_tuple):
                     break
             frame_n += 1
     else:
-        skip = board_cfg.get("_skip", 3)
-        burst = max(1, skip)
+        # Search stride plus burst: every skip-th frame is examined while the
+        # board is absent, and a hit re-arms a burst of `skip` consecutive
+        # frames so a visible board is sampled densely. `--skip` therefore thins
+        # the search, not the detections.
+        skip = max(1, int(board_cfg.get("_skip", 3)))
+        burst = skip
         frame_n = 0
         go = 0
         while True:
@@ -194,61 +213,109 @@ def _detect_one_camera(args_tuple):
             frame_n += 1
     cap.release()
 
-    cam_name = Path(video_path).parent.name
-    return cam_name, frames_with_det, all_corners, all_ids, total, (w, h)
+    out["frames"], out["corners"], out["ids"] = frames_with_det, all_corners, all_ids
+    return out
 
 
-def detect_all_cameras(cam_dirs, board_cfg, excluded, codet_path=None):
-    """Run marker detection on all cameras. If codet_path points to a
-    codet_frames.json (saved by the coverage HUD), only those frames are
-    decoded — much faster than scanning the full video."""
-    codet = None
-    if codet_path and codet_path.exists():
-        import json
-        with open(codet_path) as f:
-            codet = json.load(f)
-        print("  Using co-detection hints ({} cameras)".format(len(codet)))
+def load_codet_hints(codet_path, calib_dir, warnings):
+    """Read the HUD's co-detection hint file, or None for a full scan.
 
+    The file is used only when the videos it names (name and size) are the
+    ones about to be opened: a hint file left behind by a previous calibration
+    would otherwise decode the previous run's frame indices from the new
+    videos, which yields sparse or empty detections with no error. A legacy
+    file with no video identity is accepted with a warning.
+    """
+    codet_path = Path(codet_path)
+    if not codet_path.exists():
+        return None
+    with open(codet_path) as f:
+        doc = json.load(f)
+    if isinstance(doc, dict) and "frames" in doc:
+        frames = doc["frames"]
+        videos = doc.get("videos") or {}
+    else:
+        frames, videos = doc, {}
+    if not isinstance(frames, dict) or not frames:
+        warn("{} holds no hints; scanning the videos".format(codet_path.name),
+             warnings)
+        return None
+    if not videos:
+        warn("{} carries no video identity (older GUI), so a stale hint file "
+             "cannot be detected; hints used as-is".format(codet_path.name),
+             warnings)
+        return {cam: list(v) for cam, v in frames.items()}
+    for cam, ident in videos.items():
+        mp4 = calibration_video(Path(calib_dir) / cam)
+        actual = (None if mp4 is None
+                  else {"name": mp4.name, "size": mp4.stat().st_size})
+        if actual != ident:
+            warn("{} was recorded for {} but the video is {}; hints "
+                 "ignored, scanning the videos".format(
+                     codet_path.name, ident, actual), warnings)
+            return None
+    return {cam: list(v) for cam, v in frames.items()}
+
+
+def detect_all_cameras(cam_dirs, board_cfg, excluded, hints=None,
+                       warnings=None):
+    """Run corner detection on every camera directory with a calibration mp4.
+
+    Returns (results, sizes, notes): results maps cam -> (frames, corners, ids),
+    sizes maps cam -> (w, h), notes has ``unreadable`` (cams whose video could
+    not be opened) and ``no_video`` (cam dirs without a calibration mp4). Both
+    are reported on stderr, because a camera that vanishes from the toml with
+    no message is the failure that looks like success.
+    """
+    if hints:
+        print("  Using co-detection hints ({} cameras)".format(len(hints)))
+    notes = {"unreadable": [], "no_video": []}
     tasks = []
     for cam_dir in cam_dirs:
         if cam_dir.name in excluded:
             continue
-        mp4s = sorted(f for f in cam_dir.iterdir()
-                      if f.is_file() and f.suffix == ".mp4"
-                      and "calibration" in f.name)
-        if not mp4s:
+        mp4 = calibration_video(cam_dir)
+        if mp4 is None:
+            notes["no_video"].append(cam_dir.name)
+            warn("{}: no calibration mp4 in {}; skipped".format(
+                cam_dir.name, cam_dir), warnings)
             continue
-        target = None
-        if codet and cam_dir.name in codet:
-            target = codet[cam_dir.name]
-        tasks.append((str(mp4s[0]), board_cfg, target))
+        target = hints.get(cam_dir.name) if hints else None
+        tasks.append((str(mp4), board_cfg, target))
 
-    results = {}
-    sizes = {}
+    results, sizes = {}, {}
+    if not tasks:
+        return results, sizes, notes
     with ProcessPoolExecutor(max_workers=len(tasks)) as pool:
-        for cam, fns, corners, ids, total, sz in pool.map(
-                _detect_one_camera, tasks):
-            results[cam] = (fns, corners, ids)
-            sizes[cam] = sz
-            n_corners = sum(len(i) for i in ids)
-            avg = n_corners / len(fns) if fns else 0
-            print("  {}: {}/{} frames with corners (avg {:.1f}/frame)".format(
-                cam, len(fns), total, avg), flush=True)
-    return results, sizes
+        for r in pool.map(_detect_one_camera, tasks):
+            cam = r["cam"]
+            if r["error"]:
+                notes["unreadable"].append(cam)
+                warn("{}: {}".format(cam, r["error"]), warnings)
+                continue
+            results[cam] = (r["frames"], r["corners"], r["ids"])
+            sizes[cam] = r["size"]
+            n_corners = sum(len(i) for i in r["ids"])
+            avg = n_corners / len(r["frames"]) if r["frames"] else 0
+            extra = ("  ({} hints clamped into range)".format(r["clamped"])
+                     if r["clamped"] else "")
+            print("  {}: {}/{} frames with corners (avg {:.1f}/frame){}".format(
+                cam, len(r["frames"]), r["total"], avg, extra), flush=True)
+    return results, sizes, notes
 
 
 # ---------------------------------------------------------------------------
-# Correspondences: vectorized marker-corner → 3D/2D point arrays
+# Correspondences: charuco corner -> 3D/2D point arrays
 # ---------------------------------------------------------------------------
 
 def _build_pts(corners, ids, marker_obj):
     """Build (obj_pts, img_pts) for one frame. Returns None pair if empty."""
     mask = np.isin(ids, list(marker_obj.keys()))
     valid_ids = ids[mask]
-    valid_corners = corners[mask]  # (M, 4, 2)
+    valid_corners = corners[mask]  # (M, 2)
     if len(valid_ids) == 0:
         return None, None
-    obj = np.stack([marker_obj[int(m)] for m in valid_ids])  # (M, 4, 3)
+    obj = np.stack([marker_obj[int(m)] for m in valid_ids])  # (M, 3)
     return (obj.reshape(-1, 1, 3).astype(np.float32),
             valid_corners.reshape(-1, 1, 2).astype(np.float32))
 
@@ -258,7 +325,7 @@ def _build_pts(corners, ids, marker_obj):
 # ---------------------------------------------------------------------------
 
 def _poses_from_pts(obj_list, img_list, K, dist_coeffs):
-    """Run solvePnP per frame -> (rvec, tvec, mean_reproj_err, n_markers) or None."""
+    """Run solvePnP per frame -> (rvec, tvec, mean_reproj_err, n_points) or None."""
     poses = []
     for obj, img in zip(obj_list, img_list):
         obj_3d = obj.reshape(-1, 3)
@@ -342,8 +409,19 @@ def calibrate_intrinsics(fns, corners_list, ids_list, marker_obj, image_size,
 # Pairwise stereo calibration
 # ---------------------------------------------------------------------------
 
+#: Shared frames a pair needs before it is solved at all. Below this the
+#: relative pose is too poorly conditioned to be worth reporting.
+PAIR_MIN_FRAMES = 5
+#: Shared frames a pair needs to rank as a full-strength tree edge. Pairs with
+#: fewer still connect the graph, but only when nothing better does.
+MIN_TREE_FRAMES = 10
+#: Pose-diverse cap on shared frames per pair, and the saturation point of the
+#: edge weight's frame-count term.
+STEREO_MAX_FRAMES = 30
+
+
 def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
-                   image_size, min_markers=6, min_frames=3):
+                   image_size, min_markers=6, min_frames=PAIR_MIN_FRAMES):
     fns_a, corners_a, ids_a = data_a
     fns_b, corners_b, ids_b = data_b
 
@@ -368,7 +446,7 @@ def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
         if len(common) < min_markers:
             continue
 
-        # Vectorized gather: for each common marker, find its index in each camera
+        # Vectorized gather: for each common corner, find its index in each camera
         idx_in_a = np.searchsorted(np.sort(ida), common)
         sort_order_a = np.argsort(ida)
         idx_in_a = sort_order_a[idx_in_a]
@@ -377,7 +455,7 @@ def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
         sort_order_b = np.argsort(idb)
         idx_in_b = sort_order_b[idx_in_b]
 
-        obj = np.stack([marker_obj[int(m)] for m in common])  # (M, 4, 3)
+        obj = np.stack([marker_obj[int(m)] for m in common])  # (M, 3)
         obj_list.append(obj.reshape(-1, 1, 3).astype(np.float32))
         img_a_list.append(ca[idx_in_a].reshape(-1, 1, 2).astype(np.float32))
         img_b_list.append(cb[idx_in_b].reshape(-1, 1, 2).astype(np.float32))
@@ -385,9 +463,9 @@ def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
     if len(obj_list) < min_frames:
         return None
 
-    if len(obj_list) > 30:
+    if len(obj_list) > STEREO_MAX_FRAMES:
         poses = _poses_from_pts(obj_list, img_a_list, K_a, d_a)
-        idx = _pose_diverse_sample(poses, 30)
+        idx = _pose_diverse_sample(poses, STEREO_MAX_FRAMES)
         obj_list = [obj_list[i] for i in idx]
         img_a_list = [img_a_list[i] for i in idx]
         img_b_list = [img_b_list[i] for i in idx]
@@ -403,38 +481,102 @@ def calibrate_pair(data_a, data_b, marker_obj, K_a, d_a, K_b, d_b,
 # Global extrinsics via spanning tree
 # ---------------------------------------------------------------------------
 
-def build_graph(cam_names, pairwise):
-    """Check connectivity and build minimum-error spanning tree (Prim's)."""
+#: Added to the weight of a pair below MIN_TREE_FRAMES so every full-strength
+#: frontier edge ranks ahead of it in Prim's step.
+WEAK_EDGE_PENALTY = 1e6
+
+
+def edge_weight(rms, n, min_tree_frames=MIN_TREE_FRAMES):
+    """Prim's weight for a stereo pair.
+
+    ``rms / sqrt(min(n, STEREO_MAX_FRAMES))``: a pose fitted on few frames can
+    report a low RMS while its baseline is poorly conditioned, so the frame
+    count discounts the RMS, saturating at the pose-diverse cap. Pairs under
+    ``min_tree_frames`` carry ``WEAK_EDGE_PENALTY`` so they join the tree only
+    when no better-observed edge reaches the same camera.
+    """
+    w = float(rms) / math.sqrt(max(1, min(int(n), STEREO_MAX_FRAMES)))
+    if n < min_tree_frames:
+        w += WEAK_EDGE_PENALTY
+    return w
+
+
+def pair_entry(pairwise, a, b):
+    """The (R, T, rms, n) tuple for a pair in either key order, or None."""
+    if (a, b) in pairwise:
+        return pairwise[(a, b)]
+    return pairwise.get((b, a))
+
+
+def connected_components(cam_names, pairwise):
+    """Connected components of the solved-pair graph.
+
+    Union-find over every solved pair. Sorted largest first; ties broken by the
+    summed shared-frame count of the component's pairs, then by first camera
+    name, so the choice of "largest" is deterministic.
+    """
+    names = list(cam_names)
+    index = {c: i for i, c in enumerate(names)}
+    parent = list(range(len(names)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for (a, b) in pairwise:
+        if a in index and b in index:
+            parent[find(index[a])] = find(index[b])
+
+    groups: dict[int, list[str]] = {}
+    for c in names:
+        groups.setdefault(find(index[c]), []).append(c)
+
+    def frames_in(group):
+        gs = set(group)
+        return sum(int(v[3]) for (a, b), v in pairwise.items()
+                   if a in gs and b in gs)
+
+    comps = [sorted(g) for g in groups.values()]
+    comps.sort(key=lambda g: (-len(g), -frames_in(g), g[0]))
+    return comps
+
+
+def build_graph(cam_names, pairwise, min_tree_frames=MIN_TREE_FRAMES):
+    """Choose the cameras to solve and their spanning tree.
+
+    Returns ``(tree_edges, kept, dropped, components)``. The LARGEST connected
+    component is kept (ties by summed frames), never the one that happens to
+    hold the first camera name, and every other camera is ``dropped``. The tree
+    is Prim's over the kept component with ``edge_weight``.
+    """
+    components = connected_components(cam_names, pairwise)
+    if not components:
+        return [], [], [], []
+    kept = components[0]
+    dropped = sorted(c for g in components[1:] for c in g)
+
     adj = defaultdict(list)
-    for (a, b), (_, _, rms, _) in pairwise.items():
-        adj[a].append((b, rms))
-        adj[b].append((a, rms))
+    for (a, b), (_, _, rms, n) in pairwise.items():
+        if a in kept and b in kept:
+            w = edge_weight(rms, n, min_tree_frames)
+            adj[a].append((b, w))
+            adj[b].append((a, w))
 
-    visited = {cam_names[0]}
-    queue = [cam_names[0]]
-    while queue:
-        node = queue.pop(0)
-        for nb, _ in adj[node]:
-            if nb not in visited:
-                visited.add(nb)
-                queue.append(nb)
-
-    if len(visited) < len(cam_names):
-        return None, set(cam_names) - visited
-
-    in_tree = {cam_names[0]}
+    in_tree = {kept[0]}
     edges = []
-    while len(in_tree) < len(cam_names):
+    while len(in_tree) < len(kept):
         best = None
-        for node in in_tree:
-            for nb, rms in adj[node]:
-                if nb not in in_tree and (best is None or rms < best[2]):
-                    best = (node, nb, rms)
+        for node in sorted(in_tree):
+            for nb, w in adj[node]:
+                if nb not in in_tree and (best is None or w < best[2]):
+                    best = (node, nb, w)
         if best is None:
             break
         edges.append((best[0], best[1]))
         in_tree.add(best[1])
-    return edges, None
+    return edges, kept, dropped, components
 
 
 def chain_extrinsics(cam_names, tree_edges, pairwise, ref_cam):
@@ -476,32 +618,6 @@ def chain_extrinsics(cam_names, tree_edges, pairwise, ref_cam):
 # Reprojection error histogram
 # ---------------------------------------------------------------------------
 
-def compute_reprojection_errors(all_dets, active_cams, intrinsics, extrinsics,
-                                marker_obj):
-    """Compute per-camera reprojection errors across all detected frames."""
-    per_cam_errors = {}
-    for cam in active_cams:
-        fns, corners_list, ids_list = all_dets[cam]
-        K, dist = intrinsics[cam]
-        rvec_global, tvec_global = extrinsics[cam]
-        R_global, _ = cv2.Rodrigues(rvec_global)
-
-        errors = []
-        for corners, ids in zip(corners_list, ids_list):
-            obj, img = _build_pts(corners, ids, marker_obj)
-            if obj is None:
-                continue
-            obj_3d = obj.reshape(-1, 3)
-            img_2d = img.reshape(-1, 2)
-            projected, _ = cv2.projectPoints(
-                obj_3d, rvec_global, tvec_global, K, dist)
-            projected = projected.reshape(-1, 2)
-            err = np.linalg.norm(projected - img_2d, axis=1)
-            errors.extend(err.tolist())
-        per_cam_errors[cam] = np.array(errors)
-    return per_cam_errors
-
-
 def save_reprojection_histogram(path, pair_rms):
     """Save a pairwise stereo RMS bar chart as PNG."""
     try:
@@ -534,10 +650,113 @@ def save_reprojection_histogram(path, pair_rms):
 
 
 # ---------------------------------------------------------------------------
+# Quality report and metadata
+# ---------------------------------------------------------------------------
+
+def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
+                 components, dropped, hints_used, skip, warnings):
+    """Assemble every quality figure of a solve into one plain dict.
+
+    Written verbatim as ``calibration_report.json`` and rendered into the
+    toml's ``[metadata]``. ``dropped`` maps reason -> camera names for every
+    camera that had (or should have had) a video but is not in the toml;
+    ``partial`` is true when any of them is non-empty, so a consumer can tell a
+    full solve from one that quietly lost cameras.
+    """
+    tree_rows = []
+    for a, b in tree:
+        entry = pair_entry(pairwise, a, b)
+        tree_rows.append({"from": a, "to": b,
+                          "rms": float(entry[2]), "frames": int(entry[3])})
+    pairs = {"{}-{}".format(a, b): {"rms": float(rms), "frames": int(n)}
+             for (a, b), (_, _, rms, n) in sorted(pairwise.items())}
+    dropped = {k: sorted(v) for k, v in dropped.items()}
+    return {
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "opencv": cv2.__version__,
+        "board": charuco.board_summary(board_cfg),
+        "ref_camera": ref,
+        "cameras": list(active),
+        "partial": any(dropped.values()),
+        "dropped": dropped,
+        "components": [list(c) for c in components],
+        "tree": tree_rows,
+        "hints_used": bool(hints_used),
+        "skip": int(skip),
+        "intrinsics": {cam: {"rms": float(s["rms"]), "frames": int(s["frames"]),
+                             "detections": int(s["detections"])}
+                       for cam, s in intrinsic_stats.items() if cam in active},
+        "pairs": pairs,
+        "warnings": list(warnings),
+    }
+
+
+def _toml_value(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    if isinstance(v, (float, np.floating)):
+        return repr(float(v))
+    if isinstance(v, str):
+        # TOML basic strings share JSON's escapes for everything json.dumps
+        # emits (\", \\, \n, \t, \uXXXX).
+        return json.dumps(v)
+    if isinstance(v, dict):
+        return "{ " + ", ".join("{} = {}".format(_toml_key(k), _toml_value(x))
+                                for k, x in v.items()) + " }"
+    if isinstance(v, (list, tuple)):
+        if not v:
+            return "[]"
+        return "[ " + ", ".join(_toml_value(x) for x in v) + ",]"
+    raise TypeError("no TOML form for {!r}".format(type(v)))
+
+
+def _toml_key(k):
+    k = str(k)
+    if k and all(c.isalnum() or c in "-_" for c in k):
+        return k
+    return json.dumps(k)
+
+
+def metadata_toml_lines(meta):
+    """Render a report dict as the ``[metadata]`` block of calibration.toml.
+
+    Scalars and arrays sit under ``[metadata]``; nested dicts become
+    ``[metadata.<name>]`` tables (``board``, ``dropped``) or one table per key
+    (``intrinsics.<cam>``, ``pairs."a-b"``). aniposelib reads ``metadata`` as an
+    opaque dict, so every key here is free-form.
+    """
+    lines = ["[metadata]"]
+    tables = []
+    for k, v in meta.items():
+        if isinstance(v, dict):
+            tables.append((k, v))
+        else:
+            lines.append("{} = {}".format(_toml_key(k), _toml_value(v)))
+    lines.append("")
+    for k, v in tables:
+        nested = v and all(isinstance(x, dict) for x in v.values())
+        if nested:
+            for sub, row in v.items():
+                lines.append("[metadata.{}.{}]".format(_toml_key(k), _toml_key(sub)))
+                for kk, vv in row.items():
+                    lines.append("{} = {}".format(_toml_key(kk), _toml_value(vv)))
+                lines.append("")
+        else:
+            lines.append("[metadata.{}]".format(_toml_key(k)))
+            for kk, vv in v.items():
+                lines.append("{} = {}".format(_toml_key(kk), _toml_value(vv)))
+            lines.append("")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Output (aniposelib-compatible calibration.toml)
 # ---------------------------------------------------------------------------
 
-def write_calibration_toml(path, cam_names, intrinsics, extrinsics, sizes):
+def write_calibration_toml(path, cam_names, intrinsics, extrinsics, sizes,
+                           meta=None):
     lines = []
     for i, cam in enumerate(cam_names):
         K, dist = intrinsics[cam]
@@ -560,9 +779,8 @@ def write_calibration_toml(path, cam_names, intrinsics, extrinsics, sizes):
         lines.append("translation = [ {}, {}, {},]".format(
             repr(float(tvec[0])), repr(float(tvec[1])), repr(float(tvec[2]))))
         lines.append("")
-    lines.append("[metadata]")
-    lines.append("")
-    with open(path, "w") as f:
+    lines.extend(metadata_toml_lines(meta or {}))
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
 
@@ -572,14 +790,17 @@ def write_calibration_toml(path, cam_names, intrinsics, extrinsics, sizes):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Multi-view calibration using ArUco marker corners.")
+        description="Multi-view calibration from ChArUco corner detections.")
     parser.add_argument("session_dir", type=Path)
     parser.add_argument("--board-config", type=Path, required=True)
     parser.add_argument("--excluded-views", nargs="*", default=[])
     parser.add_argument("--ref-camera", type=str, default="cam1")
     parser.add_argument("--skip", type=int, default=3,
-                        help="Process every Nth frame (default 3). Lower = more "
-                             "detections but slower.")
+                        help="Full-scan search stride (default 3): while the "
+                             "board is absent every Nth frame is examined; a "
+                             "hit re-arms a burst of N consecutive frames, so "
+                             "a visible board is sampled densely. Ignored "
+                             "when codet_frames.json hints are used.")
     args = parser.parse_args()
 
     with open(args.board_config) as f:
@@ -591,15 +812,16 @@ def main():
         board_cfg["square_length"], board_cfg["marker_length"],
         board_cfg.get("board_legacy", False)))
 
-    board, _ = create_board_and_dict(board_cfg)
+    try:
+        board, _ = create_board_and_dict(board_cfg)
+    except (ValueError, RuntimeError) as e:
+        fail("BAD_BOARD_CONFIG", "{}: {}".format(args.board_config, e))
     marker_obj = get_charuco_obj_points(board)
     print("  {} charuco corners".format(len(marker_obj)))
 
     calib_dir = args.session_dir / "calibration"
     if not calib_dir.exists():
-        print("ERROR: calibration/ not found in {}".format(args.session_dir),
-              file=sys.stderr)
-        sys.exit(1)
+        fail("NO_CALIB_DIR", "calibration/ not found in {}".format(args.session_dir))
 
     cam_dirs = sorted(d for d in calib_dir.iterdir()
                       if d.is_dir() and d.name.startswith("cam"))
@@ -607,47 +829,62 @@ def main():
                if d.is_dir() and not d.name.startswith("cam")}
     excluded = set(args.excluded_views) | non_cam
 
+    warnings: list[str] = []
+    dropped: dict[str, list[str]] = {
+        "no_video": [], "unreadable": [], "few_detections": [],
+        "failed_intrinsics": [], "isolated": []}
+
     # --- Detect ---
     board_cfg["_skip"] = args.skip
-    codet_path = calib_dir / "codet_frames.json"
-    if codet_path.exists():
-        print("\nDetecting markers (co-detection hints)...")
+    hints = load_codet_hints(calib_dir / "codet_frames.json", calib_dir, warnings)
+    if hints:
+        print("\nDetecting corners (co-detection hints)...")
     else:
-        print("\nDetecting markers (full scan, skip={})...".format(args.skip))
-    all_dets, all_sizes = detect_all_cameras(
-        cam_dirs, board_cfg, excluded, codet_path=codet_path)
+        print("\nDetecting corners (full scan, skip={})...".format(args.skip))
+    all_dets, all_sizes, notes = detect_all_cameras(
+        cam_dirs, board_cfg, excluded, hints=hints, warnings=warnings)
+    dropped["no_video"] = notes["no_video"]
+    dropped["unreadable"] = notes["unreadable"]
+    if not all_dets:
+        fail("NO_VIDEOS", "no readable calibration videos under {} "
+             "(camera dirs: {})".format(calib_dir, len(cam_dirs)))
 
     active = sorted(c for c in all_dets if len(all_dets[c][0]) >= 5)
-    dropped = sorted(set(all_dets) - set(active))
-    if dropped:
-        print("  Dropping (<5 detections): {}".format(", ".join(dropped)))
+    dropped["few_detections"] = sorted(set(all_dets) - set(active))
+    if dropped["few_detections"]:
+        warn("dropping {} (<5 detections)".format(
+            ", ".join(dropped["few_detections"])), warnings)
     if len(active) < 2:
-        print("ERROR: fewer than 2 cameras with detections", file=sys.stderr)
-        sys.exit(1)
+        fail("NO_DETECTIONS", "fewer than 2 cameras with detections")
 
     # --- Intrinsics (parallel — cv2 releases the GIL) ---
     print("\nIntrinsics...")
+
     def _intrinsic_job(cam):
         fns, corners, ids = all_dets[cam]
         return cam, calibrate_intrinsics(fns, corners, ids, marker_obj,
                                          all_sizes[cam])
 
     intrinsics = {}
+    intrinsic_stats = {}
     with ThreadPoolExecutor(max_workers=len(active)) as pool:
         for cam, result in pool.map(_intrinsic_job, active):
             if result is None:
-                print("  {}: FAILED".format(cam))
+                dropped["failed_intrinsics"].append(cam)
+                warn("{}: intrinsics FAILED ({} detection frames, 20 needed "
+                     "with >= 6 corners)".format(cam, len(all_dets[cam][0])),
+                     warnings)
                 continue
             rms, K, dist, n = result
             intrinsics[cam] = (K, dist)
+            intrinsic_stats[cam] = {"rms": rms, "frames": n,
+                                    "detections": len(all_dets[cam][0])}
             print("  {}: RMS={:.3f}px  fx={:.0f}  ({} frames)".format(
                 cam, rms, K[0, 0], n))
 
     active = [c for c in active if c in intrinsics]
     if len(active) < 2:
-        print("ERROR: fewer than 2 cameras with valid intrinsics",
-              file=sys.stderr)
-        sys.exit(1)
+        fail("NO_INTRINSICS", "fewer than 2 cameras with valid intrinsics")
 
     # --- Pairwise stereo (parallel — cv2 releases the GIL) ---
     print("\nPairwise stereo...")
@@ -673,22 +910,25 @@ def main():
             print("  {}-{}: RMS={:.3f}  {} frames".format(ca, cb, rms, n))
 
     if not pairwise:
-        print("ERROR: no camera pairs with co-detections", file=sys.stderr)
-        sys.exit(1)
+        fail("NO_PAIRS", "no camera pairs with co-detections")
 
     # --- Global extrinsics ---
     print("\nCamera graph...")
-    tree, missing = build_graph(active, pairwise)
-    if tree is None:
-        print("  Disconnected — isolated: {}".format(
-            ", ".join(sorted(missing))))
-        active = [c for c in active if c not in missing]
-        if len(active) < 2:
-            print("ERROR: too few connected cameras", file=sys.stderr)
-            sys.exit(1)
-        tree, _ = build_graph(active, pairwise)
+    tree, kept, isolated, components = build_graph(active, pairwise)
+    if isolated:
+        groups = "  ".join("{" + ",".join(c) + "}" for c in components)
+        warn("coverage graph is disconnected: {}; keeping the largest group "
+             "({} cameras), dropping {}".format(
+                 groups, len(kept), ", ".join(isolated)), warnings)
+        dropped["isolated"] = isolated
+        active = list(kept)
+    if len(active) < 2:
+        fail("DISCONNECTED", "too few connected cameras")
 
     ref = args.ref_camera if args.ref_camera in active else active[0]
+    if ref != args.ref_camera:
+        warn("reference camera {} is not in the solve; using {}".format(
+            args.ref_camera, ref), warnings)
     print("  ref={}, tree: {}".format(
         ref, " ".join("{}->{}".format(a, b) for a, b in tree)))
 
@@ -697,32 +937,47 @@ def main():
     # --- Quality summary + histogram ---
     print("\nPairwise quality:")
     pair_rms = {}
-    warnings = []
     for (ca, cb), (_, _, rms, n) in sorted(pairwise.items()):
         pair_rms["{}-{}".format(ca, cb)] = rms
         print("  {}-{}: RMS={:.1f}px  ({} frames)".format(ca, cb, rms, n))
         if rms > 20:
-            warnings.append("{}-{}: high stereo RMS ({:.1f}px)".format(
-                ca, cb, rms))
+            warn("{}-{}: high stereo RMS ({:.1f}px)".format(ca, cb, rms), warnings)
+        elif n < MIN_TREE_FRAMES:
+            warn("{}-{}: only {} shared frames ({}+ needed for a full-strength "
+                 "tree edge)".format(ca, cb, n, MIN_TREE_FRAMES), warnings)
 
-    # Per-camera intrinsics quality
     for cam in active:
-        K, dist = intrinsics[cam]
         fns = all_dets[cam][0]
         if len(fns) < 30:
-            warnings.append("{}: only {} detection frames (30+ recommended)".format(
-                cam, len(fns)))
+            warn("{}: only {} detection frames (30+ recommended)".format(
+                cam, len(fns)), warnings)
 
     hist_path = calib_dir / "reprojection_error_histogram.png"
     save_reprojection_histogram(hist_path, pair_rms)
 
     # --- Write ---
+    report = build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
+                          components, dropped, hints_used=bool(hints),
+                          skip=args.skip, warnings=warnings)
     out = calib_dir / "calibration.toml"
-    write_calibration_toml(out, active, intrinsics, extrinsics, all_sizes)
+    write_calibration_toml(out, active, intrinsics, extrinsics, all_sizes,
+                           meta=report)
+    report_path = calib_dir / "calibration_report.json"
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=1)
 
-    print("\nCalibration complete.")
+    print("\nCalibration complete{}.".format(
+        " (PARTIAL)" if report["partial"] else ""))
     print("  {}".format(out))
+    print("  REPORT_PATH={}".format(report_path))
     print("  Cameras: {}".format(" ".join(active)))
+    if report["partial"]:
+        n_expected = len(active) + sum(len(v) for v in dropped.values())
+        print("  Solved {} of {} cameras; dropped: {}".format(
+            len(active), n_expected,
+            "; ".join("{}: {}".format(k, ", ".join(v))
+                      for k, v in dropped.items() if v)),
+            file=sys.stderr)
     if warnings:
         print("\nWARNINGS:")
         for w in warnings:
