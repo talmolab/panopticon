@@ -20,7 +20,12 @@
 #   should land on different queues. Some Intel drivers ignore the setting for
 #   non-TCP traffic, which is why this script VERIFIES rather than assumes.
 #
-# REVERTING: re-run with -Queues 1.
+# REVERTING: re-run with -Queues 1, the default.
+#
+# VERIFICATION RULE: the settle poll and the final check compare against the
+# value this run APPLIES. A check against a different number reports every run
+# as failed (or every run as succeeded) whatever the driver did, which defeats
+# the one thing this script promises.
 #
 # Applying this RESETS both adapters, so the cameras briefly disappear and
 # re-enumerate. Never run it during a recording.
@@ -75,9 +80,8 @@
 [CmdletBinding()]
 param(
     [string[]] $Ports  = @("Ethernet 3", "Ethernet 4", "Ethernet 5"),
-    [int]      $Queues = 4,
     # Defaults are the RESTORE values, not the experiment: see the block above.
-    [int]      $Queues2       = 1,
+    [int]      $Queues        = 1,
     [int]      $BaseProcessor = 0,
     [int]      $MaxProcessor  = 23
 )
@@ -107,7 +111,7 @@ Show-State "BEFORE"
 
 foreach ($p in $Ports) {
     try {
-        Set-NetAdapterRss -Name $p -NumberOfReceiveQueues $Queues2 `
+        Set-NetAdapterRss -Name $p -NumberOfReceiveQueues $Queues `
             -BaseProcessorNumber $BaseProcessor -MaxProcessorNumber $MaxProcessor `
             -ErrorAction Stop
         Write-Host ("  {0}: {1} queues on processors {2}-{3}" -f `
@@ -124,7 +128,7 @@ foreach ($p in $Ports) {
 $deadline = (Get-Date).AddSeconds(60)
 while ((Get-Date) -lt $deadline) {
     $now = Get-NetAdapterRss -Name $Ports
-    if (-not ($now | Where-Object { $_.NumberOfReceiveQueues -lt $Queues })) {
+    if (-not ($now | Where-Object { $_.NumberOfReceiveQueues -ne $Queues })) {
         Write-Host ("  settled after {0:N0}s" -f `
             (60 - ($deadline - (Get-Date)).TotalSeconds)) -ForegroundColor DarkGray
         break
@@ -137,16 +141,17 @@ Show-State "AFTER"
 # expected failure mode here, not an error.
 $bad = @()
 foreach ($r in (Get-NetAdapterRss -Name $Ports)) {
-    if ($r.NumberOfReceiveQueues -lt $Queues) { $bad += $r.Name }
+    if ($r.NumberOfReceiveQueues -ne $Queues) { $bad += $r.Name }
 }
 Write-Host ""
 if ($bad.Count -eq 0) {
     Write-Host "OK: every port reports $Queues receive queues." -ForegroundColor Green
-    Write-Host "Next: re-run the acquisition and compare Eth5 ReceivedDiscardedPackets"
-    Write-Host "(baseline 35,423 per 150 s) and % DPC Time on cores 0/1 (baseline ~46%)."
+    Write-Host "Next: run a recording and compare each port's ReceivedDiscardedPackets"
+    Write-Host "and per-core % DPC Time against the same numbers taken before this run."
+    Write-Host "A setting that does not move those counters has changed nothing."
 } else {
     Write-Host ("NOT APPLIED on: {0}" -f ($bad -join ", ")) -ForegroundColor Yellow
-    Write-Host "The driver accepted the call but kept fewer queues -- this happens when"
+    Write-Host "The driver accepted the call but kept a different queue count -- this happens when"
     Write-Host "a driver only applies RSS to TCP. Fallback is to tune *RssBaseProcNumber"
     Write-Host "and *MaxRssProcessors via Set-NetAdapterAdvancedProperty instead."
 }
