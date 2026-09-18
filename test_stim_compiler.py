@@ -125,7 +125,7 @@ def test_structural_problems():
 def test_waveform_encoding():
     """freq/pulse-width -> integer microseconds, including the 100%-duty case."""
     def blk_line(freq, pw):
-        ino = sc.compile_ino([B("A", dur=5, freq=freq, pw=pw)], [])
+        ino = sc.compile_ino([B("A", dur=5, freq=freq, pw=pw)], [], [53])
         return [l for l in ino.splitlines() if l.startswith("  {53u")][0]
 
     # 10 Hz / 10 ms = a real train: 100000 us period, 10000 us pulse.
@@ -139,7 +139,7 @@ def test_waveform_encoding():
     # No floating point may reach the sketch: updateStim() runs inside the
     # camera trigger busy-wait, where an AVR float divide (~30 us) blunts the
     # trigger edge precision.
-    ino = sc.compile_ino([B("A", dur=5, freq=10, pw=10)], [])
+    ino = sc.compile_ino([B("A", dur=5, freq=10, pw=10)], [], [53])
     body = ino.split("void updateStim()")[1].split("// ===== SETUP")[0]
     assert "float" not in body and "0f" not in body, "float math in updateStim()"
     print("3) waveform -> integer microseconds, no floats in updateStim: PASS")
@@ -159,7 +159,17 @@ def test_safe_pins():
     # anything after it leaves the pin floating until the GUI connects.
     setup = sc.compile_ino([], [], [53]).split("void setup()")[1]
     assert setup.index("allStimLow();") < setup.index("Serial.begin")
-    print("4) safe pins: empty workflow, union, no-stim rig, boot order: PASS")
+    # safe_pins is required: gui_app/ is shared between rigs, so the compiler
+    # must not fall back to one rig's laser pin when a caller forgets it.
+    for call in (lambda: sc.compile_ino([], []),
+                 lambda: sc.recording_only_sketch()):
+        try:
+            call()
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("compiled with a default safe-pin list")
+    print("4) safe pins: empty workflow, union, no-stim rig, boot order, required: PASS")
 
 
 def test_pin_conflicts():

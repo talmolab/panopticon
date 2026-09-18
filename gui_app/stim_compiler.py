@@ -56,10 +56,13 @@ def arduino_cli_help() -> str:
 #: Back-compat for existing callers; None if not installed.
 ARDUINO_CLI = find_arduino_cli()
 
-# Fallback for callers that don't pass the rig's pins. The real list comes from
-# the profile's `stim_safe_pins` — see RigProfile. These are forced LOW the
-# instant the sketch boots, before the serial handshake, so a powered laser
-# driver never sits on a floating input pin.
+#: The safe pins come from the rig profile's `stim_safe_pins` (RigProfile) and
+#: are held LOW from the instant the sketch boots, before the serial handshake,
+#: so a powered laser driver never sits on a floating input pin. The compiler
+#: takes them as a REQUIRED argument and applies no default of its own, because
+#: gui_app/ is shared between rigs and a pin baked in here is right for one rig
+#: and wrong for another. This constant remains only as the standalone stim
+#: editor's default when it runs without a profile; it is not used in this module.
 DEFAULT_SAFE_LOW_PINS = (53,)
 
 
@@ -400,11 +403,13 @@ def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
 
 
 def compile_ino(blocks: list[dict], edges: list[dict],
-                safe_pins=DEFAULT_SAFE_LOW_PINS, trigger_pins=()) -> str:
+                safe_pins, trigger_pins=()) -> str:
     """Return the .ino source for the combined camera-trigger + stim sketch.
 
-    safe_pins come from the rig profile's `stim_safe_pins` and are held LOW from
-    boot regardless of what the workflow uses.
+    safe_pins is required: it comes from the rig profile's `stim_safe_pins` and
+    names the pins held LOW from boot regardless of what the workflow uses. A
+    caller without a profile must pass it explicitly (an empty list is a real
+    statement that the rig has no laser pin), never rely on a default.
 
     trigger_pins come from the profile too, and are refused rather than
     compiled: see forbidden_pin_uses(). Raises ValueError so a graph that would
@@ -728,7 +733,7 @@ def sketch_id(ino_content: str) -> str | None:
     return m.group(1) if m else None
 
 
-def recording_only_sketch(safe_pins=DEFAULT_SAFE_LOW_PINS, trigger_pins=()) -> str:
+def recording_only_sketch(safe_pins, trigger_pins=()) -> str:
     """The sketch with NO stimulation: camera triggers plus the safe-pin guard.
 
     This is the state the board should be in unless a paradigm was deliberately
