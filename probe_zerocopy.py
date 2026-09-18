@@ -15,8 +15,11 @@ system tolerates <=300 us of GIL-held work per thread per frame even at 17 threa
 ~1000 us blows the 10 ms budget at 11 threads. So removing this copy is the whole game.
 
 WHAT THIS CHECKS BEFORE THE HOT PATH IS EDITED
-  1. PaddingX == 0. GetArrayZeroCopy reshapes the buffer to (H, W) and does NOT account
-     for row padding, so a nonzero PaddingX would silently shear the image. Must assert.
+  1. result.PaddingX == 0 and result.PaddingY == 0. GetArrayZeroCopy reshapes the
+     buffer to (H, W) and does NOT account for row padding, so nonzero padding shears
+     every frame silently. The check asserts on the GRAB RESULT, not on cam.PaddingX:
+     the nodemap feature is absent on these cameras, while the result field is what
+     GetArray() itself reads to build its strides.
   2. The context-manager semantics survive OUR access pattern. pypylon's zero-copy
      context raises on exit if any reference to the view escaped, and production touches
      the frame six ways (snapshot copy, NV12 ring copy, os.write, preview decimate,
@@ -90,15 +93,6 @@ def main():
     pf = cam.PixelFormat.GetValue()
     print(f"camera: {devs[0].GetModelName()} {W}x{H} {pf}")
 
-    # (1) PaddingX must be zero or the (H, W) reshape shears the image.
-    padx = None
-    for node in ("PaddingX",):
-        try:
-            padx = getattr(cam, node).GetValue()
-        except Exception as e:
-            print(f"  {node}: unavailable ({type(e).__name__})")
-    print(f"  PaddingX = {padx}")
-
     # Free-run so the probe does not need the trigger board. Frame arrival is then
     # camera-paced rather than 100 Hz-paced, which is what we want: it measures how
     # fast the LOOP can go, not how fast the trigger allows.
@@ -111,6 +105,28 @@ def main():
         cam.AcquisitionFrameRate.SetValue(100.0)
     except Exception as e:
         print(f"  frame-rate set failed: {e}")
+
+    # (1) The grab RESULT's padding must be zero, or the (H, W) reshape
+    #     GetArrayZeroCopy performs shears every frame silently. Read it off
+    #     the result, not the camera: `cam.PaddingX` is the nodemap feature and
+    #     is absent on these cameras, so reading it proves nothing, while
+    #     `result.PaddingX` is the grab-result field GetArray() itself uses to
+    #     build its strides and is always present. This gates the hot-path
+    #     change, so it asserts rather than reports.
+    cam.StartGrabbing(pylon.GrabStrategy_OneByOne)
+    first = cam.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+    if not first.GrabSucceeded():
+        first.Release()
+        cam.StopGrabbing()
+        cam.Close()
+        print("first grab failed, so row padding is unknown; refusing to A/B")
+        return 1
+    padx, pady = int(first.PaddingX), int(first.PaddingY)
+    first.Release()
+    cam.StopGrabbing()
+    print(f"  result.PaddingX = {padx}   result.PaddingY = {pady}")
+    assert (padx, pady) == (0, 0), (
+        f"row padding {padx}x{pady} would shear the zero-copy view")
 
     # Production-shaped consumers: one NV12 ring slot + a preview decimate.
     nv12 = np.full((H * 3 // 2, W), 128, np.uint8)
@@ -195,7 +211,8 @@ def main():
     cam.Close()
     out = Path(args.out) if args.out else REPO / "probe_out" / "zerocopy.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"padding_x": padx, "w": W, "h": H,
+    out.write_text(json.dumps({"padding_x": padx, "padding_y": pady,
+                               "w": W, "h": H,
                                "results": results}, indent=1))
 
     # Correctness: all three must read the SAME first pixel value class (they are
