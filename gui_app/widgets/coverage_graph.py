@@ -30,6 +30,7 @@ class CoverageGraphWidget(QWidget):
         self._grid_covered = None
         self._grid_cells_hit = None
         self._min_grid_cells = 3
+        self._components: list[list[int]] = []
         self._start_time = None
         self._elapsed_s = 0.0
 
@@ -40,27 +41,32 @@ class CoverageGraphWidget(QWidget):
         self._per_cam = np.zeros(self._n, dtype=int)
         self._grid_covered = None
         self._grid_cells_hit = np.zeros(self._n, dtype=int)
+        # Reset with the rest of the snapshot so a previous session's group
+        # list cannot paint before this session's first tick.
+        self._components = []
         self._ready = False
         self._start_time = time.monotonic()
         self._elapsed_s = 0.0
         self.update()
 
     def update_from(self, det):
-        """Snapshot a BoardDetector's state and repaint."""
+        """Snapshot a BoardDetector's state and repaint.
+
+        Every attribute is read directly: BoardDetector defines all of them
+        unconditionally, so a fallback default would hide a renamed attribute
+        behind a plausible number instead of failing loudly.
+        """
         self._n = det.n
         self._glow = np.asarray(det.glow, dtype=float).copy()
         self._shared = np.asarray(det.shared, dtype=int).copy()
         # Show the counter READY actually tests, or the caption lies.
-        self._per_cam = np.asarray(
-            getattr(det, "per_cam_frames", det.per_cam_covis), dtype=int).copy()
+        self._per_cam = np.asarray(det.per_cam_frames, dtype=int).copy()
         self._optimal = det.optimal_shared or 1
-        self._target = getattr(det, "min_per_cam_shared", 40)
+        self._target = det.min_per_cam_shared
         self._grid_covered = np.asarray(det.grid_covered, dtype=bool).copy()
         self._grid_cells_hit = np.asarray(det.grid_cells_hit, dtype=int).copy()
-        self._min_grid_cells = getattr(det, "MIN_GRID_CELLS", 3)
-        self._components = [list(c) for c in getattr(det, "components", [])]
-        self._bridge = det.bridge_hint() if hasattr(det, "bridge_hint") else None
-        self._min_edge = getattr(det, "min_edge", 80)
+        self._min_grid_cells = det.MIN_GRID_CELLS
+        self._components = [list(c) for c in det.components]
         ready_now = bool(det.ready)
         if self._start_time is not None and not ready_now:
             self._elapsed_s = time.monotonic() - self._start_time
@@ -156,7 +162,7 @@ class CoverageGraphWidget(QWidget):
         else:
             mn = int(self._per_cam.min()) if (self._per_cam is not None and self._n) else 0
             min_grid = int(self._grid_cells_hit.min()) if (self._grid_cells_hit is not None and self._n) else 0
-            comps = getattr(self, "_components", []) or []
+            comps = self._components
             p.setPen(QPen(QColor(150, 150, 170)))
             p.drawText(QRectF(0, h - 18, w, 16), Qt.AlignCenter,
                        f"{timer_str}  paired {mn}/{self._target}  "
