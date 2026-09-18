@@ -552,6 +552,31 @@ def test_upload_sim_port_short_circuits():
     print("15) upload() on port 'sim' accepts the sketch without arduino-cli: PASS")
 
 
+def test_arduino_cli_discovery():
+    """Discovery runs at Apply time, not import, and covers the per-user
+    Arduino IDE 2.x install; an unset variable drops its entry."""
+    import os
+    assert not hasattr(sc, "ARDUINO_CLI"), "arduino-cli looked up at import time"
+    saved = os.environ.get("LOCALAPPDATA")
+    try:
+        os.environ["LOCALAPPDATA"] = r"C:\Users\someone\AppData\Local"
+        cands = sc.arduino_cli_candidates()
+        assert any(c.startswith(r"C:\Users\someone\AppData\Local\Programs\Arduino IDE")
+                   for c in cands), cands
+        assert not any("%" in c for c in cands)
+        os.environ.pop("LOCALAPPDATA")
+        cands = sc.arduino_cli_candidates()
+        assert not any("LOCALAPPDATA" in c or "%" in c for c in cands), cands
+        assert len(cands) == len(sc._ARDUINO_CLI_CANDIDATES) - 1
+        assert "Programs" not in sc.arduino_cli_help() or "%" not in sc.arduino_cli_help()
+    finally:
+        if saved is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = saved
+    print("15b) arduino-cli discovery: call-time only, per-user IDE path covered: PASS")
+
+
 def test_run_cli_is_quiet_and_has_no_stdin():
     """Every arduino-cli launch gets the shared quiet STARTUPINFO (no console
     flash over the GUI) and a closed stdin (no prompt can hang it)."""
@@ -696,6 +721,7 @@ def main():
     test_sketch_identity()
     test_sketch_swap_invalidates_stale_upload()
     test_upload_sim_port_short_circuits()
+    test_arduino_cli_discovery()
     test_run_cli_is_quiet_and_has_no_stdin()
     test_upload_timeout_waits_for_avrdude()
     if _HAS_NUMPY:

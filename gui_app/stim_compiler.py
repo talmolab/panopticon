@@ -15,10 +15,26 @@ FQBN = "arduino:avr:mega"
 _ARDUINO_CLI_CANDIDATES = (
     r"C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe",
     r"C:\Program Files (x86)\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe",
+    # The Arduino IDE 2.x installer defaults to a per-user install when it is
+    # not run elevated, the usual case on a lab PC; expanded at call time.
+    r"%LOCALAPPDATA%\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe",
     "/usr/local/bin/arduino-cli",
     "/usr/bin/arduino-cli",
     "/opt/homebrew/bin/arduino-cli",
 )
+
+
+def arduino_cli_candidates() -> list[str]:
+    """The fixed search list with environment variables expanded; an entry
+    whose variable is unset is dropped rather than searched literally."""
+    import os
+    out = []
+    for c in _ARDUINO_CLI_CANDIDATES:
+        expanded = os.path.expandvars(c)
+        if "%" in expanded:
+            continue
+        out.append(expanded)
+    return out
 
 
 def find_arduino_cli() -> Path | None:
@@ -30,7 +46,7 @@ def find_arduino_cli() -> Path | None:
     on_path = shutil.which("arduino-cli")
     if on_path:
         return Path(on_path)
-    for c in _ARDUINO_CLI_CANDIDATES:
+    for c in arduino_cli_candidates():
         if Path(c).exists():
             return Path(c)
     return None
@@ -44,7 +60,7 @@ def arduino_cli_help() -> str:
         "Panopticon looked in, in order:\n"
         "  1. $PANOPTICON_ARDUINO_CLI\n"
         "  2. arduino-cli on PATH\n"
-        + "".join(f"  {i}. {c}\n" for i, c in enumerate(_ARDUINO_CLI_CANDIDATES, 3))
+        + "".join(f"  {i}. {c}\n" for i, c in enumerate(arduino_cli_candidates(), 3))
         + "\nFix it either way:\n"
         "  - install the Arduino IDE (which bundles arduino-cli), or\n"
         "  - install arduino-cli standalone and put it on PATH, or\n"
@@ -52,9 +68,6 @@ def arduino_cli_help() -> str:
         "Camera acquisition does NOT need this — only the Stimulation editor's "
         "Apply/Test, which compile and flash the trigger board.")
 
-
-#: Back-compat for existing callers; None if not installed.
-ARDUINO_CLI = find_arduino_cli()
 
 #: The safe pins come from the rig profile's `stim_safe_pins` (RigProfile) and
 #: are held LOW from the instant the sketch boots, before the serial handshake,
