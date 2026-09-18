@@ -16,6 +16,7 @@ every other grab thread would spend them blocked while holding a driver buffer.
 import gc
 import os
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,29 @@ from gui_app import encoders
 from gui_app.frame_sync import FrameSyncCoordinator
 from gui_app.grab_thread import (_EncoderThread, write_split_point,
                                  DRAIN_SENTINEL_TIMEOUT_S, DRAIN_JOIN_TIMEOUT_S)
+
+#: Bound on abandon() as a whole. An encoder thread that has not left
+#: Encode() in this long is wedged in the driver and is leaked, not waited on.
+ABANDON_TIMEOUT_S = 5.0
+
+
+def _release_loose_encoder(enc) -> None:
+    """End and drop an encoder no _EncoderThread owns.
+
+    The session is freed by the object's destructor, so the last reference
+    must go here, after EndEncode() and Close() where the encoder has one.
+    """
+    try:
+        enc.EndEncode()
+    except Exception:
+        pass
+    close = getattr(enc, "Close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:
+            pass
+    del enc
 
 
 class SyncEncodeRouter:
@@ -63,30 +87,42 @@ class SyncEncodeRouter:
         self._cam_warnings: list[list[str]] = [[] for _ in range(self._n)]
 
         factory = encoder_factory or encoders.get_default_factory()
+        #: An encoder created but not yet owned by an _EncoderThread. Every
+        #: session must be reachable from the except block below: one bound
+        #: only to a loop local is freed by refcount without EndEncode/Close,
+        #: after the gc.collect() meant to hand the sessions back.
+        pending = None
         try:
             for i, rp in enumerate(raw_paths):
-                notes: list = []
-                enc = factory(width, height, quality, fps, notes)
-                for note in notes:
-                    # A degraded encoder config is a property of the recording,
-                    # not of the console: it reaches WARNINGS.txt at stop.
-                    self._warn(i, f"cam{i+1}: {note}")
+                # The fd is opened BEFORE the encoder is created, so the only
+                # step that can fail after a session exists is the thread
+                # constructor, and `pending` covers that one.
                 h264_path = Path(rp).parent / "stream.h264"
                 fd = os.open(str(h264_path),
                              os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_BINARY)
                 self._h264_paths.append(h264_path)
-                et = _EncoderThread(i, enc, fd, Path(rp).parent / "raw_tail.bin",
-                                    height)
+                self._fds.append(fd)
+                notes: list = []
+                pending = factory(width, height, quality, fps, notes)
+                for note in notes:
+                    # A degraded encoder config is a property of the recording,
+                    # not of the console: it reaches WARNINGS.txt at stop.
+                    self._warn(i, f"cam{i+1}: {note}")
+                et = _EncoderThread(i, pending, fd,
+                                    Path(rp).parent / "raw_tail.bin", height)
+                pending = None          # the thread owns it now
                 # Keep encoders off the P-cores the grab threads are pinned to;
                 # see cpu_affinity.pin_to_efficiency_core.
                 et._pin_ecore = pin_encoders
                 et._enc_pcores = enc_pcores
                 self._encoders.append(et)
-                self._fds.append(fd)
             self.available = True
         except Exception as e:
             self.unavailable_reason = f"{type(e).__name__}: {e}"
             print(f"[sync] encoder init failed, kick-out unavailable: {e}", flush=True)
+            if pending is not None:
+                _release_loose_encoder(pending)
+                pending = None
             for fd in self._fds:
                 try:
                     os.close(fd)
@@ -137,9 +173,16 @@ class SyncEncodeRouter:
         return self._coord.lag_report()
 
     def lag_frames(self) -> list:
-        """Per-camera triggers behind the leader (drift-free health signal)."""
-        with self._lock:
-            return self._coord.lag_frames()
+        """Per-camera triggers behind the leader (drift-free health signal).
+
+        Read WITHOUT the submit lock, exactly as lag_report() is: the values
+        are a snapshot for a health display. The frontier entries are monotonic
+        ints and the retired flags bools, so a read torn across a concurrent
+        submit is off by at most one trigger, whereas taking the lock from the
+        GUI thread would make every grab thread's submit() wait on it while
+        holding a driver buffer.
+        """
+        return self._coord.lag_frames()
 
     def _route(self, releases):
         for cam, bid, payload in releases:
@@ -174,7 +217,7 @@ class SyncEncodeRouter:
         if report is not None:
             print(report, flush=True)
 
-    def abandon(self):
+    def abandon(self, timeout_s: float = ABANDON_TIMEOUT_S):
         """Tear down WITHOUT draining (app quit, or a finalize that failed).
 
         Order matters. Each encoder thread is stopped FIRST (abort flag, queue
@@ -186,11 +229,22 @@ class SyncEncodeRouter:
         Encode() after the join keeps its fd and session until process exit;
         the process does not always exit here (the failed-finalize path returns
         to IDLE), so a leaked session is reported rather than assumed harmless.
+
+        `timeout_s` bounds the WHOLE call, not each thread: the threads are
+        wedged concurrently if at all, and a per-thread bound would make the
+        caller wait n times longer at nine cameras than at one.
+
+        A stream.h264 left at zero bytes is removed once its fd is closed. An
+        abandoned session never recorded a frame into it, and an empty stream
+        left behind makes the next start into that directory ask to overwrite
+        a session that never existed and makes the post-hoc encoder remux an
+        empty file instead of raw.bin.
         """
+        deadline = time.monotonic() + max(0.0, timeout_s)
         for i, et in enumerate(self._encoders):
             exited = True
             try:
-                exited = et.abandon(timeout=5.0)
+                exited = et.abandon(timeout=max(0.05, deadline - time.monotonic()))
             except Exception:
                 exited = False
             if exited:
@@ -203,12 +257,24 @@ class SyncEncodeRouter:
                         os.close(self._fds[i])
                     except Exception:
                         pass
+                    self._unlink_if_empty(i)
             else:
                 print(f"[sync] cam{i+1}: encoder thread still running at "
                       f"abandon; its fd and encoder session are leaked until "
                       f"the application exits", flush=True)
         self._fds = []
         gc.collect()
+
+    def _unlink_if_empty(self, i: int) -> None:
+        """Remove camera i's stream.h264 when it holds no bytes (fd closed)."""
+        if i >= len(self._h264_paths):
+            return
+        p = self._h264_paths[i]
+        try:
+            if p.exists() and p.stat().st_size == 0:
+                p.unlink()
+        except Exception:
+            pass
 
     def live_encoders(self) -> int:
         """Encoder threads still running (0 after a clean stop or abandon)."""

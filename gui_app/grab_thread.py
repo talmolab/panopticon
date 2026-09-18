@@ -72,6 +72,15 @@ DRAIN_JOIN_TIMEOUT_S = 60.0
 #: honest zero for delivery_lag_s, and a single late first frame does not
 #: hide a backlog of the same size for the whole run.
 CLOCK_BASELINE_FRAMES = 200
+#: Seconds of pre-trigger silence tolerated before the stall ladder runs when
+#: the caller has NOT signalled that the board started and no frame has
+#: arrived. The signal is the honest source (see signal_triggers_started);
+#: this bound exists so a caller that never signals still gets a dead camera
+#: retired instead of the coordinator force-dropping every trigger for every
+#: camera for the rest of the session. It has to cover the whole startup gap
+#: with margin: a sketch flash (~30 s) + the readiness barrier (30 s bound) +
+#: the serial handshake with a forced reset (~10 s) is ~70 s.
+PRE_TRIGGER_GRACE_S = 90.0
 
 
 def ring_slots(max_lag, kick: bool) -> int:
@@ -363,6 +372,16 @@ class GrabThread(QThread):
         self._encoder_factory = encoder_factory
         self._running = False
         self._triggers_stopped = False
+        #: Set by signal_triggers_started() once the trigger board has
+        #: acknowledged its start command. Until then a retrieve timeout is
+        #: expected silence, not a stall: the board is started only after every
+        #: grab thread is ready, and that gap (a sketch swap, the readiness
+        #: barrier, the serial handshake) can exceed the stall bound. Re-arming
+        #: inside it restarts the block-ID counter with no frame history to
+        #: re-base it against, which retires the camera before its first
+        #: trigger. Not reset by run(): the signal may land before run() is
+        #: scheduled.
+        self._triggers_started = False
         self._abandoned = False
         self._kick = False
         self.frame_count = 0
@@ -402,6 +421,12 @@ class GrabThread(QThread):
         #: coordinator's cross-camera lag (CameraManager.frontier_lags).
         self.delivery_lag_s = 0.0
         self.desynced = False         # stalled and could not be realigned
+        #: True once the retrieve loop has exited and run() is in its drain
+        #: and teardown. A thread in this state is not receiving frames, so a
+        #: caller escalating a stop must not read its still-moving frame_count
+        #: (the decoupled encoder's last pool frames) as a board that ignored
+        #: the stop command.
+        self.retrieve_loop_exited = False
 
     def _rearm_stream(self, attempt: int) -> bool:
         """Restart this camera's stream after a stall.
@@ -600,6 +625,7 @@ class GrabThread(QThread):
         self._running = True
         self._triggers_stopped = False
         self._abandoned = False
+        self.retrieve_loop_exited = False
         self.frame_count = 0
         self.timestamps = []
         self.block_ids = []
@@ -764,6 +790,7 @@ class GrabThread(QThread):
         t_rel = t_cycle = 0.0
         t_prev = None
         stats_line = None       # printed AFTER Release(), never inside the with
+        t_loop_start = time.perf_counter()   # anchors PRE_TRIGGER_GRACE_S
 
         try:
             while self._running and self._camera.IsGrabbing():
@@ -773,19 +800,23 @@ class GrabThread(QThread):
                     result = self._backend.retrieve(self._camera, timeout)
                     t1 = time.perf_counter()
                     t_wait += t1 - t0
-                    if not result.GrabSucceeded():
-                        print(f"[grab{self._cam_index}] grab failed: {result.ErrorCode} {result.ErrorDescription}", flush=True)
-                        result.Release()
-                        continue
 
                     # Everything from here to the matching `finally` runs with
                     # the driver buffer held, and Release() runs on EVERY exit
-                    # from it: success, `break`, or an exception on its way to
-                    # the handler below. The pool must get its buffer back once
-                    # per result by construction, not by the accident of the
-                    # variable being rebound on the next retrieve.
+                    # from it: success, `continue`, `break`, or an exception on
+                    # its way to the handler below. The pool must get its buffer
+                    # back once per result by construction, not by the accident
+                    # of the variable being rebound on the next retrieve. The
+                    # failed-grab branch is inside for the same reason: reading
+                    # ErrorCode/ErrorDescription off a failed result can itself
+                    # raise, and that path must release too.
                     stats_line = None
                     try:
+                        if not result.GrabSucceeded():
+                            print(f"[grab{self._cam_index}] grab failed: "
+                                  f"{result.ErrorCode} {result.ErrorDescription}",
+                                  flush=True)
+                            continue
                         # Zero-copy view over the driver buffer. `result.Array`
                         # (GetArray) ALLOCATES a fresh 2.3 MB array and memcpys into
                         # it with the GIL HELD -- measured 0.837 ms/frame of GIL-held
@@ -985,6 +1016,22 @@ class GrabThread(QThread):
                         break
                     if not self._running:
                         break
+                    # A stall is silence while triggers are known to be
+                    # running: either the caller has signalled that the board
+                    # acknowledged its start, or a frame has already arrived
+                    # (which also gives _resync_offset the history it needs).
+                    # Before both, the board has not been started and the
+                    # timeouts are expected; re-arming here would restart the
+                    # block-ID counter with nothing to re-base it against and
+                    # retire the camera on its first real frame. The grace is
+                    # bounded so a caller that never signals cannot leave a
+                    # dead camera un-retired for the whole session. Two
+                    # attribute reads, on the timeout path only.
+                    if (recording and not self._triggers_started
+                            and self._last_ts is None
+                            and t0 - t_loop_start < PRE_TRIGGER_GRACE_S):
+                        consec_timeouts = 0
+                        continue
                     # Stalled: the stream has gone quiet while triggers are still
                     # running. Restart it rather than time out for the rest of
                     # the session.
@@ -1037,6 +1084,9 @@ class GrabThread(QThread):
                         break
                     time.sleep(0.001)
         finally:
+            # First, before any drain can block: from here on this thread
+            # receives no frames, whatever frame_count still does.
+            self.retrieve_loop_exited = True
             print(f"[grab{self._cam_index}] exiting: frames={frame_n} "
                   f"timeouts={timeout_n} drops={self.drops} rearms={self.rearms}"
                   + (" DESYNCED" if self.desynced else ""), flush=True)
@@ -1169,6 +1219,19 @@ class GrabThread(QThread):
         except Exception as e:
             print(f"[grab{self._cam_index}] could not write WARNINGS.txt: {e}",
                   flush=True)
+
+    def signal_triggers_started(self):
+        """Arm the stall detector: the trigger board has acknowledged its start.
+
+        Called once start_triggers() returns True. From here a run of retrieve
+        timeouts means the stream has stalled and is re-armed; before it the
+        same silence is the board not yet running and is ignored, for up to
+        PRE_TRIGGER_GRACE_S. A frame arriving arms the detector as well, so a
+        caller that never signals still gets stall recovery once the recording
+        is under way, and a camera that never delivers is still retired once
+        the grace runs out.
+        """
+        self._triggers_started = True
 
     def signal_triggers_stopped(self):
         self._triggers_stopped = True

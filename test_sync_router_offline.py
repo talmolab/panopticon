@@ -246,28 +246,36 @@ with tempfile.TemporaryDirectory() as d:
     depth = gt.ENCODE_QUEUE_DEPTH
     _submit_all(r, 2, [1])
     # Wait until cam1's encoder has taken frame 1 into Encode (where it will
-    # block), then pace the rest so cam2's healthy encoder keeps up: put_nowait
-    # never yields, and an unpaced burst fills a healthy queue before its
-    # thread is scheduled, which is not the wedge this case is about.
-    for _ in range(500):
-        if fac.created[0].in_encode:
-            break
-        time.sleep(0.01)
+    # block), then pace the rest ON STATE, not on the clock: cam2's healthy
+    # encoder must have encoded trigger t before t+1 is submitted, so its
+    # queue can never fill and the only drops are cam1's wedge. put_nowait
+    # never yields, and a burst paced by sleep fills a healthy queue whenever
+    # the encoder thread is starved, which reads as a router regression.
+    def _settled(pred, tries=2000):
+        for _ in range(tries):
+            if pred():
+                return True
+            time.sleep(0.001)
+        return False
+
+    assert _settled(lambda: fac.created[0].in_encode), "cam1 encoder never entered Encode"
+    paced = True
     for t in range(2, depth + 12):              # 211 released; cam1 holds 1 + 200
         _submit_all(r, 2, [t])
-        time.sleep(0.0005)
+        paced = _settled(lambda: fac.created[1].encoded >= t) and paced
     dropped_before = r.dropped_full
     gate.set()
     res = r.stop()
     w = _warn_text(tmp / "cam1")
-    ok = (dropped_before == 10 and res[0][0] == depth + 1 and res[1][0] == depth + 11
+    ok = (paced and dropped_before == 10 and res[0][0] == depth + 1
+          and res[1][0] == depth + 11
           and res[0][2] == list(range(1, depth + 2))
           and "dropped because its encoder queue was full" in w
           and "10 released frames" in w
           and any("queue was full" in m for m in r.warnings)
           and not _warn_text(tmp / "cam2"))
     check(7, "queue-full drops: IDs not recorded, count named in warnings + WARNINGS.txt",
-          ok, f"dropped={dropped_before} counts={[c for c, _, _ in res]} file={w!r}")
+          ok, f"paced={paced} dropped={dropped_before} counts={[c for c, _, _ in res]} file={w!r}")
 
 # 8 -- abandon(): stops encoder threads, releases sessions, frees the files ---
 with tempfile.TemporaryDirectory() as d:
@@ -283,6 +291,8 @@ with tempfile.TemporaryDirectory() as d:
     for i in range(3):
         try:
             (tmp / f"cam{i+1}" / "stream.h264").unlink()
+        except FileNotFoundError:
+            pass                      # abandon() already removed an empty one
         except OSError:
             deletable = False
     ok = (r.live_encoders() == 0 and all(e.ended == 1 and e.closed == 1 for e in fac.created)
@@ -290,6 +300,52 @@ with tempfile.TemporaryDirectory() as d:
     check(8, "abandon() leaves no live encoder thread, releases every encoder, "
              "and the stream files can be deleted", ok,
           f"live={r.live_encoders()} ended={[e.ended for e in fac.created]} deletable={deletable}")
+
+# 8b -- abandon() removes the zero-byte streams a session never wrote into ----
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    paths = _dirs(tmp, 2)
+    fac = FakeFactory()
+    r = SyncEncodeRouter(paths, W, H, 21, fps=100, max_lag=50, encoder_factory=fac)
+    r.start()
+    existed = all((tmp / f"cam{i+1}" / "stream.h264").exists() for i in range(2))
+    r.abandon()
+    gone = not any((tmp / f"cam{i+1}" / "stream.h264").exists() for i in range(2))
+    check("8b", "abandon() before any frame unlinks the empty stream.h264 files, so the "
+                "next start into the directory sees no data and the post-hoc encoder "
+                "cannot prefer an empty stream", existed and gone,
+          f"existed={existed} gone={gone}")
+
+# 8c -- abandon() is bounded as a whole, not per wedged encoder --------------
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    paths = _dirs(tmp, 3)
+    gate = threading.Event()
+    fac = FakeFactory()
+    for i in range(3):
+        fac.per_cam[i] = dict(gate=gate)
+    r = SyncEncodeRouter(paths, W, H, 21, fps=100, max_lag=50, encoder_factory=fac)
+    r.start()
+    _submit_all(r, 3, [1, 2])
+    for _ in range(2000):
+        if all(e.in_encode for e in fac.created):
+            break
+        time.sleep(0.001)
+    fds = list(r._fds)
+    t0 = time.perf_counter()
+    r.abandon(timeout_s=0.3)
+    took = time.perf_counter() - t0
+    leaked = r.live_encoders()
+    gate.set()
+    for et in r._encoders:
+        et.join(timeout=5)
+    for fd in fds:                    # the fds abandon() left to the live writers
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    check("8c", "abandon() with three wedged encoders takes one shared bound, not three",
+          leaked == 3 and took < 0.8, f"leaked={leaked} took={took:.2f}s")
 
 # 9 -- abandon() with a full queue (the sentinel cannot be put) ---------------
 with tempfile.TemporaryDirectory() as d:
@@ -322,6 +378,45 @@ with tempfile.TemporaryDirectory() as d:
               "empty stream files", ok,
           f"available={r.available} reason={r.unavailable_reason!r} "
           f"files={[(tmp / f'cam{i+1}' / 'stream.h264').exists() for i in range(3)]}")
+
+# 10b -- init: the fd is opened BEFORE the encoder is created ------------------
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    paths = _dirs(tmp, 3)
+    (tmp / "cam2" / "stream.h264").mkdir()      # os.open fails for camera 2
+    fac = FakeFactory()
+    r = SyncEncodeRouter(paths, W, H, 21, fps=100, max_lag=50, encoder_factory=fac)
+    ok = (not r.available
+          and len(fac.created) == 1                # no session made for cam2
+          and all(e.ended == 1 and e.closed == 1 for e in fac.created)
+          and not (tmp / "cam1" / "stream.h264").exists())
+    check("10b", "a stream.h264 that cannot be opened fails init before its encoder "
+                 "session exists; the sessions already made are released", ok,
+          f"available={r.available} created={len(fac.created)} "
+          f"ended={[e.ended for e in fac.created]}")
+
+# 10c -- init: an encoder the thread constructor orphans is still released ----
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    paths = _dirs(tmp, 3)
+    fac = FakeFactory()
+    real_thread = se._EncoderThread
+
+    def _boom(i, enc, fd, spill, height):
+        if i == 1:
+            raise RuntimeError("simulated thread construction failure")
+        return real_thread(i, enc, fd, spill, height)
+
+    se._EncoderThread = _boom
+    try:
+        r = SyncEncodeRouter(paths, W, H, 21, fps=100, max_lag=50, encoder_factory=fac)
+    finally:
+        se._EncoderThread = real_thread
+    ok = (not r.available and len(fac.created) == 2
+          and all(e.ended == 1 and e.closed == 1 for e in fac.created))
+    check("10c", "an encoder created but not yet owned by a thread when init fails is "
+                 "released with the rest", ok,
+          f"created={len(fac.created)} ended={[e.ended for e in fac.created]}")
 
 # 11 -- an encoder degradation note lands in WARNINGS.txt ---------------------
 with tempfile.TemporaryDirectory() as d:

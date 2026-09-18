@@ -11,8 +11,12 @@ recording from ALL of them, with no error beyond a single line on stdout.
 `retire()` is the escape hatch: it drops the camera from the alignment set so
 the survivors keep recording aligned. These tests pin that every early-return
 path in `GrabThread.run()` takes it, that a re-armed stream is re-based onto
-the true trigger ordinal in every recording mode, and that the driver buffer
-is returned once per result on every path.
+the true trigger ordinal in every recording mode, that silence before the
+trigger board has started is not read as a stall, and that the driver buffer
+is returned once per result on every path. The last cases pin
+CameraManager's stop/abandon contract under a grab thread that will not exit:
+the data is kept, the bounds are shared, and the stuck camera's handle is
+leaked rather than closed under a live native call.
 
 No cameras, no vendor SDK and no encoder: the camera, the backend and the
 router are stubs, and pypylon is made un-importable up front so a regression
@@ -22,6 +26,8 @@ that pulls it back into the capture modules fails here.
 """
 import os
 import sys
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -34,12 +40,15 @@ sys.modules["pypylon.pylon"] = None
 
 # GrabThread subclasses QThread, so Qt must exist. Offscreen: no display needed.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt5.QtCore import QThread
 from PyQt5.QtWidgets import QApplication
 _APP = QApplication.instance() or QApplication([])
 
 import numpy as np
 
+from gui_app import camera_manager as cm
 from gui_app import grab_thread as gt
+from gui_app.camera_manager import CameraManager, AcquisitionStopIncomplete
 from gui_app.grab_thread import GrabThread
 
 W, H = 64, 48          # tiny: these tests never encode, only allocate
@@ -297,16 +306,26 @@ def test_repeated_errors_retire(tmp):
 
 
 def test_rearm_exhaustion_retires(tmp):
+    """A stream that never delivers, with the board never signalled as
+    started: the pre-trigger grace must EXPIRE and the ladder must then
+    retire, or a dead camera holds the coordinator's frontier at 0 for the
+    whole session. The grace is shortened to keep the test fast; the same
+    script under the default grace is what test 17 relies on."""
     router = FakeRouter()
     cam = TimingOutCamera()
     t = _make(router, cam, tmp)
-    t.run()
+    saved = gt.PRE_TRIGGER_GRACE_S
+    gt.PRE_TRIGGER_GRACE_S = 0.0
+    try:
+        t.run()
+    finally:
+        gt.PRE_TRIGGER_GRACE_S = saved
     assert router.retired, ("re-arms were exhausted and the camera was never "
                             "retired — the thread would time out in silence for "
                             "the rest of the session")
     assert "re-arm" in router.retired[0][1].lower(), router.retired
-    print(f"5) re-arm exhaustion retires the camera "
-          f"(after {cam.rearms} StartGrabbing calls): PASS")
+    print(f"5) re-arm exhaustion retires the camera once the pre-trigger grace "
+          f"has expired (after {cam.rearms} StartGrabbing calls): PASS")
 
 
 def _good_frames(first_bid, n, ts_of=lambda b: b / FPS):
@@ -518,6 +537,263 @@ def test_ring_slots_formula():
     print("16) ring_slots() is the single source of the ring depth: PASS")
 
 
+def test_pre_trigger_silence_is_not_a_stall(tmp):
+    """Timeouts before the board has started must not re-arm or retire.
+
+    The board is started only after every grab thread is ready, and that gap
+    (sketch swap, readiness barrier, serial handshake) can exceed the stall
+    bound. A re-arm inside it restarts the block-ID counter with no frame
+    history to re-base it against, and the first real frame then retires the
+    camera. Both kick and raw modes, since the retire applies to every mode.
+    """
+    for realtime, label in ((True, "kick"), (False, "raw")):
+        router = FakeRouter(accept_submits=True) if realtime else None
+        cam = ScriptedCamera([])
+        t = _make(router, cam, tmp, realtime=realtime)
+        assert not t.retrieve_loop_exited
+        cam._script = (["timeout"] * 30 + _good_frames(1, 10)
+                       + [t.signal_triggers_stopped, "timeout"])
+        t.run()
+        assert cam.rearms == 1, f"{label}: re-armed during pre-trigger silence ({cam.rearms})"
+        assert not t.desynced, label
+        if realtime:
+            assert router.retired == [], (label, router.retired)
+            bids = [b for (_c, b, _ts) in router.submitted]
+        else:
+            assert t.warnings == [], (label, t.warnings)
+            bids = t.block_ids
+        assert bids == list(range(1, 11)), (label, bids)
+        assert t.frame_count == 10, (label, t.frame_count)
+        assert t.retrieve_loop_exited, label
+    print("17) 30 timeouts before the first frame (board not started): no re-arm, "
+          "no retire, IDs 1..10 recorded in kick and raw modes: PASS")
+
+
+def test_signalled_stall_without_history_retires(tmp):
+    """Once the board is known to be running, silence IS a stall even before
+    the first frame, and the re-armed counter cannot be re-based without
+    history: the camera is retired rather than recorded under offset 0, which
+    would shift every ID by the unknown number of missed triggers."""
+    router = FakeRouter(accept_submits=True)
+    cam = ScriptedCamera([])
+    t = _make(router, cam, tmp)
+    cam._script = ([t.signal_triggers_started] + ["timeout"] * 25
+                   + _good_frames(1, 10))
+    t.run()
+    assert cam.rearms == 2, f"expected the arm + one re-arm, got {cam.rearms}"
+    assert router.retired and "realigned" in router.retired[0][1], router.retired
+    assert router.submitted == [], "frames were recorded under a guessed ordinal"
+    print("18) signal_triggers_started + 25 timeouts with no frame history: "
+          "re-armed, then retired instead of guessing offset 0: PASS")
+
+
+class FailedResult(FakeResult):
+    """GrabSucceeded() is False; the loop must release it and carry on."""
+
+    ErrorCode = 0xE1000014
+    ErrorDescription = "The buffer was incompletely grabbed."
+
+    def GrabSucceeded(self):
+        return False
+
+
+class PoisonedFailedResult(FailedResult):
+    """A failed result whose error fields raise when read."""
+
+    @property
+    def ErrorDescription(self):
+        raise RuntimeError("error description unavailable")
+
+
+def test_failed_grab_is_released_on_every_path(tmp):
+    router = FakeRouter(accept_submits=True)
+    bad = FailedResult(1, 0.01)
+    poisoned = PoisonedFailedResult(2, 0.02)
+    cam = ScriptedCamera([bad, poisoned] + _good_frames(3, 5)
+                         + [lambda: None])
+    t = _make(router, cam, tmp)
+    cam._script.append(t.signal_triggers_stopped)
+    cam._script.append("timeout")
+    t.run()
+    assert bad.released == 1, bad.released
+    assert poisoned.released == 1, "a failed result whose error text raised was not released"
+    assert router.retired == [], router.retired
+    assert [b for (_c, b, _ts) in router.submitted] == [3, 4, 5, 6, 7]
+    print("19) a failed grab is released exactly once, even when reading its "
+          "error fields raises, and the loop continues: PASS")
+
+
+# -- CameraManager stop/abandon under a thread that will not exit -------------
+
+
+class FakeGrabThread(QThread):
+    """Just the surface CameraManager touches; run() blocks on an event."""
+
+    def __init__(self, cam, block: threading.Event = None, frame_count=100):
+        super().__init__()
+        self._camera = cam
+        self._block = block
+        self.frame_count = frame_count
+        self.timestamps = [k / 100.0 for k in range(1, frame_count + 1)]
+        self.block_ids = list(range(1, frame_count + 1))
+        self.warnings = []
+        self.retrieve_loop_exited = False
+        self.stopped = 0
+        self.abandoned = 0
+        self.triggers_started = 0
+
+    def run(self):
+        if self._block is not None:
+            self._block.wait()
+
+    def signal_triggers_stopped(self):
+        pass
+
+    def signal_triggers_started(self):
+        self.triggers_started += 1
+
+    def stop(self):
+        self.stopped += 1
+
+    def abandon(self):
+        self.abandoned += 1
+
+
+class FakeManagerBackend:
+    def __init__(self):
+        self.stopped = []
+        self.closed = []
+
+    def stop_grabbing(self, cam):
+        self.stopped.append(cam)
+
+    def close(self, cam):
+        self.closed.append(cam)
+
+
+def _manager(threads, cams, backend):
+    m = CameraManager.__new__(CameraManager)   # no backend load, no Qt parent
+    QObject_init = cm.QObject.__init__
+    QObject_init(m)
+    m._backend = backend
+    m._cameras = list(cams)
+    m._geometry = None
+    m._baseline_exp_gain = []
+    m.last_warnings = []
+    m.last_results = []
+    m._grab_threads = list(threads)
+    m._leaked_threads = []
+    m._leaked_cameras = []
+    m._router = None
+    return m
+
+
+def test_stop_incomplete_keeps_results_and_abandon_leaks_the_stuck_camera():
+    cams = [object(), object(), object()]
+    release = threading.Event()
+    threads = [FakeGrabThread(cams[0]), FakeGrabThread(cams[1], release),
+               FakeGrabThread(cams[2])]
+    backend = FakeManagerBackend()
+    m = _manager(threads, cams, backend)
+    for t in threads:
+        t.start()
+    threads[0].wait(2000); threads[2].wait(2000)
+    saved = (cm.STOP_NORMAL_EXIT_S, cm.STOP_FORCED_EXIT_S, cm.STOP_DRAIN_S,
+             cm.ABANDON_THREAD_S)
+    cm.STOP_NORMAL_EXIT_S = cm.STOP_FORCED_EXIT_S = cm.STOP_DRAIN_S = 0.2
+    cm.ABANDON_THREAD_S = 0.2
+    try:
+        m.signal_triggers_started()
+        assert all(t.triggers_started == 1 for t in threads)
+        try:
+            m.stop_acquisition()
+            raise AssertionError("stop_acquisition returned with a live thread")
+        except AcquisitionStopIncomplete as e:
+            assert e.stuck == [1], e.stuck
+            assert len(e.results) == 3 and all(c == 100 for c, _t, _b in e.results)
+            assert e.results is m.last_results
+            assert "NOT been written" in str(e) and "cam2" in str(e), str(e)
+        assert threads[1].stopped == 1, "the still-receiving thread was not escalated"
+        assert threads[0].stopped == 0 and threads[2].stopped == 0
+        assert len(m._grab_threads) == 3, "the thread list was cleared under a live thread"
+
+        m.abandon()
+        assert threads[1].abandoned == 1
+        assert cams[0] in backend.closed and cams[2] in backend.closed
+        assert cams[1] not in backend.closed and cams[1] not in backend.stopped, \
+            "the stuck camera was closed under its live grab thread"
+        assert threads[1] in m._leaked_threads and cams[1] in m._leaked_cameras
+        assert m._grab_threads == [] and m._cameras == []
+    finally:
+        (cm.STOP_NORMAL_EXIT_S, cm.STOP_FORCED_EXIT_S, cm.STOP_DRAIN_S,
+         cm.ABANDON_THREAD_S) = saved
+        release.set()
+        threads[1].wait(2000)
+    print("20) stop with a stuck thread: results kept on the exception and "
+          "last_results, only the stuck camera escalated, abandon() leaks its "
+          "handle instead of closing it: PASS")
+
+
+def test_stop_bounds_are_shared_not_per_thread():
+    """Nine cameras all still receiving must take one set of bounds, not nine."""
+    release = threading.Event()
+    cams = [object() for _ in range(9)]
+    threads = [FakeGrabThread(c, release) for c in cams]
+    m = _manager(threads, cams, FakeManagerBackend())
+    for t in threads:
+        t.start()
+    saved = (cm.STOP_NORMAL_EXIT_S, cm.STOP_FORCED_EXIT_S, cm.STOP_DRAIN_S)
+    cm.STOP_NORMAL_EXIT_S = cm.STOP_FORCED_EXIT_S = cm.STOP_DRAIN_S = 0.2
+    try:
+        t0 = time.perf_counter()
+        try:
+            m.stop_acquisition()
+        except AcquisitionStopIncomplete as e:
+            assert len(e.stuck) == 9
+        took = time.perf_counter() - t0
+    finally:
+        cm.STOP_NORMAL_EXIT_S, cm.STOP_FORCED_EXIT_S, cm.STOP_DRAIN_S = saved
+        release.set()
+        for t in threads:
+            t.wait(2000)
+    # Three phases of 0.2 s shared across nine threads: ~0.6 s, not ~5.4 s.
+    assert took < 1.5, f"stop took {took:.2f}s for 9 stuck threads (sequential waits?)"
+    print(f"21) stop bounds are one deadline per phase for all threads "
+          f"({took:.2f}s for 9 stuck threads): PASS")
+
+
+def test_draining_thread_is_not_escalated():
+    """A thread whose retrieve loop has exited but whose drain is slow, with
+    frame_count still moving, is not 'still receiving' and gets no stop()."""
+    release = threading.Event()
+    cam = object()
+    t = FakeGrabThread(cam, release)
+    t.retrieve_loop_exited = True
+    m = _manager([t], [cam], FakeManagerBackend())
+    t.start()
+    saved = (cm.STOP_NORMAL_EXIT_S, cm.STOP_FORCED_EXIT_S, cm.STOP_DRAIN_S)
+    cm.STOP_NORMAL_EXIT_S = cm.STOP_FORCED_EXIT_S = 0.1
+    cm.STOP_DRAIN_S = 0.5
+
+    def _finish():
+        time.sleep(0.2)
+        t.frame_count += 3            # the queue took the pool's last frames
+        release.set()
+
+    threading.Thread(target=_finish, daemon=True).start()
+    try:
+        res = m.stop_acquisition()
+    finally:
+        cm.STOP_NORMAL_EXIT_S, cm.STOP_FORCED_EXIT_S, cm.STOP_DRAIN_S = saved
+        release.set()
+        t.wait(2000)
+    assert t.stopped == 0, "a draining thread was stopped outright"
+    assert m.last_warnings == [], m.last_warnings
+    assert len(res) == 1 and m._grab_threads == []
+    print("22) a thread in its encoder drain (loop exited, frame_count moving) "
+          "is waited for, not reported as a board that ignored the stop: PASS")
+
+
 class _RaisingFull:
     """Context manager swapping np.full for one that raises MemoryError."""
 
@@ -555,6 +831,12 @@ def main():
         test_abandon_is_not_a_retirement(tmp)
         test_stop_after_triggers_stopped_is_clean(tmp)
         test_ring_slots_formula()
+        test_pre_trigger_silence_is_not_a_stall(tmp)
+        test_signalled_stall_without_history_retires(tmp)
+        test_failed_grab_is_released_on_every_path(tmp)
+    test_stop_incomplete_keeps_results_and_abandon_leaks_the_stuck_camera()
+    test_stop_bounds_are_shared_not_per_thread()
+    test_draining_thread_is_not_escalated()
     print("\nALL GRAB-FAILURE TESTS PASS")
 
 

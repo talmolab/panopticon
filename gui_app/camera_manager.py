@@ -1,11 +1,41 @@
 """Manages the camera set — opening, closing, and switching between free-run and
 trigger modes. The count comes from the profile (`n_cameras`, 6 on 3dpose) and is
 enforced by `open_all(expect_cameras=...)`, not hardcoded here."""
+import time
 import numpy as np
 from pathlib import Path
 from PyQt5.QtCore import QObject, pyqtSignal
 from gui_app.backends import load_backend
 from gui_app.grab_thread import GrabThread
+
+#: Bounds on stop_acquisition, each applied to its PHASE as one shared
+#: deadline rather than to each thread in turn: the threads exit concurrently,
+#: so a per-thread wait would make a nine-camera stop take nine times longer
+#: than a one-camera stop in exactly the case the bound exists for (every
+#: camera still receiving frames).
+STOP_NORMAL_EXIT_S = 5.0       # loop leaves on its first timeout after the board stops
+STOP_FORCED_EXIT_S = 10.0      # after gt.stop(): one retrieve, unless wedged natively
+STOP_DRAIN_S = 100.0           # decoupled-encoder drain: 30 s sentinel + 60 s join
+ABANDON_THREAD_S = 3.0         # abandon(): loop exit + encoder abort, all threads
+
+
+class AcquisitionStopIncomplete(RuntimeError):
+    """stop_acquisition() collected every camera's data but could not finish.
+
+    A grab thread is still running after the stop bounds, so the cameras were
+    NOT reconfigured (reconfiguring a handle under a live RetrieveResult is
+    concurrent native access) and the thread list is kept for abandon(). The
+    per-camera (frame_count, timestamps, block_ids) tuples are on `results`
+    and on CameraManager.last_results: the caller must still save them, or
+    blockids.npy / frametimes.npy are written for NO camera and the healthy
+    cameras' streams cannot be aligned.
+    """
+
+    def __init__(self, message: str, results: list, stuck: list):
+        super().__init__(message)
+        self.results = results
+        #: Zero-based indices of the cameras whose thread is still running.
+        self.stuck = stuck
 
 
 class AcquisitionStartRefused(RuntimeError):
@@ -51,7 +81,19 @@ class CameraManager(QObject):
         #: Problems found while finalising the last recording (retired cameras,
         #: block-ID truncation). Read by the GUI after stop_acquisition().
         self.last_warnings: list = []
+        #: Per-camera (frame_count, timestamps, block_ids) from the last
+        #: stop_acquisition(), kept even when it raised so the caller can still
+        #: write blockids.npy / frametimes.npy for the healthy cameras.
+        self.last_results: list = []
         self._grab_threads: list[GrabThread] = []
+        #: Grab threads that never exited and the camera handles they hold.
+        #: Referenced for the life of the process on purpose: destroying a
+        #: running QThread aborts the process, and letting a camera object be
+        #: collected closes its handle under the native call the thread is
+        #: wedged in. Nothing reads these lists; they exist to keep the
+        #: objects alive.
+        self._leaked_threads: list = []
+        self._leaked_cameras: list = []
         self._router = None  # SyncEncodeRouter in real-time kick-out mode
 
     @property
@@ -320,11 +362,33 @@ class CameraManager(QObject):
         return (f"cpu pinning: {got}/{len(self._grab_threads)} grab threads on "
                 f"{n_p} P-cores{flag}")
 
+    @staticmethod
+    def _wait_all(threads, timeout_s: float) -> None:
+        """Wait up to `timeout_s` IN TOTAL for the given threads to exit."""
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        for gt in threads:
+            if gt.isRunning():
+                gt.wait(max(1, int((deadline - time.monotonic()) * 1000)))
+
+    def _retain_live(self, threads) -> list:
+        """Move still-running threads (and their cameras) to the leak lists.
+
+        Returns the indices that were still running. A running QThread must
+        stay referenced or Qt aborts the process when its wrapper is
+        collected, and its camera handle must stay referenced or the vendor
+        object's destructor closes it under the live native call.
+        """
+        live = [i for i, gt in enumerate(threads) if gt.isRunning()]
+        for i in live:
+            self._leaked_threads.append(threads[i])
+            self._leaked_cameras.append(threads[i]._camera)
+        return live
+
     def _stop_grab_threads(self):
         for gt in self._grab_threads:
             gt.stop()
-        for gt in self._grab_threads:
-            gt.wait(5000)
+        self._wait_all(self._grab_threads, STOP_NORMAL_EXIT_S)
+        self._retain_live(self._grab_threads)
         self._grab_threads.clear()
 
     def apply_exposure_gain(self, fps: float, exposure_us=None, gain_db=None):
@@ -379,6 +443,10 @@ class CameraManager(QObject):
                           realtime_kick: bool = False,
                           kick_max_lag: int = 240,
                           exposure_us=None, gain_db=None):
+        # Grab threads first, router second: the previous session's kick-mode
+        # threads submit() to the router until they exit and retire() through
+        # it from their finally blocks, so the router must outlive them.
+        self._stop_grab_threads()
         if self._router is not None:
             # A router from an acquisition that was never stopped holds one
             # encoder session and one open stream.h264 per camera. Dropping the
@@ -392,7 +460,6 @@ class CameraManager(QObject):
             except Exception as e:
                 print(f"[acq] abandoning the stale router failed: {e}", flush=True)
             self._router = None
-        self._stop_grab_threads()
         self.last_warnings = []
         if realtime and realtime_kick:
             # Shared router gates frames through the cross-camera coordinator so
@@ -475,6 +542,18 @@ class CameraManager(QObject):
                     if getattr(getattr(gt, "ready", None), "is_set", bool)())
         return ready, total
 
+    def signal_triggers_started(self):
+        """Tell every grab thread the trigger board acknowledged its start.
+
+        Call this right after start_triggers() returns True. It arms the
+        threads' stall detectors: until then a run of retrieve timeouts is the
+        board not yet running, and a re-arm inside that gap would restart the
+        block-ID counter with no history to re-base it against and retire the
+        camera on its first real frame.
+        """
+        for gt in self._grab_threads:
+            gt.signal_triggers_started()
+
     def stop_acquisition(self) -> list[tuple[int, list[float], list[int]]]:
         """Stop the grab threads and return each camera's
         (frame_count, timestamps, block_ids).
@@ -483,43 +562,53 @@ class CameraManager(QObject):
         then call resume_preview(). Separating data collection from the camera
         reconfigure means a camera that dropped off the bus can't crash teardown
         (or take the other cameras' data down with it) before the data is written.
+
+        Worst case this blocks STOP_NORMAL_EXIT_S + STOP_FORCED_EXIT_S +
+        STOP_DRAIN_S (~115 s) regardless of camera count; each bound is one
+        shared deadline for all threads.
+
+        Raises AcquisitionStopIncomplete when a thread is still running at the
+        end: the results are on the exception and on last_results, and the
+        cameras are left untouched for abandon().
         """
         warnings: list = []
-        counts = [gt.frame_count for gt in self._grab_threads]
-        for gt in self._grab_threads:
+        threads = self._grab_threads
+        for gt in threads:
             gt.signal_triggers_stopped()
         # Normal exit: the board has stopped, the loop drains what is left in
         # the pool and leaves on its first retrieve timeout (200 ms).
-        for gt in self._grab_threads:
-            gt.wait(5000)
+        self._wait_all(threads, STOP_NORMAL_EXIT_S)
         # Escalation. The loop only honours signal_triggers_stopped() on a
         # timeout, so a camera still receiving frames (the board ignored the
         # stop, or a camera never left free-run) never times out and the
         # thread never exits on its own. Frames after the stop command are not
         # wanted, so tell it to stop outright; that ends the loop within one
         # retrieve (at most 200 ms) unless it is wedged in a native call.
-        for i, gt in enumerate(self._grab_threads):
-            if not gt.isRunning():
+        # Only a thread whose RETRIEVE LOOP is still running is escalated: a
+        # thread already in its decoupled-encoder drain receives nothing, and
+        # its frame_count may still move as the queue takes the pool's last
+        # frames, so it must not be read as a board that ignored the stop.
+        escalated = []
+        for i, gt in enumerate(threads):
+            if not gt.isRunning() or gt.retrieve_loop_exited:
                 continue
-            if gt.frame_count > counts[i]:
-                msg = (f"cam{i+1}: frames kept arriving after the trigger board "
-                       f"was told to stop ({gt.frame_count - counts[i]} more); "
-                       f"the board may still be triggering, or the camera was "
-                       f"not in trigger mode. Its grab thread was stopped "
-                       f"outright.")
-                print(f"[acq] WARNING: {msg}", flush=True)
-                warnings.append(msg)
+            msg = (f"cam{i+1}: its grab thread was still receiving frames "
+                   f"{STOP_NORMAL_EXIT_S:.0f} s after the trigger board was told "
+                   f"to stop; the board may still be triggering, or the camera "
+                   f"was not in trigger mode. The thread was stopped outright.")
+            print(f"[acq] WARNING: {msg}", flush=True)
+            warnings.append(msg)
             gt.stop()
-        for gt in self._grab_threads:
-            if gt.isRunning():
-                gt.wait(10000)
+            escalated.append(gt)
+        self._wait_all(escalated, STOP_FORCED_EXIT_S)
         # A thread still running now is inside its decoupled-encoder drain,
         # which is bounded (~95 s worst case: 30 s sentinel put + 60 s join),
         # or wedged in a native call. Wait the bound out loudly.
-        for i, gt in enumerate(self._grab_threads):
+        draining = [gt for gt in threads if gt.isRunning()]
+        for i, gt in enumerate(threads):
             if gt.isRunning():
                 print(f"[cam{i+1}] grab thread still draining at stop, waiting...", flush=True)
-                gt.wait(100000)
+        self._wait_all(draining, STOP_DRAIN_S)
 
         if self._router is not None:
             # Kick-out mode: grab threads have stopped submitting; flush the
@@ -539,21 +628,26 @@ class CameraManager(QObject):
             for gt in self._grab_threads:
                 warnings.extend(gt.warnings)
         self.last_warnings = warnings
+        self.last_results = results
 
-        stuck = [i for i, gt in enumerate(self._grab_threads) if gt.isRunning()]
+        stuck = [i for i, gt in enumerate(threads) if gt.isRunning()]
         if stuck:
             # Never hand the cameras back to preview under a live grab thread:
             # set_freerun() calls StopGrabbing() on the same handle the thread
             # is inside RetrieveResult on, which is concurrent native access.
             # The thread list is kept so abandon() can still find them. The
-            # caller treats an exception here as "abandon and tell the
-            # operator"; the router's data above is already persisted.
+            # results travel on the exception: the streams are on disk, but
+            # blockids.npy / frametimes.npy are the caller's to write, and
+            # without them the healthy cameras' streams cannot be aligned.
             names = ", ".join(f"cam{i+1}" for i in stuck)
-            raise RuntimeError(
+            raise AcquisitionStopIncomplete(
                 f"grab thread(s) for {names} did not exit after the stop "
                 f"timeouts (GPU or driver wedged?). The cameras were NOT "
                 f"reconfigured; restart the application before recording "
-                f"again. Captured data up to the stop is on disk.")
+                f"again. The captured streams are on disk, but blockids.npy "
+                f"and frametimes.npy have NOT been written yet: save "
+                f"CameraManager.last_results before abandoning.",
+                results, stuck)
         self._grab_threads.clear()
         return results
 
@@ -597,12 +691,30 @@ class CameraManager(QObject):
         encoder drain and close their stream fds at once, and the kick-out
         router stops its encoder threads, releases their sessions and closes
         its fds, so the half-baked stream files unlock and can be deleted and
-        the sessions are available to the next acquisition in this process."""
-        for gt in self._grab_threads:
+        the sessions are available to the next acquisition in this process.
+
+        A camera whose grab thread is still running after the wait is NOT
+        stopped or closed: by hypothesis that thread is wedged inside a native
+        call on the same handle, and stop_grabbing()/close() from this thread
+        would be the concurrent native access stop_acquisition refused to
+        risk. Its thread and handle are kept referenced instead (see
+        _leaked_threads), which costs nothing at process exit and, on the
+        return-to-IDLE path, is the lesser harm.
+
+        Bounded by ABANDON_THREAD_S for all grab threads together plus the
+        router's own abandon bound, independent of camera count.
+        """
+        threads = self._grab_threads
+        for gt in threads:
             gt.abandon()
-        for gt in self._grab_threads:
-            gt.wait(3000)
-        self._grab_threads.clear()
+        self._wait_all(threads, ABANDON_THREAD_S)
+        live = self._retain_live(threads)
+        live_cams = {id(threads[i]._camera) for i in live}
+        for i in live:
+            print(f"[cam{i+1}] grab thread still running at abandon; leaking "
+                  f"its camera handle rather than closing under a live native "
+                  f"call", flush=True)
+        self._grab_threads = []
         if self._router is not None:
             try:
                 self._router.abandon()
@@ -610,6 +722,8 @@ class CameraManager(QObject):
                 pass
             self._router = None
         for cam in self._cameras:
+            if id(cam) in live_cams:
+                continue
             try:
                 self._backend.stop_grabbing(cam)
             except Exception:
