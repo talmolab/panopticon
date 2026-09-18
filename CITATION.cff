@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: Panopticon
+abstract: >-
+  Multi-camera hardware-synchronised video acquisition for 3D animal pose
+  estimation. Cameras expose on one trigger board's edge, frames are encoded
+  to H.264 on the GPU during recording, and every camera's video is aligned
+  trigger for trigger by GigE block ID before it is written.
+authors:
+  - family-names: Tang
+    given-names: Isaac
+    email: itang@salk.edu
+    affiliation: Salk Institute for Biological Studies
+  - family-names: Tye
+    given-names: Kay
+    affiliation: Salk Institute for Biological Studies
+  - family-names: Pereira
+    given-names: Talmo
+    affiliation: Salk Institute for Biological Studies
+repository-code: https://github.com/talmolab/panopticon
+license: GPL-3.0-only
+version: 0.1.0
+keywords:
+  - multi-camera
+  - video acquisition
+  - hardware synchronisation
+  - 3D pose estimation
+  - GigE Vision
+  - NVENC

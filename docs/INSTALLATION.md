@@ -532,7 +532,7 @@ this page only to keep the example paths short.
 
 ```powershell
 cd $HOME\Desktop
-git clone --recurse-submodules https://github.com/talmolab/panopticon.git
+git clone https://github.com/talmolab/panopticon.git
 cd panopticon
 ```
 
@@ -543,11 +543,9 @@ Cloning into 'panopticon'...
 remote: Enumerating objects: ...
 Receiving objects: 100% ...
 Resolving deltas: 100% ...
-Submodule 'campy' (https://github.com/Elmaestrotango/campy.git) registered for path 'campy'
 ```
 
-`--recurse-submodules` matters: `campy` is a submodule. If you already cloned
-without it, run `git submodule update --init --recursive`.
+The repository has no submodules, so a plain clone is complete.
 
 If `git` is not recognized, install Git for Windows from
 <https://git-scm.com/download/win> and reopen PowerShell.
@@ -1368,7 +1366,6 @@ of your message.
 | `git : The term 'git' is not recognized` | Install Git for Windows, then reopen PowerShell. |
 | `uv sync` fails to download | No internet, or a proxy. The clone and this step are the only ones that need it. |
 | `warning: Skipping installation of entry points (project.scripts)` | Normal. The project is not packaged; nothing is wrong. |
-| `git status` shows `m campy` | Line-ending differences inside the submodule, not real edits. It affects nothing. |
 | `make_shortcut.ps1` prints `No venv at ...` | `uv sync` has not been run in this copy of the repository. |
 | `... cannot be loaded because running scripts is disabled` | Launch the script as `powershell -ExecutionPolicy Bypass -File <script>.ps1`, as shown above. |
 | `This must run elevated (Set-NetAdapterRss needs admin).` | `configure_nic.ps1` needs an Administrator PowerShell window. |

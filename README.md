@@ -36,9 +36,9 @@ needs to seek, sits at the front of the file instead of the end, and one IDR key
 second means scrubbing to frame N does not decode the N frames before it.
 `calibration.toml` sits alongside, read as-is.
 
-Built on **[campy](https://github.com/ksseverson57/campy)** by Kyle Severson. A fork is
-vendored here as a git submodule; the trigger firmware lineage and the raw-capture
-approach come from campy.
+Built on **[campy](https://github.com/ksseverson57/campy)** by Kyle Severson (MIT
+licensed). The trigger firmware lineage and the raw-capture approach come from campy;
+Panopticon carries no campy code and has no submodule.
 
 **Credits:** Isaac Tang (author and maintainer), Kay Tye, Talmo Pereira. Tye Lab and
 Talmo Lab, Salk Institute.
@@ -287,3 +287,13 @@ pinhole guess are dropped before selecting. That is a coarse outlier filter, not
 metric. Each stereo pair needs at least 3 shared frames and runs with intrinsics fixed.
 The pairs are chained from the reference camera along a lowest-error spanning tree, **with
 no global bundle adjustment**, so read the pairwise chart rather than one overall number.
+
+---
+
+## License
+
+Panopticon is licensed under the GNU General Public License, version 3 only
+(`GPL-3.0-only`); the full text is in [LICENSE](LICENSE). The GPL is the license
+that the PyQt5 dependency requires of a program built on it, and PyQt5 is kept, so
+the application carries the same terms. campy, the MIT-licensed lineage credited
+above, is compatible with them.

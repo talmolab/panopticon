@@ -118,9 +118,9 @@ the trigger instant is half a period after `FRAME_START`.
 `camsHigh()` and `camsLow()` write every trigger pin inside a
 `noInterrupts()`/`interrupts()` pair, so skew between pins is bounded by the
 write loop and cannot be stretched by an interrupt landing mid-loop. The design
-comes from campy, by Kyle Severson (`campy/campy/trigger/trigger.ino`), which
-documents ±0.35 µs inter-frame interval precision and roughly 30 ns synchronicity
-between pins.
+comes from campy, by Kyle Severson (`trigger.ino` in the upstream repository,
+<https://github.com/ksseverson57/campy>), which documents ±0.35 µs inter-frame
+interval precision and roughly 30 ns synchronicity between pins.
 
 And nothing on the host is in the timing path. The host names the pins and the
 rate; after that the board is on its own.
@@ -980,8 +980,8 @@ are easy to forget when adding an encode path, and neither failure is loud.
   1 MB pieces from byte 0 and stops when moov parses, so moov-at-end forces a
   read of the entire file, per camera, before frame 1 appears.
 
-The mp4 writers are `encode_worker._cmd()` (both branches), `acquire._encode_raw()`
-and `alignment.extract_aligned()`. That last one **replaces** the session
+The mp4 writers are `encode_worker._cmd()` (both branches) and
+`alignment.extract_aligned()`. That last one **replaces** the session
 recording, so it needs both flags too. `_append_raw_tail()` and the in-capture
 encoders emit Annex-B `.h264` and are exempt; the remux supplies the container.
 
