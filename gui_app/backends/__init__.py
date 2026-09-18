@@ -33,13 +33,39 @@ invariants visible at the point they matter.
 
 WRITING A NEW BACKEND
 1. Implement `CameraBackend` for your SDK — ALL of it, including the members
-   below the `set_freerun` line, which are as load-bearing as the rest.
+   below the `set_freerun` line, which are as load-bearing as the rest, plus
+   the optional members listed under `CameraBackend` if they apply.
 2. Return camera handles satisfying `CameraHandleProtocol` from `open()`, and
    result objects satisfying `GrabResultProtocol` from `retrieve()`.
 3. Register it in `load_backend()`.
-4. Run `test_grab_failure.py` (needs PyQt5 and pypylon importable, but no
-   hardware) and then `probe_lag.py` against real cameras, and check the
-   `cycle=` figure in the grab threads' log equals your frame period.
+4. Run `test_grab_failure.py` and `test_sim_backend.py` (both need PyQt5 but
+   no hardware and no SDK) and then `probe_lag.py` against real cameras, and
+   check the `cycle=` figure in the grab threads' log equals your frame
+   period.
+5. `gui_app/backends/sim.py` is the worked example: it implements this whole
+   contract with no SDK, so a question this document leaves open can be
+   answered by reading what the simulated rig does.
+
+TRIGGER SEMANTICS AND THE STOP PROTOCOL
+The application never asks a camera to stop producing frames. `set_freerun`
+means "deliver at `fps` with no trigger source" and is the preview; recording
+uses `set_triggered`, which means "deliver ONE frame per external trigger and
+NOTHING while the triggers are stopped". That distinction is the whole stop
+path: `CameraManager.stop_acquisition` tells the trigger board to stop, sets
+each grab thread's `_triggers_stopped` flag and then waits — it never calls
+`GrabThread.stop()` first. The grab loop leaves only when `retrieve()` raises
+`TimeoutException` with that flag set, so:
+
+  **`retrieve()` MUST time out once the trigger source stops.** A backend
+  that keeps synthesising frames in triggered mode can never be stopped: the
+  thread runs until the escalation path stops it outright, which is reported
+  to the operator as a board that ignored its stop command.
+
+A backend whose trigger source is not a wire needs an out-of-band hook for
+the trigger controller to drive, because nothing in this contract mentions
+triggers. The simulated backend's hook is `sim_board.SimBoard`: one virtual
+clock, started and stopped by `SimSerial` (what `TeensyController` opens for
+the `sim` port), read by every simulated camera.
 
 The hard part is rarely the API. It is the guarantees:
   - a per-frame **monotonic trigger ordinal** that survives a stream restart
@@ -77,13 +103,26 @@ class GrabResultProtocol(Protocol):
         """Monotonic trigger ordinal, the SAME value on every camera for a given
         hardware trigger. This is the entire basis of cross-camera alignment.
         May wrap (Basler wraps at 65535 unless 64-bit IDs are negotiated);
-        `alignment._unwrap_blockids` handles that."""
+        `alignment._unwrap_blockids` handles that. Values are >= 1: GVSP
+        reserves 0, and the grab loop refuses anything at or below it rather
+        than let a placeholder be read as a wrap.
+
+        Reading it MAY RAISE, and the caller does not shield it: the grab loop
+        counts the exception as a frame error and retires the camera after ten
+        in a row, because a placeholder ordinal would starve every other
+        camera through the coordinator and poison post-hoc alignment
+        silently. Outside the recording path (the failed-grab log line) a
+        raise is caught and -1 substituted."""
 
     @property
     def TimeStamp(self) -> int:
         """Device-clock timestamp in nanoseconds. Must be a free-running camera
         clock, not a host clock — it is used to re-derive the trigger ordinal
-        after a stream restart, when BlockID resets."""
+        after a stream restart, when BlockID resets. It therefore has to stay
+        MONOTONIC across `StopGrabbing`/`StartGrabbing`, and the unit really is
+        nanoseconds: `frame_sync.check_block_id_rate` compares block IDs
+        against it and says so when the two disagree. May raise on the same
+        terms as `BlockID`."""
 
     @property
     def PaddingX(self) -> int:
@@ -96,6 +135,12 @@ class GrabResultProtocol(Protocol):
     def GetArrayZeroCopy(self):
         """Context manager yielding a (H, W) uint8 view over the driver buffer
         WITHOUT copying.
+
+        The view must be C-CONTIGUOUS and exactly (height, width) of uint8:
+        it is handed to `os.write(fd, img)` and assigned into `buf[:H, :]` of
+        an NV12 buffer, both of which take the memory as it lies. A padded or
+        non-contiguous view would write sheared rows with no error, which is
+        why `PaddingX`/`PaddingY` are checked before the view is taken.
 
         The view must remain valid until the context exits, and the caller
         guarantees it does not outlive `Release()`. If your SDK cannot do this,
@@ -120,7 +165,10 @@ class CameraHandleProtocol(Protocol):
         """Arm the stream. `strategy` is the backend's `GRAB_STRATEGY`.
 
         Re-arming after a stall is expected to restart the block-ID counter;
-        `GrabThread._resync_offset` recovers the true ordinal from `TimeStamp`."""
+        `GrabThread._resync_offset` recovers the true ordinal from `TimeStamp`,
+        which is why that clock must keep running across the restart. A
+        counter that does NOT restart is fine too — the resync arithmetic
+        lands on the same ordinal either way."""
 
     def StopGrabbing(self) -> None: ...
 
@@ -152,7 +200,9 @@ class CameraBackend(Protocol):
         Order defines camera names (`cam1`...`camN`), which are baked into the
         calibration extrinsics — so an unstable order silently mislabels data.
         The device objects are opaque apart from `GetSerialNumber()`, which
-        `camera_manager` calls to name cameras in its two failure messages."""
+        must return a `str`: `camera_manager` names cameras with it, sorts on
+        it, and compares it with the profile's `camera_serials` entries as
+        strings, so a number here would match nothing and refuse to start."""
 
     def open(self, device, pfs_path: str, max_num_buffer: int):
         """Open and configure one camera, returning a `CameraHandleProtocol`.
@@ -160,19 +210,37 @@ class CameraBackend(Protocol):
         Raise on any problem; the caller refuses to start a partial set rather
         than shifting camera names. `max_num_buffer` is the driver-side pool
         depth (`camera_manager.MAX_NUM_BUFFER`) and must be honoured — the
-        capacity preflight budgets RAM against it."""
+        capacity preflight budgets RAM against it. `pfs_path` must be ACCEPTED
+        even by a backend with no such concept (ignore it): the caller has one
+        code path and passes the profile's value whatever backend is loaded."""
 
     def describe(self, cam) -> dict:
         """`{"width", "height", "pixel_format", "serial"}` read back FROM THE
         CAMERA, not from config. The caller aborts unless every camera agrees
-        with the profile — a mismatched pixel format is silently destructive."""
+        with the profile — a mismatched pixel format is silently destructive.
+
+        `pixel_format` comes from a one-word vocabulary: **"Mono8"** is the
+        only value the application accepts, compared literally, and anything
+        else refuses the start. The capture path is 8-bit throughout, and a
+        wider format is not an error anywhere — a Mono12 frame is uint16 and
+        the NV12 copy truncates it mod 256, yielding a full-length, perfectly
+        aligned, visually shredded recording. `width`/`height` are ints and
+        `serial` a str."""
 
     def set_freerun(self, cam, fps: float) -> None:
-        """Untriggered preview mode at `fps` (the app uses 30)."""
+        """Untriggered preview mode at `fps` (the app uses 30).
+
+        Frames must arrive at that rate with NO trigger source running: this
+        is the preview, and it is the half of the pair that makes the
+        recording half meaningful."""
 
     def set_triggered(self, cam, rate_limit: float,
                       announce: bool = False) -> None:
-        """Hardware-trigger mode. `rate_limit` sets the camera's internal frame
+        """Hardware-trigger mode: deliver one frame per external trigger and
+        NOTHING while the triggers are stopped (see "Trigger semantics and the
+        stop protocol" above — this is what lets a recording end).
+
+        `rate_limit` sets the camera's internal frame
         rate; note the minimum interval becomes `exposure + 1/rate_limit`, which
         is what caps usable exposure. `rate_limit <= 0` means disable the limiter
         (see `basler.set_triggered` for why that is a trap).
@@ -222,7 +290,29 @@ class CameraBackend(Protocol):
     def stream_stats(self, cam) -> dict:
         """Per-stream counters for the log. Keys are backend-specific; include
         whatever distinguishes *host* starvation from *network* loss, since that
-        is the distinction every capture problem eventually reduces to."""
+        is the distinction every capture problem eventually reduces to.
+
+        ONE key is reserved: **"error"**. Set it (to a message) when the
+        counters cannot be read, and set nothing else — the grab loop branches
+        on it and prints "stream stats unavailable" instead of a dict of
+        counters that are not there. Never raise: the caller reads these while
+        finalising a recording, and a raise there is caught and turned into
+        the same `{"error": ...}`, which is a worse message than the backend's
+        own.
+
+        OPTIONAL MEMBERS (discovered with `getattr`, so a backend without them
+        simply loses the feature):
+          - `thermals(cam) -> dict` — the camera's own temperature, polled
+            while acquiring. `CameraManager.thermals()` calls it per camera
+            and substitutes `{"error": ...}` if it raises, and the main
+            window's thermal watch reads `temp_c` (float, degrees C),
+            `temp_status` (the camera's own verdict; anything but "Ok" or
+            empty is over temperature), `temp_critical_c` and
+            `temp_shutdown_c`. `temp_max_c` is recorded in session metadata.
+            Return only the keys the camera has rather than raising.
+          - `gain_unit(cam)` — "dB", "raw" or None, for a log line that has to
+            name the unit a gain value is in.
+        """
 
 
 def load_backend(name: str = "basler") -> CameraBackend:
@@ -231,7 +321,13 @@ def load_backend(name: str = "basler") -> CameraBackend:
     if name == "basler":
         from gui_app.backends.basler import BaslerBackend
         return BaslerBackend()
+    if name == "sim":
+        # The simulated rig: a virtual trigger clock and cameras with
+        # injectable faults, so the capture path can be exercised with no
+        # hardware and no SDK (profiles/sim.yaml selects it).
+        from gui_app.backends.sim import SimBackend
+        return SimBackend()
     raise ValueError(
-        f"unknown camera backend {name!r}. Available: 'basler'. "
+        f"unknown camera backend {name!r}. Available: 'basler', 'sim'. "
         f"To add one, implement CameraBackend in gui_app/backends/ and register "
         f"it here — see this module's docstring for the guarantees required.")
