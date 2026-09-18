@@ -11,6 +11,7 @@ one place.
 This module imports no camera SDK and no Qt; the manager is duck-typed so the
 helpers also work against a stub in tests.
 """
+import functools
 import inspect
 
 from gui_app.session_config import RigProfile
@@ -36,7 +37,8 @@ _OPEN_KWARG_FIELDS = {
 }
 
 
-def apply_profile_to_manager(mgr, profile: RigProfile, log=print) -> list | None:
+def apply_profile_to_manager(mgr, profile: RigProfile,
+                             log=functools.partial(print, flush=True)) -> list | None:
     """Copy the thread-placement flags onto ``mgr`` and set the capture core
     pool from ``profile.capture_core_exclude``.
 
@@ -44,6 +46,11 @@ def apply_profile_to_manager(mgr, profile: RigProfile, log=print) -> list | None
     (non-Windows, non-hybrid CPU, or an import failure). Affinity is an
     optimisation and never a reason not to open cameras, so its failure is
     logged through ``log`` rather than raised.
+
+    ``log`` is any callable taking one string (``logging.getLogger().info``,
+    a list's ``append``) and is only ever called as ``log(message)``; the
+    default prints unbuffered so the line reaches a redirected log file
+    before the cameras open.
     """
     for name in MANAGER_FLAGS:
         setattr(mgr, name, bool(getattr(profile, name, False)))
@@ -52,10 +59,10 @@ def apply_profile_to_manager(mgr, profile: RigProfile, log=print) -> list | None
         pool = cpu_affinity.capture_core_pool(profile.capture_core_exclude)
         cpu_affinity.set_core_order(pool)
         log(f"[rig] capture core pool {pool} "
-            f"(excluding {profile.capture_core_exclude})", flush=True)
+            f"(excluding {profile.capture_core_exclude})")
         return pool
     except Exception as e:
-        log(f"[rig] could not set capture core pool: {e}", flush=True)
+        log(f"[rig] could not set capture core pool: {e}")
         return None
 
 

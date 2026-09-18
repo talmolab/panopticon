@@ -44,22 +44,23 @@ METADATA_DEFAULT_KEYS = ("experimenter", "assay", "cohort", "cage", "notes")
 _PATH_FIELDS = ("pfs_path", "output_dir", "board_config")
 
 #: Element type for list-valued profile fields. Pin and core lists must be
-#: ints because they reach ``pinMode``/affinity masks; serials must be strings
-#: because the backend compares them with ``GetSerialNumber()`` (a string), and
-#: a bare 8-digit YAML number would otherwise never match.
+#: ints because they reach ``pinMode``/affinity masks. ``camera_serials`` is
+#: not here: its elements go through ``_coerce_serial``, which refuses
+#: anything but a quoted string.
 _LIST_ELEMENT_TYPES = {
     "trigger_pins": int,
     "stim_safe_pins": int,
     "capture_core_exclude": int,
-    "camera_serials": str,
 }
 
 
 class ProfileError(ValueError):
-    """A profile file cannot be loaded as written. The message names the file
-    and the offending key so the operator can fix the YAML without a
-    traceback; callers that load every profile in a directory can catch this
-    and skip the bad one."""
+    """A profile file cannot be read or loaded as written. The message names
+    the file and the offending key so the operator can fix the YAML without a
+    traceback. Every failure inside ``RigProfile.load`` (unreadable file, YAML
+    syntax, unknown key, bad value, failed validation) is raised as this one
+    type so callers that load every profile in a directory can catch it and
+    skip the bad one instead of aborting launch."""
 
 
 def _default_metadata() -> dict:
@@ -99,13 +100,19 @@ class RigProfile:
     # profile selects the vendor so no code changes when a rig ports; the
     # default is the only backend shipped.
     camera_backend: str = "basler"
-    # Serial numbers of the cameras this rig consists of, in cam1..camN order,
-    # or None to name cameras by their position in the backend's sorted
-    # enumeration. An explicit list is what makes camera identity survive an
-    # extra device on the host or a replacement camera whose serial sorts
-    # elsewhere: names follow the list, not the sort. Every listed serial must
-    # enumerate and unlisted devices are ignored, so a calibration's extrinsics
-    # can never attach to the wrong physical camera through renaming.
+    # Serial numbers of the cameras this rig consists of, as quoted strings in
+    # ASCENDING order, or None to open every enumerated camera. When set,
+    # open_all opens only these serials and refuses to start if any of them
+    # is missing, so a replacement camera cannot slip into a session under a
+    # calibrated camera's name. Names remain positional over the backend's
+    # serial-sorted subset (cam1 is the smallest listed serial that
+    # enumerated), which is why validate() refuses any other order: an
+    # out-of-order list would name the cameras differently from the list and
+    # attach the calibration extrinsics to the wrong physical camera. An
+    # extra, unlisted device on the host still fails n_cameras, because that
+    # count is taken over the full enumeration before this list narrows it.
+    # Serials must be quoted: YAML reads a bare leading-zero number as octal,
+    # so an unquoted serial can load as a different number and validate.
     camera_serials: list | None = None
     # Video encoder: "auto" (NVENC when a session is free, else libx264),
     # "nvenc", "x264" or "raw" (raw.bin + post-hoc encode). Declared here so
@@ -265,8 +272,13 @@ class RigProfile:
         degraded recording later.
         """
         path = Path(path)
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ProfileError(f"{path.name}: not valid YAML: {e}") from None
+        except (OSError, UnicodeDecodeError) as e:
+            raise ProfileError(f"{path.name}: cannot be read: {e}") from None
         if data is None:
             # An empty file is a mistake, not a request for every default:
             # a profile that ran the rig entirely on code defaults would
@@ -278,7 +290,10 @@ class RigProfile:
                 f"level, got {type(data).__name__}")
 
         known = {f.name: f for f in dataclasses.fields(cls)}
-        unknown = sorted(set(data) - set(known))
+        # Keys are stringified before sorting: YAML types an unquoted key
+        # (``1:``, ``yes:``), and sorting a str against an int raises a
+        # TypeError that would escape the ProfileError contract.
+        unknown = sorted(str(k) for k in set(data) - set(known))
         if unknown:
             raise ProfileError(
                 f"{path.name}: unknown profile field(s) {unknown}. Fields a "
@@ -371,9 +386,23 @@ class RigProfile:
                 raise ValueError(
                     "camera_serials is empty; omit it to name cameras by "
                     "enumeration order")
+            if not all(isinstance(s, str) and s for s in self.camera_serials):
+                raise ValueError(
+                    f"camera_serials {self.camera_serials} must be non-empty "
+                    f"strings, as the backend reports them")
             if len(set(self.camera_serials)) != len(self.camera_serials):
                 raise ValueError(f"camera_serials {self.camera_serials} lists "
                                  f"a serial twice")
+            # The manager names cameras cam1..camN by position over the
+            # backend's serial-sorted subset, so the list is required to be
+            # in that same (string) order; otherwise cam{i} would not be
+            # entry i of the list and the extrinsics would attach to the
+            # wrong physical camera with no error anywhere.
+            if self.camera_serials != sorted(self.camera_serials):
+                raise ValueError(
+                    f"camera_serials {self.camera_serials} is not in ascending "
+                    f"order; cameras are named cam1..camN over the serial-sorted "
+                    f"set, so list them as {sorted(self.camera_serials)}")
             if self.n_cameras and self.n_cameras != len(self.camera_serials):
                 raise ValueError(
                     f"n_cameras {self.n_cameras} disagrees with the "
@@ -464,6 +493,20 @@ def _coerce_scalar(tp, value):
     return value
 
 
+def _coerce_serial(value):
+    """One camera serial: a non-empty quoted string, exactly as YAML read it.
+
+    A bare number is refused rather than stringified. YAML 1.1 reads an
+    unquoted leading-zero number as octal, so ``01234567`` loads as 342391;
+    stringifying it would let the profile validate and leave open_all to
+    report a serial that never existed as "did not enumerate", with no hint
+    that the YAML was at fault.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"camera serials must be quoted strings, got {value!r}")
+    return value.strip()
+
+
 def _coerce_field(f: dataclasses.Field, value):
     """Coerce a YAML value to the declared type of dataclass field ``f``."""
     tp = f.type
@@ -475,6 +518,8 @@ def _coerce_field(f: dataclasses.Field, value):
     if tp is list:
         if not isinstance(value, (list, tuple)):
             raise TypeError(f"expected a list, got {value!r}")
+        if f.name == "camera_serials":
+            return [_coerce_serial(v) for v in value]
         elem = _LIST_ELEMENT_TYPES.get(f.name)
         if elem is None:
             return list(value)
@@ -647,25 +692,38 @@ class SessionConfig:
 
     def __post_init__(self):
         # Blank identity fields take placeholders so a quick test session can
-        # start without typing; anything typed is validated as a path
-        # component, because it is one.
-        self.date = (self.date or "").strip()
-        if not self.date:
-            self.date = datetime.now().strftime("%Y%m%d")
-        self.date = validate_session_date(self.date)
-        self.mouse_1 = (self.mouse_1 or "").strip() or "m1"
-        self.mouse_2 = (self.mouse_2 or "").strip() or "m2"
-        self.mouse_1 = validate_path_component(self.mouse_1, "mouse_1")
-        self.mouse_2 = validate_path_component(self.mouse_2, "mouse_2")
-        for label in ("cohort", "cage"):
-            value = (getattr(self, label) or "").strip()
-            if value:
-                value = validate_path_component(value, label)
-            setattr(self, label, value)
-        self.assay = (self.assay or "").strip()
-        self.experimenter = (self.experimenter or "").strip()
+        # start without typing. Nothing is refused here: a config is built
+        # inside Qt slots from whatever the sidebar holds, and an exception
+        # there aborts the slot with the toggle left ON. The path-component
+        # checks live in validate(), which the entry point calls where it can
+        # show a dialog and reset the toggles.
+        self.date = str(self.date or "").strip() or datetime.now().strftime("%Y%m%d")
+        self.mouse_1 = str(self.mouse_1 or "").strip() or "m1"
+        self.mouse_2 = str(self.mouse_2 or "").strip() or "m2"
+        # cohort and cage are metadata values only (session_dir is
+        # base/date/mouse_1_mouse_2), so any text is kept as typed.
+        for label in ("cohort", "cage", "assay", "experimenter"):
+            setattr(self, label, str(getattr(self, label) or "").strip())
         if not isinstance(self.base_data_dir, Path):
             self.base_data_dir = Path(self.base_data_dir or "")
+
+    def validate(self) -> "SessionConfig":
+        """Raise ValueError if a field that becomes a path is not a plain
+        component; return self otherwise.
+
+        date, mouse_1 and mouse_2 form session_dir and the prefix of every mp4
+        name, so each must be one plain directory component (and the date a
+        YYYYMMDD calendar date) or the mkdir fails deep inside an acquisition,
+        or worse, a separator nests or escapes the data directory. The
+        contract for an entry point (acquisition start, snapshot, solve) is
+        to call this before any directory is created and turn the ValueError
+        into a dialog; a caller that skips it gets the mkdir failure, or the
+        misplaced directory, that this exists to prevent.
+        """
+        self.date = validate_session_date(self.date)
+        self.mouse_1 = validate_path_component(self.mouse_1, "mouse_1")
+        self.mouse_2 = validate_path_component(self.mouse_2, "mouse_2")
+        return self
 
     @classmethod
     def from_profile(cls, profile: RigProfile, **overrides) -> "SessionConfig":

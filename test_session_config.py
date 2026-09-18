@@ -3,7 +3,11 @@
 A profile typo used to take the field's default silently, so a misspelled
 ``realtime_kick`` recorded a whole session on the wrong pipeline. Session
 fields typed into the sidebar became directory names unchecked. Both are
-exercised here without cameras, a board or Qt.
+exercised here without cameras, a board or Qt. Every way a profile file can
+fail to load must surface as ProfileError, because the sidebar loads every
+file in the profiles directory and one bad file must not abort launch.
+SessionConfig construction never raises; ``validate()`` does, so the entry
+points can refuse a bad field with a dialog instead of a traceback in a slot.
 
 The two shipped profiles are asserted field by field so a stray edit cannot
 change the rig's effective configuration without this test noticing.
@@ -130,6 +134,20 @@ check("a misspelled key is refused and named",
       e is not None and "realtime_kik" in str(e) and "kick_maxlag" in str(e),
       str(e)[:120])
 check("ProfileError is a ValueError", issubclass(ProfileError, ValueError))
+e = raises(ProfileError, load, "1: x\nbogus: y\nyes: z\n", "mixedkeys")
+check("unknown keys of mixed types (int, str, bool) raise ProfileError, not TypeError",
+      e is not None and "bogus" in str(e) and "'1'" in str(e), str(e)[:120])
+e = raises(ProfileError, load, "name: [unclosed\nframe_rate: 100\n", "syntax")
+check("a YAML syntax error raises ProfileError naming the file",
+      e is not None and "syntax.yaml" in str(e), str(e).replace(chr(10), " ")[:100])
+e = raises(ProfileError, load, "name: t\nkick_max_lag: !!python/object:os.system x\n", "tag")
+check("an unsafe YAML tag raises ProfileError", e is not None, str(e)[:100])
+_bin = TMP / "binary.yaml"
+_bin.write_bytes(b"\xff\xfe\x00name: t\n")
+e = raises(ProfileError, RigProfile.load, _bin)
+check("a file that is not UTF-8 raises ProfileError", e is not None, str(e)[:100])
+e = raises(ProfileError, RigProfile.load, TMP / "does_not_exist.yaml")
+check("a missing profile file raises ProfileError", e is not None, str(e)[:100])
 e = raises(ProfileError, load, "", "empty")
 check("an empty profile file is refused", e is not None, str(e)[:80])
 e = raises(ProfileError, load, "- a\n- b\n", "listy")
@@ -199,15 +217,36 @@ e = raises(ProfileError, load, "trigger_pins: 4\n")
 check("a scalar for a list field is refused", e is not None)
 e = raises(ProfileError, load, "kick_max_lag:\n")
 check("an empty value for a required scalar is refused", e is not None)
-p = load("camera_serials: [41920544, '41920545']\nn_cameras: 2\n")
-check("camera_serials are coerced to strings",
+p = load("camera_serials: ['41920544', \"41920545\"]\nn_cameras: 2\n")
+check("quoted camera_serials load as the strings written",
       p.camera_serials == ["41920544", "41920545"])
-e = raises(ProfileError, load, "camera_serials: [1, 2, 3]\nn_cameras: 9\n")
+e = raises(ProfileError, load, "camera_serials: [41920544, '41920545']\n")
+check("a bare (unquoted) serial is refused with the field named",
+      e is not None and "camera_serials" in str(e) and "quoted" in str(e), str(e)[:120])
+# YAML 1.1 reads an unquoted leading-zero number as octal; stringifying it
+# would produce a phantom serial that validates and never enumerates.
+e = raises(ProfileError, load, "camera_serials: [01234567, '41920545']\n")
+check("a leading-zero unquoted serial (octal in YAML) is refused, not stringified",
+      e is not None and "quoted" in str(e), str(e)[:120] if e else "loaded")
+e = raises(ProfileError, load, "camera_serials: ['', '41920545']\n")
+check("an empty serial string is refused", e is not None)
+e = raises(ProfileError, load, "camera_serials: ['41920545', '41920544']\n")
+check("camera_serials out of ascending order is refused and the sorted list is shown",
+      e is not None and "ascending" in str(e) and "['41920544', '41920545']" in str(e),
+      str(e)[:140])
+# A string sort is what the backend does; a numeric sort would differ for
+# serials of unequal length, so the check must compare as strings.
+e = raises(ProfileError, load, "camera_serials: ['9', '10']\n")
+check("order is compared as strings ('10' sorts before '9'), matching the backend",
+      e is not None and "ascending" in str(e), str(e)[:100])
+check("a hand-built profile with int serials fails validate()",
+      raises(ValueError, RigProfile(camera_serials=[1, 2]).validate) is not None)
+e = raises(ProfileError, load, "camera_serials: ['1', '2', '3']\nn_cameras: 9\n")
 check("camera_serials length must agree with a nonzero n_cameras",
       e is not None and "n_cameras" in str(e), str(e)[:100])
 e = raises(ProfileError, load, "camera_serials: []\n")
 check("an empty camera_serials list is refused", e is not None)
-e = raises(ProfileError, load, "camera_serials: [1, 1]\n")
+e = raises(ProfileError, load, "camera_serials: ['1', '1']\n")
 check("a duplicated serial is refused", e is not None)
 p = load("gev_bandwidth_reserve_pct: 15\ngev_bandwidth_reserve_accum: 4\n")
 check("bandwidth reserve fields coerce to float / int",
@@ -258,26 +297,40 @@ bad_components = {
     "control char": "a\x07b", "reserved device": "CON",
     "reserved device with ext": "com1.txt", "too long": "x" * 81,
 }
+# Construction must never raise: _build_config runs inside Qt slots, and an
+# exception there leaves the toggle ON. validate() is the explicit gate.
 for label, value in bad_components.items():
-    e = raises(ValueError, SessionConfig, date="20260918", mouse_1=value)
-    check(f"mouse_1 {label} is refused", e is not None and "mouse_1" in str(e),
+    built = raises(Exception, SessionConfig, date="20260918", mouse_1=value)
+    e = raises(ValueError, SessionConfig(date="20260918", mouse_1=value).validate)
+    check(f"mouse_1 {label} constructs but validate() refuses it",
+          built is None and e is not None and "mouse_1" in str(e),
           str(e)[:80] if e else "no error")
 check("mouse_2 is validated too",
-      raises(ValueError, SessionConfig, mouse_2="a/b") is not None)
-check("cohort and cage are validated when set",
-      raises(ValueError, SessionConfig, cohort="c:1") is not None
-      and raises(ValueError, SessionConfig, cage="..") is not None)
+      raises(ValueError, SessionConfig(mouse_2="a/b").validate) is not None)
+# cohort and cage are metadata values, not path components: session_dir is
+# base/date/mouse_1_mouse_2, so a label with a separator or colon is fine.
+c = SessionConfig(cohort=" A/3 ", cage="rack 2: left")
+check("cohort and cage accept any text and are only stripped",
+      c.cohort == "A/3" and c.cage == "rack 2: left"
+      and c.validate() is c and c.metadata()["cage"] == "rack 2: left")
 check("blank cohort and cage are allowed",
       SessionConfig(cohort="", cage="  ").cohort == "")
 for bad_date in ("2026-09-18", "20261301", "abcdefgh", "2026918", "20260918/"):
-    check(f"date {bad_date!r} is refused",
-          raises(ValueError, SessionConfig, date=bad_date) is not None)
+    built = raises(Exception, SessionConfig, date=bad_date)
+    check(f"date {bad_date!r} constructs but validate() refuses it",
+          built is None
+          and raises(ValueError, SessionConfig(date=bad_date).validate) is not None)
 c = SessionConfig(date="", mouse_1="   ", mouse_2="")
 check("blank date takes today; whitespace-only mouse ids take placeholders",
-      len(c.date) == 8 and c.mouse_1 == "m1" and c.mouse_2 == "m2")
+      len(c.date) == 8 and c.mouse_1 == "m1" and c.mouse_2 == "m2"
+      and c.validate() is c)
 c = SessionConfig(date=" 20260918 ", mouse_1=" M-12.a ", mouse_2="B_2 ")
 check("valid fields are stripped and kept (a trailing space is stripped, not refused)",
       c.date == "20260918" and c.mouse_1 == "M-12.a" and c.session_id == "M-12.a_B_2")
+check("validate() returns the config so it chains from from_profile",
+      SessionConfig.from_profile(pose, date="20260918").validate().date == "20260918")
+check("non-string identity fields are stringified, not refused, at construction",
+      SessionConfig(date=20260918, mouse_1=7).validate().session_id == "7_m2")
 check("a valid session_dir stays under base_data_dir",
       SessionConfig(date="20260918", mouse_1="a", mouse_2="b",
                     base_data_dir=TMP).session_dir.resolve()
@@ -347,7 +400,7 @@ check("open_kwargs drops keywords the manager does not accept",
       "gev_bandwidth_reserve_pct" not in kw and "gev_bandwidth_reserve_accum" not in kw)
 check("open_kwargs omits only_serials when camera_serials is None",
       "only_serials" not in kw)
-serial_prof = load("camera_serials: [1, 2]\nn_cameras: 2\n"
+serial_prof = load("camera_serials: ['1', '2']\nn_cameras: 2\n"
                    "gev_bandwidth_reserve_pct: 10\n", "serials")
 kw2 = rig_setup.open_kwargs(_KwargsManager(), serial_prof)
 check("a **kwargs manager receives every non-None field",
@@ -358,12 +411,27 @@ check("open_kwargs output is accepted by the stub's open_all",
 
 mgr = _OldManager()
 logged = []
-pool = rig_setup.apply_profile_to_manager(mgr, pose, log=lambda *a, **k: logged.append(a))
+pool = rig_setup.apply_profile_to_manager(mgr, pose, log=logged.append)
 check("apply_profile_to_manager copies the three placement flags",
       mgr.pin_capture_threads is True and mgr.encoder_pcores is False
       and mgr.pin_encoder_threads is False)
-check("apply_profile_to_manager logs the pool it chose (or why not)",
-      len(logged) == 1 and (pool is None or isinstance(pool, list)), str(logged))
+check("apply_profile_to_manager logs one line through a one-argument callable",
+      len(logged) == 1 and isinstance(logged[0], str)
+      and (pool is None or isinstance(pool, list)), str(logged))
+import logging
+_records = []
+_logger = logging.getLogger("test_session_config.rig")
+_logger.addHandler(type("H", (logging.Handler,), {"emit": lambda self, r: _records.append(r)})())
+_logger.setLevel(logging.INFO)
+check("a logging.Logger method is accepted as log (no flush= keyword leaks)",
+      raises(Exception, rig_setup.apply_profile_to_manager, _OldManager(), pose,
+             log=_logger.info) is None and len(_records) == 1)
+check("a bare lambda is accepted as log",
+      raises(Exception, rig_setup.apply_profile_to_manager, _OldManager(), pose,
+             log=lambda m: None) is None)
+check("the default log is unbuffered print",
+      inspect.signature(rig_setup.apply_profile_to_manager).parameters["log"]
+      .default.keywords == {"flush": True})
 if pool:
     check("the pool honours capture_core_exclude",
           not set(pool) & set(pose.capture_core_exclude), str(pool))
