@@ -43,6 +43,11 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QImage, QPixmap
 _QAPP = QApplication.instance() or QApplication([])
 
+#: Seconds allowed for teardown once the acquisition loop ends. Long enough
+#: for nine cameras plus an encoder drain, short enough that a wedge still
+#: yields a traceback rather than a probe that never exits.
+TEARDOWN_WATCHDOG_S = 300
+
 from gui_app import rig_setup
 from gui_app.camera_manager import CameraManager
 from gui_app.probe_guard import (add_force_argument,
@@ -282,6 +287,7 @@ def main():
             _QAPP.processEvents()
             time.sleep(0.033)
 
+    last_temp_s = -1
     while time.perf_counter() - t0 < args.seconds:
         _pump(1.0)
         el = time.perf_counter() - t0
@@ -300,7 +306,12 @@ def main():
         # LAGGARD heats up before it starts falling behind, or is simply the
         # thread that lost the scheduling lottery. A cold-path register read,
         # rate-limited so it never competes with streaming.
-        if int(el) % 5 == 0 and int(el) != row.get("_last_temp_s", -1):
+        # The dedup keeps its own variable: `row` is rebuilt every
+        # iteration, so a key stored in it can never be read back and the
+        # rate limit reduces to the second boundary, which a drifting pump
+        # hits twice or skips.
+        if int(el) % 5 == 0 and int(el) != last_temp_s:
+            last_temp_s = int(el)
             try:
                 row["temps"] = [t.get("temp_c") for t in mgr.thermals()]
             except Exception:
@@ -313,6 +324,14 @@ def main():
                 print("           temps  "
                       + " ".join(f"c{i+1}:{t:.0f}" for i, t in enumerate(temps)
                                  if t is not None), flush=True)
+
+    # The acquisition watchdog has done its job; re-arm it for teardown with
+    # a budget of its own. Closing nine cameras and draining the encoders can
+    # legitimately outlast the acquisition budget, and a hard kill inside
+    # stop_acquisition leaves the cameras open and the serial port held, so the
+    # next run cannot even open the board.
+    faulthandler.cancel_dump_traceback_later()
+    faulthandler.dump_traceback_later(TEARDOWN_WATCHDOG_S, exit=True)
 
     teensy.stop_triggers(prof.trigger_pins)
     time.sleep(0.5)
@@ -345,6 +364,7 @@ def main():
                       f"{v.max():7.0f}")
     mgr.close_all()
     teensy.close()
+    faulthandler.cancel_dump_traceback_later()
     if not args.keep:
         shutil.rmtree(scratch, ignore_errors=True)
     print(f"\ntrace written to {out/'trace.json'}")
