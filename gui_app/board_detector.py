@@ -21,49 +21,63 @@ Tracks:
                         one is a connectivity test, not a per-pair test: the
                         board is one-sided, so opposed cameras can never
                         co-detect and "every pair connected" could never fill.
-                        Once ``ready`` goes true ``update()`` stops counting.
+                        ``ready`` LATCHES: detection, glow decay, counting and
+                        ``codet_frames`` all keep running afterwards, because
+                        the hinted solve decodes only the frames listed in
+                        ``codet_frames`` and every co-detection recorded while
+                        the operator keeps waving is more data for it.
+  - ``codet_frames``  : per tick, ``{cam_index: grabbed_frame_ordinal}`` for
+                        the cameras that co-detected. The value is the grab
+                        thread's GRABBED count read after the frame copy, so it
+                        is +1 relative to the 0-based mp4 index and, in kick
+                        mode, further offset by any frames the coordinator
+                        force-dropped. Pairing survives because every camera
+                        carries the same offset for the same tick; the solve
+                        clamps the hints into range and treats them as
+                        neighbourhood hints, not exact indices.
+  - ``ticks_per_s``   : measured detection tick rate (EMA), for the HUD and
+                        the rig log. Detection is sequential over cameras and
+                        costs 6-250 ms per camera depending on scene clutter,
+                        so the rate is best effort: typically 10-20 Hz for nine
+                        cameras, ~1 Hz when several cameras see clutter.
 
-Counts are at the detection tick rate (``coverage_worker``'s ~30 Hz), not the
-recorded-frame rate, so the thresholds are relative coverage signals rather than
-frame totals — tune them on the rig.
+Counts are at the detection tick rate, not the recorded-frame rate, so the
+thresholds are relative coverage signals rather than frame totals: each
+threshold buys MORE wall time (and more recorded frames) when the tick rate
+falls, which is the safe direction. Tune them on the rig.
 
-Works across both the pre-4.7 and >=4.7 OpenCV ArUco APIs.
+Works across both the pre-4.7 and >=4.7 OpenCV ArUco APIs. ``cv2`` and
+``yaml`` are imported inside the constructors, not at module level, so this
+module imports with numpy alone; the tests drive the counting logic with a stub
+engine and the GUI self-disables the HUD when OpenCV is missing.
 """
+import json
 import math
 import time
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
-import cv2
-import yaml
+
+from gui_app import charuco
 
 
 class _CharucoEngine:
     """Returns a visible-marker count for a grayscale frame, across cv2 versions."""
 
-    def __init__(self, board_x, board_y, marker_bits, dict_size,
-                 square_length=1.0, marker_length=0.8, legacy=False):
-        aruco = cv2.aruco
-        dict_name = "DICT_{0}X{0}_{1}".format(marker_bits, dict_size)
-        self._dict = aruco.getPredefinedDictionary(getattr(aruco, dict_name))
-        # Absolute lengths don't affect detection (only board topology, the
-        # dictionary, and the legacy pattern do) — we pass the real values to
-        # mirror 1_calibrate.py exactly.
-        self._new_api = hasattr(aruco, "CharucoDetector")
-        if self._new_api:
-            self._board = aruco.CharucoBoard(
-                (board_x, board_y), square_length, marker_length, self._dict)
-            # Boards printed before the OpenCV 4.6 charuco layout change use the
-            # legacy marker pattern; without this the >=4.7 detector matches the
-            # wrong markers and returns zero charuco corners.
-            if legacy and hasattr(self._board, "setLegacyPattern"):
-                self._board.setLegacyPattern(True)
-            self._detector = aruco.CharucoDetector(self._board)
-        else:
-            self._board = aruco.CharucoBoard_create(
-                board_x, board_y, square_length, marker_length, self._dict)
-            if legacy and hasattr(self._board, "setLegacyPattern"):
-                self._board.setLegacyPattern(True)
-            self._params = aruco.DetectorParameters_create()
+    def __init__(self, board_cfg: dict):
+        # Imported here, not at module level: the module must import with
+        # numpy alone (tests, hosts without OpenCV).
+        import cv2
+        self._cv2 = cv2
+        # Board and marker detector both come from the shared helper, so the
+        # HUD and the solve can never disagree about dictionary, layout, legacy
+        # policy or which ArUco API generation is in use; the helper raises on
+        # an unknown dictionary or an unexpressible legacy flag. The HUD counts
+        # markers only (no charuco corner interpolation), because the count
+        # and centroid are all the coverage logic reads.
+        self._board, self._dict = charuco.make_board(board_cfg)
+        self._detect_markers = charuco.make_marker_detector(self._dict)
 
     def detect(self, gray):
         """Return (marker_count, centroid_xy_normalized) for a frame.
@@ -71,6 +85,7 @@ class _CharucoEngine:
         centroid_xy is the mean of all detected marker corners, normalized to
         [0, 1] by the frame dimensions. Returns (0, None) when nothing is found.
         """
+        cv2 = self._cv2
         if gray is None:
             return 0, None
         if gray.ndim == 3:
@@ -79,11 +94,7 @@ class _CharucoEngine:
             gray = np.ascontiguousarray(gray)
         h, w = gray.shape[:2]
         try:
-            if self._new_api:
-                _ch_corners, _ch_ids, m_corners, m_ids = self._detector.detectBoard(gray)
-            else:
-                m_corners, m_ids, _ = cv2.aruco.detectMarkers(
-                    gray, self._dict, parameters=self._params)
+            m_corners, m_ids = self._detect_markers(gray)
             if m_ids is None or len(m_ids) == 0:
                 return 0, None
             n = int(len(m_ids))
@@ -93,9 +104,6 @@ class _CharucoEngine:
             return n, (cx, cy)
         except cv2.error:
             return 0, None
-
-    def count(self, gray):
-        return self.detect(gray)[0]
 
 
 class BoardDetector:
@@ -118,14 +126,10 @@ class BoardDetector:
         # raise or lower it without editing code.
         if min_grid_cells is not None:
             self.MIN_GRID_CELLS = int(min_grid_cells)
+        import yaml
         with open(board_config_path) as f:
             b = yaml.safe_load(f)
-        self._engine = _CharucoEngine(
-            b["board_x"], b["board_y"],
-            b.get("marker_bits", 4), b.get("dict_size", 1000),
-            square_length=b.get("square_length", 1.0),
-            marker_length=b.get("marker_length", 0.8),
-            legacy=b.get("board_legacy", False))
+        self._engine = _CharucoEngine(b)
         self.reset()
 
     def reset(self):
@@ -143,6 +147,9 @@ class BoardDetector:
         self.ready = False
         self._last = time.perf_counter()
         self.codet_frames = []
+        #: Measured detection tick rate, exponentially smoothed. 0 until the
+        #: second tick. Published so the HUD can show what "a tick" is worth.
+        self.ticks_per_s = 0.0
 
     def _centroid_to_cell(self, cx, cy):
         r = min(int(cy * self.GRID_ROWS), self.GRID_ROWS - 1)
@@ -150,18 +157,29 @@ class BoardDetector:
         return max(0, r), max(0, c)
 
     def update(self, frames, frame_counts=None):
-        """Run one detection tick. If frame_counts (per-camera recorded frame
-        indices) is provided, co-detection frame numbers are saved for the
-        calibration script to use instead of re-scanning every frame."""
-        if self.ready:
-            return self
+        """Run one detection tick. If frame_counts (per-camera GRABBED frame
+        ordinals) is provided, the co-detecting cameras' ordinals are appended
+        to ``codet_frames`` for the solve to decode instead of re-scanning
+        every frame.
+
+        Runs after READY too: ``ready`` only latches. Stopping would freeze the
+        glow and, worse, stop recording hints while the operator is still
+        waving the board, and the hinted solve never sees an unlisted frame.
+        """
         now = time.perf_counter()
         dt = max(0.0, now - self._last)
         self._last = now
         self.glow *= math.exp(-dt / self.glow_decay_s)
+        if dt > 0:
+            inst = 1.0 / dt
+            self.ticks_per_s = (inst if self.ticks_per_s <= 0
+                                else 0.9 * self.ticks_per_s + 0.1 * inst)
 
         seen = []
         for i in range(self.n):
+            # A frames list shorter than n (a camera whose first frame has not
+            # arrived) reads as "no frame" for the missing cameras, never an
+            # IndexError that would kill the worker.
             fr = frames[i] if frames is not None and i < len(frames) else None
             nc, centroid = self._engine.detect(fr)
             if nc >= self.glow_threshold:
@@ -265,11 +283,93 @@ class BoardDetector:
         return best
 
     def _update_ready(self):
+        """Recompute components and READY. READY latches: every input is
+        monotone (counts only grow, edges only appear), so a true can never
+        honestly become false again, and a flicker would confuse the operator."""
         self.components = self._components() if self.n else []
+        if self.ready:
+            return
         if self.n == 0 or np.any(self.per_cam_frames < self.min_per_cam_shared):
-            self.ready = False
             return
         if np.any(self.grid_cells_hit < self.MIN_GRID_CELLS):
-            self.ready = False
             return
         self.ready = (len(self.components) == 1)
+
+
+# ---------------------------------------------------------------------------
+# codet_frames.json: the hint file the solve reads
+# ---------------------------------------------------------------------------
+
+CODET_FORMAT = 2
+
+
+def write_codet_frames(path, codet_frames, camera_names, videos=None):
+    """Write the co-detection hint file the solve reads.
+
+    ``codet_frames`` is ``BoardDetector.codet_frames``; ``camera_names`` maps
+    camera index to name. ``videos`` is ``{cam_name: {"name": mp4 file name,
+    "size": bytes}}`` when the videos already exist; at acquisition stop they
+    usually do not (the remux runs afterwards), so the caller stamps them later
+    with ``stamp_codet_videos``. The solve refuses hints whose video identity
+    does not match the mp4 it is about to open, because a stale hint file from
+    a previous calibration decodes the wrong frames silently.
+
+    Returns the total number of hint indices written.
+    """
+    per_cam: dict[str, set] = {}
+    for tick in codet_frames:
+        for cam_idx, frame_n in tick.items():
+            per_cam.setdefault(camera_names[cam_idx], set()).add(int(frame_n))
+    doc = {
+        "format": CODET_FORMAT,
+        "written": datetime.now().isoformat(timespec="seconds"),
+        "frames": {cam: sorted(fns) for cam, fns in per_cam.items()},
+        "videos": dict(videos or {}),
+    }
+    with open(path, "w") as f:
+        json.dump(doc, f)
+    return sum(len(v) for v in doc["frames"].values())
+
+
+def calibration_video(cam_dir):
+    """The calibration mp4 in a camera directory, or None."""
+    cam_dir = Path(cam_dir)
+    if not cam_dir.is_dir():
+        return None
+    mp4s = sorted(f for f in cam_dir.iterdir()
+                  if f.is_file() and f.suffix == ".mp4"
+                  and "calibration" in f.name)
+    return mp4s[0] if mp4s else None
+
+
+def stamp_codet_videos(calib_dir):
+    """Record each camera's mp4 name and size in ``codet_frames.json``.
+
+    Called once the calibration mp4s are FINAL, not merely present: the
+    identity is the file size, and alignment (``alignment.extract_aligned``)
+    replaces the session recording with a re-encoded file of a different size.
+    A stamp taken before alignment runs therefore mismatches on exactly the
+    sessions that were aligned, and the solve discards the hints and scans in
+    full. The GUI's right moment is the transition to idle, reached both when
+    no alignment runs and after alignment finishes. Returns the number of
+    cameras stamped, 0 when there is no hint file to stamp.
+    """
+    calib_dir = Path(calib_dir)
+    path = calib_dir / "codet_frames.json"
+    if not path.exists():
+        return 0
+    with open(path) as f:
+        doc = json.load(f)
+    if "frames" not in doc:
+        # Legacy flat {cam: [frames]} layout: lift it into the current one.
+        doc = {"format": CODET_FORMAT, "written": "", "frames": doc,
+               "videos": {}}
+    videos = {}
+    for cam in doc["frames"]:
+        mp4 = calibration_video(calib_dir / cam)
+        if mp4 is not None:
+            videos[cam] = {"name": mp4.name, "size": mp4.stat().st_size}
+    doc["videos"] = videos
+    with open(path, "w") as f:
+        json.dump(doc, f)
+    return len(videos)

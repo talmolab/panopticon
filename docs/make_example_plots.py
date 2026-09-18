@@ -8,7 +8,9 @@ thresholds and layout are guaranteed to match what a real
 
     uv run docs/make_example_plots.py
 
-Only needs matplotlib. Writes into docs/images/.
+Needs the full project environment (OpenCV contrib, PyYAML, matplotlib):
+1_calibrate.py imports cv2 and yaml at module level, so loading it for the
+plotting function needs them present. Writes into docs/images/.
 """
 import importlib.util
 import sys
@@ -23,8 +25,8 @@ def _load_calibrate():
     spec = importlib.util.spec_from_file_location(
         "calibrate_mod", REPO / "1_calibrate.py")
     mod = importlib.util.module_from_spec(spec)
-    # The module imports cv2/yaml at top level; we only need the plotting
-    # function, so a missing solver dependency should not stop the docs build.
+    # The module imports cv2/yaml at top level, so this needs the project
+    # environment; the plotting function is not importable on its own.
     spec.loader.exec_module(mod)
     return mod
 

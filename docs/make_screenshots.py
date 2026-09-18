@@ -5,14 +5,23 @@
     uv run python docs/make_screenshots.py main       # cameras needed
     uv run python docs/make_screenshots.py stim       # no cameras needed
 
+    --profile NAME   rig profile stem to illustrate (default 3dpose); the
+                     available stems are listed when it does not exist
+    --wait-s N       seconds the main window runs before its screenshot is
+                     taken (default 50: startup firmware check + live preview)
+
 Positions for the numbered callouts come from Qt's own widget geometry rather
 than from measuring pixels, so they stay correct if the layout, the window size
 or the camera count changes.
 
 The coverage-graph stages and the waveform previews are rendered by driving the
 widgets with constructed values. They are illustrations of specific states, not
-captures of a particular session, and the docs say so where they appear.
+captures of a particular session, and the docs say so where they appear. The
+coverage stages are expressed RELATIVE to the profile's thresholds and the
+READY flag comes from the detector's own rule, so the captions in the images
+follow the profile instead of drifting from it.
 """
+import argparse
 import sys
 from pathlib import Path
 
@@ -112,33 +121,62 @@ def save(pix, name):
 
 
 # ─── coverage-graph stages (no hardware) ─────────────────────────────────────
-def _detector(n, board, pair, per_cam, glow_idx=(), cells=4, weak=None):
+def _detector(n, profile, pair, per_cam, glow_idx=(), cells=4, weak=None,
+              split=None):
+    """A BoardDetector in a constructed state.
+
+    ``pair`` and ``per_cam`` are FRACTIONS of the profile's ``min_edge`` and
+    ``min_per_cam_shared``; ``weak`` is ``(i, j, fraction)`` for one pair below
+    the others; ``split`` is ``(k, fraction)`` and puts every pair between the
+    first k cameras and the rest at that fraction, which is how a graph in two
+    groups is drawn (one weak pair in an otherwise complete graph is still
+    connected). Both per-camera counters are set (``per_cam_frames`` is what
+    READY and the caption use, ``per_cam_covis`` is the display weighting) and
+    READY comes from ``_update_ready()``, so the image can never show a state
+    the real detector would not, such as READY over a disconnected graph.
+    """
     import numpy as np
     from gui_app.board_detector import BoardDetector
-    det = BoardDetector(n, board)
-    det.shared = np.full((n, n), pair, dtype=int) - np.eye(n, dtype=int) * pair
+    det = BoardDetector(
+        n, profile.board_config,
+        min_per_cam_shared=profile.calibration_min_per_cam_shared,
+        min_edge=profile.calibration_min_edge,
+        min_grid_cells=profile.calibration_min_grid_cells)
+    edge = int(round(pair * det.min_edge))
+    frames = int(round(per_cam * det.min_per_cam_shared))
+    det.shared = np.full((n, n), edge, dtype=int) - np.eye(n, dtype=int) * edge
     if weak:
-        i, j, v = weak
-        det.shared[i, j] = det.shared[j, i] = v
-    det.per_cam_covis = np.full(n, per_cam, dtype=int)
+        i, j, frac = weak
+        det.shared[i, j] = det.shared[j, i] = int(round(frac * det.min_edge))
+    if split:
+        k, frac = split
+        cross = int(round(frac * det.min_edge))
+        for i in range(k):
+            for j in range(k, n):
+                det.shared[i, j] = det.shared[j, i] = cross
+    det.per_cam_frames = np.full(n, frames, dtype=int)
+    det.per_cam_covis = np.full(n, frames * max(1, n - 1), dtype=int)
     det.glow = np.zeros(n)
     for i in glow_idx:
         det.glow[i] = 1.0
     det.grid_cells_hit = np.full(n, cells, dtype=int)
-    det.ready = (per_cam >= det.min_per_cam_shared
-                 and pair >= det.min_edge
-                 and cells >= det.MIN_GRID_CELLS)
+    det._update_ready()
     return det
 
 
-def shot_coverage_stages(board, n=6):
+def shot_coverage_stages(profile, n=6):
     from gui_app.widgets.coverage_graph import CoverageGraphWidget
+    # Fractions of the profile thresholds: 1.0 is the bar. Stage 3 has every
+    # per-camera figure satisfied but the cameras in two groups whose cross
+    # pairs sit at half the bar, so the caption reads "groups 2/1" and READY
+    # stays off however the thresholds are tuned: the state that cost a real
+    # nine-camera session.
     stages = [
-        ("calib_stage_1_start.png", dict(pair=0,   per_cam=0,   glow_idx=(),      cells=0)),
-        ("calib_stage_2_partial.png", dict(pair=25,  per_cam=60,  glow_idx=(0, 2),  cells=2)),
-        ("calib_stage_3_nearly.png", dict(pair=70,  per_cam=200, glow_idx=(4,),    cells=3,
-                                          weak=(0, 3, 20))),
-        ("calib_stage_4_ready.png", dict(pair=160, per_cam=260, glow_idx=(),      cells=4)),
+        ("calib_stage_1_start.png", dict(pair=0.0,  per_cam=0.0,  glow_idx=(),     cells=0)),
+        ("calib_stage_2_partial.png", dict(pair=0.6,  per_cam=0.5,  glow_idx=(0, 2), cells=2)),
+        ("calib_stage_3_nearly.png", dict(pair=1.75, per_cam=1.6,  glow_idx=(4,),   cells=3,
+                                          split=(n // 2, 0.5))),
+        ("calib_stage_4_ready.png", dict(pair=4.0,  per_cam=2.2,  glow_idx=(),     cells=4)),
     ]
     from PyQt5.QtWidgets import QWidget, QVBoxLayout
     print("coverage-graph stages:")
@@ -153,10 +191,14 @@ def shot_coverage_stages(board, n=6):
         lay.setContentsMargins(6, 6, 6, 6)
         w = CoverageGraphWidget()
         w.setup(n)
-        w.update_from(_detector(n, board, **kw))
+        det = _detector(n, profile, **kw)
+        w.update_from(det)
         lay.addWidget(w)
         holder.show(); QApplication.processEvents(); QApplication.processEvents()
         save(holder.grab(), name)
+        print(f"    paired {int(det.per_cam_frames.min())}/{det.min_per_cam_shared}"
+              f"  grid {int(det.grid_cells_hit.min())}/{det.MIN_GRID_CELLS}"
+              f"  groups {len(det.components)}/1  ready={det.ready}")
         holder.close()
 
 
@@ -210,16 +252,20 @@ def shot_stim_window(profile):
         get_fps=lambda: profile.frame_rate,
         get_safe_pins=lambda: profile.stim_safe_pins,
         get_trigger_pins=lambda: profile.trigger_pins)
-    # A two-step chain that loops: the shape most paradigms start from.
+    # A two-step chain that loops: the shape most paradigms start from. The
+    # illustrated pin is the profile's first safe pin (the laser on 3dpose);
+    # gui_app is shared with other rigs, so no pin is hardcoded here.
+    pins = list(getattr(profile, "stim_safe_pins", None) or [])
+    pin = int(pins[0]) if pins else 53
     blocks = [
-        {"id": "a", "x": 40,  "y": 40, "pin": 53, "freq": 10.0, "pw": 10.0,
+        {"id": "a", "x": 40,  "y": 40, "pin": pin, "freq": 10.0, "pw": 10.0,
          "dur": 5.0, "start": True,  "end": False},
-        {"id": "b", "x": 260, "y": 40, "pin": 53, "freq": 0.0, "pw": 10.0,
+        {"id": "b", "x": 260, "y": 40, "pin": pin, "freq": 0.0, "pw": 10.0,
          "dur": 10.0, "start": False, "end": False},
     ]
     edges = [{"src": "a", "dst": "b"}, {"src": "b", "dst": "a"}]
     win._canvas.load_workflow(blocks, edges)
-    win._f_pin.setText("53"); win._f_freq.setText("10")
+    win._f_pin.setText(str(pin)); win._f_freq.setText("10")
     win._f_pw.setText("10");  win._f_dur.setText("5")
     win._update_preview()
     win._status_lbl.setText("2 blocks · 1 chain · loops")
@@ -270,61 +316,95 @@ MAIN_TARGETS = [
 ]
 
 
-def shot_main_window(app):
+def shot_main_window(app, wait_s):
     from gui_app.main_window import MainWindow
     win = MainWindow()
     win.resize(1600, 950)
     win.show()
 
-    def finish():
-        print("main window:")
-        save(win.grab(), "main_idle.png")          # clean, for the workflow page
-        win._sidebar.show_coverage()
-        win._sidebar.update_coverage(
-            _detector(max(win._camera_mgr.num_cameras, 6),
-                      win._profile.board_config, pair=140, per_cam=190,
-                      glow_idx=(1, 4), cells=4, weak=(0, 3, 35)))
-        win._sidebar.show_progress(3, 6, "Encoding")
-        win.statusBar().showMessage(
-            "Capture healthy — keeping up with the trigger (max lag 3 ms)")
-        QApplication.processEvents()
-        pix, missing = draw_callouts(
-            win, MAIN_TARGETS, column_from=lambda w: w._sidebar)
-        save(pix, "ui_annotated.png")
-        if missing:
-            print(f"  not visible, unlabelled: {missing}")
+    def teardown():
+        # Always runs, even when the screenshot code raises: an exception in a
+        # QTimer callback would otherwise leave the event loop running with
+        # every camera and the serial port open.
         try:
             win._camera_mgr.close_all()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  close_all failed: {e}")
         try:
             if win._teensy is not None and win._teensy.is_open:
                 win._teensy.stop_triggers(win._profile.trigger_pins)
                 win._teensy.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  trigger board teardown failed: {e}")
         app.quit()
 
-    # Enough for the startup firmware check plus preview frames, so the panes
-    # show live video rather than black.
-    QTimer.singleShot(50_000, finish)
+    def finish():
+        try:
+            print("main window:")
+            save(win.grab(), "main_idle.png")          # clean, for the workflow page
+            win._sidebar.show_coverage()
+            # A six-node ring at minimum: with fewer cameras the illustrated
+            # graph degenerates and the callouts have nothing to point at.
+            win._sidebar.update_coverage(
+                _detector(max(win._camera_mgr.num_cameras, 6), win._profile,
+                          pair=3.5, per_cam=1.6, glow_idx=(1, 4), cells=4,
+                          weak=(0, 3, 0.9)))
+            win._sidebar.show_progress(3, 6, "Encoding")
+            win.statusBar().showMessage(
+                "Capture healthy — keeping up with the trigger (max lag 3 ms)")
+            QApplication.processEvents()
+            pix, missing = draw_callouts(
+                win, MAIN_TARGETS, column_from=lambda w: w._sidebar)
+            save(pix, "ui_annotated.png")
+            if missing:
+                print(f"  not visible, unlabelled: {missing}")
+        finally:
+            teardown()
+
+    # Long enough for the startup firmware check plus preview frames, so the
+    # panes show live video rather than black.
+    QTimer.singleShot(int(wait_s * 1000), finish)
     app.exec_()
 
 
-def main():
-    what = sys.argv[1] if len(sys.argv) > 1 else "all"
-    app = QApplication(sys.argv[:1])
+def load_profile(stem):
+    """The RigProfile with this stem, or exit 1 listing the ones that exist."""
     from gui_app.session_config import RigProfile
-    profile = next(RigProfile.load(p) for p in RigProfile.list_profiles()
-                   if p.stem == "3dpose")
+    paths = list(RigProfile.list_profiles())
+    for p in paths:
+        if p.stem == stem:
+            return RigProfile.load(p)
+    print(f"profile '{stem}' not found; available: "
+          f"{', '.join(sorted(p.stem for p in paths)) or '(none)'}",
+          file=sys.stderr)
+    sys.exit(1)
 
-    if what in ("all", "widgets"):
-        shot_coverage_stages(profile.board_config)
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(
+        description="Generate the screenshots used by the documentation.")
+    ap.add_argument("what", nargs="?", default="all",
+                    choices=("all", "widgets", "stim", "main"))
+    ap.add_argument("--profile", default="3dpose",
+                    help="rig profile stem to illustrate (default 3dpose)")
+    ap.add_argument("--wait-s", type=float, default=50.0,
+                    help="seconds the main window runs before its screenshot "
+                         "(default 50)")
+    return ap.parse_args(argv)
+
+
+def main():
+    args = parse_args(sys.argv[1:])
+    app = QApplication(sys.argv[:1])
+    profile = load_profile(args.profile)
+
+    if args.what in ("all", "widgets"):
+        shot_coverage_stages(profile)
         shot_waveforms()
-    if what in ("all", "stim"):
+    if args.what in ("all", "stim"):
         shot_stim_window(profile)
-    if what in ("all", "main"):
-        shot_main_window(app)     # runs its own event loop, exits at the end
+    if args.what in ("all", "main"):
+        shot_main_window(app, args.wait_s)   # runs its own event loop, exits at the end
     print("done")
 
 
