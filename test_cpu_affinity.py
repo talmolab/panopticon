@@ -274,6 +274,49 @@ check(n, "import without pypylon raises ImportError naming pypylon and camera_ba
       and "camera_backend" in msg and r.returncode == 0,
       msg[:120] + (" | stderr: " + r.stderr.strip()[-200:] if r.stderr.strip() else ""))
 
+# ===========================================================================
+# set_freerun: select FrameStart before disarming the trigger (A3-11)
+# ===========================================================================
+
+def _freerun_cam(symbolics):
+    return StubCamera({
+        "TriggerSelector": StubNode("AcquisitionStart", symbolics=symbolics),
+        "TriggerMode": StubNode("On"),
+        "AcquisitionFrameRateEnable": StubNode(False),
+        "AcquisitionFrameRate": StubNode(0.0),
+    })
+
+
+# 10 -- the selector is written BEFORE TriggerMode Off, on a camera whose
+#       .pfs left another selector active.
+n += 1
+cam = _freerun_cam(symbolics=None)
+B().set_freerun(cam, 30.0)
+sets = [c for c in cam.calls if c[0] in ("TriggerSelector", "TriggerMode")]
+check(n, "set_freerun selects FrameStart before writing TriggerMode Off",
+      sets[:2] == [("TriggerSelector", "FrameStart"), ("TriggerMode", "Off")]
+      and cam._nodes["TriggerSelector"].value == "FrameStart"
+      and cam._nodes["AcquisitionFrameRate"].value == 30.0, str(sets))
+
+# 11 -- other selectors the camera offers are disarmed too, and the selector
+#       ends on FrameStart so set_triggered and the .pfs agree afterwards.
+n += 1
+cam = _freerun_cam(symbolics=("FrameStart", "AcquisitionStart", "ExposureActive"))
+B().set_freerun(cam, 30.0)
+sets = [c for c in cam.calls if c[0] in ("TriggerSelector", "TriggerMode")]
+check(n, "offered AcquisitionStart trigger is disarmed, selector left on FrameStart",
+      sets == [("TriggerSelector", "FrameStart"), ("TriggerMode", "Off"),
+               ("TriggerSelector", "AcquisitionStart"), ("TriggerMode", "Off"),
+               ("TriggerSelector", "FrameStart")], str(sets))
+
+# 12 -- a selector the camera does not offer is never written (it would raise).
+n += 1
+cam = _freerun_cam(symbolics=("FrameStart", "FrameBurstStart"))
+B().set_freerun(cam, 30.0)
+written = {c[1] for c in cam.calls if len(c) == 2 and c[0] == "TriggerSelector"}
+check(n, "only offered selectors are written",
+      written == {"FrameStart", "FrameBurstStart"}, str(written))
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): " + ", ".join(failures))

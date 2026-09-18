@@ -149,15 +149,59 @@ class BaslerBackend:
             print(f"[cam{i+1}] GigE driver selection skipped: {e}", flush=True)
 
     # ------------------------------------------------------------------- modes
+    #: Trigger selectors other than FrameStart that a .pfs may have armed.
+    #: Each is switched Off when the camera offers it, because any armed
+    #: trigger gates free-run just as FrameStart does.
+    OTHER_TRIGGER_SELECTORS = ("AcquisitionStart", "FrameBurstStart")
+
     def set_freerun(self, cam, fps: float = 30.0) -> None:
-        """Untriggered preview mode."""
+        """Untriggered preview mode.
+
+        TriggerMode is a per-selector value, so the selector is set to
+        FrameStart BEFORE TriggerMode is written (mirroring set_triggered).
+        Writing TriggerMode Off against whatever selector the .pfs left active
+        would leave FrameStart armed on a .pfs saved with another selector, and
+        the preview would then wait for a trigger that never comes: no frames,
+        no error. The other selectors the camera offers are disarmed as well,
+        best effort, and the selector is left on FrameStart.
+        """
         try:
             cam.StopGrabbing()
         except Exception:
             pass
+        cam.TriggerSelector.SetValue("FrameStart")
         cam.TriggerMode.SetValue("Off")
+        for sel in self._other_trigger_selectors(cam):
+            try:
+                cam.TriggerSelector.SetValue(sel)
+                cam.TriggerMode.SetValue("Off")
+            except Exception as e:
+                print(f"[cam] trigger selector {sel} could not be disarmed: {e}",
+                      flush=True)
+        cam.TriggerSelector.SetValue("FrameStart")
         cam.AcquisitionFrameRateEnable.SetValue(True)
         cam.AcquisitionFrameRate.SetValue(float(fps))
+
+    @classmethod
+    def _other_trigger_selectors(cls, cam) -> list:
+        """OTHER_TRIGGER_SELECTORS entries this camera's TriggerSelector offers.
+
+        The enumeration's symbolic list is consulted so a selector the camera
+        lacks is never written (which would raise). A camera that does not
+        publish the list yields nothing, keeping the FrameStart path the only
+        one that can fail.
+        """
+        try:
+            node = cam.GetNodeMap().GetNode("TriggerSelector")
+            if node is None:
+                return []
+            syms = getattr(node, "Symbolics", None)
+            if syms is None and hasattr(node, "GetSymbolics"):
+                syms = node.GetSymbolics()
+            offered = set(syms or ())
+        except Exception:
+            return []
+        return [s for s in cls.OTHER_TRIGGER_SELECTORS if s in offered]
 
     def set_triggered(self, cam, rate_limit: float = 165.0,
                       announce: bool = False) -> None:
