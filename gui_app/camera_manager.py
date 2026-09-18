@@ -391,9 +391,9 @@ class CameraManager(QObject):
                         gev_bandwidth_reserve_accum)
                     print(f"[cam{i+1}] bandwidth reserve {applied}", flush=True)
             except Exception as e:
-                # Don't continue with a partial set: camera names are assigned by
-                # serial-number order, so a missing camera would silently shift
-                # every later camera's name and mislabel the recorded data.
+                # Never continue with a partial set: names are positional,
+                # so a camera missing from the middle shifts every later
+                # name and mislabels the recorded data.
                 self.close_all()
                 return self._open_failed(
                     f"Camera {dev.GetSerialNumber()} failed to open/configure:\n{e}\n\n"
