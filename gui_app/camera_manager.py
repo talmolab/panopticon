@@ -38,6 +38,23 @@ class AcquisitionStopIncomplete(RuntimeError):
         self.stuck = stuck
 
 
+class CameraOpenError(RuntimeError):
+    """Why open_all refused - RETURNED rather than raised.
+
+    open_all is called from a Qt slot and from the headless probes, both of
+    which branch on its result, so the reason travels as a value. Two
+    properties make that safe:
+      - it is FALSY, so `if not mgr.open_all(...)` still reads as failure;
+      - it is an Exception, so a caller can tell a failure that has already
+        been reported with a specific message from a plain "nothing was
+        opened", and show ONE dialog instead of a specific one followed by a
+        generic one that contradicts it.
+    """
+
+    def __bool__(self) -> bool:
+        return False
+
+
 class AcquisitionStartRefused(RuntimeError):
     """start_acquisition() could not put every camera into the requested state.
 
@@ -78,6 +95,10 @@ class CameraManager(QObject):
         self._geometry = None      # (w, h) agreed by every camera
         #: (exposure_us, gain_db) per camera as loaded from the .pfs.
         self._baseline_exp_gain: list = []
+        #: Why the last open_all refused, or None after one that succeeded.
+        #: The same string the `error` signal carried, kept so a caller that
+        #: reads the return value never has to also listen to the signal.
+        self.last_open_error = None
         #: Problems found while finalising the last recording (retired cameras,
         #: block-ID truncation). Read by the GUI after stop_acquisition().
         self.last_warnings: list = []
@@ -177,6 +198,18 @@ class CameraManager(QObject):
         for gt in self._grab_threads:
             gt.set_keep_full(flag)
 
+    def _open_failed(self, message: str) -> CameraOpenError:
+        """Report an open failure once, and return it.
+
+        RULE: every open_all failure path goes through here. The message is
+        emitted on `error` for a caller wired to the signal, kept on
+        last_open_error, and returned, so the reason exists in exactly one
+        form no matter which of the three a caller reads.
+        """
+        self.last_open_error = message
+        self.error.emit(message)
+        return CameraOpenError(message)
+
     def open_all(self, pfs_path: str, gige_driver: str = "socket",
                  trigger_rate_limit: float = 165.0, expect_cameras: int = 0,
                  max_num_buffer: int = MAX_NUM_BUFFER,
@@ -218,10 +251,15 @@ class CameraManager(QObject):
         gev_bandwidth_reserve_pct / gev_bandwidth_reserve_accum: GevSCBWR and
         GevSCBWRA, written through the backend at open when not None. They
         hold bandwidth back for packet resends, which lowers the assigned
-        bandwidth every camera gets, so they are opt-in per profile."""
+        bandwidth every camera gets, so they are opt-in per profile.
+
+        Returns True when every camera opened, or a falsy CameraOpenError
+        carrying the reason (which is also emitted on `error` and left on
+        last_open_error)."""
         self._trigger_rate_limit = trigger_rate_limit
         self._max_num_buffer = int(max_num_buffer)
         self._baseline_exp_gain = []
+        self.last_open_error = None
         # The agreed geometry describes the camera set THIS call opens. A value
         # left over from a previous profile makes every camera of a
         # different-resolution rig fail against a rig that is no longer open,
@@ -231,8 +269,7 @@ class CameraManager(QObject):
             self._backend = load_backend(backend)
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
-            self.error.emit("No cameras found")
-            return False
+            return self._open_failed("No cameras found")
 
         # Camera names are positional (`cam{i+1}`) and every extrinsic in
         # calibration.toml attaches to a name, so a device that shifts a
@@ -256,13 +293,12 @@ class CameraManager(QObject):
             if missing:
                 names = ", ".join(f"cam{want.index(x) + 1} ({x})"
                                   for x in missing)
-                self.error.emit(
+                return self._open_failed(
                     f"Requested cameras did not enumerate: {names}\n\n"
                     f"They are named by their position in the profile's "
                     f"camera_serials, so opening without them would leave "
                     f"those names unrecorded. Power-cycle them and reselect "
                     f"the profile.")
-                return False
             extra = [x for x in sorted(by_serial) if x not in set(want)]
             if extra:
                 # Ignored rather than refused: an unlisted device cannot take
@@ -280,14 +316,13 @@ class CameraManager(QObject):
         # is not one of them, and a multi-process split opens its own share.
         if expect_cameras and len(sorted_devs) != expect_cameras:
             found = ", ".join(sorted(d.GetSerialNumber() for d in devices))
-            self.error.emit(
+            return self._open_failed(
                 f"Expected {expect_cameras} cameras but {len(sorted_devs)} "
                 f"are available to open.\n\nEnumerated: {found}\n\n"
                 f"Camera names are positional, so starting with a missing "
                 f"camera would rename every camera after it and attach the "
                 f"calibration extrinsics to the wrong physical cameras. "
                 f"Power-cycle the missing camera and reselect the profile.")
-            return False
 
         for i, dev in enumerate(sorted_devs):
             try:
@@ -357,10 +392,9 @@ class CameraManager(QObject):
                 # serial-number order, so a missing camera would silently shift
                 # every later camera's name and mislabel the recorded data.
                 self.close_all()
-                self.error.emit(
+                return self._open_failed(
                     f"Camera {dev.GetSerialNumber()} failed to open/configure:\n{e}\n\n"
                     "Power-cycle it (or close the app holding it) and reselect the profile.")
-                return False
 
         self._set_freerun_mode()
         self._start_grab_threads()

@@ -283,6 +283,25 @@ opened(m11)
 check("a profile that sets no reserve leaves the knobs alone",
       b11.bandwidth_calls == [], str(b11.bandwidth_calls))
 
+# --- what open_all returns ---------------------------------------------------
+b18 = rig()
+m18 = manager(b18)
+ok18, _ = opened(m18, expect_cameras=9)
+check("a reported failure comes back as the reason, not a bare False",
+      isinstance(ok18, cm.CameraOpenError) and "Expected 9" in str(ok18),
+      repr(ok18))
+check("the reason is falsy, so `if not mgr.open_all(...)` still reads as "
+      "failure", not ok18 and ok18 is not False, repr(ok18))
+check("a caller can tell an already-reported failure from nothing to open",
+      isinstance(ok18, Exception))
+check("the same reason is on last_open_error and was emitted once",
+      m18.last_open_error == str(ok18) and m18.errors == [str(ok18)],
+      f"{m18.last_open_error!r} {m18.errors!r}")
+
+ok19, _ = opened(m18, expect_cameras=3)
+check("a later success clears last_open_error",
+      ok19 is True and m18.last_open_error is None, repr(m18.last_open_error))
+
 # --- exposure and gain ------------------------------------------------------
 def exposures(mgr, *args, **kwargs):
     """apply_exposure_gain with its log captured; returns the log."""
