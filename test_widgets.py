@@ -532,6 +532,33 @@ def test_thumb_follows_silent_state_changes():
     tog.close()
 
 
+# --------------------------------------------------------------------------
+# A5-05: the output directory is elided to the button width, never clipped.
+# --------------------------------------------------------------------------
+def test_output_dir_is_elided_to_fit_the_button():
+    long_path = r"C:\a\b\c\some_very_long_project_folder_name\with_another_long_leaf_folder_name"
+    with _profiles_dir({"one.yaml": GOOD_PROFILE}):
+        sb = SidebarWidget(default_output_dir=long_path)
+        sb.show()
+        app.processEvents()
+    btn = sb._dir_button
+    text = btn.text()
+    check("long path is shortened", len(text) < len(long_path), text)
+    check("elided text carries an ellipsis", "\u2026" in text, text)
+    head, tail = text.split("…")
+    check("elided text keeps the start and the end of the path",
+          long_path.startswith(head) and long_path.endswith(tail) and head.startswith("C:\\"), text)
+    check("elided text fits inside the button",
+          btn.fontMetrics().horizontalAdvance(text) <= btn.width(),
+          f"{btn.fontMetrics().horizontalAdvance(text)} > {btn.width()}")
+    check("tooltip carries the full path", btn.toolTip() == long_path)
+    check("output_dir property is the full path", sb.output_dir == long_path)
+
+    sb._set_output_dir(r"C:\short")
+    check("a short path is shown whole", btn.text() == r"C:\short", btn.text())
+    sb.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -553,6 +580,7 @@ def main():
     test_untouched_date_refreshes_on_read()
     test_metadata_defaults_prefill_from_profile()
     test_thumb_follows_silent_state_changes()
+    test_output_dir_is_elided_to_fit_the_button()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)

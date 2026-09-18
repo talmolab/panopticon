@@ -1,6 +1,5 @@
 """Sidebar widget with session parameters, toggle switches, progress bar, and status."""
 from datetime import datetime
-from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QLabel,
     QProgressBar, QFrame, QPushButton, QFileDialog, QSlider, QComboBox,
@@ -84,14 +83,14 @@ class SidebarWidget(QWidget):
         layout.addWidget(sep)
 
         self._output_dir = default_output_dir
-        self._dir_button = QPushButton(self._truncate_path(self._output_dir))
-        self._dir_button.setToolTip(self._output_dir)
+        self._dir_button = QPushButton()
         self._dir_button.setStyleSheet(
             "QPushButton { background: #1a1a2e; color: #88aadd; border: 1px solid #444; "
             "border-radius: 3px; padding: 5px 8px; font-size: 10px; text-align: left; }"
             "QPushButton:hover { border-color: #5078c8; background: #222244; }"
         )
         self._dir_button.clicked.connect(self._pick_output_dir)
+        self._set_output_dir(self._output_dir)
         layout.addWidget(self._dir_button)
 
         layout.addSpacing(4)
@@ -280,18 +279,36 @@ class SidebarWidget(QWidget):
         self._status.setStyleSheet("color: #888; border: none; padding: 4px;")
         layout.addWidget(self._status)
 
-    def _truncate_path(self, path: str, max_len: int = 32) -> str:
-        if len(path) <= max_len:
-            return path
-        parts = Path(path).parts
-        return str(Path(parts[0], "...", *parts[-2:]))
+    #: Horizontal room the button's stylesheet takes from its text: 8px of
+    #: padding and 1px of border on each side.
+    _DIR_BUTTON_CHROME = 18
+
+    def _set_output_dir(self, path: str):
+        self._output_dir = path
+        self._dir_button.setToolTip(path)
+        self._refresh_dir_text()
+
+    def _refresh_dir_text(self):
+        """Fit the output directory into the button by eliding its middle.
+
+        Eliding by measured width, not by character count, is what keeps the
+        drive and the last folder both readable at every path length; a
+        hand-rolled character cut cannot bound the width and QPushButton
+        clips overflow without an ellipsis. The tooltip carries the full path.
+        """
+        btn = self._dir_button
+        avail = max(40, btn.width() - self._DIR_BUTTON_CHROME)
+        btn.setText(btn.fontMetrics().elidedText(self._output_dir, Qt.ElideMiddle, avail))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # The button's final width is only known once laid out.
+        self._refresh_dir_text()
 
     def _pick_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Select Output Directory", self._output_dir)
         if d:
-            self._output_dir = d
-            self._dir_button.setText(self._truncate_path(d))
-            self._dir_button.setToolTip(d)
+            self._set_output_dir(d)
 
     @property
     def output_dir(self) -> str:
@@ -375,9 +392,7 @@ class SidebarWidget(QWidget):
         not discard what was entered for this session.
         """
         if profile.output_dir:
-            self._output_dir = profile.output_dir
-            self._dir_button.setText(self._truncate_path(self._output_dir))
-            self._dir_button.setToolTip(self._output_dir)
+            self._set_output_dir(profile.output_dir)
         for key, value in profile.metadata_defaults.items():
             field = self._fields.get(key)
             if field is not None and key not in self._user_edited:
