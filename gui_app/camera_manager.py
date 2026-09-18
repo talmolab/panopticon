@@ -101,6 +101,19 @@ class CameraManager(QObject):
         return len(self._cameras)
 
     @property
+    def geometry(self):
+        """(width, height) every open camera agreed on, or None when none are
+        open.
+
+        Read-only on purpose: the value is what the CAMERAS report, read back
+        after the .pfs was applied, and a caller that needs a different size
+        fixes the .pfs rather than this number. It is also what the profile's
+        frame_width/frame_height are checked against, because those two size
+        the NV12 ring and the raw decode.
+        """
+        return self._geometry
+
+    @property
     def latest_frames(self) -> list:
         return [gt.latest_frame for gt in self._grab_threads]
 
@@ -167,7 +180,8 @@ class CameraManager(QObject):
     def open_all(self, pfs_path: str, gige_driver: str = "socket",
                  trigger_rate_limit: float = 165.0, expect_cameras: int = 0,
                  max_num_buffer: int = MAX_NUM_BUFFER,
-                 only_serials=None, backend: str | None = None):
+                 only_serials=None, backend: str | None = None,
+                 expect_geometry=None):
         """trigger_rate_limit: AcquisitionFrameRate to apply in trigger mode, or
         0 to disable the limiter altogether — see _set_trigger_mode.
 
@@ -182,10 +196,24 @@ class CameraManager(QObject):
         max_num_buffer: driver-side buffers per camera. Comes from the profile
         so a rig can trade pool depth against RAM; MAX_NUM_BUFFER is the default
         for callers that do not care. The capacity preflight must be given the
-        SAME value or it will refuse (or permit) the wrong recordings."""
+        SAME value or it will refuse (or permit) the wrong recordings.
+
+        expect_geometry: the profile's (frame_width, frame_height), or None to
+        accept whatever the cameras report. A camera whose ROI differs refuses
+        the open, because those two numbers size the NV12 ring and the raw
+        decode: in real-time mode the per-frame copy raises and the camera is
+        retired, and in raw mode ffmpeg decodes the camera's bytes at the
+        profile's size, which shears a full-length recording with no error
+        anywhere. Refusing at open costs a dialog; not refusing costs the
+        session."""
         self._trigger_rate_limit = trigger_rate_limit
         self._max_num_buffer = int(max_num_buffer)
         self._baseline_exp_gain = []
+        # The agreed geometry describes the camera set THIS call opens. A value
+        # left over from a previous profile makes every camera of a
+        # different-resolution rig fail against a rig that is no longer open,
+        # and the message blames camera 1 of the rig being opened.
+        self._geometry = None
         if backend is not None and backend != getattr(self._backend, "name", None):
             self._backend = load_backend(backend)
         devices = self._backend.enumerate_devices()
@@ -233,6 +261,11 @@ class CameraManager(QObject):
         for i, dev in enumerate(sorted_devs):
             try:
                 cam = self._backend.open(dev, pfs_path, self._max_num_buffer)
+                # Listed before it is configured, so the close_all below
+                # closes THIS camera too: a handle opened and then dropped is
+                # still held by this process, and the retry the error message
+                # asks for would find the camera busy.
+                self._cameras.append(cam)
                 # Read back what the .pfs actually applied. FeaturePersistence
                 # is loaded with validation disabled, and CLAUDE.md tells users
                 # to edit the .pfs in pylon Viewer — where ROI and pixel format
@@ -252,6 +285,13 @@ class CameraManager(QObject):
                         f"PixelFormat is {pf}, not Mono8. The capture path "
                         f"assumes 8-bit; anything wider is silently truncated "
                         f"mod 256. Fix the .pfs.")
+                if expect_geometry and (w, h) != tuple(expect_geometry):
+                    raise RuntimeError(
+                        f"resolution {w}x{h} differs from the profile's "
+                        f"{expect_geometry[0]}x{expect_geometry[1]}. Those two "
+                        f"numbers size the NV12 ring and the raw decode, so a "
+                        f"session recorded at this ROI is sheared or empty. "
+                        f"Fix the .pfs (or the profile) so they agree.")
                 if self._geometry and (w, h) != self._geometry:
                     raise RuntimeError(
                         f"resolution {w}x{h} differs from camera 1 "
@@ -276,7 +316,6 @@ class CameraManager(QObject):
                     f"Camera {dev.GetSerialNumber()} failed to open/configure:\n{e}\n\n"
                     "Power-cycle it (or close the app holding it) and reselect the profile.")
                 return False
-            self._cameras.append(cam)
 
         self._set_freerun_mode()
         self._start_grab_threads()
@@ -443,6 +482,19 @@ class CameraManager(QObject):
                           realtime_kick: bool = False,
                           kick_max_lag: int = 240,
                           exposure_us=None, gain_db=None):
+        # Refused BEFORE anything is stopped or reconfigured, so the cameras
+        # stay in preview and the operator can fix the .pfs and start again:
+        # width/height size the NV12 ring and the raw decode, so a
+        # disagreement with the cameras' ROI retires every camera (real-time)
+        # or shears a full-length recording (raw). Both waste the session.
+        if (self._geometry and width and height
+                and (int(width), int(height)) != self._geometry):
+            raise AcquisitionStartRefused(
+                f"The profile records {int(width)}x{int(height)} but the "
+                f"cameras are configured for {self._geometry[0]}x"
+                f"{self._geometry[1]}. Nothing was recorded and the cameras "
+                f"are still in preview: fix the .pfs (or the profile) so they "
+                f"agree.")
         # Grab threads first, router second: the previous session's kick-mode
         # threads submit() to the router until they exit and retire() through
         # it from their finally blocks, so the router must outlive them.
@@ -684,6 +736,8 @@ class CameraManager(QObject):
             except Exception:
                 pass
         self._cameras.clear()
+        # Geometry belongs to the open camera set; see open_all.
+        self._geometry = None
 
     def abandon(self):
         """Tear down capture immediately, WITHOUT draining encoders (app quit
@@ -733,3 +787,5 @@ class CameraManager(QObject):
             except Exception:
                 pass
         self._cameras.clear()
+        # Geometry belongs to the open camera set; see open_all.
+        self._geometry = None
