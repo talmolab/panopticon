@@ -863,8 +863,11 @@ class WaveformPreview(QWidget):
 class _UploadWorker(QThread):
     done = pyqtSignal(bool, str)
 
-    def __init__(self, ino: str, port: str):
-        super().__init__()
+    def __init__(self, ino: str, port: str, parent=None):
+        # Parented to the window so the QThread is owned by Qt, not by the
+        # single Python reference the done slot drops; a QThread destroyed
+        # while its thread is still winding down aborts the process.
+        super().__init__(parent)
         self.ino = ino          # kept so the window can record what got flashed
         self._port = port
 
@@ -906,6 +909,11 @@ def _lbl(text, color="#aaa"):
 
 
 class StimulationWindow(QDialog):
+    #: True when an Apply starts flashing the board, False when it finishes
+    #: either way. The main window listens so it can grey out Record and
+    #: Calibrate for the flash, the same as for its own firmware operations.
+    uploading_changed = pyqtSignal(bool)
+
     def __init__(self, get_port: Callable[[], str],
                  get_output_dir: Callable[[], str],
                  get_fps: Callable[[], int] = lambda: 100,
@@ -1278,6 +1286,12 @@ class StimulationWindow(QDialog):
         - A forbidden or contested pin: a stim waveform on a camera trigger
           line breaks the block-ID identity every downstream consumer assumes.
         """
+        if self.is_uploading():
+            return ("A firmware upload is in progress (~30 s). Wait for it to "
+                    "finish.\n\narduino-cli holds the board's serial port until "
+                    "the flash completes; starting an acquisition now cannot "
+                    "open the port and a second flash on the same port would "
+                    "leave the board in an unknown state.")
         if self._apply_failed:
             return ("The last Apply FAILED, so the board does not carry this "
                     "paradigm.\n\nRecording now would produce a session "
@@ -1464,16 +1478,24 @@ class StimulationWindow(QDialog):
         # arduino-cli needs the serial port to itself. NOT reopened lazily —
         # _on_upload_done retakes it immediately; see the comment there.
         self._release_serial()
-        self._upload_worker = _UploadWorker(ino, self._get_port())
+        self._upload_worker = _UploadWorker(ino, self._get_port(), parent=self)
         self._upload_worker.done.connect(self._on_upload_done)
         self._upload_worker.start()
+        self.uploading_changed.emit(True)
 
     @pyqtSlot(bool, str)
     def _on_upload_done(self, ok: bool, msg: str):
         self._apply_btn.setEnabled(True)
         self._test_btn.setEnabled(True)
-        ino = getattr(self._upload_worker, "ino", None)
-        self._upload_worker = None
+        worker, self._upload_worker = self._upload_worker, None
+        ino = getattr(worker, "ino", None)
+        if worker is not None:
+            # done is emitted from inside run(), so the thread is still
+            # winding down when this slot runs; wait for it before the object
+            # can be collected, because destroying a running QThread aborts.
+            worker.wait()
+            worker.deleteLater()
+        self.uploading_changed.emit(False)
         if not ok:
             self._test_after_upload = False
             self._apply_failed = True
