@@ -283,6 +283,102 @@ opened(m11)
 check("a profile that sets no reserve leaves the knobs alone",
       b11.bandwidth_calls == [], str(b11.bandwidth_calls))
 
+# --- exposure and gain ------------------------------------------------------
+def exposures(mgr, *args, **kwargs):
+    """apply_exposure_gain with its log captured; returns the log."""
+    out = io.StringIO()
+    with redirect_stdout(out):
+        mgr.apply_exposure_gain(*args, **kwargs)
+    return out.getvalue()
+
+
+b12 = rig()
+m12 = manager(b12)
+opened(m12, trigger_rate_limit=165.0)
+log12 = exposures(m12, 100)
+check("every camera's applied exposure and gain is logged, not just cam1's",
+      [f"[cam{i+1}] exposure=" in log12 for i in range(3)] == [True] * 3,
+      log12)
+check("the .pfs baseline is what a recording restores",
+      [c[1:3] for c in b12.exposure_calls] == [(3000.0, 6.0)] * 3,
+      str(b12.exposure_calls))
+check("no gain unit is stated for the baseline restore, which writes the "
+      "node's own reading back", all(c[3] is None
+                                     for c in b12.exposure_calls),
+      str(b12.exposure_calls))
+check("a clean apply adds no warnings", m12.last_warnings == [],
+      str(m12.last_warnings))
+
+b13 = rig()
+m13 = manager(b13)
+opened(m13, trigger_rate_limit=165.0)
+log13 = exposures(m13, 100, exposure_us=15000.0, gain_db=6.0)
+check("a calibration gain from the profile is passed as dB, so a raw-gain "
+      "camera is refused rather than written 6 steps",
+      all(c[3] == "dB" for c in b13.exposure_calls), str(b13.exposure_calls))
+check("an exposure over the ceiling is clamped and says so",
+      "CLAMPED from 15000 us" in log13
+      and all(c[1] < 15000.0 for c in b13.exposure_calls), log13)
+
+b14 = rig()
+m14 = manager(b14)
+opened(m14, trigger_rate_limit=0.0)
+log14 = exposures(m14, 100)
+check("with the limiter disabled the log says so instead of quoting 165",
+      "limiter disabled" in log14 and "AcquisitionFrameRate=165" not in log14,
+      log14)
+check("the ceiling with no limiter is the trigger period less 10%",
+      "ceiling 9000 us" in log14, log14)
+
+b15 = rig()
+m15 = manager(b15)
+opened(m15, trigger_rate_limit=100.0)
+log15 = exposures(m15, 100, exposure_us=3000.0)
+check("a frame rate at the limiter does not raise inside the Qt slot",
+      isinstance(log15, str))
+check("and it does not clamp the exposure to a non-positive ceiling",
+      all(c[1] == 3000.0 for c in b15.exposure_calls),
+      str(b15.exposure_calls))
+check("it is recorded as a warning instead",
+      any("skips triggers" in w for w in m15.last_warnings),
+      str(m15.last_warnings))
+
+b16 = rig()
+b16.applied["21111112"] = (None, None)          # no such control
+b16.applied["21111113"] = (500.0, 6.0)          # the node clamped it
+m16 = manager(b16)
+opened(m16, trigger_rate_limit=165.0)
+exposures(m16, 100, exposure_us=3000.0)
+check("a camera that reports no exposure control is named in last_warnings",
+      any("cam2" in w and "no such control" in w for w in m16.last_warnings),
+      str(m16.last_warnings))
+check("a camera whose node clamped the value is named too",
+      any("cam3" in w and "500" in w for w in m16.last_warnings),
+      str(m16.last_warnings))
+check("the camera that took the value is not warned about",
+      not any("cam1" in w for w in m16.last_warnings),
+      str(m16.last_warnings))
+
+b17 = rig()
+b17.exposure_error = RuntimeError("AccessException: node is locked")
+m17 = manager(b17)
+opened(m17, trigger_rate_limit=165.0)
+exposures(m17, 100, exposure_us=3000.0)
+check("a write that raises is recorded per camera rather than ending the "
+      "apply", len(m17.last_warnings) == 3
+      and all("AccessException" in w for w in m17.last_warnings),
+      str(m17.last_warnings))
+
+m17.last_warnings = ["cam1: exposure was not applied"]
+m17._grab_threads = []
+out = io.StringIO()
+with redirect_stdout(out):
+    m17.stop_acquisition()
+check("stop_acquisition keeps the start-time exposure warnings, which are "
+      "what WARNINGS.txt is written from",
+      m17.last_warnings == ["cam1: exposure was not applied"],
+      str(m17.last_warnings))
+
 # --- rig_setup --------------------------------------------------------------
 
 

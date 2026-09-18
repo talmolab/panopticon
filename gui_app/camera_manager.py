@@ -481,8 +481,8 @@ class CameraManager(QObject):
         This WRITES ExposureTime and Gain on every open camera, every time an
         acquisition starts. The .pfs remains the only SOURCE of a recording's
         values (nothing here writes back into the .pfs file), but the effective
-        exposure can be below what the .pfs says — read the `[cam1] exposure=...`
-        line rather than assuming.
+        exposure can be below what the .pfs says — read the `[camN]
+        exposure=...` line for that camera rather than assuming.
 
         Pass exposure_us=None (and gain_db=None) to RESTORE the .pfs baseline
         captured at open — which is what a recording does, so a
@@ -494,10 +494,46 @@ class CameraManager(QObject):
 
         The ceiling is computed and ENFORCED here rather than trusted to the
         profile, because exceeding it fails silently.
+
+        EVERY camera's applied exposure and gain is logged, and anything that
+        did not land - a control the camera does not implement, a value the
+        node clamped - is appended to last_warnings. A calibration exposure
+        left on one camera halves that camera's frame rate in the next
+        recording, and until that is recorded per camera the only evidence is
+        a rate-check warning after the session.
+
+        Never raises for a bad profile: a frame rate at or above the limiter
+        is refused by RigProfile.load, so it cannot reach this call inside a
+        Qt slot.
         """
-        limit = getattr(self, "_trigger_rate_limit", 165.0) or 165.0
-        # Period minus the camera's own post-exposure timer, with 10% margin.
-        ceiling_us = (1e6 / float(fps) - 1e6 / float(limit)) * 0.9
+        limit = float(getattr(self, "_trigger_rate_limit", 165.0) or 0.0)
+        if limit > 0:
+            # In trigger mode the frame-rate timer starts AFTER exposure ends,
+            # so the minimum interval is exposure + 1/limit.
+            ceiling_us = (1e6 / float(fps) - 1e6 / float(limit)) * 0.9
+            limiter = f"AcquisitionFrameRate={limit:g}"
+        else:
+            # RULE: report the limiter as disabled instead of substituting a
+            # default. _set_trigger_mode really did disable
+            # AcquisitionFrameRate, so the only bound left is the trigger
+            # period itself, and a log line quoting a limiter that is not
+            # running is worse than no line at all.
+            ceiling_us = (1e6 / float(fps)) * 0.9
+            limiter = "limiter disabled"
+        if ceiling_us <= 0:
+            # fps >= limit: no exposure fits the trigger period at all.
+            # RigProfile.load refuses that pairing, so reaching it means the
+            # numbers were set some other way; clamping to a non-positive
+            # ceiling would record at the sensor minimum and report success,
+            # when the real fault is that the camera skips triggers.
+            msg = (f"frame rate {fps:g} is at or above the trigger rate limit "
+                   f"{limit:g}: the camera skips triggers at this rate and no "
+                   f"exposure ceiling exists, so exposure is left as asked")
+            print(f"[acq] WARNING: {msg}", flush=True)
+            self.last_warnings.append(msg)
+            ceiling_us = None
+        ceiling_txt = ("none" if ceiling_us is None
+                       else f"{ceiling_us:.0f} us")
         for i, cam in enumerate(self._cameras):
             base_exp, base_gain = (self._baseline_exp_gain[i]
                                    if i < len(self._baseline_exp_gain)
@@ -505,21 +541,66 @@ class CameraManager(QObject):
             want_exp = base_exp if exposure_us is None else float(exposure_us)
             want_gain = base_gain if gain_db is None else float(gain_db)
             note = ""
-            if want_exp is not None and want_exp > ceiling_us:
+            if (ceiling_us is not None and want_exp is not None
+                    and want_exp > ceiling_us):
                 note = (f" CLAMPED from {want_exp:.0f} us: at {fps:g} fps with "
-                        f"AcquisitionFrameRate={limit:g} the ceiling is "
-                        f"{ceiling_us:.0f} us, and exceeding it would halve the "
-                        f"frame rate silently")
+                        f"{limiter} the ceiling is {ceiling_us:.0f} us, and "
+                        f"exceeding it would halve the frame rate silently")
                 want_exp = ceiling_us
+            # The unit is stated only for a value that came from the PROFILE,
+            # where gain is documented in dB: the backend then refuses a raw
+            # camera rather than writing 6 dB as 6 raw steps. The baseline
+            # restore writes back what the same node reported, so its unit is
+            # the node's by construction and stating one would refuse a
+            # legitimate raw-gain camera.
+            unit = {} if gain_db is None else {"gain_unit": "dB"}
             try:
-                exp, gain = self._backend.set_exposure_gain(cam, want_exp, want_gain)
-                if i == 0 or note:
-                    print(f"[cam{i+1}] exposure={exp if exp is None else f'{exp:.0f}'} us "
-                          f"gain={gain if gain is None else f'{gain:.1f}'} dB "
-                          f"(ceiling {ceiling_us:.0f} us at {fps:g} fps){note}",
-                          flush=True)
+                exp, gain = self._backend.set_exposure_gain(
+                    cam, want_exp, want_gain, **unit)
             except Exception as e:
+                msg = (f"cam{i+1}: exposure/gain was NOT applied "
+                       f"({type(e).__name__}: {e}); this camera is recording "
+                       f"at whatever the previous acquisition left")
                 print(f"[cam{i+1}] exposure/gain set failed: {e}", flush=True)
+                self.last_warnings.append(msg)
+                continue
+            # Every camera, every time (mandate M7): a value that lands on
+            # cam1 and not on cam5 is invisible otherwise, and cam5 then
+            # records at the wrong exposure with nothing in the log.
+            print(f"[cam{i+1}] exposure="
+                  f"{exp if exp is None else f'{exp:.0f}'} us gain="
+                  f"{gain if gain is None else f'{gain:.1f}'} "
+                  f"(ceiling {ceiling_txt} at {fps:g} fps, {limiter}){note}",
+                  flush=True)
+            self.last_warnings.extend(
+                self._exposure_gain_warnings(i, want_exp, want_gain, exp, gain))
+
+    @staticmethod
+    def _exposure_gain_warnings(i: int, want_exp, want_gain, exp, gain) -> list:
+        """Warnings for a camera whose exposure or gain did not land.
+
+        A read-back of None means the camera has no such control, and a
+        read-back further from the request than the node's own quantisation
+        can explain means the node clamped the value: the camera is recording
+        at something other than what was asked, which is exactly the silent
+        frame-rate halving the .pfs restore exists to prevent. The tolerance
+        is one unit or 1%, whichever is larger, because a node increment is
+        model-specific and a legitimate rounding must not read as a fault.
+        """
+        out = []
+        for label, want, got, unit, floor in (
+                ("exposure", want_exp, exp, " us", 1.0),
+                ("gain", want_gain, gain, "", 0.1)):
+            if want is None:
+                continue
+            if got is None:
+                out.append(f"cam{i+1}: {label} {want:g}{unit} was not applied "
+                           f"(the camera reports no such control)")
+            elif abs(float(got) - float(want)) > max(floor, 0.01 * abs(want)):
+                out.append(f"cam{i+1}: {label} was set to {float(got):g}{unit}, "
+                           f"not the {want:g}{unit} asked for (the camera "
+                           f"clamped it to its own range)")
+        return out
 
     def start_acquisition(self, raw_paths: list[Path], display_every: int = 10,
                           realtime: bool = False, width: int = 0, height: int = 0,
@@ -668,7 +749,12 @@ class CameraManager(QObject):
         end: the results are on the exception and on last_results, and the
         cameras are left untouched for abandon().
         """
-        warnings: list = []
+        # Seeded with what is already recorded, not emptied: the
+        # exposure/gain problems apply_exposure_gain found at start belong to
+        # THIS recording, and the session's WARNINGS.txt is written from this
+        # list. A camera that recorded at the wrong exposure is exactly what
+        # that file exists to show.
+        warnings: list = list(self.last_warnings)
         threads = self._grab_threads
         for gt in threads:
             gt.signal_triggers_stopped()
