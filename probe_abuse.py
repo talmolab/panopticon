@@ -5,7 +5,7 @@ and no hang. Run one at a time so camera/serial ownership is unambiguous.
 
     uv run probe_abuse.py --case list
     uv run probe_abuse.py --case rapid_toggle
-    uv run probe_abuse.py --case serial_stolen
+    uv run probe_abuse.py --case serial_exclusive
     uv run probe_abuse.py --case quit_midrecord
     uv run probe_abuse.py --case stim_tandem --stim data/test_stim/stim_config.json
 """
@@ -25,7 +25,8 @@ from gui_app.probe_guard import (add_force_argument,
 
 CASES = {
     "rapid_toggle": "flip Record on/off/on fast --- races the start and stop paths",
-    "serial_stolen": "another process grabs COM3 mid-recording",
+    "serial_exclusive": "a second handle on the trigger port mid-recording "
+                        "must be refused by Windows",
     "quit_midrecord": "close the window while recording (abandon path)",
     "stim_tandem": "upload a paradigm, then record with stim running",
 }
@@ -81,6 +82,32 @@ def main():
         QTimer.singleShot(45000, app.quit)
 
     # ---------------------------------------------------------------- cases
+    def preview_alive():
+        """True while every grab thread is running, i.e. the preview survived.
+
+        A GUI that ends the storm in IDLE with its grab threads gone is not
+        healthy, it is dead quietly, so the resting state is checked here and
+        not inferred from the absence of a hang.
+        """
+        threads = getattr(win._camera_mgr, "_grab_threads", [])
+        return bool(threads) and all(t.isRunning() for t in threads)
+
+    def settle_then(deadline, describe):
+        """Poll until the GUI is at rest, then judge it against the invariant.
+
+        ENCODING outlasts any fixed wait after a long recording, so a verdict
+        taken on a timer measures the wait, not the GUI.
+        """
+        st = win._state
+        at_rest = st == State.IDLE and not win._busy
+        if at_rest or time.perf_counter() > deadline:
+            alive = preview_alive()
+            finish(at_rest and alive,
+                   f"{describe}: state={st} busy={win._busy} "
+                   f"preview_threads_running={alive}")
+        else:
+            QTimer.singleShot(2000, lambda: settle_then(deadline, describe))
+
     def rapid_toggle():
         print("[abuse] Record ON", flush=True)
         win._sidebar._record_toggle.setChecked(True)
@@ -107,31 +134,55 @@ def main():
             print(f"[abuse] state after the storm: {st}", flush=True)
             if st == State.RECORDING:
                 win._sidebar._record_toggle.setChecked(False)
-                QTimer.singleShot(20000, lambda: finish(
-                    True, "survived; ended in a coherent state"))
-            else:
-                finish(st != State.IDLE or True,
-                       f"did not end up recording (state={st}); no hang")
+            # The storm passes only if the GUI comes back to a COHERENT
+            # resting state: IDLE, not busy, still previewing. "No hang" is
+            # not the contract -- a GUI wedged in a non-IDLE state with dead
+            # grab threads also fails to hang.
+            settle_then(time.perf_counter() + 180, "after the storm")
         QTimer.singleShot(int(args.seconds * 1000), later)
 
-    def serial_stolen():
+    def serial_exclusive():
+        """A second handle on the trigger port must be refused while the GUI
+        records, because a port two processes can write to is a port whose
+        pulse train nobody owns.
+
+        The case asserts exclusivity, which is what opening the port from this
+        process actually tests. Windows serial opens use share mode 0, so a
+        successful open here means the GUI released the port mid-recording --
+        a real fault, and the only outcome that fails this case.
+        """
         import serial
-        def steal():
-            print("[abuse] stealing COM3 from another handle", flush=True)
+        outcome = {"opened": None}
+
+        def second_handle():
+            port = win._profile.serial_port
+            print(f"[abuse] opening a second handle on {port}", flush=True)
             try:
-                s = serial.Serial(win._profile.serial_port, 115200, timeout=0.1)
-                print("[abuse] STOLE the port (GUI did not hold it exclusively)",
+                s = serial.Serial(port, 115200, timeout=0.1)
+                outcome["opened"] = True
+                print("[abuse] OPENED it: the GUI is not holding the port",
                       flush=True)
                 QTimer.singleShot(4000, s.close)
             except Exception as e:
-                print(f"[abuse] could not steal (GUI holds it): "
-                      f"{type(e).__name__}", flush=True)
+                outcome["opened"] = False
+                print(f"[abuse] refused, as it must be: {type(e).__name__}",
+                      flush=True)
         win._sidebar._record_toggle.setChecked(True)
-        QTimer.singleShot(12000, steal)
-        QTimer.singleShot(int(args.seconds * 1000), lambda: (
-            win._sidebar._record_toggle.setChecked(False),
-            QTimer.singleShot(20000, lambda: finish(
-                True, "no hang; see log for whether frames kept flowing"))))
+        QTimer.singleShot(12000, second_handle)
+
+        def done():
+            win._sidebar._record_toggle.setChecked(False)
+            if outcome["opened"] is None:
+                QTimer.singleShot(20000, lambda: finish(
+                    False, "the second open never ran"))
+            elif outcome["opened"]:
+                QTimer.singleShot(20000, lambda: finish(
+                    False, "a second process opened the trigger port while "
+                           "the GUI was recording"))
+            else:
+                settle_then(time.perf_counter() + 180,
+                            "port stayed exclusive; after the recording")
+        QTimer.singleShot(int(args.seconds * 1000), done)
 
     def quit_midrecord():
         win._sidebar._record_toggle.setChecked(True)
@@ -171,7 +222,7 @@ def main():
             sw._upload_worker.done.connect(after)
 
     QTimer.singleShot(6000, {"rapid_toggle": rapid_toggle,
-                             "serial_stolen": serial_stolen,
+                             "serial_exclusive": serial_exclusive,
                              "quit_midrecord": quit_midrecord,
                              "stim_tandem": stim_tandem}[args.case])
     # Hard backstop: never let an unattended case hang the machine.
