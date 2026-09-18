@@ -44,8 +44,8 @@ PASS/FAIL
   - If wall stays ~0.08 ms even at 17 competitors, GIL contention does not explain
     production and something else is going on -- go looking again.
 
-    uv run probe_gil_wait.py
-    uv run probe_gil_wait.py --gil-us 100,300,1000 --competitors 0,5,11,17
+    uv run tools/experiments/probe_gil_wait.py
+    uv run tools/experiments/probe_gil_wait.py --gil-us 100,300,1000 --competitors 0,5,11,17
 """
 import argparse
 import ctypes
@@ -57,6 +57,11 @@ from ctypes import wintypes
 from pathlib import Path
 
 import numpy as np
+
+#: The repository root, three levels up from tools/experiments/. Output is
+#: anchored to it, never to the working directory, so a run started from
+#: anywhere writes to one place.
+REPO = Path(__file__).resolve().parents[2]
 
 W, H = 1920, 1200
 NV12_H = H * 3 // 2
@@ -191,7 +196,8 @@ def main():
                     help="GIL-held us per competitor per 10 ms frame")
     ap.add_argument("--iters", type=int, default=400, help="copies in the measured thread")
     ap.add_argument("--ring", type=int, default=200)
-    ap.add_argument("--out", default="probe_out/gil_wait.json")
+    ap.add_argument("--out",
+                    default=str(REPO / "probe_out" / "gil_wait.json"))
     args = ap.parse_args()
 
     cps, _ = calibrate_cycles_per_s()

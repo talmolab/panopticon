@@ -22,8 +22,8 @@ Two measurements, because neither alone is conclusive:
 Run with the cameras free and the machine otherwise quiet -- analysis running
 alongside a measurement has invalidated a conclusion on this rig before.
 
-    uv run probe_release_gil.py                 # all cameras
-    uv run probe_release_gil.py --cams 1        # single-camera control
+    uv run tools/experiments/probe_release_gil.py                 # all cameras
+    uv run tools/experiments/probe_release_gil.py --cams 1        # single-camera control
 """
 from __future__ import annotations
 
@@ -36,7 +36,11 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+#: The repository root, three levels up from tools/experiments/. Output and
+#: imports are anchored to it, never to the working directory, so a run
+#: started from anywhere reads the same package and writes to one place.
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
 
 from gui_app.backends import load_backend
 from gui_app.probe_guard import (add_force_argument,

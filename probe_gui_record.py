@@ -50,7 +50,7 @@ def main():
     # session directory already holds data, and an unattended probe has nobody
     # to answer it: on 2026-09-14 two 600 s runs sat on that dialog forever and
     # were misread as an NVENC hang, until py-spy showed the main thread parked
-    # in QMessageBox.question at main_window.py:630. Leave no data behind and
+    # in MainWindow's overwrite QMessageBox.question. Leave no data behind and
     # the prompt cannot fire.
     if scratch.exists():
         import shutil

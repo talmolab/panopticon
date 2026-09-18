@@ -1,7 +1,7 @@
 """E3: verify a zero-copy replacement for `img = result.Array` on a real camera.
 
 WHY
-`grab_thread.py:339` does `img = result.Array`. pypylon's GetArray() ALLOCATES a fresh
+The grab loop's frame access used to be `img = result.Array`. pypylon's GetArray() ALLOCATES a fresh
 2.3 MB numpy array and memcpys the driver buffer into it -- and pypylon's `%nothread`
 list means that copy runs with the GIL HELD. Round-1 agent measurements on this rig, on
 one real 100 fps camera:
@@ -28,7 +28,7 @@ WHAT THIS CHECKS BEFORE THE HOT PATH IS EDITED
      fps, execution time (QueryThreadCycleTime) and wall time, so the choice is made on
      numbers rather than on the docstring.
 
-    uv run probe_zerocopy.py --seconds 12
+    uv run tools/experiments/probe_zerocopy.py --seconds 12
 """
 import argparse
 import ctypes
@@ -42,7 +42,10 @@ from pathlib import Path
 import numpy as np
 from pypylon import pylon
 
-REPO = Path(__file__).resolve().parent
+#: The repository root, three levels up from tools/experiments/. Output and
+#: imports are anchored to it, never to the working directory, so a run
+#: started from anywhere reads the same package and writes to one place.
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from gui_app.probe_guard import (add_force_argument,

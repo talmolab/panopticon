@@ -19,8 +19,8 @@ needs one authoritative coordinator publishing decisions to all workers (the
 frontier is nine int64s, so the channel is tiny) -- worth building only if the
 timing below justifies it.
 
-    uv run probe_multiproc.py --workers 3 --seconds 60
-    uv run probe_multiproc.py --workers 1 --seconds 60    # control
+    uv run tools/experiments/probe_multiproc.py --workers 3 --seconds 60
+    uv run tools/experiments/probe_multiproc.py --workers 1 --seconds 60    # control
 """
 from __future__ import annotations
 
@@ -31,7 +31,10 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path(__file__).parent
+#: The repository root, three levels up from tools/experiments/. Output and
+#: imports are anchored to it, never to the working directory, so a run
+#: started from anywhere reads the same package and writes to one place.
+REPO = Path(__file__).resolve().parents[2]
 
 
 def worker(idx, serials, seconds, profile_name, q, switch_interval):

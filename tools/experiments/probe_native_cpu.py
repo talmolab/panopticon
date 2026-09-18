@@ -62,15 +62,15 @@ HOW A THREAD IS CLASSIFIED (three independent discriminators, all cheap)
 
 USAGE (all read-only; --attach touches no camera)
     # 1. offline: confirm the plumbing and dump the static network config
-    uv run probe_native_cpu.py --selftest
-    uv run probe_native_cpu.py --netconfig
+    uv run tools/experiments/probe_native_cpu.py --selftest
+    uv run tools/experiments/probe_native_cpu.py --netconfig
 
     # 2. during a recording started from the GUI, in a second console:
-    uv run probe_native_cpu.py --attach-name python.exe --duration 600 \
+    uv run tools/experiments/probe_native_cpu.py --attach-name python.exe --duration 600 \
         --interval 10 --out probe_out/native_cpu_6cam_100fps_9000.json
 
     # 3. counters only (no process attach), if you want DPC/interrupt alone:
-    uv run probe_native_cpu.py --counters-only --duration 600
+    uv run tools/experiments/probe_native_cpu.py --counters-only --duration 600
 """
 import argparse
 import ctypes
@@ -83,6 +83,11 @@ import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
+
+#: The repository root, three levels up from tools/experiments/. Output is
+#: anchored to it, never to the working directory, so a run started from
+#: anywhere writes to one place.
+REPO = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
 # Win32
@@ -580,7 +585,8 @@ def main():
     ap.add_argument("--duration", type=float, default=600.0)
     ap.add_argument("--interval", type=float, default=10.0)
     ap.add_argument("--no-counters", action="store_true")
-    ap.add_argument("--out", default="probe_out/native_cpu.json")
+    ap.add_argument("--out",
+                    default=str(REPO / "probe_out" / "native_cpu.json"))
     a = ap.parse_args()
 
     if os.name != "nt":
