@@ -196,8 +196,11 @@ def describe(blocks: list[dict], edges: list[dict]) -> list[dict]:
                 mode = "constant ON"
             else:
                 mode = f"{pw * freq / 10:g}% duty"
+            # duration_ms is the exact value the sketch executes; a trace that
+            # models step lengths from it shares the board's rounding.
             steps.append({"pin": int(b["pin"]), "freq_hz": freq,
                           "pulse_width_ms": pw, "duration_s": float(b["dur"]),
+                          "duration_ms": dur_to_ms(b["dur"]),
                           "mode": mode})
         out.append({
             "loops": loop_to >= 0,
@@ -226,13 +229,27 @@ def test_duration_s(blocks: list[dict], edges: list[dict]) -> float | None:
 #: UART RX0/TX0 — the link the GUI talks to the board over.
 RESERVED_SERIAL_PINS = (0, 1)
 
+#: Highest digital pin on the board named by FQBN: the Mega 2560 exposes D0-D53
+#: and A0-A15 as digital 54-69. A higher number compiles, but digitalWrite on a
+#: pin the board lacks does nothing, and the sketch's uint8_t field truncates
+#: anything above 255 onto a different physical pin.
+MEGA_MAX_DIGITAL_PIN = 69
 
-def forbidden_pin_uses(blocks: list[dict],
-                       trigger_pins=()) -> list[tuple[int, str]]:
+#: Widest value the sketch's uint32_t timing fields hold.
+UINT32_MAX = 2**32 - 1
+
+
+def forbidden_pin_uses(blocks: list[dict], trigger_pins=(),
+                       max_pin: int = MEGA_MAX_DIGITAL_PIN) -> list[tuple[int, str]]:
     """Stim blocks assigned to pins that must never carry a stim waveform.
 
-    Two classes, both of which fail SILENTLY — nothing downstream can detect
-    either, which is why this is enforced at compile time rather than reviewed:
+    A pin outside 2..max_pin is refused because the failure is silent: the
+    paradigm "runs", stim_trace.csv labels the frames stimulated, and no pin
+    was driven (or, above 255, the wrong pin was). A typo of 530 for 53 is one
+    keystroke.
+
+    Two further classes, both of which fail SILENTLY — nothing downstream can
+    detect either, which is why this is enforced at compile time rather than reviewed:
 
     - **Camera trigger pins.** The rig's whole alignment model rests on GigE
       BlockID N denoting the same instant on every camera, which holds because
@@ -257,6 +274,80 @@ def forbidden_pin_uses(blocks: list[dict],
         elif pin in RESERVED_SERIAL_PINS:
             out.append((pin, "UART RX0/TX0 — would garble the trigger-board "
                              "serial link and the RDY ack"))
+        elif pin < 0 or pin > max_pin:
+            out.append((pin, f"not a digital pin on this board (2..{max_pin}) — "
+                             f"the block would compile but drive nothing, or "
+                             f"a different pin"))
+    return out
+
+
+def dur_to_ms(dur_s) -> int:
+    """Block duration in whole milliseconds, rounded to nearest.
+
+    One rounding rule shared by the sketch and describe(), so the per-frame
+    trace models the same block boundaries the board executes. Truncation
+    would put 1.001 s at 1000 ms and drift a looping paradigm by a millisecond
+    per block per cycle.
+    """
+    return int(round(float(dur_s) * 1000.0))
+
+
+def block_timing(blk: dict) -> tuple[int, int, int]:
+    """``(period_us, pw_us, dur_ms)`` for one block, as integers.
+
+    Period and pulse width are resolved to integer microseconds here so the
+    sketch does no floating-point math: updateStim() runs inside the camera
+    trigger's busy-wait, where an AVR float divide (~30 us) would blunt the
+    ~0.35 us edge precision of the trigger firmware.
+    """
+    freq, pw = float(blk["freq"]), float(blk["pw"])
+    period_us = int(round(1e6 / freq)) if freq > 0 else 0
+    pw_us = int(round(pw * 1000.0))
+    return period_us, pw_us, dur_to_ms(blk["dur"])
+
+
+def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
+    """Blocks whose numbers the firmware cannot execute as written.
+
+    Each is a silent failure on the board: the sketch runs, the trace labels
+    frames stimulated, and the pin does something else. Returns
+    ``[(block_id, reason), ...]``. A pulse width at or above the period is NOT
+    a problem here: it means constant ON by design.
+
+    - a frequency whose period rounds to 0 us (above 2 MHz): the firmware reads
+      period 0 as "hold LOW" and the block never fires
+    - a frequency set but a pulse width that rounds to 0 us: same silent LOW;
+      an off period is expressed with frequency 0
+    - a duration under 1 ms: rounds to 0 ms, and a zero-length block makes the
+      advance loop spin its full guard on every updateStim() call inside the
+      trigger busy-wait
+    - any value above 2**32-1: the uint32_t fields truncate it to a wrong value
+    - a negative frequency, pulse width or duration
+    """
+    out: list[tuple[str, str]] = []
+    for b in blocks:
+        bid = str(b.get("id", "?"))
+        freq, pw, dur = float(b["freq"]), float(b["pw"]), float(b["dur"])
+        if freq < 0 or pw < 0 or dur < 0:
+            out.append((bid, "frequency, pulse width and duration cannot be negative"))
+            continue
+        period_us, pw_us, dur_ms = block_timing(b)
+        if freq > 0 and period_us == 0:
+            out.append((bid, f"{freq:g} Hz has a period under 1 us, which the "
+                             f"firmware holds LOW; the highest usable "
+                             f"frequency is 1 MHz"))
+        if freq > 0 and pw_us == 0:
+            out.append((bid, f"a pulse width of {pw:g} ms rounds to 0 us, so "
+                             f"the block would hold LOW; set the frequency to "
+                             f"0 for an off period"))
+        if dur_ms < 1:
+            out.append((bid, f"a duration of {dur:g} s is below the 1 ms "
+                             f"resolution of the firmware"))
+        for name, val in (("period", period_us), ("pulse width", pw_us),
+                          ("duration", dur_ms)):
+            if val > UINT32_MAX:
+                out.append((bid, f"the {name} exceeds the firmware's 32-bit "
+                                 f"field ({val} > {UINT32_MAX})"))
     return out
 
 
@@ -277,6 +368,10 @@ def compile_ino(blocks: list[dict], edges: list[dict],
     if bad:
         detail = "; ".join(f"pin {p}: {why}" for p, why in bad)
         raise ValueError(f"stim block on a forbidden pin — {detail}")
+    params = parameter_problems(blocks)
+    if params:
+        detail = "; ".join(f"block {bid}: {why}" for bid, why in params)
+        raise ValueError(f"stim block the firmware cannot execute — {detail}")
 
     chains = _extract_chains(blocks, edges)
     n = len(chains)
@@ -292,13 +387,8 @@ def compile_ino(blocks: list[dict], edges: list[dict],
             freq = float(blk["freq"])
             pw = float(blk["pw"])
             dur_s = float(blk["dur"])
-            # Period and pulse width are resolved to integer microseconds here so
-            # the sketch does no floating-point math -- updateStim() runs inside
-            # the camera trigger's busy-wait, where an AVR float divide (~30 us)
-            # would blunt the ~0.35 us edge precision of the original firmware.
-            period_us = int(round(1e6 / freq)) if freq > 0 else 0
-            pw_us = int(round(pw * 1000.0))
-            dur_ms = int(dur_s * 1000)
+            # Integer microseconds and milliseconds only; see block_timing().
+            period_us, pw_us, dur_ms = block_timing(blk)
             entries.append(
                 f"  {{{pin}u, {period_us}UL, {pw_us}UL, {dur_ms}UL}},"
                 f"   // {freq:g} Hz, {pw:g} ms pulse, {dur_s:g} s"

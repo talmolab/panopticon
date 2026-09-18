@@ -164,6 +164,80 @@ def test_forbidden_pins():
     print("5b) forbidden pins: trigger lines + RX0/TX0 refused at compile: PASS")
 
 
+def refuses(blocks, edges=(), safe=(53,), trig=(2, 4, 6, 8, 10, 12)):
+    """True iff compile_ino raises ValueError for this graph."""
+    try:
+        sc.compile_ino(blocks, list(edges), list(safe), list(trig))
+    except ValueError:
+        return True
+    return False
+
+
+def test_pin_range():
+    """A pin the board does not have compiles to a silent no-op (70..255) or,
+    above 255, truncates onto a different physical pin; 530 for 53 is one
+    keystroke. Refuse at compile so the .ino never reaches the board."""
+    for pin in (-1, 70, 255, 256, 530):
+        bad = sc.forbidden_pin_uses([B("A", pin=pin)])
+        assert [p for p, _ in bad] == [pin], (pin, bad)
+        assert "not a digital pin" in bad[0][1]
+        assert refuses([B("A", pin=pin)]), f"compile_ino accepted pin {pin}"
+    # The board's full range is accepted: 2 is the first free pin, 69 = A15.
+    for pin in (2, 53, 69):
+        assert sc.forbidden_pin_uses([B("A", pin=pin)]) == [], pin
+    # The ceiling is a parameter, so another board can widen or narrow it.
+    assert sc.forbidden_pin_uses([B("A", pin=70)], max_pin=80) == []
+    assert sc.MEGA_MAX_DIGITAL_PIN == 69
+    print("5d) pins outside 2..69 refused at compile: PASS")
+
+
+def test_parameter_ranges():
+    """Waveform numbers the firmware cannot execute as written are refused
+    instead of compiling to a block that silently holds LOW or spins."""
+    # freq >= 2 MHz rounds to a 0 us period, which the sketch reads as 'hold LOW'.
+    assert refuses([B("A", freq=2e6)]), "2 MHz compiled to a silent LOW block"
+    assert [bid for bid, _ in sc.parameter_problems([B("A", freq=2e6)])] == ["A"]
+    # A frequency with a pulse width that rounds to 0 us is the same silent LOW.
+    assert refuses([B("A", freq=10, pw=0.0001)])
+    assert refuses([B("A", freq=10, pw=0)])
+    # An off period is freq 0 (pw irrelevant), and that is still accepted.
+    assert sc.parameter_problems([B("A", freq=0, pw=0)]) == []
+    assert sc.parameter_problems([B("A", freq=0, pw=100)]) == []
+    # dur < 1 ms rounds to 0 ms: a zero-length block spins the advance loop.
+    assert refuses([B("A", dur=0)]), "dur 0 compiled"
+    assert refuses([B("A", dur=0.0004)])
+    assert sc.parameter_problems([B("A", dur=0.001)]) == []
+    # Anything above uint32 truncates in the sketch's fields.
+    assert refuses([B("A", freq=1e-4)]), "period 1e10 us accepted"
+    assert refuses([B("A", pw=5e6)]), "pulse width 5e9 us accepted"
+    assert refuses([B("A", dur=5e6)]), "duration 5e9 ms accepted"
+    # Negative numbers are not a waveform.
+    assert refuses([B("A", freq=-10)]) and refuses([B("A", pw=-1)]) \
+        and refuses([B("A", dur=-1)])
+    # pw >= period is constant ON by design (CLAUDE.md), never a problem.
+    assert sc.parameter_problems([B("A", freq=10, pw=100)]) == []
+    assert sc.parameter_problems([B("A", freq=10, pw=500)]) == []
+    # The 1 MHz ceiling itself is usable.
+    assert sc.parameter_problems([B("A", freq=1e6, pw=0.001)]) == []
+    print("5e) frequency/pulse/duration ranges refused at compile: PASS")
+
+
+def test_duration_rounding_parity():
+    """The sketch and describe() share one rounding, so the per-frame trace
+    can model exactly the block boundaries the board executes."""
+    assert sc.dur_to_ms(1.001) == 1001, "truncated 1.001 s to 1000 ms"
+    assert sc.dur_to_ms(1.003) == 1003 and sc.dur_to_ms(0.0015) == 2
+    ino = sc.compile_ino([B("A", dur=1.001, freq=10, pw=10)], [], [53])
+    line = [l for l in ino.splitlines() if l.startswith("  {53u")][0]
+    assert "{53u, 100000UL, 10000UL, 1001UL}" in line, line
+    step = sc.describe([B("A", dur=1.001, freq=10, pw=10)], [])[0]["steps"][0]
+    assert step["duration_ms"] == 1001 and step["duration_s"] == 1.001
+    # Across the whole ms grid up to 20 s no duration loses a millisecond.
+    for k in range(1, 20001):
+        assert sc.dur_to_ms(k / 1000) == k, k
+    print("5f) duration rounding: sketch and describe() agree, none truncated: PASS")
+
+
 def test_recording_only_sketch():
     """Stim must be opt-in per launch, not sticky flash state.
 
@@ -409,6 +483,9 @@ def main():
     test_safe_pins()
     test_pin_conflicts()
     test_forbidden_pins()
+    test_pin_range()
+    test_parameter_ranges()
+    test_duration_rounding_parity()
     test_recording_only_sketch()
     test_durations()
     test_describe()
