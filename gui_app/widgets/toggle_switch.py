@@ -1,6 +1,6 @@
 """Custom toggle switch widget."""
 from PyQt5.QtWidgets import QAbstractButton, QSizePolicy
-from PyQt5.QtCore import Qt, QRectF, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, QRectF, QSize, pyqtProperty, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QPainter, QColor, QBrush, QPen, QFont
 
 
@@ -15,7 +15,6 @@ class ToggleSwitch(QAbstractButton):
         self._anim = QPropertyAnimation(self, b"thumb_pos", self)
         self._anim.setDuration(150)
         self._anim.setEasingCurve(QEasingCurve.InOutCubic)
-        self.toggled.connect(self._on_toggled)
         self.setFixedHeight(36)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -28,7 +27,18 @@ class ToggleSwitch(QAbstractButton):
 
     thumb_pos = pyqtProperty(float, _get_thumb_pos, _set_thumb_pos)
 
-    def _on_toggled(self, checked):
+    def checkStateSet(self):
+        """Animate the thumb to the current checked state.
+
+        QAbstractButton calls this virtual on every setChecked, including one
+        made under blockSignals, so the thumb follows the state a caller sets
+        silently. Driving the animation from the toggled signal instead would
+        leave the thumb painted ON after a silent uncheck, and force callers
+        to reach into the widget to repaint it.
+        """
+        self._animate_to(self.isChecked())
+
+    def _animate_to(self, checked: bool):
         self._anim.setStartValue(self._thumb_pos)
         self._anim.setEndValue(1.0 if checked else 0.0)
         self._anim.start()
@@ -75,5 +85,4 @@ class ToggleSwitch(QAbstractButton):
         p.end()
 
     def sizeHint(self):
-        from PyQt5.QtCore import QSize
         return QSize(180, 36)

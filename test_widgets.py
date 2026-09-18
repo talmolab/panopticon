@@ -508,6 +508,30 @@ def test_metadata_defaults_prefill_from_profile():
     sb.close()
 
 
+# --------------------------------------------------------------------------
+# A5-13: the thumb follows the checked state even under blockSignals.
+# --------------------------------------------------------------------------
+def test_thumb_follows_silent_state_changes():
+    tog = ToggleSwitch("Calibrate")
+    tog.show()
+    app.processEvents()
+    tog.blockSignals(True)
+    tog.setChecked(True)
+    tog.blockSignals(False)
+    check("silent setChecked(True) animates the thumb on", tog._anim.endValue() == 1.0)
+    tog._anim.setCurrentTime(tog._anim.duration())
+    check("thumb reaches the on position", abs(tog.thumb_pos - 1.0) < 1e-6, str(tog.thumb_pos))
+    tog.blockSignals(True)
+    tog.setChecked(False)
+    tog.blockSignals(False)
+    check("silent setChecked(False) animates the thumb off", tog._anim.endValue() == 0.0)
+    check("no private toggled slot remains for callers to reach into",
+          not hasattr(ToggleSwitch, "_on_toggled"))
+    tog.click()
+    check("a click still animates the thumb", tog._anim.endValue() == 1.0 and tog.isChecked())
+    tog.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -528,6 +552,7 @@ def main():
     test_all_good_profiles_give_no_warnings()
     test_untouched_date_refreshes_on_read()
     test_metadata_defaults_prefill_from_profile()
+    test_thumb_follows_silent_state_changes()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)

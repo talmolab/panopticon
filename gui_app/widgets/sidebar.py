@@ -508,10 +508,10 @@ class SidebarWidget(QWidget):
         click to stop it. Emitting is suppressed because the toggled signal is
         the start/stop path this call is refusing from inside.
 
-        blockSignals also suppresses the widget's own thumb animation, which
-        ToggleSwitch drives from toggled, so the animation is driven by hand;
-        otherwise the thumb stays painted ON while isChecked() is False, an arm
-        indicator that lies on a rig with a laser.
+        The thumb still animates off: ToggleSwitch drives it from
+        checkStateSet, which setChecked calls regardless of blockSignals, so
+        the painted state cannot disagree with isChecked() on a rig with a
+        laser.
 
         Enablement is recomputed afterwards: the refused click disabled the
         acquiring toggle through sibling exclusion, and clearing the refused
@@ -521,7 +521,6 @@ class SidebarWidget(QWidget):
         t.blockSignals(True)
         t.setChecked(False)
         t.blockSignals(False)
-        t._on_toggled(False)
         self._apply_enablement()
 
     def clear_toggles_silently(self, kind: str | None = None):
