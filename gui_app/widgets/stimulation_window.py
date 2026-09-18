@@ -233,6 +233,15 @@ class BlockItem(QGraphicsItem):
 class ArrowItem(QGraphicsItem):
     def __init__(self, src_block: BlockItem, src_port: ConnectorPort,
                  dst_block: BlockItem, dst_port: ConnectorPort):
+        # One outgoing arrow per block, enforced here rather than trusted. The
+        # compiler follows a single successor per block, so a second arrow
+        # would be drawn but never run; a silent overwrite of out_arrow also
+        # leaves the first arrow orphaned in dst.in_arrows.
+        if src_block.out_arrow is not None:
+            raise ValueError(
+                f"block {src_block.block_id} already has an outgoing arrow")
+        if src_block is dst_block:
+            raise ValueError(f"block {src_block.block_id} cannot point at itself")
         super().__init__()
         self.src      = src_block
         self.src_port = src_port
@@ -636,7 +645,15 @@ class StimCanvas(QGraphicsView):
                 })
         return blocks, edges
 
-    def load_workflow(self, blocks: list[dict], edges: list[dict]):
+    def load_workflow(self, blocks: list[dict], edges: list[dict]) -> int:
+        """Replace the canvas with a saved graph; returns the edges dropped.
+
+        An edge is dropped when either end is missing, when it points a block
+        at itself, or when its source already has an outgoing arrow. The
+        editor cannot draw those, but a hand-edited file can carry them, and
+        the compiler follows only one successor per block, so keeping them
+        would draw an arrow the firmware never runs.
+        """
         self.clear()
         by_id: dict[str, BlockItem] = {}
         for d in blocks:
@@ -647,16 +664,21 @@ class StimCanvas(QGraphicsView):
             blk.setPos(d["x"], d["y"])
             self.scene().addItem(blk)
             by_id[d["id"]] = blk
+        dropped = 0
         for e in edges:
             src = by_id.get(e["src"])
             dst = by_id.get(e["dst"])
-            if src and dst:
-                # Gracefully fall back to LEFT/RIGHT for old save files.
-                sp = e.get("src_port", ConnectorPort.RIGHT)
-                dp = e.get("dst_port", ConnectorPort.LEFT)
-                self.scene().addItem(
-                    ArrowItem(src, src.port(sp), dst, dst.port(dp)))
+            if src is None or dst is None or src is dst \
+                    or src.out_arrow is not None:
+                dropped += 1
+                continue
+            # Gracefully fall back to LEFT/RIGHT for old save files.
+            sp = e.get("src_port", ConnectorPort.RIGHT)
+            dp = e.get("dst_port", ConnectorPort.LEFT)
+            self.scene().addItem(
+                ArrowItem(src, src.port(sp), dst, dst.port(dp)))
         self.refresh_starts()
+        return dropped
 
     def clear(self):
         self.scene().clear()
@@ -1291,12 +1313,20 @@ class StimulationWindow(QDialog):
         if not path:
             return
         try:
-            data = json.loads(Path(path).read_text())
-            self._canvas.load_workflow(
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            dropped = self._canvas.load_workflow(
                 data.get("blocks", []), data.get("edges", []))
-            self._set_status(f"Loaded {Path(path).name}")
         except Exception as e:
             QMessageBox.critical(self, "Load failed", str(e))
+            return
+        self._dirty = False
+        if dropped:
+            self._set_status(
+                f"Loaded {Path(path).name} — dropped {dropped} invalid edge(s) "
+                f"(a block can have one outgoing arrow).", error=True,
+                kind="notice")
+        else:
+            self._set_status(f"Loaded {Path(path).name}")
 
     # ── apply (upload) ────────────────────────────────────────────────────────
     def _on_apply(self):
