@@ -461,9 +461,15 @@ def check_capacity(n_cams: int, width: int, height: int,
               + (f" + {ring_gb:.1f} NV12 ring" if realtime else "")
               + f"), {avail_gb:.1f} GiB available")
     if need_gb > avail_gb:
+        # RULE: name the profile field, `max_num_buffer`. REASON: the pool
+        # depth actually used comes from the profile; MAX_NUM_BUFFER in
+        # camera_manager is only the fallback default, and "MaxNumBuffer" is
+        # the pylon node name — neither string exists in the YAML the operator
+        # must edit to act on this message.
         blocking.append(
             f"Not enough RAM for {n_cams} cameras: {detail}. Lower "
-            f"MaxNumBuffer or kick_max_lag, or close other applications.")
+            f"`max_num_buffer` or `kick_max_lag` in the rig profile, or close "
+            f"other applications.")
     elif need_gb > 0.75 * avail_gb:
         warnings.append(f"RAM is tight for {n_cams} cameras: {detail}.")
 
