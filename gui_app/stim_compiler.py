@@ -70,9 +70,13 @@ def resolve_starts(blocks: list[dict],
     Returns ``(start_ids, needs_start_ids)``.
 
     Within one weakly-connected group: an explicit ``start`` flag wins; failing
-    that every block with no incoming arrow is a start (parallel chains that
-    merge). A pure loop has neither, so it lands in ``needs_start_ids`` — the
-    user has to tick "Starting" on one of its blocks or it will not run.
+    that every block with no incoming arrow is a start. A pure loop has
+    neither, so it lands in ``needs_start_ids`` — the user has to tick
+    "Starting" on one of its blocks or it will not run.
+
+    Two sources feeding one block (fan-in) both resolve as starts here, but the
+    graph is then refused by structural_problems(): the shared block would run
+    in two chains at once, which has no defined behaviour on the board.
     """
     ids = [b["id"] for b in blocks]
     id_set = set(ids)
@@ -146,6 +150,50 @@ def _extract_chains(blocks: list[dict],
             cur = succ[cur]
         chains.append((order, loop_to))
     return chains
+
+
+def structural_problems(blocks: list[dict], edges: list[dict]) -> list[str]:
+    """Graph shapes the compiler cannot turn into chains faithfully.
+
+    Each returns a plain sentence naming the block, so the editor can show it
+    and compile_ino can refuse. Both shapes are otherwise SILENT: the sketch
+    compiles, stim_paradigm.json records the drawn graph, and the board runs
+    something else.
+
+    - **Two outgoing arrows from one block.** A chain has one successor per
+      block, so the walker would keep the last edge and drop the other branch
+      from the firmware without a word.
+    - **Fan-in.** A block reached from two separate starts appears in both
+      chains, so the board would run it twice concurrently on one pin. The
+      remedy is to duplicate the block so each chain has its own copy. A block
+      re-entered by its own chain (a lead-in feeding a loop) is fine: that is
+      one chain looping, not two chains sharing a block.
+    """
+    ids = {b["id"] for b in blocks}
+    out: list[str] = []
+    succs: dict[str, set[str]] = {}
+    for e in edges:
+        if e["src"] in ids and e["dst"] in ids:
+            succs.setdefault(e["src"], set()).add(e["dst"])
+    for src in (b["id"] for b in blocks):
+        dsts = succs.get(src, set())
+        if len(dsts) > 1:
+            out.append(f"block {src} has {len(dsts)} outgoing arrows "
+                       f"({', '.join(sorted(dsts))}); a block can lead to only "
+                       f"one next block")
+    if out:
+        return out       # chains are not meaningful until the branches are fixed
+    owners: dict[str, int] = {}
+    shared: list[str] = []
+    for i, (chain, _loop_to) in enumerate(_extract_chains(blocks, edges)):
+        for b in chain:
+            if owners.setdefault(b["id"], i) != i and b["id"] not in shared:
+                shared.append(b["id"])
+    for bid in shared:
+        out.append(f"block {bid} is reached by two chains (fan-in), so it would "
+                   f"run twice at once; duplicate the block so each chain has "
+                   f"its own copy")
+    return out
 
 
 def end_time_s(blocks: list[dict], edges: list[dict]) -> float | None:
@@ -360,9 +408,14 @@ def compile_ino(blocks: list[dict], edges: list[dict],
 
     trigger_pins come from the profile too, and are refused rather than
     compiled: see forbidden_pin_uses(). Raises ValueError so a graph that would
-    corrupt cross-camera alignment can never reach the board. The RX0/TX0 check
-    is unconditional; the trigger-pin check needs the profile, so callers that
-    have one MUST pass it.
+    corrupt cross-camera alignment can never reach the board. The RX0/TX0 and
+    pin-range checks are unconditional; the trigger-pin check needs the
+    profile, so callers that have one MUST pass it.
+
+    Also raises ValueError for parameter_problems() (numbers the firmware
+    would silently execute as something else) and structural_problems()
+    (branches or fan-in the chain walker would silently collapse). The editor
+    runs the same three checks before Apply/Test/Record to explain the refusal.
     """
     bad = forbidden_pin_uses(blocks, trigger_pins)
     if bad:
@@ -372,6 +425,10 @@ def compile_ino(blocks: list[dict], edges: list[dict],
     if params:
         detail = "; ".join(f"block {bid}: {why}" for bid, why in params)
         raise ValueError(f"stim block the firmware cannot execute — {detail}")
+    shape = structural_problems(blocks, edges)
+    if shape:
+        raise ValueError("stim graph cannot be compiled faithfully — "
+                         + "; ".join(shape))
 
     chains = _extract_chains(blocks, edges)
     n = len(chains)

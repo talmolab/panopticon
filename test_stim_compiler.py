@@ -39,7 +39,8 @@ def test_start_resolution():
                                       [E("A", "B"), E("B", "C")])
     assert starts == {"A"} and needs == set()
 
-    # Fan-in: two parallel chains merging both start.
+    # Fan-in: both sources resolve as starts here; compile_ino then refuses
+    # the graph because C would run in two chains at once (test 2b).
     starts, needs = sc.resolve_starts([B("A"), B("B"), B("C")],
                                       [E("A", "C"), E("B", "C")])
     assert starts == {"A", "B"} and needs == set()
@@ -85,6 +86,40 @@ def test_chain_extraction_terminates():
     # A loop nobody starts produces nothing rather than a bogus chain.
     assert sc._extract_chains([B("A"), B("B")], [E("A", "B"), E("B", "A")]) == []
     print("2) chain extraction terminates on cycles (linear/loop/rho): PASS")
+
+
+def test_structural_problems():
+    """Shapes the walker would silently collapse are refused with a message
+    that names the block, instead of compiling a different paradigm."""
+    # Two outgoing arrows: the walker used to keep the last edge and drop B.
+    blocks, edges = [B("A"), B("B"), B("C")], [E("A", "B"), E("A", "C")]
+    probs = sc.structural_problems(blocks, edges)
+    assert len(probs) == 1 and "block A" in probs[0] and "outgoing" in probs[0], probs
+    assert refuses(blocks, edges), "two out-edges compiled to a single chain"
+    # The same edge listed twice is one successor, not a branch.
+    assert sc.structural_problems([B("A"), B("B")], [E("A", "B"), E("A", "B")]) == []
+
+    # Fan-in: A->C, B->C puts C in two concurrent chains. pin_conflicts() used
+    # to name the symptom (the pin) with no pin choice that could fix it.
+    blocks, edges = [B("A", pin=44), B("B", pin=45), B("C", pin=46)], \
+        [E("A", "C"), E("B", "C")]
+    probs = sc.structural_problems(blocks, edges)
+    assert len(probs) == 1 and "block C" in probs[0] and "fan-in" in probs[0], probs
+    assert refuses(blocks, edges), "fan-in compiled with C in two chains"
+
+    # A lead-in feeding a loop (rho) re-enters B from its own chain: one chain
+    # looping, so it is accepted and keeps its loop_to.
+    rho_b, rho_e = [B("A"), B("B"), B("C")], [E("A", "B"), E("B", "C"), E("C", "B")]
+    assert sc.structural_problems(rho_b, rho_e) == []
+    assert "{CHAIN_0, CHAIN_0_LEN, 1}" in sc.compile_ino(rho_b, rho_e, [53])
+    # Plain shapes are untouched: linear, pinned loop, two independent chains.
+    assert sc.structural_problems([B("A"), B("B")], [E("A", "B")]) == []
+    assert sc.structural_problems([B("A", start=True), B("B")],
+                                  [E("A", "B"), E("B", "A")]) == []
+    assert sc.structural_problems([B("A"), B("B", pin=44)], []) == []
+    # Edges to unknown ids are ignored, as everywhere else in the compiler.
+    assert sc.structural_problems([B("A")], [E("A", "ghost"), E("A", "ghost2")]) == []
+    print("2b) two out-edges and fan-in refused with the block named: PASS")
 
 
 def test_waveform_encoding():
@@ -479,6 +514,7 @@ def test_sketch_swap_invalidates_stale_upload():
 def main():
     test_start_resolution()
     test_chain_extraction_terminates()
+    test_structural_problems()
     test_waveform_encoding()
     test_safe_pins()
     test_pin_conflicts()
