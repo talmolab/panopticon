@@ -89,25 +89,40 @@ class BaslerBackend:
         alignment pass read the wrap as a camera running impossibly far ahead.
         `alignment._unwrap_blockids` is the software fallback and handles it
         either way, so this is an optimisation, not a requirement.
+
+        Two independent settings must BOTH take: the camera-side
+        GevGVSPExtendedIDMode makes the camera send 64-bit IDs, and the
+        stream-grabber-side UseExtendedIdIfAvailable makes pylon consume them.
+        The grabber flag alone changes nothing on the wire, so 'enabled' is
+        reported only when both succeeded; otherwise the log names the half
+        that failed, and the return value means 'actually negotiated'.
         """
-        ok = False
+        cam_ok = grabber_ok = False
         try:
             node = cam.GetNodeMap().GetNode("GevGVSPExtendedIDMode")
             if node is not None:
                 node.FromString("On")
-                ok = True
+                cam_ok = True
         except Exception as e:
             print(f"[cam{i+1}] GevGVSPExtendedIDMode unavailable: {e}", flush=True)
         try:
             node = cam.GetStreamGrabberNodeMap().GetNode("UseExtendedIdIfAvailable")
             if node is not None:
                 node.SetValue(True)
-                ok = True
+                grabber_ok = True
         except Exception as e:
             print(f"[cam{i+1}] UseExtendedIdIfAvailable unavailable: {e}", flush=True)
-        print(f"[cam{i+1}] extended (64-bit) block IDs: "
-              f"{'enabled' if ok else 'UNAVAILABLE — relying on software unwrap'}",
-              flush=True)
+        ok = cam_ok and grabber_ok
+        if ok:
+            status = "enabled"
+        else:
+            missing = [name for name, took in
+                       (("camera GevGVSPExtendedIDMode", cam_ok),
+                        ("grabber UseExtendedIdIfAvailable", grabber_ok))
+                       if not took]
+            status = ("UNAVAILABLE (" + ", ".join(missing) +
+                      " not set) — relying on software unwrap")
+        print(f"[cam{i+1}] extended (64-bit) block IDs: {status}", flush=True)
         return ok
 
     @staticmethod

@@ -405,6 +405,45 @@ check(n, "stream_stats carries GevSCFJM and the knobs when present, omits when a
       and st_bare == {}, f"{st} / {st_bare}")
 
 # ===========================================================================
+# enable_extended_block_ids: 'enabled' only when BOTH halves took (A3-14)
+# ===========================================================================
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+
+def _ext_ids(cam_side, grabber_side):
+    nodes = {"GevGVSPExtendedIDMode": StubNode("Off")} if cam_side else {}
+    sg = {"UseExtendedIdIfAvailable": StubNode(False)} if grabber_side else {}
+    cam = StubCamera(nodes, sg_nodes=sg)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ok = B.enable_extended_block_ids(0, cam)
+    return ok, buf.getvalue()
+
+
+# 19 -- both halves present: negotiated, reported as enabled.
+n += 1
+ok, log = _ext_ids(True, True)
+check(n, "64-bit IDs: both halves set -> True and 'enabled'",
+      ok is True and "enabled" in log and "UNAVAILABLE" not in log, log.strip())
+
+# 20 -- the grabber flag alone does not put 64-bit IDs on the wire: False,
+#       and the log names the camera-side half that did not take.
+n += 1
+ok, log = _ext_ids(False, True)
+check(n, "64-bit IDs: grabber flag alone -> False, camera half named",
+      ok is False and "UNAVAILABLE" in log and "GevGVSPExtendedIDMode" in log
+      and "UseExtendedIdIfAvailable" not in log.split("UNAVAILABLE")[1],
+      log.strip())
+
+# 21 -- the camera mode alone is likewise not 'enabled'; the grabber half is named.
+n += 1
+ok, log = _ext_ids(True, False)
+check(n, "64-bit IDs: camera mode alone -> False, grabber half named",
+      ok is False and "UseExtendedIdIfAvailable" in log.split("UNAVAILABLE")[1],
+      log.strip())
+
+# ===========================================================================
 # cpu_affinity: efficiency-class parsing on hosts this machine is not
 # (A3-23 top class only, A3-24 processor groups)
 # ===========================================================================
@@ -427,14 +466,14 @@ def cpu_set_buffer(spec, **kw):
 P285K = [0, 1, 10, 11, 12, 13, 22, 23]
 two_class = cpu_set_buffer([(c, 1 if c in P285K else 0) for c in range(24)])
 
-# 19 -- two classes: the top class is the P-core set, exactly as before.
+# 22 -- two classes: the top class is the P-core set, exactly as before.
 n += 1
 r = ca.classify_cpu_sets(two_class)
 check(n, "two-class host: top class is the P-core set",
       r.fast == P285K and r.slow == [c for c in range(24) if c not in P285K]
       and r.groups == {0} and r.reason == "", f"fast={r.fast} reason={r.reason!r}")
 
-# 20 -- three classes (LP-E = 0, E = 1, P = 2): ONLY class 2 is fast; the
+# 23 -- three classes (LP-E = 0, E = 1, P = 2): ONLY class 2 is fast; the
 #       E-cores in the middle class must not be pinned as P-cores.
 n += 1
 three_class = cpu_set_buffer([(c, 2) for c in range(0, 12)]        # 6 P-cores x2 threads
@@ -445,12 +484,12 @@ check(n, "three-class host: only the top class is fast, both lower classes are s
       r.fast == list(range(12)) and r.slow == list(range(12, 22))
       and sorted(r.by_class) == [0, 1, 2], f"fast={r.fast} slow={r.slow}")
 
-# 21 -- the middle class is never in `fast` even when it is the largest class.
+# 24 -- the middle class is never in `fast` even when it is the largest class.
 n += 1
 check(n, "E-cores (middle class) excluded from the P-core set",
       not (set(range(12, 20)) & set(r.fast)), str(r.fast))
 
-# 22 -- more than one processor group: indices repeat per group and a 64-bit
+# 25 -- more than one processor group: indices repeat per group and a 64-bit
 #       mask cannot address the machine, so pinning is refused with a reason.
 n += 1
 multi_group = cpu_set_buffer([(c, 1 if c < 8 else 0, 0) for c in range(64)]
@@ -461,20 +500,20 @@ check(n, "multiple processor groups disable pinning",
       and "processor groups" in r.reason and r.ids == {},
       f"fast={r.fast} reason={r.reason!r}")
 
-# 23 -- the log line names the groups so the host is recognisable.
+# 26 -- the log line names the groups so the host is recognisable.
 n += 1
 line = ca.describe_classes(r)
 check(n, "describe_classes names every class and the group count",
       "class 0:" in line and "class 1:" in line and "processor groups [0, 1]" in line
       and "no pinning" in line, line)
 
-# 24 -- one class: not hybrid, nothing to prefer.
+# 27 -- one class: not hybrid, nothing to prefer.
 n += 1
 r = ca.classify_cpu_sets(cpu_set_buffer([(c, 0) for c in range(16)]))
 check(n, "single class: not hybrid, empty P-core set with reason",
       r.fast == [] and r.slow == [] and "not hybrid" in r.reason, r.reason)
 
-# 25 -- the process affinity mask prunes P-cores the process may not use, and
+# 28 -- the process affinity mask prunes P-cores the process may not use, and
 #       an empty intersection refuses rather than pins partially.
 n += 1
 mask = sum(1 << c for c in range(24) if c not in (0, 1))
@@ -484,7 +523,7 @@ check(n, "process mask prunes the P-core set; empty intersection refuses",
       r.fast == [10, 11, 12, 13, 22, 23] and r2.fast == []
       and "process mask" in r2.reason, f"{r.fast} / {r2.reason!r}")
 
-# 26 -- records are walked by their own Size field (a newer Windows may grow
+# 29 -- records are walked by their own Size field (a newer Windows may grow
 #       the struct) and records of another Type are skipped.
 n += 1
 grown = cpu_set_buffer([(c, 1 if c in P285K else 0) for c in range(24)], size=40)
@@ -493,7 +532,7 @@ r = ca.classify_cpu_sets(foreign + grown)
 check(n, "variable record size honoured, non-CPU-set records skipped",
       r.fast == P285K and 99 not in r.slow, f"fast={r.fast}")
 
-# 27 -- CPU Set ids are kept per logical CPU (SetThreadSelectedCpuSets takes
+# 30 -- CPU Set ids are kept per logical CPU (SetThreadSelectedCpuSets takes
 #       ids, not indices) and a truncated buffer does not raise.
 n += 1
 r = ca.classify_cpu_sets(two_class)
@@ -502,7 +541,7 @@ check(n, "CPU Set ids mapped per logical CPU; truncated buffer parses what it ca
       r.ids[10] == 266 and len(r.ids) == 24 and len(truncated.by_class) >= 1,
       f"ids[10]={r.ids.get(10)} n={len(r.ids)}")
 
-# 28 -- the live path on this host: enumerates without raising and agrees
+# 31 -- the live path on this host: enumerates without raising and agrees
 #       with its own classification (any Windows host, hybrid or not).
 n += 1
 live = ca.performance_cores()
@@ -542,7 +581,7 @@ t = threading.Thread(target=_knob_body)
 t.start()
 t.join(10)
 
-# 29 -- CPU Set ids come from the enumeration, an unknown CPU never pins, and
+# 32 -- CPU Set ids come from the enumeration, an unknown CPU never pins, and
 #       restrict/clear report booleans (True on a hybrid Windows host).
 n += 1
 hybrid = bool(ca.performance_cores())
@@ -554,7 +593,7 @@ check(n, "CPU Sets helpers: ids from enumeration, unknown CPU refused, clear wor
       and knob_out.get("clear") is True,
       f"{ {k: knob_out.get(k) for k in ('ids', 'restrict', 'clear', 'unknown')} }")
 
-# 30 -- the power-throttling opt-out and its reset both take on Windows.
+# 33 -- the power-throttling opt-out and its reset both take on Windows.
 n += 1
 check(n, "power-throttling opt-out and system reset return booleans (True on Windows)",
       isinstance(knob_out.get("throttle_off"), bool)
@@ -562,7 +601,7 @@ check(n, "power-throttling opt-out and system reset return booleans (True on Win
       and (knob_out.get("throttle_off") is True) == (sys.platform == "win32"),
       f"off={knob_out.get('throttle_off')} sys={knob_out.get('throttle_sys')}")
 
-# 31 -- MMCSS registration hands back a handle that revert accepts; reverting
+# 34 -- MMCSS registration hands back a handle that revert accepts; reverting
 #       nothing is False rather than an error.
 n += 1
 h = knob_out.get("mmcss")
