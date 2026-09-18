@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
 from PyQt5.QtCore import QSettings
+from PyQt5.QtGui import QImage
 from PyQt5.QtWidgets import QApplication
 
 app = QApplication.instance() or QApplication([])
@@ -248,6 +249,95 @@ def test_unzoom_restores_from_clean_stretches():
     grid.close()
 
 
+# --------------------------------------------------------------------------
+# A5-07 / A5-08: frames paint from a Grayscale8 QImage, hidden panes are not
+# converted, and the target rect keeps the sensor aspect.
+# --------------------------------------------------------------------------
+def _frame(w=640, h=400, value=180):
+    f = np.full((h, w), value, dtype=np.uint8)
+    f[:, : w // 2] = 60      # a left/right split so orientation is testable
+    return f
+
+
+def test_pane_paints_grayscale8_without_pixmap_expansion():
+    grid = CameraGridWidget()
+    grid.resize(900, 600)
+    grid.show()
+    grid.setup_grid(6)
+    app.processEvents()
+    grid.update_frame(0, _frame())
+    img = grid._cells[0].view.image()
+    check("pane holds a QImage after update_frame", img is not None)
+    check("pane image stays 8-bit Grayscale8",
+          img is not None and img.format() == QImage.Format_Grayscale8 and img.depth() == 8,
+          f"format={img.format() if img else None} depth={img.depth() if img else None}")
+    # Painting must run without error and show the frame, not a blank pane.
+    shot = grid._cells[0].view.grab().toImage()
+    rect = grid._cells[0].view.target_rect()
+    cx, cy = rect.center().x(), rect.center().y()
+    left = shot.pixelColor(rect.left() + 5, cy).red()
+    right = shot.pixelColor(rect.right() - 5, cy).red()
+    check("painted pane shows the frame's left/right split",
+          left < 100 < right, f"left={left} right={right}")
+
+    non_contig = np.asfortranarray(_frame(320, 200))
+    grid.update_frame(1, non_contig)
+    check("non-contiguous frame is accepted",
+          grid._cells[1].view.image() is not None
+          and grid._cells[1].view.image().width() == 320)
+    grid.close()
+
+
+def test_hidden_pane_skips_conversion():
+    grid = CameraGridWidget()
+    grid.resize(900, 600)
+    grid.show()
+    grid.setup_grid(6)
+    app.processEvents()
+    grid.toggle_zoom(0)
+    app.processEvents()
+    grid.update_frame(1, _frame())
+    grid.update_frame(0, _frame())
+    check("hidden pane received no image", grid._cells[1].view.image() is None)
+    check("zoomed pane received its image", grid._cells[0].view.image() is not None)
+    grid.toggle_zoom(0)
+    app.processEvents()
+    grid.update_frame(1, _frame())
+    check("pane converts again once visible", grid._cells[1].view.image() is not None)
+    grid.close()
+
+
+def test_zoomed_pane_keeps_sensor_aspect():
+    grid = CameraGridWidget()
+    grid.resize(960, 400)       # 2.4:1 grid area, the 6-camera window shape
+    grid.show()
+    grid.setup_grid(6)
+    app.processEvents()
+    grid.toggle_zoom(2)
+    app.processEvents()
+    grid.update_frame(2, _frame(640, 400))
+    pane = grid._cells[2].view
+    check("zoomed pane is wider than the sensor aspect",
+          pane.width() / pane.height() > 2.0, f"{pane.width()}x{pane.height()}")
+    rect = pane.target_rect()
+    aspect = rect.width() / rect.height()
+    check("target rect keeps the 1.6 sensor aspect", abs(aspect - 1.6) < 0.02, f"{aspect:.3f}")
+    check("target rect is letterboxed inside the pane",
+          rect.width() <= pane.width() and rect.height() <= pane.height()
+          and rect.left() > 0 and rect.right() < pane.width() - 1,
+          f"rect={rect} pane={pane.width()}x{pane.height()}")
+    check("target rect is centred",
+          abs(rect.center().x() - pane.width() / 2) <= 1
+          and abs(rect.center().y() - pane.height() / 2) <= 1)
+
+    # A tall pane letterboxes the other way.
+    pane.resize(200, 400)
+    rect = pane.target_rect()
+    check("tall pane letterboxes top/bottom",
+          rect.width() == 200 and rect.height() == 125 and rect.top() > 0, repr(rect))
+    grid.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -258,6 +348,9 @@ def main():
     test_stop_record_emits_when_already_off()
     test_shrinking_grid_zeroes_stale_stretches()
     test_unzoom_restores_from_clean_stretches()
+    test_pane_paints_grayscale8_without_pixmap_expansion()
+    test_hidden_pane_skips_conversion()
+    test_zoomed_pane_keeps_sensor_aspect()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)
