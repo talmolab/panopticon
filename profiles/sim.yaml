@@ -1,0 +1,55 @@
+# Simulated rig — 3 virtual cameras and a virtual trigger board, no hardware.
+#
+# Selecting this profile runs the whole application against
+# gui_app/backends/sim.py and gui_app/backends/sim_board.py: the cameras are
+# paced by a virtual trigger clock and the "serial port" is that clock's
+# command channel, so Record, Stop, the stim editor's Apply and the block-ID
+# guards all run end to end on a machine with no cameras, no trigger board
+# and no vendor SDK.
+name: sim
+camera_backend: sim
+# Nothing is flashed: stim_compiler.upload() short-circuits for this port and
+# hands the sketch to the simulated board, whose RDY ack then reports that
+# sketch's identity.
+serial_port: sim
+# auto so a host without an NVIDIA GPU falls through to libx264 rather than
+# failing the recording — the simulated rig exists to run anywhere.
+encoder: auto
+
+# Small frames and few cameras: this profile is for exercising the pipeline,
+# not for measuring it, and the NV12 ring is sized from these numbers.
+n_cameras: 3
+frame_width: 640
+frame_height: 400
+frame_rate: 100
+calibration_frame_rate: 30
+quality: 21
+encode_parallel: 3
+realtime_encode: true
+realtime_kick: true
+kick_max_lag: 240
+# The simulated pool is not a RAM budget, but the capacity preflight reads
+# this number, so it stays a plausible one.
+max_num_buffer: 600
+
+metadata_defaults:
+  experimenter: ""
+  assay: ""
+
+# No .pfs is read: the simulated camera has no feature file, and the backend
+# accepts the path and ignores it. The value is kept so the field is exercised.
+pfs_path: "configs/mono8_1920x1200.pfs"
+output_dir: "data"
+board_config: "configs/boards/charuco_8x8_15mm.yaml"
+
+trigger_pins: [2, 4, 6, 8, 10, 12]
+stim_safe_pins: [53]
+# The simulated camera enforces `exposure + 1/trigger_rate_limit` exactly as a
+# real one does — a value over the ceiling makes it ignore triggers — so this
+# stays at the rigs' setting rather than being switched off for convenience.
+trigger_rate_limit: 165
+
+# No thread placement and no thermal poll: there is no hybrid-CPU behaviour to
+# tune here, and the simulated temperatures never move.
+pin_capture_threads: false
+thermal_poll_s: 0
