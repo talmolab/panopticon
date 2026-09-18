@@ -141,8 +141,7 @@ class SidebarWidget(QWidget):
         calib_row.addWidget(self._calibrate_toggle, stretch=1)
         self._run_calib_btn = QPushButton("Solve")
         self._run_calib_btn.setFixedSize(50, 28)
-        self._run_calib_btn.setToolTip(
-            "Solve the camera calibration from the recorded calibration videos")
+        self._run_calib_btn.setToolTip(self._SOLVE_TIP)
         self._run_calib_btn.setStyleSheet(
             "QPushButton { background: #2a2a4a; color: #88aadd; border: 1px solid #444; "
             "border-radius: 3px; font-size: 10px; }"
@@ -154,6 +153,8 @@ class SidebarWidget(QWidget):
         layout.addLayout(calib_row)
 
         layout.addWidget(self._record_toggle)
+        # Tooltips and enabled state come from the gates from the first paint.
+        self._apply_enablement()
 
         self._snapshot_btn = QPushButton("Snapshot")
         self._snapshot_btn.setToolTip("Save a full-resolution still from every camera to the session's snapshots/ folder")
@@ -279,18 +280,49 @@ class SidebarWidget(QWidget):
             return self._record_toggle
         raise ValueError(f"unknown toggle kind {kind!r}; expected 'calibrate' or 'record'")
 
+    _SOLVE_TIP = "Solve the camera calibration from the recorded calibration videos"
+    _CALIBRATE_TIP = "Start or stop a calibration recording"
+    _RECORD_TIP = "Start or stop a session recording"
+    _BUSY_TIP = "Disabled during a background operation"
+    _GATE_TIP = "Disabled while encoding, aligning or solving"
+
     def _apply_enablement(self):
         """Recompute the enabled state of Calibrate, Record and Solve from the
         gates. Calibrate and Record are mutually exclusive: one being checked
         disables the other, so a second acquisition cannot be started on top
         of a live one. A busy overlay disables all three; the toggles gate
-        disables both toggles; the solve gate disables Solve alone."""
+        disables both toggles; the solve gate disables Solve alone.
+
+        Each disabled control carries a tooltip naming the gate that holds
+        it, so a dead click can be explained by hovering instead of being
+        read as a hang."""
         calibrate_on = self._calibrate_toggle.isChecked()
         record_on = self._record_toggle.isChecked()
-        toggles_open = self._toggles_gate and not self._busy
-        self._calibrate_toggle.setEnabled(toggles_open and not record_on)
-        self._record_toggle.setEnabled(toggles_open and not calibrate_on)
-        self._run_calib_btn.setEnabled(not self._busy and not self._solve_running)
+
+        def toggle_reason(sibling_on: bool, sibling_name: str) -> str:
+            if self._busy:
+                return self._BUSY_TIP
+            if not self._toggles_gate:
+                return self._GATE_TIP
+            if sibling_on:
+                return f"Disabled while {sibling_name} is on"
+            return ""
+
+        for toggle, sibling_on, sibling_name, tip in (
+                (self._calibrate_toggle, record_on, "Record", self._CALIBRATE_TIP),
+                (self._record_toggle, calibrate_on, "Calibrate", self._RECORD_TIP)):
+            reason = toggle_reason(sibling_on, sibling_name)
+            toggle.setEnabled(not reason)
+            toggle.setToolTip(reason or tip)
+
+        if self._busy:
+            solve_reason = self._BUSY_TIP
+        elif self._solve_running:
+            solve_reason = "Disabled while a solve is running"
+        else:
+            solve_reason = ""
+        self._run_calib_btn.setEnabled(not solve_reason)
+        self._run_calib_btn.setToolTip(solve_reason or self._SOLVE_TIP)
 
     def _on_profile_changed(self, index: int):
         if 0 <= index < len(self._profiles):

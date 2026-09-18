@@ -33,9 +33,18 @@ class ToggleSwitch(QAbstractButton):
         self._anim.setEndValue(1.0 if checked else 0.0)
         self._anim.start()
 
+    #: Opacity of a disabled switch. The sidebar disables a toggle for sibling
+    #: exclusion, encoding, alignment, a solve and busy ops; a switch painted
+    #: live in those states invites a click that does nothing, which reads as
+    #: a hang. Dimming is the feedback that the control is not available.
+    DISABLED_OPACITY = 0.35
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        enabled = self.isEnabled()
+        if not enabled:
+            p.setOpacity(self.DISABLED_OPACITY)
         w, h = self.width(), self.height()
 
         track_h = 22
@@ -59,7 +68,7 @@ class ToggleSwitch(QAbstractButton):
         p.setBrush(QBrush(QColor(240, 240, 240)))
         p.drawEllipse(QRectF(thumb_x - thumb_r / 2, thumb_y - thumb_r / 2, thumb_r, thumb_r))
 
-        p.setPen(QPen(QColor(220, 220, 220)))
+        p.setPen(QPen(QColor(220, 220, 220) if enabled else QColor(150, 150, 160)))
         p.setFont(QFont("Segoe UI", 10))
         p.drawText(int(label_x), 0, w - int(label_x), h, Qt.AlignVCenter | Qt.AlignLeft, self._label)
 

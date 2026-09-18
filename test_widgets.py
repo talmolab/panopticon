@@ -38,6 +38,7 @@ app = QApplication.instance() or QApplication([])
 from gui_app.widgets import sidebar as sidebar_module
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.camera_grid import CameraGridWidget
+from gui_app.widgets.toggle_switch import ToggleSwitch
 
 _TMP = tempfile.mkdtemp(prefix="panopticon_widgets_")
 # Redirect the per-machine settings so no test touches the real registry.
@@ -338,6 +339,59 @@ def test_zoomed_pane_keeps_sensor_aspect():
     grid.close()
 
 
+# --------------------------------------------------------------------------
+# A5-12: a disabled toggle looks disabled and says why.
+# --------------------------------------------------------------------------
+def test_disabled_toggle_is_visibly_dimmed():
+    tog = ToggleSwitch("Record")
+    tog.resize(180, 36)
+    tog.show()
+    app.processEvents()
+    live = tog.grab().toImage()
+    tog.setEnabled(False)
+    app.processEvents()
+    dead = tog.grab().toImage()
+    check("disabled toggle pixels differ from enabled", live != dead)
+    # The whole switch paints at reduced opacity when disabled, so the track
+    # (x in [0,44)) must move towards the widget background, whatever the
+    # palette: the offscreen default is light, the app's palette is dark.
+    bg = live.pixelColor(170, 2).lightness()          # above the label text
+    ly, dy = live.pixelColor(22, 18).lightness(), dead.pixelColor(22, 18).lightness()
+    check("disabled track fades towards the background",
+          abs(dy - bg) < abs(ly - bg), f"bg={bg} live={ly} dead={dy}")
+    tog.setEnabled(True)
+    app.processEvents()
+    check("re-enabled toggle paints like the original", tog.grab().toImage() == live)
+    tog.close()
+
+
+def test_disabled_toggle_tooltip_names_the_gate():
+    sb = make_sidebar()
+    check("live toggles carry a purpose tooltip",
+          sb._record_toggle.toolTip() and "Disabled" not in sb._record_toggle.toolTip())
+    sb._calibrate_toggle.setChecked(True)
+    check("record tooltip names the sibling",
+          sb._record_toggle.toolTip() == "Disabled while Calibrate is on",
+          sb._record_toggle.toolTip())
+    sb.set_busy(True)
+    check("busy tooltip on both toggles",
+          sb._record_toggle.toolTip() == sb._calibrate_toggle.toolTip() == SidebarWidget._BUSY_TIP)
+    check("busy tooltip on solve", sb._run_calib_btn.toolTip() == SidebarWidget._BUSY_TIP)
+    sb.set_busy(False)
+    check("after busy the sibling reason returns",
+          sb._record_toggle.toolTip() == "Disabled while Calibrate is on")
+    check("after busy the solve tooltip is restored",
+          sb._run_calib_btn.toolTip() == SidebarWidget._SOLVE_TIP)
+    sb._calibrate_toggle.setChecked(False)
+    sb.set_toggles_enabled(False)
+    check("gate tooltip while encoding/aligning",
+          sb._record_toggle.toolTip() == SidebarWidget._GATE_TIP)
+    sb.set_solve_enabled(False)
+    check("solve tooltip while a solve runs",
+          "solve" in sb._run_calib_btn.toolTip().lower() and "Disabled" in sb._run_calib_btn.toolTip())
+    sb.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -351,6 +405,8 @@ def main():
     test_pane_paints_grayscale8_without_pixmap_expansion()
     test_hidden_pane_skips_conversion()
     test_zoomed_pane_keeps_sensor_aspect()
+    test_disabled_toggle_is_visibly_dimmed()
+    test_disabled_toggle_tooltip_names_the_gate()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)
