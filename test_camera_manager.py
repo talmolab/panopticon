@@ -242,6 +242,47 @@ check("the refusal happens before any camera is reconfigured",
       b6.triggered == [] and m6.started_threads == [],
       f"{b6.triggered} {m6.started_threads}")
 
+# --- naming by serial, and what counts as the camera set --------------------
+b7 = StubBackend([StubCamera("9999999", 1920, 1200),      # sorts BEFORE the
+                  StubCamera("21111111", 1920, 1200),     # 8-digit serials as
+                  StubCamera("21111112", 1920, 1200)])    # a string
+m7 = manager(b7)
+ok7, log7 = opened(m7, only_serials=["21111112", "21111111"], expect_cameras=2)
+check("with a serial list, cam1..camN are the list entries in list order",
+      ok7 is True and b7.opened == ["21111112", "21111111"], str(b7.opened))
+check("a device the profile does not list is ignored, not opened",
+      "9999999" not in b7.opened and "ignoring 1" in log7, log7)
+check("expect_cameras is counted after the serial filter, so an extra device "
+      "on the host does not refuse the open",
+      m7.num_cameras == 2 and m7.errors == [], str(m7.errors))
+
+b8 = rig(serials=("21111111", "21111113"))
+m8 = manager(b8)
+ok8, _ = opened(m8, only_serials=["21111111", "21111112", "21111113"])
+check("a listed camera that did not enumerate refuses the open and is named",
+      not ok8 and "cam2 (21111112)" in str(m8.errors), str(m8.errors))
+
+b9 = rig()
+m9 = manager(b9)
+ok9, _ = opened(m9, expect_cameras=4)
+check("without a serial list an enumeration short of expect_cameras still "
+      "refuses", not ok9 and "Expected 4 cameras" in str(m9.errors),
+      str(m9.errors))
+
+# --- GigE bandwidth reserve --------------------------------------------------
+b10 = rig()
+m10 = manager(b10)
+opened(m10, gev_bandwidth_reserve_pct=12, gev_bandwidth_reserve_accum=4)
+check("the profile's bandwidth reserve is applied to every camera at open",
+      [c[1:] for c in b10.bandwidth_calls] == [(12, 4)] * 3,
+      str(b10.bandwidth_calls))
+
+b11 = rig()
+m11 = manager(b11)
+opened(m11)
+check("a profile that sets no reserve leaves the knobs alone",
+      b11.bandwidth_calls == [], str(b11.bandwidth_calls))
+
 # --- rig_setup --------------------------------------------------------------
 
 
@@ -269,6 +310,19 @@ check("open_kwargs emits expect_geometry as one (width, height) keyword",
 check("every keyword open_kwargs emits is accepted by open_all",
       set(kw) <= set(inspect.signature(CameraManager.open_all).parameters),
       str(sorted(kw)))
+
+
+class _ReserveProfile(_Profile):
+    gev_bandwidth_reserve_pct = 12.0
+    gev_bandwidth_reserve_accum = 4
+
+
+kw_res = rig_setup.open_kwargs(CameraManager, _ReserveProfile())
+check("open_kwargs now reaches open_all with the bandwidth reserve fields",
+      kw_res.get("gev_bandwidth_reserve_pct") == 12.0
+      and kw_res.get("gev_bandwidth_reserve_accum") == 4
+      and set(kw_res) <= set(inspect.signature(
+          CameraManager.open_all).parameters), str(kw_res))
 
 # ----------------------------------------------------------------------------
 if failures:

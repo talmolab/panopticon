@@ -181,7 +181,9 @@ class CameraManager(QObject):
                  trigger_rate_limit: float = 165.0, expect_cameras: int = 0,
                  max_num_buffer: int = MAX_NUM_BUFFER,
                  only_serials=None, backend: str | None = None,
-                 expect_geometry=None):
+                 expect_geometry=None,
+                 gev_bandwidth_reserve_pct=None,
+                 gev_bandwidth_reserve_accum=None):
         """trigger_rate_limit: AcquisitionFrameRate to apply in trigger mode, or
         0 to disable the limiter altogether — see _set_trigger_mode.
 
@@ -190,8 +192,14 @@ class CameraManager(QObject):
         with. A profile selects its vendor here; the grab threads receive the
         same backend instance, so nothing else in the application changes.
 
+        only_serials: the profile's camera_serials. When given, cam{i+1} is
+        entry i of THIS LIST rather than a position in the enumeration, so a
+        device the profile does not list cannot shift a name; unlisted devices
+        are ignored with a line on stdout, and a listed serial that did not
+        enumerate refuses the open.
+
         expect_cameras: if nonzero, refuse to start unless exactly this many
-        cameras enumerate.
+        cameras are available to open (counted after only_serials filters).
 
         max_num_buffer: driver-side buffers per camera. Comes from the profile
         so a rig can trade pool depth against RAM; MAX_NUM_BUFFER is the default
@@ -205,7 +213,12 @@ class CameraManager(QObject):
         retired, and in raw mode ffmpeg decodes the camera's bytes at the
         profile's size, which shears a full-length recording with no error
         anywhere. Refusing at open costs a dialog; not refusing costs the
-        session."""
+        session.
+
+        gev_bandwidth_reserve_pct / gev_bandwidth_reserve_accum: GevSCBWR and
+        GevSCBWRA, written through the backend at open when not None. They
+        hold bandwidth back for packet resends, which lowers the assigned
+        bandwidth every camera gets, so they are opt-in per profile."""
         self._trigger_rate_limit = trigger_rate_limit
         self._max_num_buffer = int(max_num_buffer)
         self._baseline_exp_gain = []
@@ -221,42 +234,60 @@ class CameraManager(QObject):
             self.error.emit("No cameras found")
             return False
 
-        # `expect_cameras` is checked against the FULL enumeration below, before
-        # any subsetting, so the positional-naming interlock still sees the whole
-        # rig. Only then does `only_serials` narrow what THIS process opens —
-        # which is what a multi-process split needs: every worker enumerates all
-        # nine, agrees on the same cam1..camN ordering, and opens its own share.
-        # Subsetting before the count check would defeat the interlock entirely.
+        # Camera names are positional (`cam{i+1}`) and every extrinsic in
+        # calibration.toml attaches to a name, so a device that shifts a
+        # position attaches one camera's calibration to a different physical
+        # camera: triangulation still runs and the 3D output is simply wrong.
+        # There are two orderings, and both are explicit:
+        #   - with `only_serials` (the profile's camera_serials), cam{i+1} is
+        #     entry i of THAT LIST. An extra pylon device on the host - a USB
+        #     camera, another rig on a shared segment - cannot shift a name,
+        #     and a listed camera that did not enumerate is named rather than
+        #     guessed at;
+        #   - without one, the backend's serial-sorted enumeration order,
+        #     which is why expect_cameras exists: a camera that never
+        #     ENUMERATES (dead switch port, unpowered, still booting) is
+        #     invisible to the open check further down, and a missing camera 3
+        #     silently renames physical 4..9 to cam3..cam8.
+        if only_serials:
+            want = [str(x) for x in only_serials]
+            by_serial = {d.GetSerialNumber(): d for d in devices}
+            missing = [x for x in want if x not in by_serial]
+            if missing:
+                names = ", ".join(f"cam{want.index(x) + 1} ({x})"
+                                  for x in missing)
+                self.error.emit(
+                    f"Requested cameras did not enumerate: {names}\n\n"
+                    f"They are named by their position in the profile's "
+                    f"camera_serials, so opening without them would leave "
+                    f"those names unrecorded. Power-cycle them and reselect "
+                    f"the profile.")
+                return False
+            extra = [x for x in sorted(by_serial) if x not in set(want)]
+            if extra:
+                # Ignored rather than refused: an unlisted device cannot take
+                # a name when the names come from the list, so it is a fact
+                # about the host and not a fault in the rig.
+                print(f"[cam] ignoring {len(extra)} enumerated device(s) not "
+                      f"in the profile's camera_serials: {', '.join(extra)}",
+                      flush=True)
+            sorted_devs = [by_serial[x] for x in want]
+        else:
+            sorted_devs = devices      # backend guarantees a stable order
 
-        # A camera that fails to OPEN is caught below. A camera that never
-        # ENUMERATES — dead switch port, unpowered, still booting — is invisible
-        # to that check, and it is the more dangerous case: names are positional
-        # by serial order (`cam{i+1}`), so a missing camera 3 silently renames
-        # physical 4..9 to cam3..cam8. Every extrinsic in calibration.toml then
-        # attaches to the wrong physical camera, triangulation still runs, and
-        # the 3D output is simply wrong. Three switches make this likelier.
-        if expect_cameras and len(devices) != expect_cameras:
+        # Counted AFTER the serial filter, because the count that matters is
+        # the cameras THIS process opens: with a serial list an extra device
+        # is not one of them, and a multi-process split opens its own share.
+        if expect_cameras and len(sorted_devs) != expect_cameras:
             found = ", ".join(sorted(d.GetSerialNumber() for d in devices))
             self.error.emit(
-                f"Expected {expect_cameras} cameras but {len(devices)} "
-                f"enumerated.\n\nFound: {found}\n\n"
-                f"Camera names are assigned by serial-number order, so starting "
-                f"with a missing camera would rename every camera after it and "
-                f"attach the calibration extrinsics to the wrong physical "
-                f"cameras. Power-cycle the missing camera and reselect the "
-                f"profile.")
+                f"Expected {expect_cameras} cameras but {len(sorted_devs)} "
+                f"are available to open.\n\nEnumerated: {found}\n\n"
+                f"Camera names are positional, so starting with a missing "
+                f"camera would rename every camera after it and attach the "
+                f"calibration extrinsics to the wrong physical cameras. "
+                f"Power-cycle the missing camera and reselect the profile.")
             return False
-
-        sorted_devs = devices          # backend guarantees a stable order
-        if only_serials:
-            want = {str(s) for s in only_serials}
-            sorted_devs = [d for d in sorted_devs
-                           if d.GetSerialNumber() in want]
-            missing = want - {d.GetSerialNumber() for d in sorted_devs}
-            if missing:
-                self.error.emit("Requested cameras did not enumerate: "
-                                + ", ".join(sorted(missing)))
-                return False
 
         for i, dev in enumerate(sorted_devs):
             try:
@@ -307,6 +338,20 @@ class CameraManager(QObject):
                     self._backend.get_exposure_gain(cam))
                 self._backend.enable_extended_block_ids(i, cam)
                 self._backend.select_gige_driver(i, cam, gige_driver)
+                if (gev_bandwidth_reserve_pct is not None
+                        or gev_bandwidth_reserve_accum is not None):
+                    # Applied at open, before any grabbing: the reserve lowers
+                    # the assigned bandwidth GevSCBWA, so changing it under a
+                    # running stream would repace a camera mid-recording. A
+                    # backend or camera without the nodes raises, which is
+                    # reported as this camera failing to configure - a profile
+                    # asking for a knob the rig does not have is a
+                    # misconfiguration, not something to apply to some of the
+                    # cameras and not others.
+                    applied = self._backend.set_bandwidth_reserve(
+                        cam, gev_bandwidth_reserve_pct,
+                        gev_bandwidth_reserve_accum)
+                    print(f"[cam{i+1}] bandwidth reserve {applied}", flush=True)
             except Exception as e:
                 # Don't continue with a partial set: camera names are assigned by
                 # serial-number order, so a missing camera would silently shift
