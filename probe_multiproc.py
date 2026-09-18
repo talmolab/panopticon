@@ -96,7 +96,10 @@ def worker(idx, serials, seconds, profile_name, q, switch_interval):
             blocks[serials[c]] = (int(b[0]), int(b[-1]), int(b.size),
                                   int(np.asarray(b).sum()))
     q.put({"worker": idx, "serials": serials,
-           "frames": [getattr(r, "frames", None) for r in res] if res else None,
+           # stop_acquisition returns (frames, timestamps, block_ids)
+           # tuples, so the count is element 0; an attribute lookup on a
+           # tuple silently yields None and blanks the whole report.
+           "frames": [r[0] for r in res] if res else None,
            "delivery_lags": lags, "blocks": blocks})
     try:
         mgr.close_all()
