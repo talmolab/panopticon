@@ -106,6 +106,25 @@ def test_structural_problems():
     probs = sc.structural_problems(blocks, edges)
     assert len(probs) == 1 and "block C" in probs[0] and "fan-in" in probs[0], probs
     assert refuses(blocks, edges), "fan-in compiled with C in two chains"
+    # Fan-in with Starting ticked on one source: resolve_starts() lets the flag
+    # win, so B is in no chain, compile_ino used to succeed and pin 44 was
+    # silently absent from the firmware. It is refused with B named.
+    blocks, edges = [B("A", pin=53, start=True), B("B", pin=44), B("C", pin=45)], \
+        [E("A", "C"), E("B", "C")]
+    probs = sc.structural_problems(blocks, edges)
+    assert len(probs) == 1 and "block B" in probs[0] and "not reached" in probs[0], probs
+    assert refuses(blocks, edges), "unreached source B compiled away silently"
+    # A lead-in into a flagged chain is the same shape (C->A(start)->B).
+    probs = sc.structural_problems([B("A", start=True), B("B"), B("C")],
+                                   [E("A", "B"), E("C", "A")])
+    assert len(probs) == 1 and "block C" in probs[0], probs
+    # A pure loop with no Starting flag has no start, so every block is
+    # unreached and compile_ino refuses instead of emitting zero chains.
+    probs = sc.structural_problems([B("A"), B("B")], [E("A", "B"), E("B", "A")])
+    assert len(probs) == 2 and all("not reached" in p for p in probs), probs
+    assert refuses([B("A"), B("B")], [E("A", "B"), E("B", "A")])
+    # A disconnected block is its own start, not unreached.
+    assert sc.structural_problems([B("A", start=True), B("B", pin=44)], []) == []
 
     # A lead-in feeding a loop (rho) re-enters B from its own chain: one chain
     # looping, so it is accepted and keeps its loop_to.
@@ -119,7 +138,8 @@ def test_structural_problems():
     assert sc.structural_problems([B("A"), B("B", pin=44)], []) == []
     # Edges to unknown ids are ignored, as everywhere else in the compiler.
     assert sc.structural_problems([B("A")], [E("A", "ghost"), E("A", "ghost2")]) == []
-    print("2b) two out-edges and fan-in refused with the block named: PASS")
+    print("2b) two out-edges, fan-in and unreached blocks refused with the "
+          "block named: PASS")
 
 
 def test_waveform_encoding():
@@ -147,21 +167,34 @@ def test_waveform_encoding():
 
 
 def test_pulse_edges_do_not_reanchor_to_now():
-    """Pulse edges advance the anchor by the nominal interval, so the polling
-    gap of the trigger busy-wait does not accumulate across a block; a poll a
-    whole interval late re-anchors instead of bursting catch-up toggles."""
+    """The rising edge is timed from a nominal anchor that advances by the
+    period, so the polling gap of the trigger busy-wait does not accumulate
+    across a block; the falling edge is timed from the ACTUAL rising edge, so a
+    late rising poll can only lengthen a pulse, never shorten it. A rising poll
+    a whole period late re-anchors instead of bursting catch-up pulses."""
     ino = sc.compile_ino([B("A", dur=5, freq=20, pw=5)], [], [53])
     body = ino.split("void updateStim()")[1].split("// ===== SETUP")[0]
-    pulse = body.split("uint32_t elapsed")[1]
-    assert "cs->last_toggle_us += interval;" in pulse, "edge re-anchors to nowUs"
-    assert "elapsed - interval >= interval" in pulse, "no clamp against a late poll"
-    assert "cs->last_toggle_us = nowUs;" in pulse, "clamp does not re-anchor"
-    # Block boundaries stay drift-free and the fresh edge still anchors.
+    fresh = body.split("if (cs->fresh)")[1].split("if (cs->pin_high)")[0]
+    pulse = body.split("if (cs->pin_high)")[1]
+    high, low = pulse.split("} else {", 1)
+    # Falling edge: measured from rise_us, the time the pin actually went HIGH.
+    assert "nowUs - cs->rise_us >= blk->pw_us" in high, "pulse width timed from the nominal edge"
+    assert "period_anchor_us" not in high, "falling edge touches the period anchor"
+    # Rising edge: measured from the nominal anchor, which then advances by
+    # one period; a poll a whole period late re-anchors to nowUs.
+    assert "nowUs - cs->period_anchor_us" in low, "rising edge not timed from the anchor"
+    assert "cs->period_anchor_us += blk->period_us;" in low, "rising edge re-anchors to nowUs"
+    assert "elapsed - blk->period_us >= blk->period_us" in low, "no clamp against a late poll"
+    assert "cs->period_anchor_us = nowUs;" in low, "clamp does not re-anchor"
+    assert "cs->rise_us = nowUs;" in low, "rising edge does not record its actual time"
+    # The first pulse of a block anchors both, and block boundaries stay drift-free.
+    assert "cs->period_anchor_us = nowUs;" in fresh and "cs->rise_us = nowUs;" in fresh
     assert "cs->blk_start_ms += blk->dur_ms;" in body
-    fresh = body.split("if (cs->fresh)")[1].split("uint32_t elapsed")[0]
-    assert "cs->last_toggle_us = nowUs;" in fresh
+    # Nothing in the sketch times an edge from a "last toggle" any more.
+    assert "last_toggle_us" not in ino
     assert "float" not in body and "0f" not in body
-    print("3b) pulse edges phase-locked to the block start, clamped when late: PASS")
+    print("3b) rising edges phase-locked to the block start, pulse width never "
+          "shortened, clamped when late: PASS")
 
 
 def test_safe_pins():
@@ -261,12 +294,21 @@ def test_parameter_ranges():
     # freq >= 2 MHz rounds to a 0 us period, which the sketch reads as 'hold LOW'.
     assert refuses([B("A", freq=2e6)]), "2 MHz compiled to a silent LOW block"
     assert [bid for bid, _ in sc.parameter_problems([B("A", freq=2e6)])] == ["A"]
-    # A frequency with a pulse width that rounds to 0 us is the same silent LOW.
+    # A NON-ZERO pulse width that rounds to 0 us is the same silent LOW.
     assert refuses([B("A", freq=10, pw=0.0001)])
-    assert refuses([B("A", freq=10, pw=0)])
-    # An off period is freq 0 (pw irrelevant), and that is still accepted.
+    assert refuses([B("A", freq=10, pw=0.0004)])
+    # A pulse width of exactly 0 is an off period everywhere (firmware,
+    # describe(), stim_trace), and it is what the editor's blank width field
+    # submits, so it compiles rather than escaping as an uncaught ValueError.
+    assert sc.parameter_problems([B("A", freq=10, pw=0)]) == []
+    ino = sc.compile_ino([B("A", dur=5, freq=10, pw=0)], [], [53])
+    assert "{53u, 100000UL, 0UL, 5000UL}" in ino
+    assert sc.describe([B("A", freq=10, pw=0)], [])[0]["steps"][0]["mode"] == "off (pin LOW)"
+    # An off period is also freq 0 (pw irrelevant), and that is still accepted.
     assert sc.parameter_problems([B("A", freq=0, pw=0)]) == []
     assert sc.parameter_problems([B("A", freq=0, pw=100)]) == []
+    # The shortest emittable pulse, 1 us, is accepted.
+    assert sc.parameter_problems([B("A", freq=10, pw=0.001)]) == []
     # dur < 1 ms rounds to 0 ms: a zero-length block spins the advance loop.
     assert refuses([B("A", dur=0)]), "dur 0 compiled"
     assert refuses([B("A", dur=0.0004)])

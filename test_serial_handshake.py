@@ -150,8 +150,18 @@ def test_ack_is_matched_as_a_whole_line():
     c, log, state = controller(lambda cmd, gen: b"RDY 6 100\r\n")
     c._ser.read = lambda n, _r=c._ser.read: _r(3)
     assert c.start_triggers(PINS, 100) is True, "ack split across reads was lost"
-    # Noise before the ack does not hide it.
+    # Noise on its OWN line before the ack does not hide it.
     c, log, state = controller(lambda cmd, gen: b"\xff\x00boot\r\nRDY 6 100\r\n")
+    assert c.start_triggers(PINS, 100) is True
+    # Noise on the SAME line is a line the board never prints, so it is a
+    # garbled ack, not a confirmed start: the match is anchored at both ends.
+    for garbled in (b"bootRDY 6 100\r\n", b"xRDY 6 100\r\n", b"RDY 6 100 x\r\n",
+                    b"RDY 6 100 deadbee\r\n"):
+        c, log, state = controller(lambda cmd, gen, g=garbled: g)
+        assert c.start_triggers(PINS, 100) is False, f"{garbled!r} accepted as an ack"
+        assert c._speaks_rdy is True, "a garbled RDY line still marks the board RDY"
+    # Surrounding whitespace is not part of the line.
+    c, log, state = controller(lambda cmd, gen: b"  RDY 6 100  \r\n")
     assert c.start_triggers(PINS, 100) is True
     print("5b) ack matched as a whole line with integer comparison: PASS")
 
@@ -205,6 +215,23 @@ def test_stop_is_confirmed_on_rdy_firmware():
     assert c.stop_triggers(PINS) is True
     assert c._speaks_rdy is False
     print("8) stop confirmed by `RDY n 0` on RDY firmware, write-only on legacy: PASS")
+
+
+def test_stop_budget_covers_the_sketch_drain():
+    """The sketch acks a stop only after delay(500) plus the 1 s Stream
+    timeout its parseFloat drain burns on the command's trailing newline, so
+    the stop budget must clear ~1.5 s with real margin: a miss on RDY firmware
+    raises the STOP NOT CONFIRMED dialog at the end of every acquisition."""
+    sketch_stop_ack_s = 0.5 + 1.0          # delay(500) + default Stream timeout
+    read_granularity_s = 0.1               # serial.Serial(timeout=0.1)
+    margin_s = 1.0                         # USB/CDC latency and UI-thread jitter
+    assert TeensyController.STOP_ACK_TIMEOUT >= sketch_stop_ack_s + read_granularity_s + margin_s, \
+        TeensyController.STOP_ACK_TIMEOUT
+    # A stop runs on the UI thread, so its budget stays inside the start budget,
+    # which additionally has to cover a reset and bootloader wait.
+    assert TeensyController.STOP_ACK_TIMEOUT <= TeensyController.ACK_TIMEOUT
+    assert TeensyController.ACK_TIMEOUT >= sketch_stop_ack_s + 2.0 + read_granularity_s
+    print("8b) stop and start ack budgets cover the sketch's 1.5 s drain: PASS")
 
 
 def test_stop_failure_paths_return_false():
@@ -333,6 +360,7 @@ def main():
     test_test_mode_command_shape()
     test_trailing_newline()
     test_stop_is_confirmed_on_rdy_firmware()
+    test_stop_budget_covers_the_sketch_drain()
     test_stop_failure_paths_return_false()
     test_reopen_failure_and_error_text()
     test_board_id_is_captured_from_the_ack()

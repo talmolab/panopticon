@@ -92,7 +92,10 @@ def resolve_starts(blocks: list[dict],
 
     Two sources feeding one block (fan-in) both resolve as starts here, but the
     graph is then refused by structural_problems(): the shared block would run
-    in two chains at once, which has no defined behaviour on the board.
+    in two chains at once, which has no defined behaviour on the board. When
+    one source carries the explicit flag it is the only start, so the other
+    source is reached by no chain; structural_problems() refuses that too,
+    because a drawn block the board never runs is the same silent collapse.
     """
     ids = [b["id"] for b in blocks]
     id_set = set(ids)
@@ -184,6 +187,12 @@ def structural_problems(blocks: list[dict], edges: list[dict]) -> list[str]:
       remedy is to duplicate the block so each chain has its own copy. A block
       re-entered by its own chain (a lead-in feeding a loop) is fine: that is
       one chain looping, not two chains sharing a block.
+    - **A block no chain reaches.** resolve_starts() lets an explicit Starting
+      flag win over the no-incoming-arrow rule, so a second source feeding the
+      flagged chain (B->C beside A(start)->C) is in no chain at all, and a
+      pure loop with no flag has no start. Either way the block is drawn,
+      saved in stim_paradigm.json, and absent from the firmware; pin_conflicts()
+      cannot see it because there is only one chain.
     """
     ids = {b["id"] for b in blocks}
     out: list[str] = []
@@ -209,6 +218,10 @@ def structural_problems(blocks: list[dict], edges: list[dict]) -> list[str]:
         out.append(f"block {bid} is reached by two chains (fan-in), so it would "
                    f"run twice at once; duplicate the block so each chain has "
                    f"its own copy")
+    for bid in (b["id"] for b in blocks):
+        if bid not in owners:
+            out.append(f"block {bid} is not reached from any starting block, so "
+                       f"it would never run; connect it or tick Starting on it")
     return out
 
 
@@ -380,8 +393,10 @@ def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
 
     - a frequency whose period rounds to 0 us (above 2 MHz): the firmware reads
       period 0 as "hold LOW" and the block never fires
-    - a frequency set but a pulse width that rounds to 0 us: same silent LOW;
-      an off period is expressed with frequency 0
+    - a frequency set with a NON-ZERO pulse width that rounds to 0 us: the
+      firmware holds LOW where describe() and the trace model a train. A pulse
+      width of exactly 0 is not a problem: firmware, describe() and stim_trace
+      all read it as an off period, and the editor's blank width field is 0
     - a duration under 1 ms: rounds to 0 ms, and a zero-length block makes the
       advance loop spin its full guard on every updateStim() call inside the
       trigger busy-wait
@@ -400,10 +415,11 @@ def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
             out.append((bid, f"{freq:g} Hz has a period under 1 us, which the "
                              f"firmware holds LOW; the highest usable "
                              f"frequency is 1 MHz"))
-        if freq > 0 and pw_us == 0:
+        if freq > 0 and pw > 0 and pw_us == 0:
             out.append((bid, f"a pulse width of {pw:g} ms rounds to 0 us, so "
-                             f"the block would hold LOW; set the frequency to "
-                             f"0 for an off period"))
+                             f"the block would hold LOW; the shortest pulse the "
+                             f"firmware can emit is 0.001 ms, and 0 means an "
+                             f"off period"))
         if dur_ms < 1:
             out.append((bid, f"a duration of {dur:g} s is below the 1 ms "
                              f"resolution of the firmware"))
@@ -532,7 +548,8 @@ const int NUM_CHAINS = {n};
 struct ChainState {{
   int idx;
   uint32_t blk_start_ms;
-  uint32_t last_toggle_us;
+  uint32_t period_anchor_us;  // nominal time of the last rising edge
+  uint32_t rise_us;           // actual time of the last rising edge
   bool pin_high;
   bool fresh;      // just entered this block -- fire the first pulse immediately
   bool done;
@@ -605,7 +622,8 @@ void initStim() {{
   for (int c = 0; c < NUM_CHAINS; c++) {{
     CS[c].idx = 0;
     CS[c].blk_start_ms = nowMs;
-    CS[c].last_toggle_us = nowUs;
+    CS[c].period_anchor_us = nowUs;
+    CS[c].rise_us = nowUs;
     CS[c].pin_high = false;
     CS[c].fresh = true;
     CS[c].done = false;
@@ -638,7 +656,7 @@ void updateStim() {{
           break;
         }}
       }}
-      cs->last_toggle_us = nowUs;
+      cs->period_anchor_us = nowUs;
       cs->fresh = true;
     }}
     if (cs->done) continue;
@@ -664,25 +682,42 @@ void updateStim() {{
     if (cs->fresh) {{
       digitalWrite(blk->pin, HIGH);
       cs->pin_high = true;
-      cs->last_toggle_us = nowUs;
+      cs->period_anchor_us = nowUs;
+      cs->rise_us = nowUs;
       cs->fresh = false;
       continue;
     }}
-    // Each edge advances the anchor by the nominal interval instead of to
-    // nowUs, so the polling gap of the trigger busy-wait does not accumulate
-    // across a block's pulses and the train stays phase-locked to the block
-    // start. A poll so late that a whole further interval has passed
-    // re-anchors to nowUs: one late edge is better than a burst of catch-up
-    // toggles.
-    uint32_t elapsed = nowUs - cs->last_toggle_us;
-    uint32_t interval = cs->pin_high ? blk->pw_us : (blk->period_us - blk->pw_us);
-    if (elapsed >= interval) {{
-      cs->pin_high = !cs->pin_high;
-      digitalWrite(blk->pin, cs->pin_high ? HIGH : LOW);
-      if (elapsed - interval >= interval) {{
-        cs->last_toggle_us = nowUs;
-      }} else {{
-        cs->last_toggle_us += interval;
+    // The trigger busy-wait polls this function with gaps of tens of
+    // microseconds (camsLow/camsHigh over every camera with interrupts off),
+    // so each edge fires late by up to one gap. The two edges are timed from
+    // different anchors so that lateness lands where it does no harm:
+    //  - the FALLING edge is timed from the ACTUAL rising edge (rise_us), so a
+    //    late rising poll never shortens the pulse. A pulse is only ever
+    //    longer than pw_us, never shorter, and the off-time absorbs the gap;
+    //    timing it from the nominal edge instead would cut a 100 us laser
+    //    pulse by the whole poll gap.
+    //  - the RISING edge is timed from a nominal anchor (period_anchor_us)
+    //    that advances by period_us per pulse instead of to nowUs, so the gaps
+    //    do not accumulate across the train and every pulse starts
+    //    phase-locked to the block start.
+    // A rising poll so late that a whole further period has passed re-anchors
+    // to nowUs: one late pulse is better than a burst of catch-up pulses.
+    if (cs->pin_high) {{
+      if (nowUs - cs->rise_us >= blk->pw_us) {{
+        digitalWrite(blk->pin, LOW);
+        cs->pin_high = false;
+      }}
+    }} else {{
+      uint32_t elapsed = nowUs - cs->period_anchor_us;
+      if (elapsed >= blk->period_us) {{
+        digitalWrite(blk->pin, HIGH);
+        cs->pin_high = true;
+        cs->rise_us = nowUs;
+        if (elapsed - blk->period_us >= blk->period_us) {{
+          cs->period_anchor_us = nowUs;
+        }} else {{
+          cs->period_anchor_us += blk->period_us;
+        }}
       }}
     }}
   }}

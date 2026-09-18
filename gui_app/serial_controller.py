@@ -12,9 +12,13 @@ from gui_app.stim_compiler import SIM_PORT, is_sim_port  # noqa: F401 (SIM_PORT 
 
 #: One complete ack line from the sketch: ``RDY <n_cams> <fps>`` with an
 #: optional 8-hex sketch identity appended by firmware that knows its own
-#: build. Matched against whole lines so a superstring such as ``RDY 6 1000``
-#: cannot satisfy a request for 100 fps.
-_RDY_LINE = re.compile(r"RDY (\d+) (-?\d+)(?: ([0-9a-fA-F]{8}))?\s*$")
+#: build. Applied with fullmatch() to the WHOLE stripped line, never searched
+#: for inside it, because the ack exists to prove the board printed exactly
+#: this line: a superstring such as ``RDY 6 1000`` cannot satisfy a request
+#: for 100 fps, and a stray byte in front of the token (``xRDY 6 100``) or a
+#: boot message run into it (``bootRDY 6 100``) is not something the sketch
+#: prints, so it is a garbled ack, not a confirmed start.
+_RDY_LINE = re.compile(r"RDY (\d+) (-?\d+)(?: ([0-9a-fA-F]{8}))?")
 
 
 class TeensyController:
@@ -35,17 +39,25 @@ class TeensyController:
     a good one until the recording comes back empty.
     """
 
-    # Headroom, not an estimate. The sketch's config path spends two delay(500)s
-    # before announceReady(), and after a forced reopen the board's bootloader
-    # wait comes on top — so an ack can legitimately take 1-2 s. (It used to be
-    # worse: without the trailing newline _send() now appends, the final
-    # parseFloat() burned its own 1 s timeout as well.)
+    # Both budgets are headroom over the sketch's fixed ack latency, which is
+    # ~1.5 s on EVERY config path, not 0.5 s: after the command is parsed the
+    # sketch runs delay(500) and then drains its input with parseFloat().
+    # readFPS()'s parseFloat stops AT the trailing newline without consuming
+    # it, so the drain sees that one byte, discards it, and waits the Stream
+    # default timeout (1000 ms; the sketch never calls setTimeout) for a digit
+    # that never comes. Add USB/CDC latency and the 0.1 s read granularity.
+    # The success path returns at the ack, so a wider budget costs nothing
+    # when the board answers; only the fault path waits longer.
+    #
+    # A start after a forced reopen adds the board's reset and bootloader wait
+    # (~1-2 s) to the 1.5 s, so an ack can take ~3.5 s; 4.0 s covers it.
     ACK_TIMEOUT = 4.0
-    # A stop lands in loop()'s reconfigure branch, which acks after one
-    # delay(500) and no bootloader wait, so the ack arrives well inside 1.5 s.
-    # The budget is shorter than ACK_TIMEOUT because a stop is issued on the UI
-    # thread at the end of every acquisition and at quit.
-    STOP_ACK_TIMEOUT = 2.0
+    # A stop lands in loop()'s reconfigure branch: the same 1.5 s drain but no
+    # bootloader wait. A budget of 2.0 s left ~0.35 s of margin, and a miss is
+    # not benign on RDY firmware: it raises the "STOP NOT CONFIRMED" dialog at
+    # the end of every ordinary acquisition and at quit. 3.0 s keeps ~1.4 s of
+    # margin and stays below ACK_TIMEOUT because a stop runs on the UI thread.
+    STOP_ACK_TIMEOUT = 3.0
     # Attempts for the reopen inside start_triggers(); the eager open at launch
     # keeps its own, longer count via open(retries=...).
     REOPEN_RETRIES = 3
@@ -172,8 +184,10 @@ class TeensyController:
         return True
 
     def _send(self, pins: list[int], fps: int) -> bool:
-        # Trailing newline terminates the sketch's final parseFloat immediately
-        # instead of letting it burn its 1 s timeout. Harmless to older firmware.
+        # The trailing newline terminates readFPS()'s parseFloat immediately
+        # instead of letting it burn its 1 s timeout; the sketch's drain still
+        # burns one timeout on that newline, which the ack budgets cover.
+        # Harmless to older firmware.
         cmd = ",".join(str(x) for x in [len(pins)] + list(pins) + [fps]) + "\n"
         try:
             self._ser.reset_input_buffer()
@@ -217,7 +231,7 @@ class TeensyController:
                 # The board speaks RDY, whatever the rest of the line says, so
                 # the pre-RDY exemption in start_triggers no longer applies.
                 self._speaks_rdy = True
-                m = _RDY_LINE.search(line)
+                m = _RDY_LINE.fullmatch(line.strip())
                 if not m:
                     print(f"[teensy] wanted {want!r}, got garbled ack "
                           f"{line.strip()!r}", flush=True)
@@ -253,9 +267,9 @@ class TeensyController:
         nothing, so the ack is what confirms the stand-down.
 
         Waiting for the ack also serialises stop and start on the host: the
-        sketch drains its input for ~0.5 s before acking, and a start written
-        into that window is swallowed, times out and forces a port reset — the
-        laser flash the long-lived connection exists to avoid.
+        sketch drains its input for ~1.5 s before acking (see STOP_ACK_TIMEOUT),
+        and a start written into that window is swallowed, times out and forces
+        a port reset — the laser flash the long-lived connection exists to avoid.
 
         The caller MUST NOT infer success from the port being open: pyserial's
         `is_open` stays True after the USB device disappears, so an unplugged
