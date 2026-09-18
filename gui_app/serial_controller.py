@@ -4,8 +4,15 @@ The board is an Arduino Mega 2560 (see stim_compiler.FQBN), not a Teensy — the
 class name is legacy from campy and is kept because tests, probe scripts and
 main_window all refer to it.
 """
+import re
 import time
 import serial
+
+#: One complete ack line from the sketch: ``RDY <n_cams> <fps>`` with an
+#: optional 8-hex sketch identity appended by firmware that knows its own
+#: build. Matched against whole lines so a superstring such as ``RDY 6 1000``
+#: cannot satisfy a request for 100 fps.
+_RDY_LINE = re.compile(r"RDY (\d+) (-?\d+)(?: ([0-9a-fA-F]{8}))?\s*$")
 
 
 class TeensyController:
@@ -37,9 +44,22 @@ class TeensyController:
         self._port = port
         self._baudrate = baudrate
         self._ser = None
-        # False until this board is seen to ack at all; distinguishes
-        # pre-RDY firmware from a board that has stopped responding.
-        self._acks = False
+        # True once ANY `RDY` line has been seen from this board, matching or
+        # not. A board that answers `RDY 6 0` to a 100 fps request has
+        # mis-parsed the config, so it must be refused rather than treated as
+        # pre-RDY firmware: the legacy exemption exists only for boards that
+        # never speak RDY at all.
+        self._speaks_rdy = False
+        #: Sketch identity (8 hex characters) from the most recent ack, or None
+        #: when the firmware does not report one. Lets the host tell which
+        #: sketch the board actually runs instead of trusting a per-machine
+        #: record of what was last uploaded.
+        self.board_id: str | None = None
+
+    @property
+    def _acks(self) -> bool:
+        """Back-compat alias for _speaks_rdy (probe scripts read it)."""
+        return self._speaks_rdy
 
     def open(self, retries: int = 10) -> bool:
         for _ in range(retries):
@@ -88,14 +108,15 @@ class TeensyController:
         if self._send(pins, fps):
             return True
 
-        if self._acks:
-            # This board has acked before, so silence now is a real fault.
-            print("[teensy] board acked previously but not now — aborting", flush=True)
+        if self._speaks_rdy:
+            # This board speaks RDY, so a missing or mismatched ack is a real
+            # fault: either it went silent or it mis-parsed the config. Both
+            # would record an empty session, so refuse.
+            print("[teensy] board speaks RDY but did not confirm — aborting", flush=True)
             return False
-        # Never seen an ack on this board: almost certainly firmware predating
-        # the RDY handshake (stock trigger.ino, or a sketch built before
-        # 2026-07-27). It has just been reset, which is exactly what the old
-        # code did, so let the recording proceed.
+        # No RDY line has ever come from this board: firmware predating the
+        # handshake (stock trigger.ino). It has just been reset, which is what
+        # that firmware needs, so let the recording proceed.
         print("[teensy] no ack support detected — assuming pre-RDY firmware", flush=True)
         return True
 
@@ -112,9 +133,20 @@ class TeensyController:
         print(f"[teensy] sent: {cmd!r}", flush=True)
         return self._await_ack(len(pins), fps)
 
-    def _await_ack(self, n_pins: int, fps: int) -> bool:
-        want = f"RDY {n_pins} {max(int(fps), 0)}"
-        deadline = time.monotonic() + self.ACK_TIMEOUT
+    def _await_ack(self, n_pins: int, fps: int, timeout: float | None = None) -> bool:
+        """Wait for one complete ``RDY <n_pins> <fps>`` line and return whether
+        the board echoed exactly the configuration that was sent.
+
+        Lines are matched whole and compared as integers, because the ack
+        exists to catch a mis-parsed config and a substring test would let
+        ``RDY 6 1000`` stand in for ``RDY 6 100``. Any RDY line, matching or
+        not, marks the board as RDY-speaking; a mismatched line fails at once
+        because the board has already answered and a second, correct line is
+        not coming.
+        """
+        want_n, want_fps = int(n_pins), max(int(fps), 0)
+        want = f"RDY {want_n} {want_fps}"
+        deadline = time.monotonic() + (self.ACK_TIMEOUT if timeout is None else timeout)
         buf = ""
         while time.monotonic() < deadline:
             try:
@@ -122,12 +154,27 @@ class TeensyController:
             except (serial.SerialException, OSError) as e:
                 print(f"[teensy] read failed: {e}", flush=True)
                 return False
-            if chunk:
-                buf += chunk.decode("ascii", "ignore")
-                if want in buf:
-                    self._acks = True
-                    print(f"[teensy] ack {want!r}", flush=True)
+            if not chunk:
+                continue
+            buf += chunk.decode("ascii", "ignore")
+            # Only complete lines are judged; a partial tail stays in buf for
+            # the next read so a line split across two reads is not lost.
+            *lines, buf = buf.split("\n")
+            for line in lines:
+                m = _RDY_LINE.search(line)
+                if not m:
+                    continue
+                self._speaks_rdy = True
+                self.board_id = (m.group(3) or "").lower() or None
+                got_n, got_fps = int(m.group(1)), int(m.group(2))
+                if (got_n, got_fps) == (want_n, want_fps):
+                    print(f"[teensy] ack {want!r}"
+                          + (f" id={self.board_id}" if self.board_id else ""),
+                          flush=True)
                     return True
+                print(f"[teensy] wanted {want!r}, got {line.strip()!r} — "
+                      f"the board mis-parsed the command", flush=True)
+                return False
         if buf.strip():
             print(f"[teensy] wanted {want!r}, got {buf.strip()!r}", flush=True)
         return False

@@ -107,7 +107,7 @@ def test_legacy_firmware_still_records():
     c, log, state = controller(lambda cmd, gen: b"")
     assert c.start_triggers(PINS, 100) is True, \
         "pre-RDY firmware refused — this would brick camera-only recording"
-    assert c._acks is False
+    assert c._speaks_rdy is False
     assert state["opens"] == 1, "should still have reset before giving up"
     print("3) firmware without RDY support -> proceeds after reset: PASS")
 
@@ -119,7 +119,7 @@ def test_regression_is_a_hard_failure():
     c, log, state = controller(
         lambda cmd, gen: ACK if (alive["v"] and cmd == START) else b"")
     assert c.start_triggers(PINS, 100) is True    # teaches it this board acks
-    assert c._acks is True
+    assert c._speaks_rdy is True
     alive["v"] = False                            # board goes quiet, stays quiet
     assert c.start_triggers(PINS, 100) is False, \
         "a known-acking board went silent and we recorded anyway"
@@ -127,11 +127,33 @@ def test_regression_is_a_hard_failure():
 
 
 def test_ack_must_match_the_command():
-    """A stale ack from a previous command must not satisfy this one."""
+    """A board that answers RDY with the wrong numbers has mis-parsed the
+    config and will fire nothing. It speaks RDY, so it is NOT legacy firmware
+    and the start must fail rather than fall through to the legacy exemption."""
     c, log, state = controller(lambda cmd, gen: b"RDY 6 0\r\n")   # fps 0, not 100
-    c.start_triggers(PINS, 100)
-    assert c._acks is False, "accepted an ack with the wrong fps"
-    print("5) ack with mismatched fps is not accepted: PASS")
+    assert c.start_triggers(PINS, 100) is False, \
+        "a mismatched RDY was treated as pre-RDY firmware and recording proceeded"
+    assert c._speaks_rdy is True, "a RDY line was seen but not classified as such"
+    assert state["opens"] == 1, "should have retried once after a reset"
+    print("5) ack with mismatched fps -> start refused, board marked RDY: PASS")
+
+
+def test_ack_is_matched_as_a_whole_line():
+    """`RDY 6 1000` must not satisfy a request for 100 fps: the ack exists to
+    catch parse errors, and an extra digit is exactly what a stray byte makes."""
+    c, log, state = controller(lambda cmd, gen: b"RDY 6 1000\r\n")
+    assert c.start_triggers(PINS, 100) is False, "superstring ack accepted"
+    # Integer comparison, not text: leading zeros and CR line endings are fine.
+    c, log, state = controller(lambda cmd, gen: b"RDY 06 0100\r\n")
+    assert c.start_triggers(PINS, 100) is True
+    # A line split across two reads is still recognised.
+    c, log, state = controller(lambda cmd, gen: b"RDY 6 100\r\n")
+    c._ser.read = lambda n, _r=c._ser.read: _r(3)
+    assert c.start_triggers(PINS, 100) is True, "ack split across reads was lost"
+    # Noise before the ack does not hide it.
+    c, log, state = controller(lambda cmd, gen: b"\xff\x00boot\r\nRDY 6 100\r\n")
+    assert c.start_triggers(PINS, 100) is True
+    print("5b) ack matched as a whole line with integer comparison: PASS")
 
 
 def test_test_mode_command_shape():
@@ -159,6 +181,7 @@ def main():
     test_legacy_firmware_still_records()
     test_regression_is_a_hard_failure()
     test_ack_must_match_the_command()
+    test_ack_is_matched_as_a_whole_line()
     test_test_mode_command_shape()
     test_trailing_newline()
     print("\nALL SERIAL HANDSHAKE TESTS PASS")
