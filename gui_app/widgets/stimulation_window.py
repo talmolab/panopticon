@@ -1,5 +1,4 @@
 """Bonsai-style stimulus workflow editor for Panopticon."""
-import hashlib
 import json
 import math
 import time
@@ -39,6 +38,28 @@ GRID_MIN_ZOOM = 0.4
 def _pin_color(pin: int) -> QColor:
     hue = (int(pin) * 137) % 360
     return QColor.fromHsv(hue, 170, 210)
+
+
+def block_mode(freq: float, pw: float) -> tuple[str, float]:
+    """Classify how a (freq, pulse-width) pair drives its pin.
+
+    Returns (kind, duty_percent) with kind one of ``low`` (nothing fires),
+    ``train`` (a pulse train), ``constant`` (pulse width equals the period,
+    so the pin is held HIGH) or ``impossible`` (pulse width exceeds the period,
+    which the firmware also renders as constant ON). The block label and the
+    waveform preview both read this one function so they can never disagree
+    about where a train turns into a constant level; a disagreement at that
+    threshold is how a laser ends up held ON while the canvas shows a train.
+    """
+    if freq <= 0 or pw <= 0:
+        return "low", 0.0
+    period = 1000.0 / freq
+    duty = pw / period * 100.0
+    if pw > period * (1 + 1e-9):
+        return "impossible", duty
+    if pw >= period * (1 - 1e-9):
+        return "constant", duty
+    return "train", duty
 
 
 # ── ConnectorPort ─────────────────────────────────────────────────────────────
@@ -141,10 +162,10 @@ class BlockItem(QGraphicsItem):
 
     def mode_text(self) -> str:
         """How this block's freq/pulse-width actually drive the pin."""
-        if self.freq <= 0 or self.pw <= 0:
+        kind, duty = block_mode(self.freq, self.pw)
+        if kind == "low":
             return "pin LOW"
-        duty = self.pw * self.freq / 10.0  # pw(ms) * freq(Hz) / 1000 as a percent
-        if duty >= 100:
+        if kind in ("constant", "impossible"):
             return "constant ON"
         return f"{duty:g}% duty"
 
@@ -768,14 +789,14 @@ class WaveformPreview(QWidget):
     def state(self) -> tuple[str, str]:
         """(kind, caption) — kind is low | train | constant | impossible."""
         f, pw = self._freq, self._pw
-        if f <= 0 or pw <= 0:
-            return "low", "pin held LOW"
-        period = 1000.0 / f
-        if pw > period * (1 + 1e-9):
-            return "impossible", f"pulse {pw:g} ms > period {period:g} ms"
-        if pw >= period * (1 - 1e-9):
-            return "constant", f"100% duty — constant ON, not {f:g} Hz"
-        return "train", f"{f:g} Hz · {pw:g} ms · {pw / period * 100:.0f}% duty"
+        kind, duty = block_mode(f, pw)
+        if kind == "low":
+            return kind, "pin held LOW"
+        if kind == "impossible":
+            return kind, f"pulse {pw:g} ms > period {1000.0 / f:g} ms"
+        if kind == "constant":
+            return kind, f"100% duty — constant ON, not {f:g} Hz"
+        return kind, f"{f:g} Hz · {pw:g} ms · {duty:.0f}% duty"
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -1292,7 +1313,7 @@ class StimulationWindow(QDialog):
             "safe_low_pins": list(self._get_safe_pins()),
             "end_time_s": stim_compiler.end_time_s(blocks, edges),
             "matches_uploaded_firmware": matches,
-            "firmware_sha256": hashlib.sha256(ino.encode()).hexdigest(),
+            "firmware_sha256": stim_compiler.sketch_sha(ino),
             "chains": stim_compiler.describe(blocks, edges),
             "blocks": blocks,
             "edges": edges,
