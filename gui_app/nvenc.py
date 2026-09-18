@@ -213,6 +213,33 @@ def create_h264_encoder(width: int, height: int, qp: int,
         f"{last_err}") from last_err
 
 
+def probe_monochrome_support(codec: str = "h264", gpuid: int = 0) -> int:
+    """NV_ENC_CAPS_SUPPORT_MONOCHROME for this GPU: 1, 0, or -1 when unknown.
+
+    The capture path feeds NV12 whose UV plane is a constant 128, which costs
+    half a frame of RAM per ring slot and a memcpy the encoder then throws
+    away. A GPU whose encoder supports monochrome could take the Y plane
+    alone, so the capability is worth knowing before anyone tries.
+
+    RULE: read the capability, never assume it. REASON: it is a per-generation
+    hardware fact, and asking for monochrome where it is unsupported fails at
+    session creation — mid-recording, once per camera.
+    """
+    _load()
+    if _nvc is None:
+        return -1
+    try:
+        caps = _nvc.GetEncoderCaps(gpuid=gpuid, codec=codec)
+    except Exception as e:
+        print(f"[nvenc] encoder caps unavailable: {e}", flush=True)
+        return -1
+    value = caps.get("support_monochrome") if hasattr(caps, "get") else None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def probe_max_sessions_isolated(width: int = 1920, height: int = 1200,
                                 limit: int = 24, timeout: float = 120.0) -> int:
     """`probe_max_sessions` in a child process, so release is guaranteed.

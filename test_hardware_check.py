@@ -351,6 +351,37 @@ def test_raw_warning_states_a_rule_not_this_rig():
           "instead of this rig's drive models: PASS")
 
 
+def test_monochrome_capability_is_read_not_assumed():
+    from gui_app import nvenc
+
+    class FakeNvc:
+        def __init__(self, caps):
+            self.caps = caps
+
+        def GetEncoderCaps(self, gpuid=0, codec="h264"):
+            if self.caps is None:
+                raise RuntimeError("no caps here")
+            return self.caps
+
+    real_nvc, real_loaded = nvenc._nvc, nvenc._loaded
+    nvenc._loaded = True
+    try:
+        nvenc._nvc = FakeNvc({"support_monochrome": 1})
+        assert nvenc.probe_monochrome_support() == 1
+        nvenc._nvc = FakeNvc({"support_monochrome": 0})
+        assert nvenc.probe_monochrome_support() == 0
+        nvenc._nvc = FakeNvc({})
+        assert nvenc.probe_monochrome_support() == -1, "absent means unknown"
+        nvenc._nvc = FakeNvc(None)
+        assert nvenc.probe_monochrome_support() == -1, "a raising query is unknown"
+        nvenc._nvc = None
+        assert nvenc.probe_monochrome_support() == -1, "no NVENC means unknown"
+    finally:
+        nvenc._nvc, nvenc._loaded = real_nvc, real_loaded
+    print("15) monochrome support is read from the encoder caps, and an "
+          "absent or failing query answers 'unknown', not 'yes': PASS")
+
+
 def main():
     test_unavailable_is_not_a_pass()
     test_shortfall_and_surplus()
@@ -366,6 +397,7 @@ def main():
     test_thread_exposes_a_non_shadowing_signal()
     test_disk_test_is_real_and_optional()
     test_raw_warning_states_a_rule_not_this_rig()
+    test_monochrome_capability_is_read_not_assumed()
     print("\nALL HARDWARE CHECK TESTS PASS")
 
 
