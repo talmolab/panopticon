@@ -115,6 +115,18 @@ class SidebarWidget(QWidget):
         acq_label.setStyleSheet("color: #dcdcdc; border: none;")
         layout.addWidget(acq_label)
 
+        # Enablement of the acquisition controls is derived, never stored on
+        # the widgets: three gates combine and each caller owns exactly one.
+        # `_busy` is the temporary overlay of a blocking background op;
+        # `_toggles_gate` is the state machine's ENCODING/ALIGNING/solve gate
+        # (set_toggles_enabled); `_solve_running` is the Solve button's own
+        # gate (set_solve_enabled). Sibling exclusion comes from the toggles'
+        # checked state. Every setter recomputes from all of them, so releasing
+        # one gate cannot enable a control another gate still holds closed.
+        self._busy = False
+        self._toggles_gate = True
+        self._solve_running = False
+
         self._calibrate_toggle = ToggleSwitch("Calibrate", QColor(66, 133, 244))
         self._record_toggle = ToggleSwitch("Record", QColor(234, 67, 53))
         self._calibrate_toggle.toggled.connect(self._on_calibrate)
@@ -245,18 +257,25 @@ class SidebarWidget(QWidget):
         return self._output_dir
 
     def _on_calibrate(self, checked):
-        if checked:
-            self._record_toggle.setEnabled(False)
-        else:
-            self._record_toggle.setEnabled(True)
+        self._apply_enablement()
         self.calibrate_toggled.emit(checked)
 
     def _on_record(self, checked):
-        if checked:
-            self._calibrate_toggle.setEnabled(False)
-        else:
-            self._calibrate_toggle.setEnabled(True)
+        self._apply_enablement()
         self.record_toggled.emit(checked)
+
+    def _apply_enablement(self):
+        """Recompute the enabled state of Calibrate, Record and Solve from the
+        gates. Calibrate and Record are mutually exclusive: one being checked
+        disables the other, so a second acquisition cannot be started on top
+        of a live one. A busy overlay disables all three; the toggles gate
+        disables both toggles; the solve gate disables Solve alone."""
+        calibrate_on = self._calibrate_toggle.isChecked()
+        record_on = self._record_toggle.isChecked()
+        toggles_open = self._toggles_gate and not self._busy
+        self._calibrate_toggle.setEnabled(toggles_open and not record_on)
+        self._record_toggle.setEnabled(toggles_open and not calibrate_on)
+        self._run_calib_btn.setEnabled(not self._busy and not self._solve_running)
 
     def _on_profile_changed(self, index: int):
         if 0 <= index < len(self._profiles):
@@ -317,17 +336,23 @@ class SidebarWidget(QWidget):
         self._profile_combo.setEnabled(editable)
 
     def set_busy(self, busy: bool):
-        """Disable the acquisition controls during a blocking background op
-        (camera switch, finishing, firmware flash).
+        """Overlay for a blocking background op (camera switch, finishing,
+        firmware flash): disables the acquisition controls while True and
+        RESTORES them when False.
 
-        Everything in the list below except the Stimulation button, which is
-        deliberately left alone so the editor can still be opened. The status
-        label stays legible so the user sees progress."""
-        for w in (self._profile_combo, self._dir_button, self._calibrate_toggle,
-                  self._record_toggle, self._run_calib_btn, self._snapshot_btn):
+        Restoring means recomputing from the other gates, not enabling
+        everything: a firmware flash runs between the click and the state
+        change, so set_busy(False) fires while a toggle is already checked and
+        must leave the sibling disabled, and a profile switch during a solve
+        must leave Solve disabled. The Stimulation button is deliberately
+        left alone so the editor can still be opened, and the status label
+        stays legible so the user sees progress."""
+        self._busy = busy
+        for w in (self._profile_combo, self._dir_button, self._snapshot_btn):
             w.setEnabled(not busy)
         for f in self._fields.values():
             f.setEnabled(not busy)
+        self._apply_enablement()
 
     def set_status(self, text: str, color: str):
         self._status.setText(text)
@@ -344,17 +369,21 @@ class SidebarWidget(QWidget):
         self._progress.setValue(0)
 
     def set_toggles_enabled(self, enabled: bool):
-        self._calibrate_toggle.setEnabled(enabled)
-        self._record_toggle.setEnabled(enabled)
+        """Gate both toggles for the ENCODING/ALIGNING/solve phases. The gate
+        survives a set_busy cycle; reset_toggles() reopens it."""
+        self._toggles_gate = enabled
+        self._apply_enablement()
 
     def set_solve_enabled(self, enabled: bool):
         """Enable/disable the Solve button independently of the toggles.
 
         A solve runs 4-5 minutes without changing the app state, so it needs its
         own gate: a second click would rebind the worker and drop the only
-        reference to a running QThread, which is an immediate qFatal.
+        reference to a running QThread, which is an immediate qFatal. The gate
+        survives a set_busy cycle so a profile switch mid-solve cannot reopen it.
         """
-        self._run_calib_btn.setEnabled(enabled)
+        self._solve_running = not enabled
+        self._apply_enablement()
 
     def clear_toggles_silently(self):
         """Force both toggles off WITHOUT emitting — for refusing a start.
@@ -383,10 +412,13 @@ class SidebarWidget(QWidget):
         self._record_toggle.setChecked(False)
 
     def reset_toggles(self):
+        """Return both toggles to off and reopen the toggles gate: the IDLE
+        entry point after an acquisition, an alignment or a refused start.
+        Unchecking emits like a click, so a live stop path still runs."""
         self._calibrate_toggle.setChecked(False)
         self._record_toggle.setChecked(False)
-        self._calibrate_toggle.setEnabled(True)
-        self._record_toggle.setEnabled(True)
+        self._toggles_gate = True
+        self._apply_enablement()
 
     # --- calibration coverage graph ---
     def setup_coverage(self, n_cams: int):
