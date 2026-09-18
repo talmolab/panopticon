@@ -425,6 +425,65 @@ check(n, "live enumeration is consistent with classify_cpu_sets",
       and set(live).isdisjoint(ca.efficiency_cores()),
       f"fast={live} classes={ {k: len(v) for k, v in classes.by_class.items()} }")
 
+# ===========================================================================
+# Opt-in scheduling knobs: CPU Sets, power-throttling opt-out, MMCSS. These
+# have no GUI caller; the contract pinned here is "callable on any host,
+# never raises, reports what it did", exercised on a worker thread so the
+# test's own main thread is left alone.
+# ===========================================================================
+import threading  # noqa: E402
+
+knob_out = {}
+
+
+def _knob_body():
+    fast = ca.performance_cores()
+    knob_out["ids"] = ca.cpu_set_ids(fast)
+    knob_out["ids_match"] = knob_out["ids"] == [ca.cpu_classes().ids[c] for c in fast]
+    knob_out["restrict"] = ca.restrict_current_thread_cpu_sets(fast)
+    knob_out["clear"] = ca.clear_current_thread_cpu_sets()
+    knob_out["unknown"] = ca.restrict_current_thread_cpu_sets([9999])
+    knob_out["throttle_off"] = ca.disable_current_thread_power_throttling()
+    knob_out["throttle_sys"] = ca.set_current_thread_power_throttling(None)
+    h = ca.mmcss_register_current_thread("Capture", ca.AVRT_PRIORITY_HIGH)
+    knob_out["mmcss"] = h
+    knob_out["revert"] = ca.mmcss_revert(h)
+    knob_out["revert_none"] = ca.mmcss_revert(None)
+
+
+t = threading.Thread(target=_knob_body)
+t.start()
+t.join(10)
+
+# 23 -- CPU Set ids come from the enumeration, an unknown CPU never pins, and
+#       restrict/clear report booleans (True on a hybrid Windows host).
+n += 1
+hybrid = bool(ca.performance_cores())
+check(n, "CPU Sets helpers: ids from enumeration, unknown CPU refused, clear works",
+      not t.is_alive() and knob_out.get("ids_match") is True
+      and knob_out.get("unknown") is False
+      and isinstance(knob_out.get("restrict"), bool)
+      and (knob_out.get("restrict") is True) == hybrid
+      and knob_out.get("clear") is True,
+      f"{ {k: knob_out.get(k) for k in ('ids', 'restrict', 'clear', 'unknown')} }")
+
+# 24 -- the power-throttling opt-out and its reset both take on Windows.
+n += 1
+check(n, "power-throttling opt-out and system reset return booleans (True on Windows)",
+      isinstance(knob_out.get("throttle_off"), bool)
+      and isinstance(knob_out.get("throttle_sys"), bool)
+      and (knob_out.get("throttle_off") is True) == (sys.platform == "win32"),
+      f"off={knob_out.get('throttle_off')} sys={knob_out.get('throttle_sys')}")
+
+# 25 -- MMCSS registration hands back a handle that revert accepts; reverting
+#       nothing is False rather than an error.
+n += 1
+h = knob_out.get("mmcss")
+check(n, "MMCSS register/revert round-trip; revert(None) is False",
+      (h is None or (h and knob_out.get("revert") is True))
+      and knob_out.get("revert_none") is False,
+      f"handle={h} revert={knob_out.get('revert')}")
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): " + ", ".join(failures))

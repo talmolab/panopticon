@@ -533,3 +533,151 @@ def end_high_resolution_timers(ms: int = 1) -> bool:
         return ctypes.WinDLL("winmm").timeEndPeriod(ms) == 0
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Opt-in alternatives to the hard affinity mask. None of these has a caller in
+# the GUI: they exist so an A/B against the hard mask can be run from a probe
+# without editing this module. Each degrades to False/None and never raises,
+# like everything above.
+# ---------------------------------------------------------------------------
+
+def cpu_set_ids(cpus) -> list[int]:
+    """CPU Set ids for the given logical CPUs, from the cached enumeration.
+
+    SetThreadSelectedCpuSets takes CPU Set IDs (256, 257, ... on the reference
+    host), not logical indices; passing indices silently selects nothing. A
+    logical CPU the enumeration does not know is dropped.
+    """
+    ids = cpu_classes().ids
+    return [ids[c] for c in cpus if c in ids]
+
+
+def restrict_current_thread_cpu_sets(cpus) -> bool:
+    """Soft-pin the calling thread to a set of logical CPUs via CPU Sets.
+
+    CPU Sets are the scheduling preference Windows documents for hybrid parts
+    and power management, as opposed to SetThreadAffinityMask, which is a hard
+    constraint. The soft form still allows the placement that caused the
+    laggard symptom (a grab thread on an E-core), so the hard mask stays the
+    default and this is the experimental arm. An empty `cpus` CLEARS the
+    thread's selection. False when the call did not take.
+    """
+    if not _IS_WINDOWS:
+        return False
+    try:
+        k32 = _k32()
+        k32.SetThreadSelectedCpuSets.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong]
+        k32.SetThreadSelectedCpuSets.restype = ctypes.c_bool
+        ids = cpu_set_ids(cpus) if cpus else []
+        if cpus and not ids:
+            return False
+        if not ids:
+            return bool(k32.SetThreadSelectedCpuSets(
+                k32.GetCurrentThread(), None, 0))
+        arr = (ctypes.c_ulong * len(ids))(*ids)
+        return bool(k32.SetThreadSelectedCpuSets(
+            k32.GetCurrentThread(), arr, len(ids)))
+    except Exception:
+        return False
+
+
+def clear_current_thread_cpu_sets() -> bool:
+    """Undo restrict_current_thread_cpu_sets for the calling thread."""
+    return restrict_current_thread_cpu_sets([])
+
+
+# THREAD_INFORMATION_CLASS value for SetThreadInformation.
+_THREAD_POWER_THROTTLING = 3
+THREAD_POWER_THROTTLING_CURRENT_VERSION = 1
+THREAD_POWER_THROTTLING_EXECUTION_SPEED = 0x1
+
+
+def set_current_thread_power_throttling(enabled: bool | None) -> bool:
+    """Control EcoQoS execution-speed throttling for the calling thread.
+
+    Windows may run a thread it deems background work at reduced clock (EcoQoS),
+    and on a hybrid part that is a route onto the E-cores that no affinity
+    mask forbids. THREAD_POWER_THROTTLING_STATE with the EXECUTION_SPEED bit
+    set in ControlMask and clear in StateMask opts the thread OUT of it; set in
+    both opts IN; a zero ControlMask returns the decision to the system.
+    False when the call is unavailable or did not take.
+    """
+    if not _IS_WINDOWS:
+        return False
+    try:
+        k32 = _k32()
+        k32.SetThreadInformation.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong]
+        k32.SetThreadInformation.restype = ctypes.c_bool
+        if enabled is None:
+            control, state = 0, 0
+        else:
+            control = THREAD_POWER_THROTTLING_EXECUTION_SPEED
+            state = THREAD_POWER_THROTTLING_EXECUTION_SPEED if enabled else 0
+        buf = (ctypes.c_ulong * 3)(THREAD_POWER_THROTTLING_CURRENT_VERSION,
+                                  control, state)
+        return bool(k32.SetThreadInformation(
+            k32.GetCurrentThread(), _THREAD_POWER_THROTTLING,
+            ctypes.byref(buf), ctypes.sizeof(buf)))
+    except Exception:
+        return False
+
+
+def disable_current_thread_power_throttling() -> bool:
+    """Opt the calling thread out of EcoQoS execution-speed throttling."""
+    return set_current_thread_power_throttling(False)
+
+
+# AvSetMmThreadPriority levels.
+AVRT_PRIORITY_LOW = -1
+AVRT_PRIORITY_NORMAL = 0
+AVRT_PRIORITY_HIGH = 1
+AVRT_PRIORITY_CRITICAL = 2
+
+
+def mmcss_register_current_thread(task: str = "Capture",
+                                  priority: int | None = None):
+    """Register the calling thread with the Multimedia Class Scheduler.
+
+    MMCSS runs a registered thread at a priority band above any non-realtime
+    process class (the "Capture" and "Pro Audio" tasks in particular), which
+    is the documented alternative to raising thread priority by hand. The
+    catch that makes this an experiment rather than the default: a thread that
+    exceeds its share (SystemResponsiveness, 20 percent by default, is
+    reserved for everything else) is DEMOTED to priority 1-7, below a normal
+    thread, so a grab loop that misbehaves would be punished harder than it is
+    today. Returns the opaque handle for mmcss_revert, or None.
+    """
+    if not _IS_WINDOWS:
+        return None
+    try:
+        avrt = ctypes.WinDLL("avrt", use_last_error=True)
+        avrt.AvSetMmThreadCharacteristicsW.argtypes = [
+            ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
+        avrt.AvSetMmThreadCharacteristicsW.restype = ctypes.c_void_p
+        index = ctypes.c_ulong(0)
+        handle = avrt.AvSetMmThreadCharacteristicsW(task, ctypes.byref(index))
+        if not handle:
+            return None
+        if priority is not None:
+            avrt.AvSetMmThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            avrt.AvSetMmThreadPriority.restype = ctypes.c_bool
+            avrt.AvSetMmThreadPriority(handle, int(priority))
+        return handle
+    except Exception:
+        return None
+
+
+def mmcss_revert(handle) -> bool:
+    """Undo mmcss_register_current_thread on the same thread."""
+    if not _IS_WINDOWS or not handle:
+        return False
+    try:
+        avrt = ctypes.WinDLL("avrt", use_last_error=True)
+        avrt.AvRevertMmThreadCharacteristics.argtypes = [ctypes.c_void_p]
+        avrt.AvRevertMmThreadCharacteristics.restype = ctypes.c_bool
+        return bool(avrt.AvRevertMmThreadCharacteristics(handle))
+    except Exception:
+        return False
