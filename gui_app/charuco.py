@@ -54,10 +54,13 @@ def resolve_dictionary(cfg: dict):
 
 
 def uses_new_api() -> bool:
-    """True on the >= 4.7 ArUco API (``CharucoBoard`` class, ``CharucoDetector``).
+    """True on the >= 4.7 ArUco API (``CharucoBoard`` class, ``ArucoDetector``).
 
-    The one version check both call sites rely on: the class constructor exists
-    and the pre-4.7 factory function does not.
+    The one version check every ArUco call site relies on, for the board
+    constructor and the marker detector alike: the class constructor exists and
+    the pre-4.7 factory function does not. A second heuristic beside this one
+    can disagree with it on an intermediate build and pair a new-API board with
+    a deprecated detection path, so none is kept.
     """
     import cv2
     aruco = cv2.aruco
@@ -105,6 +108,35 @@ def make_board(cfg: dict):
         board = aruco.CharucoBoard_create(bx, by, sq, mk, aruco_dict)
     apply_legacy_pattern(board, bool(cfg.get("board_legacy", False)))
     return board, aruco_dict
+
+
+def make_marker_detector(aruco_dict):
+    """Return ``detect(gray) -> (marker_corners, marker_ids)`` for this build.
+
+    The API choice comes from ``uses_new_api()``, the same check that picked
+    the board constructor, so the detector and the board can never come from
+    different API generations. Both the solve and the HUD detect markers
+    through this function: the solve interpolates charuco corners from the
+    result, the HUD needs only the marker count and centroid, and the two must
+    see the same markers for the HUD's READY to predict the solve's coverage.
+    ``marker_ids`` is None or empty when nothing is found.
+    """
+    import cv2
+    aruco = cv2.aruco
+    if uses_new_api():
+        detector = aruco.ArucoDetector(aruco_dict, aruco.DetectorParameters())
+
+        def detect(gray):
+            corners, ids, _rejected = detector.detectMarkers(gray)
+            return corners, ids
+    else:
+        params = aruco.DetectorParameters_create()
+
+        def detect(gray):
+            corners, ids, _rejected = aruco.detectMarkers(
+                gray, aruco_dict, parameters=params)
+            return corners, ids
+    return detect
 
 
 def board_summary(cfg: dict) -> dict:

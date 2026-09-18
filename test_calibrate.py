@@ -22,8 +22,13 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
+import types
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pyproject allows 3.10, where tomllib is absent
+    import tomli as tomllib
 
 import numpy as np
 from PyQt5.QtCore import Qt
@@ -263,7 +268,7 @@ check(26, "a persistent detector exception is logged once, not at tick rate",
       n_err == 1 and det.calls > 5, f"errors={n_err} calls={det.calls}")
 
 
-# 27-40 — end-to-end synthetic solve ------------------------------------------------
+# 27-42 — end-to-end synthetic solve ------------------------------------------------
 def look_at(pos, target):
     z = np.asarray(target, float) - np.asarray(pos, float)
     z /= np.linalg.norm(z)
@@ -335,8 +340,10 @@ def run_solve(session, board_yaml, *extra):
         cwd=str(REPO), env=env, timeout=600)
 
 
-scratch = os.environ.get("CLAUDE_SCRATCH") or tempfile.mkdtemp(prefix="calib_e2e_")
-with tempfile.TemporaryDirectory(dir=scratch) as td:
+# One TemporaryDirectory owns the whole e2e tree so nothing outlives the run;
+# a separately created parent would stay behind in %TEMP% on every run.
+with tempfile.TemporaryDirectory(prefix="calib_e2e_",
+                                 dir=os.environ.get("CLAUDE_SCRATCH") or None) as td:
     session, board_yaml, n_frames = make_session(td)
     calib = session / "calibration"
 
@@ -434,6 +441,126 @@ with tempfile.TemporaryDirectory(dir=scratch) as td:
     check(41, "an empty session fails through the worker with the NO_VIDEOS text",
           got.get("ok") is False and got.get("msg", "").startswith("No readable calibration videos"),
           got.get("msg", "")[:80].replace("\n", " "))
+
+    # A legacy flat hint file (a GUI that predates the video identity) is used,
+    # and the layout notice stays on stderr: anything in report["warnings"]
+    # raises the GUI's warning dialog, and a layout detail is not a quality
+    # problem, so it must not turn every clean solve into "(with warnings)".
+    if ok_files:
+        (calib / "codet_frames.json").write_text(json.dumps(
+            {c: [k for k in range(92, n_frames, 2)] for c in ("cam3", "cam4", "cam5")}))
+        r4 = run_solve(session, board_yaml)
+        rep4 = json.loads(report_path.read_text(encoding="utf-8"))
+        check(42, "a legacy flat hint file is used and leaves no trace in the report warnings",
+              r4.returncode == 0 and rep4["hints_used"] is True
+              and "carries no video identity" in r4.stderr
+              and not any("video identity" in w for w in rep4["warnings"]),
+              f"hints_used={rep4.get('hints_used')} warnings={rep4.get('warnings')}")
+
+
+# 43-44 — hint-file notices: stderr-only versus actionable ----------------------------
+with tempfile.TemporaryDirectory() as td:
+    calib = Path(td) / "calibration"
+    (calib / "cam1").mkdir(parents=True)
+    (calib / "cam1" / "cam1_calibration.mp4").write_bytes(b"x" * 10)
+    hints_path = calib / "codet_frames.json"
+    hints_path.write_text(json.dumps({"cam1": [3, 5, 8]}))
+    warnings = []
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        hints = cal.load_codet_hints(hints_path, calib, warnings)
+    check(43, "a legacy flat hint file yields hints, an empty warnings list and a stderr notice",
+          hints == {"cam1": [3, 5, 8]} and warnings == []
+          and "carries no video identity" in err.getvalue(),
+          f"hints={hints} warnings={warnings}")
+    hints_path.write_text(json.dumps({
+        "frames": {"cam1": [3, 5, 8]},
+        "videos": {"cam1": {"name": "cam1_calibration.mp4", "size": 999}}}))
+    warnings = []
+    with contextlib.redirect_stderr(io.StringIO()):
+        hints = cal.load_codet_hints(hints_path, calib, warnings)
+    check(44, "a video-identity mismatch drops the hints AND lands in warnings (actionable)",
+          hints is None and len(warnings) == 1 and "hints ignored" in warnings[0],
+          f"hints={hints} warnings={warnings}")
+
+
+# 45-46 — one ArUco API gate for board and detector -----------------------------------
+# The HUD engine and the solve must both take their marker detector from
+# charuco, so no call site keeps a private hasattr() heuristic that can
+# disagree with uses_new_api() on an intermediate OpenCV build.
+src_hud = (REPO / "gui_app" / "board_detector.py").read_text(encoding="utf-8")
+src_solve = (REPO / "1_calibrate.py").read_text(encoding="utf-8")
+calls = []
+_real_mmd = charuco.make_marker_detector
+charuco.make_marker_detector = lambda d: calls.append(d) or (lambda gray: ([], None))
+try:
+    eng = board_detector._CharucoEngine(board_cfg)
+    n, centroid = eng.detect(np.zeros((32, 32), np.uint8))
+finally:
+    charuco.make_marker_detector = _real_mmd
+check(45, "the HUD engine takes its marker detector from charuco and keeps no API heuristic",
+      len(calls) == 1 and n == 0 and centroid is None
+      and "hasattr(aruco" not in src_hud and "hasattr(aruco" not in src_solve
+      and "charuco.make_marker_detector(" in src_solve)
+
+cfg_new = dict(board_cfg, board_legacy=False)
+board, _ = charuco.make_board(cfg_new)
+bimg = board.generateImage((480, 480), marginSize=40)
+n, centroid = board_detector._CharucoEngine(cfg_new).detect(bimg)
+check(46, "the shared detector finds the rendered board's markers through the HUD engine",
+      n >= 20 and centroid is not None and abs(centroid[0] - 0.5) < 0.05
+      and abs(centroid[1] - 0.5) < 0.05, f"n={n} centroid={centroid}")
+
+
+# 47-48 — the worker kills a child tree only while the child is alive --------------------
+class _FakeProc:
+    """A Popen stand-in whose stdout raises mid-stream. ``alive`` selects what
+    poll() reports at that moment."""
+
+    def __init__(self, alive):
+        self.pid = 987654
+        self.returncode = None if alive else 0
+        self.stderr = iter(())
+        self._alive = alive
+
+    @property
+    def stdout(self):
+        yield "Detecting corners...\n"
+        raise RuntimeError("decoder blew up")
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def poll(self):
+        return None if self._alive else 0
+
+
+def run_fake_worker(alive):
+    killed = []
+    real_sub, real_kill = cw.subprocess, cw._kill_tree
+    cw.subprocess = types.SimpleNamespace(
+        Popen=lambda *a, **k: _FakeProc(alive), PIPE=subprocess.PIPE,
+        TimeoutExpired=subprocess.TimeoutExpired)
+    cw._kill_tree = killed.append
+    got = {}
+    try:
+        worker = cw.CalibrationWorker(Path("."), REPO / "1_calibrate.py")
+        worker.finished.connect(lambda ok, m: got.update(ok=ok, msg=m), Qt.DirectConnection)
+        with contextlib.redirect_stdout(io.StringIO()):
+            worker.start()
+            worker.wait(10_000)
+    finally:
+        cw.subprocess, cw._kill_tree = real_sub, real_kill
+    return killed, got
+
+
+killed, got = run_fake_worker(alive=False)
+check(47, "an exception after the child exited does not kill its (reusable) pid",
+      killed == [] and got.get("ok") is False and "decoder blew up" in got.get("msg", ""),
+      f"killed={killed} got={got}")
+killed, got = run_fake_worker(alive=True)
+check(48, "an exception while the child is alive still kills the tree",
+      killed == [987654] and got.get("ok") is False, f"killed={killed} got={got}")
 
 print()
 if failures:

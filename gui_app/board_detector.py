@@ -70,16 +70,14 @@ class _CharucoEngine:
         # numpy alone (tests, hosts without OpenCV).
         import cv2
         self._cv2 = cv2
-        aruco = cv2.aruco
-        # The board comes from the shared helper so the HUD and the solve can
-        # never disagree about dictionary, layout or legacy policy; the helper
-        # raises on an unknown dictionary or an unexpressible legacy flag.
+        # Board and marker detector both come from the shared helper, so the
+        # HUD and the solve can never disagree about dictionary, layout, legacy
+        # policy or which ArUco API generation is in use; the helper raises on
+        # an unknown dictionary or an unexpressible legacy flag. The HUD counts
+        # markers only (no charuco corner interpolation), because the count
+        # and centroid are all the coverage logic reads.
         self._board, self._dict = charuco.make_board(board_cfg)
-        self._new_api = hasattr(aruco, "CharucoDetector")
-        if self._new_api:
-            self._detector = aruco.CharucoDetector(self._board)
-        else:
-            self._params = aruco.DetectorParameters_create()
+        self._detect_markers = charuco.make_marker_detector(self._dict)
 
     def detect(self, gray):
         """Return (marker_count, centroid_xy_normalized) for a frame.
@@ -96,11 +94,7 @@ class _CharucoEngine:
             gray = np.ascontiguousarray(gray)
         h, w = gray.shape[:2]
         try:
-            if self._new_api:
-                _ch_corners, _ch_ids, m_corners, m_ids = self._detector.detectBoard(gray)
-            else:
-                m_corners, m_ids, _ = cv2.aruco.detectMarkers(
-                    gray, self._dict, parameters=self._params)
+            m_corners, m_ids = self._detect_markers(gray)
             if m_ids is None or len(m_ids) == 0:
                 return 0, None
             n = int(len(m_ids))
@@ -351,9 +345,14 @@ def calibration_video(cam_dir):
 def stamp_codet_videos(calib_dir):
     """Record each camera's mp4 name and size in ``codet_frames.json``.
 
-    Called once the calibration videos exist (after the encode/remux finishes),
-    because that is the earliest moment the identity is known. Returns the
-    number of cameras stamped, 0 when there is no hint file to stamp.
+    Called once the calibration mp4s are FINAL, not merely present: the
+    identity is the file size, and alignment (``alignment.extract_aligned``)
+    replaces the session recording with a re-encoded file of a different size.
+    A stamp taken before alignment runs therefore mismatches on exactly the
+    sessions that were aligned, and the solve discards the hints and scans in
+    full. The GUI's right moment is the transition to idle, reached both when
+    no alignment runs and after alignment finishes. Returns the number of
+    cameras stamped, 0 when there is no hint file to stamp.
     """
     calib_dir = Path(calib_dir)
     path = calib_dir / "codet_frames.json"

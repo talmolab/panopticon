@@ -123,19 +123,10 @@ def _detect_one_camera(args_tuple):
     cv2.setNumThreads(2)
     aruco = cv2.aruco
     cam_name = Path(video_path).parent.name
+    # Board and marker detector share one API choice with the HUD, so the
+    # markers the HUD counted are the markers the solve interpolates from.
     board, aruco_dict = charuco.make_board(board_cfg)
-
-    if hasattr(aruco, "ArucoDetector"):
-        _adet = aruco.ArucoDetector(aruco_dict, aruco.DetectorParameters())
-
-        def _detect_markers(gray):
-            return _adet.detectMarkers(gray)[:2]
-    else:
-        _params = aruco.DetectorParameters_create()
-
-        def _detect_markers(gray):
-            c, i, _ = aruco.detectMarkers(gray, aruco_dict, parameters=_params)
-            return c, i
+    _detect_markers = charuco.make_marker_detector(aruco_dict)
 
     min_corners = 6
 
@@ -223,8 +214,13 @@ def load_codet_hints(codet_path, calib_dir, warnings):
     The file is used only when the videos it names (name and size) are the
     ones about to be opened: a hint file left behind by a previous calibration
     would otherwise decode the previous run's frame indices from the new
-    videos, which yields sparse or empty detections with no error. A legacy
-    file with no video identity is accepted with a warning.
+    videos, which yields sparse or empty detections with no error.
+
+    A legacy file with no video identity is accepted; the notice about it goes
+    to stderr only, not into ``warnings``, because ``warnings`` becomes the
+    report's warning list and the GUI raises a dialog for any non-empty list.
+    A layout detail is not a quality problem the operator can act on, and a
+    GUI still writing the flat layout would otherwise flag every clean solve.
     """
     codet_path = Path(codet_path)
     if not codet_path.exists():
@@ -242,8 +238,7 @@ def load_codet_hints(codet_path, calib_dir, warnings):
         return None
     if not videos:
         warn("{} carries no video identity (older GUI), so a stale hint file "
-             "cannot be detected; hints used as-is".format(codet_path.name),
-             warnings)
+             "cannot be detected; hints used as-is".format(codet_path.name))
         return {cam: list(v) for cam, v in frames.items()}
     for cam, ident in videos.items():
         mp4 = calibration_video(Path(calib_dir) / cam)

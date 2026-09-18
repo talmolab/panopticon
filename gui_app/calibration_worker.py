@@ -156,7 +156,10 @@ class CalibrationWorker(QThread):
             proc.wait()
             err_thread.join(timeout=5)
         except Exception as e:
-            _kill_tree(proc.pid)
+            # Kill only a child that is still alive: the pid of an exited child
+            # is free for reuse and psutil would walk an unrelated process tree.
+            if proc.poll() is None:
+                _kill_tree(proc.pid)
             self._done(False, str(e))
             return
 
