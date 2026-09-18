@@ -4,6 +4,13 @@ Drives the REAL code path --- CameraManager, GrabThread, SyncEncodeRouter,
 FrameSyncCoordinator, TeensyController --- so anything found here applies to the
 GUI. The only thing missing is Qt.
 
+RULE: the profile reaches the manager through gui_app.rig_setup, the same two
+calls the GUI makes, and the effective configuration is printed before the
+cameras open. A probe that configures the rig by hand measures a machine nobody
+records with: pool depth, capture-core exclusion and thread pinning each change
+what the rig does, and a number quoted from the wrong one is worse than no
+number. Read the CONFIG lines below before comparing a run against the GUI.
+
     uv run probe_lag.py --seconds 120
     uv run probe_lag.py --seconds 120 --max-lag 480 --label baseline
     uv run probe_lag.py --seconds 120 --no-display     # skip preview downsample
@@ -36,6 +43,7 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QImage, QPixmap
 _QAPP = QApplication.instance() or QApplication([])
 
+from gui_app import rig_setup
 from gui_app.camera_manager import CameraManager
 from gui_app.probe_guard import (add_force_argument,
                                  refuse_if_panopticon_running)
@@ -48,7 +56,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=90)
     ap.add_argument("--profile", default="3dpose")
     ap.add_argument("--max-lag", type=int, default=None, help="override kick_max_lag")
-    ap.add_argument("--max-buffer", type=int, default=None, help="override MaxNumBuffer")
+    ap.add_argument("--max-buffer", type=int, default=None,
+                    help="override the profile's max_num_buffer")
     ap.add_argument("--no-display", action="store_true",
                     help="display_every=10**9, i.e. never build the preview frame")
     ap.add_argument("--no-kick", action="store_true", help="disable the coordinator")
@@ -64,9 +73,15 @@ def main():
     # Always state the interval when quoting a number from this probe.
     ap.add_argument("--switch-interval", type=float, default=0.001,
                     help="sys.setswitchinterval; 0.001 matches gui.py")
-    ap.add_argument("--pin", nargs="?", const=True, default=False,
+    # Default None, not False: the profile decides, so a run with no flags
+    # reproduces the GUI. An explicit flag overrides it in either direction.
+    ap.add_argument("--pin", nargs="?", const=True, default=None,
                     help="pin grab threads to P-cores: bare flag = one core "
-                         "each, 'set' = confined to the P-core set")
+                         "each, 'set' = confined to the P-core set "
+                         "(default: the profile's pin_capture_threads)")
+    ap.add_argument("--no-pin", action="store_true",
+                    help="leave grab threads unpinned even if the profile "
+                         "pins them")
     ap.add_argument("--core-order", default=None,
                     help="comma-separated P-core order for camera pinning, "
                          "e.g. 10,11,12,13,22,23 to avoid the DPC-heavy cores")
@@ -96,6 +111,11 @@ def main():
     prof = next(RigProfile.load(p) for p in RigProfile.list_profiles()
                 if p.stem == args.profile)
     max_lag = args.max_lag if args.max_lag is not None else prof.kick_max_lag
+    pin = prof.pin_capture_threads
+    if args.pin is not None:
+        pin = args.pin
+    if args.no_pin:
+        pin = False
     # Anchored to the repository, never to the working directory: a probe
     # started from another shell otherwise writes its trace and its scratch
     # recordings wherever it was launched.
@@ -106,14 +126,37 @@ def main():
         shutil.rmtree(scratch, ignore_errors=True)
 
     print(f"=== probe '{args.label}': {args.seconds:g}s, max_lag={max_lag}, "
-          f"max_buffer={args.max_buffer or 'default'}, "
           f"display={'off' if args.no_display else 'on'}, "
           f"kick={'off' if args.no_kick else 'on'} ===", flush=True)
 
     mgr = CameraManager()
     mgr.error.connect(lambda m: print(f"[cam-error] {m}", flush=True))
-    if not mgr.open_all(prof.pfs_path, gige_driver=prof.gige_driver,
-                        trigger_rate_limit=prof.trigger_rate_limit):
+    # The GUI's two calls, in the GUI's order: the flags and the capture-core
+    # pool are set before the cameras open, because the pool decides where the
+    # grab threads land and open_all is what creates them.
+    pool = rig_setup.apply_profile_to_manager(mgr, prof)
+    mgr.pin_capture_threads = pin
+    kwargs = rig_setup.open_kwargs(mgr, prof)
+    if args.max_buffer:
+        kwargs["max_num_buffer"] = args.max_buffer
+
+    # Print what is actually in force. A lag number is only comparable to a GUI
+    # recording when these lines match the ones the GUI logs.
+    print(f"CONFIG profile      : {prof.name} ({args.profile})", flush=True)
+    for key in sorted(kwargs):
+        print(f"CONFIG {key:13s}: {kwargs[key]}", flush=True)
+    print(f"CONFIG core pool    : {pool} "
+          f"(excluding {prof.capture_core_exclude})", flush=True)
+    print(f"CONFIG pinning      : pin_capture_threads={mgr.pin_capture_threads} "
+          f"pin_encoder_threads={getattr(mgr, 'pin_encoder_threads', None)} "
+          f"encoder_pcores={getattr(mgr, 'encoder_pcores', None)}", flush=True)
+    print(f"CONFIG encode       : realtime={prof.realtime_encode} "
+          f"kick={prof.realtime_kick and not args.no_kick} "
+          f"max_lag={max_lag} quality={prof.quality} "
+          f"{prof.frame_width}x{prof.frame_height}@{prof.frame_rate:g}",
+          flush=True)
+
+    if not mgr.open_all(**kwargs):
         print("FAILED to open cameras")
         return 1
     n = mgr.num_cameras
@@ -158,13 +201,6 @@ def main():
         except Exception:
             pass
 
-    if args.max_buffer:
-        for i, cam in enumerate(mgr._cameras):
-            try:
-                cam.MaxNumBuffer.SetValue(args.max_buffer)
-            except Exception as e:
-                print(f"[cam{i+1}] MaxNumBuffer override failed: {e}", flush=True)
-
     names = mgr.camera_names if hasattr(mgr, "camera_names") else \
         [f"cam{i+1}" for i in range(n)]
     raw_paths = []
@@ -185,11 +221,13 @@ def main():
     }[args.thread_prio]
     print(f"grab thread priority tier: {args.thread_prio}", flush=True)
     if args.core_order:
+        # Replaces the pool rig_setup derived from the profile, so say so: the
+        # run is no longer comparable to a GUI recording.
         from gui_app.cpu_affinity import set_core_order
         order = [int(x) for x in args.core_order.split(",")]
         set_core_order(order)
-        print(f"P-core order override: {order}", flush=True)
-    mgr.pin_capture_threads = args.pin
+        print(f"CONFIG core pool    : {order} (OVERRIDDEN by --core-order; "
+              f"this run no longer matches the GUI)", flush=True)
     mgr.start_acquisition(
         raw_paths, display_every=10**9 if args.no_display else 10,
         realtime=prof.realtime_encode, width=prof.frame_width,
