@@ -10,8 +10,18 @@ about these cameras; the comments are the point, not decoration.
 """
 from __future__ import annotations
 
-import pypylon.genicam as genicam
-import pypylon.pylon as pylon
+try:
+    import pypylon.genicam as genicam
+    import pypylon.pylon as pylon
+except ImportError as _e:
+    # The SDK is imported exactly here so that a rig without it fails in ONE
+    # place with a message that says what to do, instead of a bare
+    # ModuleNotFoundError from whichever module happened to load the backend.
+    raise ImportError(
+        "The 'basler' camera backend needs pypylon, which is not importable "
+        f"in this environment ({_e}). Install pypylon into the project "
+        "environment, or set the profile's `camera_backend` field to another "
+        "backend registered in gui_app/backends/__init__.py.") from _e
 
 
 class BaslerBackend:

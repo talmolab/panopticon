@@ -249,6 +249,31 @@ cam = StubCamera({"ExposureTimeAbs": StubNode(777.0)})
 check(n, "get_exposure_gain: legacy node read, absent gain is None",
       B.get_exposure_gain(cam) == (777.0, None), str(B.get_exposure_gain(cam)))
 
+# ===========================================================================
+# Importing the backend without pypylon (A3-02)
+# ===========================================================================
+
+# 9 -- a fresh interpreter with pypylon blocked must fail at the backend import
+#      with an ImportError that names pypylon AND the camera_backend field.
+n += 1
+code = """
+import sys
+for m in ('pypylon', 'pypylon.pylon', 'pypylon.genicam'):
+    sys.modules[m] = None
+try:
+    import gui_app.backends.basler
+except ImportError as e:
+    print('IMPORTERROR:' + str(e))
+else:
+    print('NO ERROR')
+"""
+r = subprocess.run([PY, "-c", code], cwd=ROOT, capture_output=True, text=True)
+msg = r.stdout.strip()
+check(n, "import without pypylon raises ImportError naming pypylon and camera_backend",
+      msg.startswith("IMPORTERROR:") and "pypylon" in msg
+      and "camera_backend" in msg and r.returncode == 0,
+      msg[:120] + (" | stderr: " + r.stderr.strip()[-200:] if r.stderr.strip() else ""))
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): " + ", ".join(failures))
