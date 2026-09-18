@@ -66,19 +66,17 @@ class AcquisitionStartRefused(RuntimeError):
     frames.
     """
 
-#: Driver-side buffers per camera. 1000 is 10 s of slack at 100 fps, and it
-#: costs n_cams x 1000 x 2.304 MB of RAM — 12.9 GiB at 6 cameras, 19.3 GiB at 9.
-#: Exported so the capacity preflight can do that arithmetic before a recording
-#: starts instead of discovering it as a MemoryError inside a grab thread.
+#: Default driver-side buffer pool depth per camera, used only when a caller
+#: passes no max_num_buffer of its own. The profile's `max_num_buffer` is
+#: authoritative, and the capacity preflight must be given the SAME value it
+#: passes to open_all: the pool costs n_cams x depth x 2.304 MB of RAM, so a
+#: preflight computed from a different depth permits or refuses the wrong
+#: recordings.
 #:
-#: The deep slack is also what let a 1.5% per-frame deficit hide for ~11 minutes
-#: before anything went wrong (see docs/PERF_EXPERIMENTS.md): nothing errors, the
-#: pool just quietly fills and every frame retrieved gets staler. Reducing it
-#: would make that failure loud within a second — but it is ALSO what absorbs
-#: genuine GigE jitter, and buffer depth is not monotonically good (a
-#: `kick_max_lag` of 1000, i.e. a 1264-buffer NV12 ring, starved capture outright
-#: on 2026-06-17: 24% loss), so it must not be changed without a rig A/B. Left at
-#: 1000 deliberately.
+#: Depth is not monotonically good and must not be changed without a rig A/B.
+#: A deep pool absorbs GigE jitter, but it also hides a per-frame deficit for
+#: minutes (nothing errors: the pool fills and every frame retrieved gets
+#: staler), and too deep starves capture outright. See docs/PERF_EXPERIMENTS.md.
 MAX_NUM_BUFFER = 1000
 
 
@@ -102,6 +100,11 @@ class CameraManager(QObject):
         #: Problems found while finalising the last recording (retired cameras,
         #: block-ID truncation). Read by the GUI after stop_acquisition().
         self.last_warnings: list = []
+        #: Per-camera GigE stream counters and transport settings from the
+        #: last stop_acquisition(), index-aligned with the camera list. Held
+        #: for the session metadata: they are what separates host starvation
+        #: (Buffer_Underrun) from network loss (Failed_Buffer, resends).
+        self.last_stream_stats: list = []
         #: Per-camera (frame_count, timestamps, block_ids) from the last
         #: stop_acquisition(), kept even when it raised so the caller can still
         #: write blockids.npy / frametimes.npy for the healthy cameras.
@@ -473,6 +476,12 @@ class CameraManager(QObject):
             return "cpu pinning: off"
         from gui_app.cpu_affinity import performance_cores
         n_p = len(performance_cores())
+        if n_p == 0:
+            # RULE: a host with no performance-core set is a documented no-op,
+            # not a partial pin. Reporting 0/N as PARTIAL reads as a failure
+            # to do something this host cannot do at all.
+            return ("cpu pinning: requested, but this host publishes no "
+                    "performance-core set (non-hybrid or non-Windows): no-op")
         got = sum(1 for gt in self._grab_threads
                   if getattr(gt, "pin_result", None)
                   and gt.pin_result.get("pinned"))
@@ -846,6 +855,8 @@ class CameraManager(QObject):
                 warnings.extend(gt.warnings)
         self.last_warnings = warnings
         self.last_results = results
+        self.last_stream_stats = self._collect_stream_stats(
+            skip={id(gt._camera) for gt in threads if gt.isRunning()})
 
         stuck = [i for i, gt in enumerate(threads) if gt.isRunning()]
         if stuck:
@@ -867,6 +878,30 @@ class CameraManager(QObject):
                 results, stuck)
         self._grab_threads.clear()
         return results
+
+    def _collect_stream_stats(self, skip=frozenset()) -> list:
+        """backend.stream_stats() per camera, one dict each.
+
+        A camera whose grab thread is still running is skipped and a backend
+        without the call or a camera that dropped off the bus contributes an
+        error entry: the counters are evidence for the metadata, never a
+        reason to fail a stop or to read a node map from two threads at once.
+        The authoritative read is the grab thread's own, taken before it
+        stops grabbing, because StopGrabbing resets the counters.
+        """
+        fn = getattr(self._backend, "stream_stats", None)
+        out = []
+        for cam in self._cameras:
+            if id(cam) in skip:
+                out.append({"error": "grab thread still running"})
+            elif fn is None:
+                out.append({"error": "backend reports no stream statistics"})
+            else:
+                try:
+                    out.append(dict(fn(cam)))
+                except Exception as e:
+                    out.append({"error": f"{type(e).__name__}: {e}"})
+        return out
 
     def resume_preview(self, preview_fps: float = 30.0):
         """Return all cameras to free-run preview after an acquisition. Resilient

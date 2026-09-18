@@ -398,6 +398,53 @@ check("stop_acquisition keeps the start-time exposure warnings, which are "
       m17.last_warnings == ["cam1: exposure was not applied"],
       str(m17.last_warnings))
 
+# --- stream statistics and the pinning report -------------------------------
+b20 = rig()
+m20 = manager(b20)
+opened(m20)
+m20._grab_threads = []
+out = io.StringIO()
+with redirect_stdout(out):
+    m20.stop_acquisition()
+check("stop_acquisition collects one set of stream counters per camera for "
+      "the session metadata",
+      len(m20.last_stream_stats) == 3
+      and all(d.get("GevSCFJM") == 48000 for d in m20.last_stream_stats),
+      str(m20.last_stream_stats))
+
+
+class _NoStatsBackend(StubBackend):
+    stream_stats = None
+
+
+b21 = _NoStatsBackend([StubCamera("21111111", 1920, 1200)])
+m21 = manager(b21)
+opened(m21)
+m21._grab_threads = []
+out = io.StringIO()
+with redirect_stdout(out):
+    m21.stop_acquisition()
+check("a backend without stream statistics does not fail the stop",
+      len(m21.last_stream_stats) == 1
+      and "error" in m21.last_stream_stats[0], str(m21.last_stream_stats))
+
+from gui_app import cpu_affinity                                # noqa: E402
+
+m22 = manager(rig())
+m22.pin_capture_threads = True
+saved_cores = cpu_affinity.performance_cores
+cpu_affinity.performance_cores = lambda *a, **kw: []
+try:
+    report = m22.pinning_report()
+finally:
+    cpu_affinity.performance_cores = saved_cores
+check("a host with no performance-core set reports pinning as a no-op, not "
+      "as PARTIAL", "no-op" in report and "PARTIAL" not in report, report)
+
+m23 = manager(rig())
+check("pinning off says so in one line", m23.pinning_report() == "cpu pinning: off",
+      m23.pinning_report())
+
 # --- rig_setup --------------------------------------------------------------
 
 
