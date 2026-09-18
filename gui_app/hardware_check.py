@@ -1,4 +1,16 @@
-"""Startup hardware screening — warns about insufficient resources."""
+"""Startup hardware screening — warns about insufficient resources.
+
+Two jobs, and the difference matters. `run_hardware_check` is the launch-time
+survey (CPU, RAM, disk, which H.264 paths actually work) that also probes the
+NVENC session cap and benches libx264, so Record never pays for either.
+`check_capacity` is the refuse-or-warn gate run at acquisition start against
+the camera count that is really open.
+
+RULE: every capability here is MEASURED, never inferred from a version string
+or a compiled-in feature list. REASON: the whole point of a preflight is to
+disagree with the machine's own optimism; a check that cannot fail is worse
+than no check, because the warning it owns never fires.
+"""
 import shutil
 import subprocess
 import time
@@ -7,8 +19,17 @@ from pathlib import Path
 
 import numpy as np
 import psutil
-from imageio_ffmpeg import get_ffmpeg_exe
 from PyQt5.QtCore import QThread, pyqtSignal
+
+from gui_app import cpu_encode, encoders, ffmpeg_cmd
+
+#: Bytes one real-time H.264 frame costs at the rig's qp, measured on real
+#: recordings. Named because the disk budget is only honest when the number it
+#: multiplies is the one the chosen encode path actually writes.
+H264_BYTES_PER_FRAME = 4600
+
+#: Presets the launch bench measures, and that the preflight text reports.
+BENCH_PRESETS = ("ultrafast", "veryfast")
 
 
 @dataclass
@@ -19,20 +40,63 @@ class HardwareReport:
     ram_available_gb: float = 0.0
     disk_free_gb: float = 0.0
     disk_write_mb_s: float = -1.0
+    #: ffmpeg's h264_nvenc encodes here (the post-hoc writers' GPU path).
     has_nvenc: bool = False
+    #: PyNvVideoCodec loads here (the real-time capture path). The two are
+    #: different libraries against the same hardware and can disagree.
+    nvenc_runtime: bool = False
+    #: Concurrent NVENC sessions the driver granted, -1 when not probed.
+    nvenc_sessions: int = -1
+    #: libx264 frames per second per core, by preset, -1.0 when not benched.
+    x264_fps_per_core: dict = field(default_factory=dict)
+    #: Cameras the CPU path sustains at the profile frame rate, by preset.
+    x264_max_cams: dict = field(default_factory=dict)
+    #: What `select_encoder` installed for this session, "" when not run.
+    encoder: str = ""
+    encoder_reason: str = ""
     warnings: list = field(default_factory=list)
 
 
 def check_nvenc() -> bool:
+    """Does ffmpeg's h264_nvenc actually encode on this machine?
+
+    RULE: test-encode, never grep `ffmpeg -encoders`. REASON: `-encoders`
+    lists what the binary was COMPILED with, and the bundled imageio-ffmpeg
+    build always lists h264_nvenc whether or not an NVIDIA GPU and driver are
+    present — NVENC availability is only tested at encoder init. So the grep
+    could not return False, and the launch warning written for a non-NVIDIA
+    machine was dead on exactly that machine.
+
+    0.2 s of black at 256x256: enough for the driver to create and destroy a
+    session, small enough to be free at launch.
+    """
     try:
-        ffmpeg = get_ffmpeg_exe()
-        result = subprocess.run(
-            [ffmpeg, "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return "h264_nvenc" in result.stdout
+        cmd = ([ffmpeg_cmd.ffmpeg_exe()] + ffmpeg_cmd.global_args()
+               + ["-f", "lavfi", "-i", "color=c=black:s=256x256:r=25:d=0.2",
+                  "-c:v", "h264_nvenc", "-f", "null", "-"])
+        result = subprocess.run(cmd, capture_output=True, timeout=20,
+                                **ffmpeg_cmd.quiet_popen_kwargs())
+        return result.returncode == 0
     except Exception:
         return False
+
+
+def check_nvenc_runtime() -> bool:
+    """Does PyNvVideoCodec — the REAL-TIME path — load here?
+
+    Recorded separately from `check_nvenc` because they are different
+    libraries: ffmpeg can encode on the GPU while the capture path cannot
+    (no wheel, no cudart), and the report has to name which one is missing.
+    """
+    try:
+        from gui_app import nvenc
+        return bool(nvenc.available())
+    except Exception:
+        return False
+
+
+#: Set by run_hardware_check, read by check_capacity: None until measured.
+_ffmpeg_nvenc_ok: bool | None = None
 
 
 def estimate_disk_speed(target_dir: Path, size_mb: int = 16) -> float:
@@ -67,7 +131,13 @@ def _get_disk_free(target: Path) -> float:
     return -1.0
 
 
+def physical_cores() -> int:
+    """Cores the encode-versus-capture arithmetic is allowed to spend."""
+    return psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 1
+
+
 def run_hardware_check(output_dir: str = "") -> HardwareReport:
+    global _ffmpeg_nvenc_ok
     report = HardwareReport()
 
     report.cpu_cores = psutil.cpu_count(logical=False) or 1
@@ -81,6 +151,8 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
     report.disk_free_gb = _get_disk_free(target)
     report.disk_write_mb_s = estimate_disk_speed(target)
     report.has_nvenc = check_nvenc()
+    report.nvenc_runtime = check_nvenc_runtime()
+    _ffmpeg_nvenc_ok = report.has_nvenc
 
     if report.cpu_cores < 4:
         report.warnings.append(
@@ -100,17 +172,32 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
         report.warnings.append(
             f"Disk write speed: {report.disk_write_mb_s:.0f} MB/s (NVMe SSD with 1000+ MB/s recommended)"
         )
-    if not report.has_nvenc:
-        # There is NO CPU fallback: every mp4 writer hardcodes `-c:v h264_nvenc`
-        # (encode_worker._cmd, encode_worker._append_raw_tail,
-        # alignment.extract_aligned). Without it those passes fail outright, so
-        # do not describe this as merely slower.
+    # Name the path that is missing. The two NVENC libraries fail
+    # independently, and the remedy differs: no PyNvVideoCodec costs the
+    # real-time encode, no ffmpeg h264_nvenc costs the post-hoc passes, and
+    # libx264 covers either at a CPU price the launch bench measures.
+    if not report.has_nvenc and not report.nvenc_runtime:
         report.warnings.append(
-            "NVENC not found in ffmpeg — there is no CPU fallback, so encoding "
-            "raw.bin to mp4 and the post-hoc alignment re-encode will FAIL. "
-            "(The real-time path's .h264 -> mp4 step is a stream copy and is "
-            "unaffected, but a recording that falls back to raw would be "
-            "stranded.)"
+            "No working NVENC on this machine: ffmpeg's h264_nvenc test encode "
+            "failed AND PyNvVideoCodec is unavailable. Encoding falls back to "
+            "libx264 on the CPU for both the recording and the post-hoc passes. "
+            "Set `encoder: x264` in the rig profile to make that the deliberate "
+            "choice, and check the camera count in this report against the "
+            "cameras you actually run."
+        )
+    elif not report.nvenc_runtime:
+        report.warnings.append(
+            "The real-time GPU encode path (PyNvVideoCodec) is unavailable, "
+            "though ffmpeg's h264_nvenc works. Recording will use libx264 on "
+            "the CPU or, with `realtime_encode: false`, raw.bin plus a "
+            "post-hoc GPU encode."
+        )
+    elif not report.has_nvenc:
+        report.warnings.append(
+            "ffmpeg's h264_nvenc test encode failed, though the real-time path "
+            "(PyNvVideoCodec) works. The post-hoc passes — raw.bin to mp4, the "
+            "raw-tail merge and the alignment re-encode — will run on the CPU "
+            "with libx264 instead, which is slower but not lossy."
         )
 
     return report
@@ -170,10 +257,177 @@ def nvenc_session_capacity(width: int, height: int, want: int,
     return _nvenc_sessions
 
 
+# --- libx264 launch bench --------------------------------------------------
+#: preset -> frames per second one libx264 thread sustains at the profile
+#: geometry. Filled by `run_x264_bench` at launch; read by the preflight and
+#: by the report text, both of which must never bench on the UI thread.
+_x264_bench: dict = {}
+
+
+def x264_bench_fps(preset: str = "ultrafast") -> float:
+    """Benched frames per second per core, or -1.0 when never measured."""
+    return _x264_bench.get(preset, -1.0)
+
+
+def run_x264_bench(width: int, height: int, fps: int,
+                   presets: tuple = BENCH_PRESETS) -> dict:
+    """Measure and cache the CPU encode rate for each preset. Slow (seconds).
+
+    RULE: call this from a worker thread at launch, never from a UI slot.
+    REASON: each preset runs a real 2 s encode, and the window is frozen for
+    the whole of it with no busy indicator.
+    """
+    for preset in presets:
+        _x264_bench[preset] = cpu_encode.x264_bench(width, height, fps,
+                                                    preset=preset)
+        print(f"[hw] libx264 {preset}: {_x264_bench[preset]:.1f} fps per core "
+              f"at {width}x{height}", flush=True)
+    return dict(_x264_bench)
+
+
+def x264_camera_count(fps: int, preset: str = "ultrafast") -> int:
+    """Cameras the benched CPU rate sustains at `fps`, 0 when unknown."""
+    return cpu_encode.sustainable_cameras(x264_bench_fps(preset), fps,
+                                          physical_cores())
+
+
+# --- encoder selection -----------------------------------------------------
+@dataclass
+class EncoderChoice:
+    """What the session will encode with, and why.
+
+    `blocking` non-empty means the start must be refused: no path on this
+    machine can encode the open cameras in real time, and the remaining option
+    (raw) costs ~500x the disk, so it is chosen deliberately in the profile or
+    not at all.
+    """
+    encoder: str = "nvenc"
+    reason: str = ""
+    blocking: str = ""
+    sessions: int = -1
+    fps_per_core: float = -1.0
+    max_cams: int = 0
+
+
+def _install(encoder: str) -> None:
+    """Point the real-time seam and the post-hoc writers at `encoder`.
+
+    The grab threads and `SyncEncodeRouter` resolve `encoders.get_default_factory()`
+    and never learn which encoder they got, so this one call is the whole
+    switch. `ffmpeg_cmd` is switched alongside it because a machine that cannot
+    encode in real time on the GPU cannot do the tail merge or the alignment
+    re-encode there either.
+    """
+    if encoder == "x264":
+        encoders.set_default_factory(cpu_encode.x264_factory)
+        ffmpeg_cmd.set_default_backend("x264")
+    elif encoder == "nvenc":
+        encoders.set_default_factory(None)
+        ffmpeg_cmd.set_default_backend("nvenc")
+    else:   # raw: no real-time encoder is created; the post-hoc pass needs one
+        encoders.set_default_factory(None)
+        ffmpeg_cmd.set_default_backend(
+            "nvenc" if _ffmpeg_nvenc_ok is not False else "x264")
+
+
+def select_encoder(profile, n_cams: int, fps: int, width: int,
+                   height: int) -> EncoderChoice:
+    """Resolve `profile.encoder` against what this machine can actually do.
+
+    `auto` takes NVENC when the session probe grants one per camera (it costs
+    almost no CPU, and the CPU is what capture needs), else libx264 when the
+    launch bench says the cores are there, else refuses — because the only
+    remaining path writes the full frame every frame and that is a decision,
+    not a fallback.
+
+    Installs the chosen factory before returning, so a caller that ignores the
+    result still gets a consistent session.
+    """
+    want = str(getattr(profile, "encoder", "auto") or "auto").lower()
+    realtime = bool(getattr(profile, "realtime_encode", True))
+    n_cams = max(1, int(n_cams))
+
+    if want == "raw" or not realtime:
+        choice = EncoderChoice(
+            encoder="raw",
+            reason=("the profile selects raw capture, so frames are written "
+                    "whole and encoded after the session"))
+        _install("raw")
+        return choice
+
+    if want in ("nvenc", "auto"):
+        sessions = nvenc_session_capacity(width, height, n_cams + 2)
+        if sessions >= n_cams:
+            choice = EncoderChoice(
+                encoder="nvenc", sessions=sessions,
+                reason=f"NVENC granted {sessions} sessions for {n_cams} cameras")
+            _install("nvenc")
+            return choice
+        if want == "nvenc":
+            choice = EncoderChoice(
+                encoder="nvenc", sessions=sessions,
+                reason="the profile forces NVENC",
+                blocking=_nvenc_shortfall_text(sessions, n_cams))
+            _install("nvenc")
+            return choice
+        print(f"[hw] NVENC granted {sessions} of {n_cams} sessions; "
+              f"considering the CPU path", flush=True)
+
+    # Either the profile forces x264, or auto could not get a session per
+    # camera. The bench is the only honest answer to "can this machine do it".
+    sessions = _nvenc_sessions if _nvenc_sessions is not None else -1
+    rate = x264_bench_fps("ultrafast")
+    cams = x264_camera_count(fps, "ultrafast")
+    cpu_text = (f"libx264 sustains ~{rate:.0f} fps per core here, enough for "
+                f"{cams} cameras at {fps} fps" if rate > 0 else
+                "libx264 has not been benched on this machine")
+
+    if rate > 0 and cams >= n_cams:
+        _install("x264")
+        return EncoderChoice(encoder="x264", sessions=sessions,
+                             fps_per_core=rate, max_cams=cams, reason=cpu_text)
+
+    if want == "x264":
+        # Forced, so install it anyway: refusing here and leaving NVENC
+        # installed would start the recording on the path the profile
+        # rejected. The blocking message stops the start instead.
+        _install("x264")
+        return EncoderChoice(
+            encoder="x264", sessions=sessions, fps_per_core=rate,
+            max_cams=cams, reason=cpu_text,
+            blocking=(f"The profile selects libx264, but {cpu_text} and "
+                      f"{n_cams} cameras are open. Record fewer cameras, "
+                      f"lower the frame rate, or set `realtime_encode: false` "
+                      f"to write raw frames and encode after the session "
+                      f"(~500x the disk)."))
+
+    _install("raw")
+    return EncoderChoice(
+        encoder="raw", sessions=sessions, fps_per_core=rate, max_cams=cams,
+        reason="neither NVENC nor libx264 can encode every camera in real time",
+        blocking=(
+            f"No encoder on this machine can keep up with {n_cams} cameras at "
+            f"{fps} fps: " + _nvenc_shortfall_text(sessions, n_cams) + " "
+            + cpu_text + ". Record fewer cameras, or set "
+            "`realtime_encode: false` in the rig profile to write raw frames "
+            "and encode after the session — which needs ~500x the disk."))
+
+
+def _nvenc_shortfall_text(sessions: int, n_cams: int) -> str:
+    """One sentence naming what the GPU actually granted."""
+    if sessions < 0:
+        return "NVENC is unavailable in this process."
+    if sessions == 0:
+        return "NVENC granted no encode sessions."
+    return (f"NVENC granted only {sessions} concurrent sessions but {n_cams} "
+            f"cameras need one each (the driver caps this).")
+
+
 def check_capacity(n_cams: int, width: int, height: int,
                    ring_n: int, max_num_buffer: int,
                    realtime: bool, output_dir: str = "",
-                   minutes: float = 10.0, fps: int = 100) -> tuple[list, list]:
+                   minutes: float = 10.0, fps: int = 100,
+                   encoder: str = "auto") -> tuple[list, list]:
     """Refuse-or-warn check run at acquisition start. Returns (blocking, warnings).
 
     Everything here scales linearly with camera count, which is why it exists:
@@ -182,6 +436,10 @@ def check_capacity(n_cams: int, width: int, height: int,
     (~129 GiB/10 min for that camera alone: raw.bin holds the mono8 frame, so
     it is width*height bytes each, ~500x the H.264 size), a MemoryError inside
     a grab thread, or a disk filling mid-session.
+
+    `encoder` is the profile's selection (`auto`, `nvenc`, `x264`, `raw`); it
+    decides which capability is checked and, with the answer, which byte rate
+    the disk budget uses.
     """
     blocking: list[str] = []
     warnings: list[str] = []
@@ -209,27 +467,74 @@ def check_capacity(n_cams: int, width: int, height: int,
     elif need_gb > 0.75 * avail_gb:
         warnings.append(f"RAM is tight for {n_cams} cameras: {detail}.")
 
-    # --- NVENC sessions ------------------------------------------------------
-    if realtime:
+    # --- the encode path -----------------------------------------------------
+    # `raw_mode` and `encodes_realtime` are kept apart on purpose: the first is
+    # what the profile asked for, the second is what this machine can deliver,
+    # and it is the SECOND that the disk budget below must use. Budgeting
+    # 4.6 KB/frame while every camera writes 2.3 MB/frame is how a disk fills
+    # mid-session with a preflight that said nothing.
+    path = str(encoder or "auto").lower()
+    raw_mode = (not realtime) or path == "raw"
+    encodes_realtime = not raw_mode
+
+    if not raw_mode and path in ("auto", "nvenc"):
         got = nvenc_session_capacity(width, height, n_cams + 2)
-        if got == 0:
-            blocking.append("NVENC granted no encode sessions, so real-time "
-                            "encoding cannot start. To record anyway, set "
-                            "`realtime_encode: false` in the rig profile — that "
-                            "writes raw frames and encodes after the session, "
-                            "which needs ~500x the disk.")
-        elif 0 < got < n_cams:
+        cpu_cams = x264_camera_count(fps, "ultrafast")
+        if got < n_cams:
+            if path == "auto" and cpu_cams >= n_cams:
+                # The CPU path covers it; say so rather than refusing, because
+                # select_encoder has already installed libx264 for this run.
+                warnings.append(
+                    f"{_nvenc_shortfall_text(got, n_cams)} Recording on the "
+                    f"CPU with libx264 instead (enough for {cpu_cams} cameras "
+                    f"at {fps} fps here). Encoding now competes with capture "
+                    f"for cores: check WARNINGS.txt afterwards for dropped "
+                    f"frames.")
+            else:
+                encodes_realtime = False
+                fallback = (
+                    f"Every camera would silently fall back to raw.bin at "
+                    f"~{frame_b*fps/2**30*600:.0f} GiB per 10 min each."
+                    if got <= 0 else
+                    f"Cameras beyond the cap would silently fall back to "
+                    f"raw.bin at ~{frame_b*fps/2**30*600:.0f} GiB per 10 min "
+                    f"each.")
+                blocking.append(
+                    f"{_nvenc_shortfall_text(got, n_cams)} {fallback} Record "
+                    f"fewer cameras, set `encoder: x264` in the rig profile to "
+                    f"encode on the CPU, or set `realtime_encode: false` to "
+                    f"put every camera on the raw path deliberately.")
+    elif not raw_mode and path == "x264":
+        rate = x264_bench_fps("ultrafast")
+        cpu_cams = x264_camera_count(fps, "ultrafast")
+        if rate <= 0:
+            warnings.append(
+                "The libx264 throughput of this machine has not been measured "
+                "(the launch bench did not run), so whether the CPU can encode "
+                f"{n_cams} cameras at {fps} fps is unverified. A camera whose "
+                "encoder falls behind drops frames and its video ends up "
+                "shorter than the others.")
+        elif cpu_cams < n_cams:
+            encodes_realtime = False
             blocking.append(
-                f"NVENC granted only {got} concurrent sessions but {n_cams} "
-                f"cameras need one each. The driver caps this. Cameras beyond "
-                f"the cap would silently fall back to raw.bin at ~{frame_b*fps/2**30*600:.0f} "
-                f"GiB per 10 min each. Record fewer cameras, or set "
-                f"`realtime_encode: false` in the rig profile to put every "
-                f"camera on the raw path deliberately.")
+                f"libx264 encodes about {rate:.0f} fps per core at "
+                f"{width}x{height} here, enough for {cpu_cams} cameras at "
+                f"{fps} fps, but {n_cams} are open. Record fewer cameras, "
+                f"lower the frame rate, or set `realtime_encode: false`.")
+
+    if raw_mode and _ffmpeg_nvenc_ok is False:
+        rate = x264_bench_fps("ultrafast")
+        warnings.append(
+            "Raw capture is selected and ffmpeg's h264_nvenc does not work on "
+            "this machine, so the post-hoc encode runs on the CPU with "
+            "libx264"
+            + (f" at about {rate:.0f} fps per core" if rate > 0 else "")
+            + f". Budget the time for {n_cams} cameras, and keep raw.bin until "
+              f"the mp4s have been checked.")
 
     # --- disk ----------------------------------------------------------------
     # Real-time H.264 is ~4.6 KB/frame; raw is the full frame every frame.
-    per_s = n_cams * fps * (4600 if realtime else frame_b)
+    per_s = n_cams * fps * (H264_BYTES_PER_FRAME if encodes_realtime else frame_b)
     need_disk_gb = per_s * minutes * 60 / 2 ** 30
     free_gb = _get_disk_free(Path(output_dir) if output_dir else Path("."))
     if free_gb >= 0:
@@ -249,7 +554,7 @@ def check_capacity(n_cams: int, width: int, height: int,
             warnings.append(
                 f"Disk is tight: a {minutes:g}-minute recording needs "
                 f"~{need_disk_gb:.0f} GiB of {free_gb:.0f} GiB free.")
-    if not realtime and per_s / 2 ** 30 > 1.5:
+    if not encodes_realtime and per_s / 2 ** 30 > 1.5:
         warnings.append(
             f"Raw capture will write {per_s / 2**30:.2f} GiB/s. Spread the "
             f"output across both NVMe drives — a single 990 PRO drops to "
@@ -268,7 +573,26 @@ def format_report(report: HardwareReport) -> str:
         lines.append(f"Disk:  {report.disk_free_gb:.0f} GB free")
     if report.disk_write_mb_s >= 0:
         lines[-1] += f", {report.disk_write_mb_s:.0f} MB/s write"
-    lines.append(f"NVENC: {'Available' if report.has_nvenc else 'Not found'}")
+    # Both NVENC libraries, named, because the remedy differs per path.
+    lines.append(
+        f"NVENC: real-time (PyNvVideoCodec) "
+        f"{'available' if report.nvenc_runtime else 'NOT available'}, "
+        f"post-hoc (ffmpeg h264_nvenc) "
+        f"{'available' if report.has_nvenc else 'NOT available'}")
+    if report.nvenc_sessions >= 0:
+        lines.append(f"       {report.nvenc_sessions} concurrent encode sessions granted")
+    # The CPU fallback's measured ceiling, so the operator can compare it with
+    # the cameras they intend to run instead of discovering it mid-recording.
+    for preset in BENCH_PRESETS:
+        rate = report.x264_fps_per_core.get(preset, -1.0)
+        if rate is None or rate < 0:
+            continue
+        cams = report.x264_max_cams.get(preset, 0)
+        lines.append(f"x264:  {preset:<10} {rate:.0f} fps per core "
+                     f"-> up to {cams} cameras")
+    if report.encoder:
+        lines.append(f"Using: {report.encoder}"
+                     + (f" ({report.encoder_reason})" if report.encoder_reason else ""))
     if report.warnings:
         lines.append("")
         lines.append("Warnings:")
@@ -278,12 +602,55 @@ def format_report(report: HardwareReport) -> str:
 
 
 class HardwareCheckThread(QThread):
+    """The launch survey, the NVENC session probe and the libx264 bench.
+
+    RULE: the probe and the bench run HERE, not at Record. REASON: both cost
+    seconds — the probe starts an interpreter, imports PyNvVideoCodec and
+    allocates every session the driver will grant, and the bench runs two real
+    encodes — and at Record they execute on the Qt main thread, freezing the
+    window with no busy indicator, once per Record for as long as the count is
+    short.
+    """
+
+    #: The report. RULE: new code connects `report_ready`. REASON: `finished`
+    #: shadows QThread.finished, so anything relying on the built-in signal
+    #: (deleteLater patterns, wait helpers) silently gets this one instead;
+    #: `finished` is kept only until the main_window connection moves across,
+    #: exactly as CalibrationWorker keeps its own.
+    report_ready = pyqtSignal(object)
     finished = pyqtSignal(object)
 
-    def __init__(self, output_dir: str = ""):
+    def __init__(self, output_dir: str = "", profile=None, n_cams: int = 0):
         super().__init__()
         self._output_dir = output_dir
+        self._profile = profile
+        self._n_cams = int(n_cams)
 
     def run(self):
         report = run_hardware_check(self._output_dir)
+        if self._profile is not None:
+            try:
+                self._preflight_encoders(report)
+            except Exception as e:
+                # A broken encoder preflight must not cost the operator the
+                # rest of the report, which is what warns about RAM and disk.
+                print(f"[hw] encoder preflight failed: {e}", flush=True)
+        self.report_ready.emit(report)
         self.finished.emit(report)
+
+    def _preflight_encoders(self, report: HardwareReport) -> None:
+        p = self._profile
+        n_cams = self._n_cams or int(getattr(p, "n_cameras", 0) or 1)
+        fps = int(getattr(p, "frame_rate", 100) or 100)
+        w = int(getattr(p, "frame_width", 1920) or 1920)
+        h = int(getattr(p, "frame_height", 1200) or 1200)
+        run_x264_bench(w, h, fps)
+        for preset in BENCH_PRESETS:
+            report.x264_fps_per_core[preset] = x264_bench_fps(preset)
+            report.x264_max_cams[preset] = x264_camera_count(fps, preset)
+        choice = select_encoder(p, n_cams, fps, w, h)
+        report.encoder = choice.encoder
+        report.encoder_reason = choice.reason
+        report.nvenc_sessions = choice.sessions
+        if choice.blocking:
+            report.warnings.append(choice.blocking)
