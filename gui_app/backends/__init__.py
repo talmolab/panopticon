@@ -107,12 +107,11 @@ class GrabResultProtocol(Protocol):
         reserves 0, and the grab loop refuses anything at or below it rather
         than let a placeholder be read as a wrap.
 
-        Reading it MAY RAISE, and the caller does not shield it: the grab loop
-        counts the exception as a frame error and retires the camera after ten
-        in a row, because a placeholder ordinal would starve every other
-        camera through the coordinator and poison post-hoc alignment
-        silently. Outside the recording path (the failed-grab log line) a
-        raise is caught and -1 substituted."""
+        Reading it MAY RAISE, and the recording path deliberately does not
+        shield it: the grab loop counts the exception as a frame error and
+        retires the camera after ten in a row, because substituting a
+        placeholder ordinal would starve every other camera through the
+        coordinator and poison post-hoc alignment silently."""
 
     @property
     def TimeStamp(self) -> int:
