@@ -1099,6 +1099,16 @@ class StimulationWindow(QDialog):
         return (self._upload_worker is not None
                 and self._upload_worker.isRunning())
 
+    def is_testing(self) -> bool:
+        """True while a bench Test is driving the board.
+
+        A Test borrows the main window's serial link and arms a timer whose
+        expiry sends the board a stop. An acquisition started meanwhile would
+        have its triggers cut by that stop, so the main window refuses Record
+        and Calibrate while this is True.
+        """
+        return self._test_timer is not None
+
     def record_blocker(self) -> str | None:
         """Reason a RECORDING must not start with this workflow, or None.
 
@@ -1378,18 +1388,30 @@ class StimulationWindow(QDialog):
             return
         self._set_status(f"Testing — {left:.0f} s remaining.")
 
-    def _end_test(self, message: str):
+    def _end_test(self, message: str) -> bool:
+        """Stop a running test; returns False when the board did not confirm.
+
+        When the main window has taken the board for an acquisition or a
+        flash, no stop is written: the acquisition's own start already
+        replaced the test's configuration, and a stop now would cut the
+        recording's camera triggers, while a flash has closed the shared
+        link so the write could only fail and raise a false alarm.
+        """
         if self._test_timer is not None:
             self._test_timer.stop()
             self._test_timer = None
         stopped = True
+        superseded = False
         if self._test_serial is not None:
-            # The most laser-exposed stop in the application: a bench Test drives
-            # the stim pin with no cameras and no recording, and a looping chain
-            # has no end time — this single write is the ONLY thing that stops
-            # it. Reporting "Test stopped." when the write failed is worse than
-            # not reporting at all.
-            stopped = self._test_serial.stop_triggers([])
+            if not self._test_owns_serial and self._is_busy():
+                superseded = True
+            else:
+                # The most laser-exposed stop in the application: a bench Test
+                # drives the stim pin with no cameras and no recording, and a
+                # looping chain has no end time, so this single write is the
+                # ONLY thing that stops it. Reporting "Test stopped." when the
+                # write failed is worse than not reporting at all.
+                stopped = self._test_serial.stop_triggers([])
             if self._test_owns_serial:      # never close the main window's link
                 self._test_serial.close()
             self._test_serial = None
@@ -1397,7 +1419,10 @@ class StimulationWindow(QDialog):
         self._test_end_at = None
         self._test_btn.setText("Test")
         self._apply_btn.setEnabled(True)
-        if not stopped:
+        if superseded:
+            self._set_status("Test superseded — an acquisition or flash took "
+                             "the board, so no stop was sent.", error=True)
+        elif not stopped:
             self._set_status("STOP NOT CONFIRMED — stim may still be running.",
                              error=True)
             QMessageBox.critical(
@@ -1409,6 +1434,7 @@ class StimulationWindow(QDialog):
                 "continuing.")
         else:
             self._set_status(message)
+        return stopped
 
     def closeEvent(self, event):
         if self._test_timer is not None:
