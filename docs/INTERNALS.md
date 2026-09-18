@@ -980,8 +980,8 @@ are easy to forget when adding an encode path, and neither failure is loud.
   1 MB pieces from byte 0 and stops when moov parses, so moov-at-end forces a
   read of the entire file, per camera, before frame 1 appears.
 
-The mp4 writers are `encode_worker._cmd()` (both branches), `acquire._encode_raw()`
-and `alignment.extract_aligned()`. That last one **replaces** the session
+The mp4 writers are `encode_worker._cmd()` (both branches) and
+`alignment.extract_aligned()`. That last one **replaces** the session
 recording, so it needs both flags too. `_append_raw_tail()` and the in-capture
 encoders emit Annex-B `.h264` and are exempt; the remux supplies the container.
 
