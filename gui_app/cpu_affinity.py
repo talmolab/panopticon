@@ -32,7 +32,9 @@ recording down.
 from __future__ import annotations
 
 import ctypes
+import struct
 import sys
+from typing import NamedTuple
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -64,6 +66,10 @@ THREAD_PRIORITY_TIME_CRITICAL = 15
 GRAB_THREAD_PRIORITY = THREAD_PRIORITY_HIGHEST
 
 _pcores_cache: list[int] | None = None
+#: Result of the last CPU-set parse (classes, groups, CPU Set ids). Filled by
+#: performance_cores() so efficiency_cores() and the CPU Sets helpers read the
+#: same enumeration instead of re-deriving it from os.cpu_count().
+_classes_cache: "CpuClasses | None" = None
 #: Optional explicit P-core ORDER for camera assignment. Slot i takes
 #: _core_order[i % len]. Exists because the default sorted order puts camera 0
 #: (and, at nine cameras, camera 8) on logical 0 -- which on this part is also
@@ -118,56 +124,156 @@ def _process_mask() -> int:
     return 0
 
 
+class CpuClasses(NamedTuple):
+    """What GetSystemCpuSetInformation says about this host's logical CPUs.
+
+    fast      - logical CPUs in the TOP efficiency class, i.e. the P-cores
+                (empty when not hybrid, when processor groups are in use, or
+                when the enumeration failed);
+    slow      - logical CPUs in EVERY lower class, i.e. all E-core flavours;
+    by_class  - {efficiency_class: sorted logical CPUs};
+    groups    - processor groups seen;
+    ids       - {logical CPU: CPU Set id}, the handles SetThreadSelectedCpuSets
+                takes (they are NOT the logical indices);
+    reason    - why `fast` is empty, or "" when it is populated.
+    """
+    fast: list
+    slow: list
+    by_class: dict
+    groups: set
+    ids: dict
+    reason: str
+
+
+#: Byte layout of one SYSTEM_CPU_SET_INFORMATION record: Size(4) Type(4)
+#: Id(4) Group(2) LogicalProcessorIndex(1) CoreIndex(1) LastLevelCacheIndex(1)
+#: NumaNodeIndex(1) EfficiencyClass(1) AllFlags(1) Reserved(4) AllocationTag(8).
+#: Records are walked by their own Size field, never by this constant.
+CPU_SET_RECORD_SIZE = 32
+_CPU_SET_TYPE_CPU_SET = 0
+_CPU_SET_HEADER = struct.Struct("<IIIHB")
+
+
+def parse_cpu_set_information(raw: bytes) -> list:
+    """Records of a SYSTEM_CPU_SET_INFORMATION buffer as dicts.
+
+    Each dict carries id, group, logical (the index WITHIN its group) and
+    efficiency_class. Records of other types are skipped; a zero Size ends the
+    walk, since it can only mean a truncated buffer.
+    """
+    out = []
+    off = 0
+    n = len(raw)
+    while off + 19 < n:
+        size, rtype, cid, group, logical = _CPU_SET_HEADER.unpack_from(raw, off)
+        if size <= 0:
+            break
+        if rtype == _CPU_SET_TYPE_CPU_SET:
+            out.append({"id": cid, "group": group, "logical": logical,
+                        "efficiency_class": raw[off + 18]})
+        off += size
+    return out
+
+
+def classify_cpu_sets(raw: bytes, process_mask: int = 0) -> CpuClasses:
+    """Decide the P-core set from a raw CPU-set buffer. Pure, so it is testable
+    with synthetic buffers for hosts this machine is not.
+
+    Rules, and why each exists:
+      - Only the TOP efficiency class is "fast". Three-class parts (a low-power
+        E-core class below the E-cores) put the E-cores in a middle class, and
+        "anything above the minimum" would pin grab threads onto them while
+        looking correct.
+      - One class means not hybrid: nothing to prefer, so `fast` is empty and
+        every pin degrades to a no-op rather than a mistake.
+      - More than one processor group means LogicalProcessorIndex repeats per
+        group and a single 64-bit affinity mask cannot address the machine, so
+        `fast` is empty rather than pinned to whichever group the caller is in.
+      - `fast` is intersected with the process affinity mask when one is
+        given: a pin outside it fails, and a PARTIAL pin is worse than none,
+        because the unpinned thread is exactly the one that lags.
+    """
+    recs = parse_cpu_set_information(raw)
+    by_class: dict = {}
+    groups = set()
+    ids: dict = {}
+    for r in recs:
+        by_class.setdefault(r["efficiency_class"], []).append(r["logical"])
+        groups.add(r["group"])
+        ids[r["logical"]] = r["id"]
+    for xs in by_class.values():
+        xs.sort()
+    if not by_class:
+        return CpuClasses([], [], by_class, groups, ids, "no CPU set records")
+    if len(groups) > 1:
+        return CpuClasses([], [], by_class, groups, {},
+                          f"{len(groups)} processor groups: pinning disabled")
+    if len(by_class) < 2:
+        return CpuClasses([], [], by_class, groups, ids,
+                          "not hybrid: one efficiency class")
+    top = max(by_class)
+    fast = list(by_class[top])
+    slow = sorted(x for c, xs in by_class.items() if c != top for x in xs)
+    if process_mask:
+        fast = [c for c in fast if process_mask & (1 << c)]
+        if not fast:
+            return CpuClasses([], slow, by_class, groups, ids,
+                              "no performance core inside the process mask")
+    return CpuClasses(fast, slow, by_class, groups, ids, "")
+
+
+def _read_cpu_set_buffer() -> bytes:
+    """Raw GetSystemCpuSetInformation buffer for this process, or b""."""
+    k32 = ctypes.WinDLL("kernel32")
+    need = ctypes.c_ulong(0)
+    k32.GetSystemCpuSetInformation(None, 0, ctypes.byref(need), None, 0)
+    if need.value <= 0:
+        return b""
+    buf = ctypes.create_string_buffer(need.value)
+    k32.GetSystemCpuSetInformation(buf, need.value, ctypes.byref(need), None, 0)
+    return buf.raw[:need.value]
+
+
+def describe_classes(classes: CpuClasses) -> str:
+    """One log line naming every class and its size, so a host with a class
+    layout nobody has measured is recognisable from the log alone."""
+    parts = [f"class {c}: {len(xs)} logical"
+             for c, xs in sorted(classes.by_class.items())]
+    line = "[affinity] CPU efficiency classes: " + ("; ".join(parts) or "none")
+    if len(classes.groups) > 1:
+        line += f"; processor groups {sorted(classes.groups)}"
+    if classes.fast:
+        line += f"; performance class {max(classes.by_class)} -> {classes.fast}"
+    else:
+        line += f"; no pinning ({classes.reason})"
+    return line
+
+
+def cpu_classes() -> CpuClasses:
+    """The cached classification of this host (enumerated once)."""
+    performance_cores()
+    return _classes_cache or CpuClasses([], [], {}, set(), {}, "not enumerated")
+
+
 def performance_cores() -> list[int]:
-    """Logical CPU indices whose efficiency class is above the minimum.
+    """Logical CPU indices in the TOP efficiency class (the P-cores).
 
     Uses GetSystemCpuSetInformation, which reports an EfficiencyClass per
-    logical processor — higher is faster. On a non-hybrid CPU every core lands
-    in one class and this returns them all, which makes pinning a no-op rather
-    than a mistake.
+    logical processor: higher is faster. The rules live in classify_cpu_sets.
+    On a non-hybrid CPU this returns [], which makes pinning a no-op rather
+    than a mistake. The per-class counts are logged once per process.
     """
-    global _pcores_cache
+    global _pcores_cache, _classes_cache
     if _pcores_cache is not None:
         return _pcores_cache
     if not _IS_WINDOWS:
         _pcores_cache = []
         return _pcores_cache
     try:
-        k32 = ctypes.WinDLL("kernel32")
-        need = ctypes.c_ulong(0)
-        k32.GetSystemCpuSetInformation(None, 0, ctypes.byref(need), None, 0)
-        buf = ctypes.create_string_buffer(need.value)
-        k32.GetSystemCpuSetInformation(buf, need.value, ctypes.byref(need),
-                                       None, 0)
-        by_class: dict[int, list[int]] = {}
-        off = 0
-        raw = buf.raw
-        while off < need.value:
-            size = int.from_bytes(raw[off:off + 4], "little")
-            if size <= 0:
-                break
-            # SYSTEM_CPU_SET_INFORMATION: Size(4) Type(4) Id(4) Group(2)
-            # LogicalProcessorIndex(1) CoreIndex(1) LastLevelCacheIndex(1)
-            # NumaNodeIndex(1) EfficiencyClass(1)
-            logical = raw[off + 14]
-            eff = raw[off + 18]
-            by_class.setdefault(eff, []).append(logical)
-            off += size
-        if len(by_class) < 2:
-            _pcores_cache = []          # not hybrid: nothing to prefer
-        else:
-            fast = sorted(x for c, xs in by_class.items() if c > min(by_class)
-                          for x in xs)
-            # Intersect with the process mask, or some threads pin and some
-            # silently do not -- see _process_mask.
-            pm = _process_mask()
-            if pm:
-                fast = [c for c in fast if pm & (1 << c)]
-            # >64 logical CPUs means processor groups, which a single 64-bit
-            # mask cannot address. Refuse rather than pin to the wrong group.
-            if any(c >= 64 for c in fast):
-                fast = []
-            _pcores_cache = fast
+        classes = classify_cpu_sets(_read_cpu_set_buffer(), _process_mask())
+        _classes_cache = classes
+        print(describe_classes(classes), flush=True)
+        _pcores_cache = list(classes.fast)
     except Exception:
         _pcores_cache = []
     return _pcores_cache
@@ -327,17 +433,16 @@ def place_capture_thread(slot: int, priority: int | None = None) -> dict:
 
 
 def efficiency_cores() -> list[int]:
-    """Logical CPUs in the LOWEST efficiency class, or [] if not hybrid."""
-    if not _IS_WINDOWS:
+    """Logical CPUs in every class BELOW the top one, or [] if not hybrid.
+
+    The union of the lower classes, not "everything that is not fast": on a
+    three-class part the middle class is still an E-core flavour and belongs
+    here, and enumerating from os.cpu_count() would include CPUs the process
+    mask excludes.
+    """
+    if not _IS_WINDOWS or not performance_cores():
         return []
-    fast = set(performance_cores())
-    if not fast:
-        return []
-    try:
-        import os
-        return [c for c in range(os.cpu_count() or 0) if c not in fast]
-    except Exception:
-        return []
+    return list(cpu_classes().slow)
 
 
 def restrict_current_thread(cpus) -> bool:

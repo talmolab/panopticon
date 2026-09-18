@@ -317,6 +317,114 @@ written = {c[1] for c in cam.calls if len(c) == 2 and c[0] == "TriggerSelector"}
 check(n, "only offered selectors are written",
       written == {"FrameStart", "FrameBurstStart"}, str(written))
 
+# ===========================================================================
+# cpu_affinity: efficiency-class parsing on hosts this machine is not
+# (A3-23 top class only, A3-24 processor groups)
+# ===========================================================================
+
+def cpu_set_record(logical, eff, group=0, cid=None, size=32, rtype=0):
+    """One SYSTEM_CPU_SET_INFORMATION record: Size Type Id Group Logical Core
+    LLC Numa EfficiencyClass AllFlags Reserved AllocationTag, padded to size."""
+    cid = 256 + logical + 64 * group if cid is None else cid
+    head = struct.pack("<IIIHBBBBBB", size, rtype, cid, group, logical,
+                       logical // 2, 0, 0, eff, 0)
+    return head + bytes(size - len(head))
+
+
+def cpu_set_buffer(spec, **kw):
+    """spec: iterable of (logical, efficiency_class[, group])."""
+    return b"".join(cpu_set_record(*entry, **kw) for entry in spec)
+
+
+# The reference host: 285K, 8 P-cores interleaved with 16 E-cores, one group.
+P285K = [0, 1, 10, 11, 12, 13, 22, 23]
+two_class = cpu_set_buffer([(c, 1 if c in P285K else 0) for c in range(24)])
+
+# 13 -- two classes: the top class is the P-core set, exactly as before.
+n += 1
+r = ca.classify_cpu_sets(two_class)
+check(n, "two-class host: top class is the P-core set",
+      r.fast == P285K and r.slow == [c for c in range(24) if c not in P285K]
+      and r.groups == {0} and r.reason == "", f"fast={r.fast} reason={r.reason!r}")
+
+# 14 -- three classes (LP-E = 0, E = 1, P = 2): ONLY class 2 is fast; the
+#       E-cores in the middle class must not be pinned as P-cores.
+n += 1
+three_class = cpu_set_buffer([(c, 2) for c in range(0, 12)]        # 6 P-cores x2 threads
+                             + [(c, 1) for c in range(12, 20)]     # 8 E-cores
+                             + [(c, 0) for c in range(20, 22)])    # 2 LP E-cores
+r = ca.classify_cpu_sets(three_class)
+check(n, "three-class host: only the top class is fast, both lower classes are slow",
+      r.fast == list(range(12)) and r.slow == list(range(12, 22))
+      and sorted(r.by_class) == [0, 1, 2], f"fast={r.fast} slow={r.slow}")
+
+# 15 -- the middle class is never in `fast` even when it is the largest class.
+n += 1
+check(n, "E-cores (middle class) excluded from the P-core set",
+      not (set(range(12, 20)) & set(r.fast)), str(r.fast))
+
+# 16 -- more than one processor group: indices repeat per group and a 64-bit
+#       mask cannot address the machine, so pinning is refused with a reason.
+n += 1
+multi_group = cpu_set_buffer([(c, 1 if c < 8 else 0, 0) for c in range(64)]
+                             + [(c, 1 if c < 8 else 0, 1) for c in range(40)])
+r = ca.classify_cpu_sets(multi_group)
+check(n, "multiple processor groups disable pinning",
+      r.fast == [] and r.slow == [] and r.groups == {0, 1}
+      and "processor groups" in r.reason and r.ids == {},
+      f"fast={r.fast} reason={r.reason!r}")
+
+# 17 -- the log line names the groups so the host is recognisable.
+n += 1
+line = ca.describe_classes(r)
+check(n, "describe_classes names every class and the group count",
+      "class 0:" in line and "class 1:" in line and "processor groups [0, 1]" in line
+      and "no pinning" in line, line)
+
+# 18 -- one class: not hybrid, nothing to prefer.
+n += 1
+r = ca.classify_cpu_sets(cpu_set_buffer([(c, 0) for c in range(16)]))
+check(n, "single class: not hybrid, empty P-core set with reason",
+      r.fast == [] and r.slow == [] and "not hybrid" in r.reason, r.reason)
+
+# 19 -- the process affinity mask prunes P-cores the process may not use, and
+#       an empty intersection refuses rather than pins partially.
+n += 1
+mask = sum(1 << c for c in range(24) if c not in (0, 1))
+r = ca.classify_cpu_sets(two_class, process_mask=mask)
+r2 = ca.classify_cpu_sets(two_class, process_mask=(1 << 5))
+check(n, "process mask prunes the P-core set; empty intersection refuses",
+      r.fast == [10, 11, 12, 13, 22, 23] and r2.fast == []
+      and "process mask" in r2.reason, f"{r.fast} / {r2.reason!r}")
+
+# 20 -- records are walked by their own Size field (a newer Windows may grow
+#       the struct) and records of another Type are skipped.
+n += 1
+grown = cpu_set_buffer([(c, 1 if c in P285K else 0) for c in range(24)], size=40)
+foreign = cpu_set_record(99, 7, rtype=1)
+r = ca.classify_cpu_sets(foreign + grown)
+check(n, "variable record size honoured, non-CPU-set records skipped",
+      r.fast == P285K and 99 not in r.slow, f"fast={r.fast}")
+
+# 21 -- CPU Set ids are kept per logical CPU (SetThreadSelectedCpuSets takes
+#       ids, not indices) and a truncated buffer does not raise.
+n += 1
+r = ca.classify_cpu_sets(two_class)
+truncated = ca.classify_cpu_sets(two_class[:50])
+check(n, "CPU Set ids mapped per logical CPU; truncated buffer parses what it can",
+      r.ids[10] == 266 and len(r.ids) == 24 and len(truncated.by_class) >= 1,
+      f"ids[10]={r.ids.get(10)} n={len(r.ids)}")
+
+# 22 -- the live path on this host: enumerates without raising and agrees
+#       with its own classification (any Windows host, hybrid or not).
+n += 1
+live = ca.performance_cores()
+classes = ca.cpu_classes()
+check(n, "live enumeration is consistent with classify_cpu_sets",
+      isinstance(live, list) and live == list(classes.fast)
+      and set(live).isdisjoint(ca.efficiency_cores()),
+      f"fast={live} classes={ {k: len(v) for k, v in classes.by_class.items()} }")
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): " + ", ".join(failures))
