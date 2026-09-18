@@ -39,6 +39,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from gui_app.backends import load_backend
+from gui_app.probe_guard import (add_force_argument,
+                                 refuse_if_panopticon_running)
 from gui_app.session_config import RigProfile
 
 # --- QueryThreadCycleTime: cycles this thread actually EXECUTED ---------------
@@ -67,7 +69,11 @@ def main() -> int:
     ap.add_argument("--cams", type=int, default=0, help="0 = all enumerated")
     ap.add_argument("--frames", type=int, default=600, help="per camera")
     ap.add_argument("--profile", default="3dpose")
+    add_force_argument(ap)
     args = ap.parse_args()
+    # Opens every camera, so another instance holding them makes both the
+    # thread-scaling arm and the exec/wall split meaningless.
+    refuse_if_panopticon_running(force=args.force)
 
     paths = {p.stem: p for p in RigProfile.list_profiles()}
     prof = RigProfile.load(paths.get(args.profile, next(iter(paths.values()))))

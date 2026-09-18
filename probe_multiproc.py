@@ -111,7 +111,14 @@ def main() -> int:
     ap.add_argument("--profile", default="3dpose")
     ap.add_argument("--switch-interval", type=float, default=0.001,
                     help="sys.setswitchinterval in each worker; gui.py uses 0.001")
+    from gui_app.probe_guard import (add_force_argument,
+                                     refuse_if_panopticon_running)
+    add_force_argument(ap)
     args = ap.parse_args()
+    # The workers open every camera and the parent owns the trigger board,
+    # so no other instance may be running: shared devices make the timing
+    # this probe reports describe the contention rather than the split.
+    refuse_if_panopticon_running(force=args.force)
     print(f"switch interval {args.switch_interval} per worker  [gui.py uses 0.001]")
 
     sys.path.insert(0, str(REPO))

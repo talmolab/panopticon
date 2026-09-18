@@ -36,6 +36,8 @@ from PyQt5.QtGui import QImage, QPixmap
 _QAPP = QApplication.instance() or QApplication([])
 
 from gui_app.camera_manager import CameraManager
+from gui_app.probe_guard import (add_force_argument,
+                                 refuse_if_panopticon_running)
 from gui_app.serial_controller import TeensyController
 from gui_app.session_config import RigProfile
 
@@ -80,7 +82,12 @@ def main():
                          "cutting the synchronised burst three cameras make "
                          "into one 10 GbE uplink.")
     ap.add_argument("--keep", action="store_true")
+    add_force_argument(ap)
     args = ap.parse_args()
+    # This probe opens every camera and the trigger board, so it must not
+    # run beside another instance: two of them fight over the same devices
+    # and the contention reads as the lag this probe exists to measure.
+    refuse_if_panopticon_running(force=args.force)
     sys.setswitchinterval(args.switch_interval)
     print(f"sys.setswitchinterval({args.switch_interval})  "
           f"[gui.py uses 0.001]", flush=True)

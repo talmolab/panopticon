@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import QTimer
 
+from gui_app.probe_guard import (add_force_argument,
+                                 refuse_if_panopticon_running)
+
 CASES = {
     "rapid_toggle": "flip Record on/off/on fast --- races the start and stop paths",
     "serial_stolen": "another process grabs COM3 mid-recording",
@@ -40,6 +43,7 @@ def main():
     ap.add_argument("--case", required=True)
     ap.add_argument("--seconds", type=float, default=40)
     ap.add_argument("--stim", type=Path, default=None)
+    add_force_argument(ap)
     args = ap.parse_args()
 
     if args.case == "list":
@@ -49,6 +53,11 @@ def main():
     if args.case not in CASES:
         print(f"unknown case; try: {', '.join(CASES)}")
         return 2
+
+    # Every case below drives a real MainWindow over the real cameras and
+    # the real board, so a second instance is fatal to both runs. `--case
+    # list` is answered above, because printing the menu opens nothing.
+    refuse_if_panopticon_running(force=args.force)
 
     _silence_dialogs()
     from gui_app.main_window import MainWindow, State

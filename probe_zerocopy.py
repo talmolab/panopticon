@@ -31,12 +31,18 @@ import argparse
 import ctypes
 import json
 import statistics
+import sys
 import time
 from ctypes import wintypes
 from pathlib import Path
 
 import numpy as np
 from pypylon import pylon
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from gui_app.probe_guard import (add_force_argument,
+                                 refuse_if_panopticon_running)
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _k32.QueryThreadCycleTime.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ulonglong)]
@@ -62,7 +68,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=12)
     ap.add_argument("--out", default="probe_out/zerocopy.json")
+    add_force_argument(ap)
     args = ap.parse_args()
+    # Opens a camera, so it must not run beside an instance that already
+    # holds it; a second opener changes the frame rate this A/B compares.
+    refuse_if_panopticon_running(force=args.force)
 
     cps = calibrate()
     tl = pylon.TlFactory.GetInstance()
