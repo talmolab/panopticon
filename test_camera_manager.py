@@ -12,6 +12,12 @@ camera's calibration to a different physical camera. And exposure/gain are
 written on every acquisition start, where a value that does not land halves
 that camera's frame rate with nothing in the log.
 
+What the cold path reports afterwards is tested here too: the stream
+statistics kept for the session metadata must not carry counters the grab
+threads' StopGrabbing already reset, nor a previous session's, and the
+preview restore that runs after a stop must not file its own problems in the
+finished recording's warnings.
+
 Each of those is exercised here against a stub backend: no cameras, no vendor
 SDK, no grab threads. The hot path lives in test_grab_failure.py.
 
@@ -68,11 +74,13 @@ class StubDevice:
 
 class StubCamera:
     def __init__(self, serial, width, height, pixel_format="Mono8",
-                 exposure=3000.0, gain=6.0):
+                 exposure=3000.0, gain=6.0, gain_unit="dB"):
         self.serial = serial
         self.width, self.height = width, height
         self.pixel_format = pixel_format
         self.exposure, self.gain = exposure, gain
+        #: 'dB' (a `Gain` node) or 'raw' (`GainRaw`, model-specific steps).
+        self.gain_unit = gain_unit
         self.closed = False
 
 
@@ -135,8 +143,20 @@ class StubBackend:
             raise self.exposure_error
         return self.applied.get(cam.serial, (exposure_us, gain_db))
 
+    def gain_unit(self, cam):
+        return cam.gain_unit
+
+    #: The camera-side nodes, as the real backend declares them. Everything
+    #: else stream_stats reports comes from the stream grabber, whose
+    #: counters StopGrabbing resets.
+    TRANSPORT_NODES = ("GevSCFJM", "GevSCFTD", "GevSCBWR", "GevSCBWRA",
+                       "GevSCBWA")
+
     def stream_stats(self, cam):
-        return {"Statistic_Failed_Buffer_Count": 0, "GevSCFJM": 48000}
+        # Shaped like the real backend's: reset-prone counters beside the
+        # camera-side transport settings.
+        return {"Failed_Buffer_Count": 0, "Buffer_Underrun_Count": 0,
+                "Resend_Request_Count": 0, "GevSCFJM": 48000}
 
     def stop_grabbing(self, cam):
         self.stopped.append(cam.serial)
@@ -406,11 +426,21 @@ m20._grab_threads = []
 out = io.StringIO()
 with redirect_stdout(out):
     m20.stop_acquisition()
-check("stop_acquisition collects one set of stream counters per camera for "
-      "the session metadata",
+check("stop_acquisition records each camera's transport settings for the "
+      "session metadata",
       len(m20.last_stream_stats) == 3
       and all(d.get("GevSCFJM") == 48000 for d in m20.last_stream_stats),
       str(m20.last_stream_stats))
+# The counters are read after every grab thread has stopped grabbing, which
+# resets them: a persisted 0 would read as "no network loss" in exactly the
+# sessions the counters are collected to diagnose.
+check("the stream-grabber counters StopGrabbing has already reset are not "
+      "persisted as zeros",
+      all(not any(k.endswith("_Count") for k in d)
+          for d in m20.last_stream_stats), str(m20.last_stream_stats))
+check("and every entry says where its counters went",
+      all("stopped grabbing" in d.get("counters", "")
+          for d in m20.last_stream_stats), str(m20.last_stream_stats))
 
 
 class _NoStatsBackend(StubBackend):
@@ -427,6 +457,149 @@ with redirect_stdout(out):
 check("a backend without stream statistics does not fail the stop",
       len(m21.last_stream_stats) == 1
       and "error" in m21.last_stream_stats[0], str(m21.last_stream_stats))
+
+
+
+class _RaisingRouter:
+    """A router whose stop() throws, i.e. a stop that ends before the
+    statistics are collected."""
+    warnings: list = []
+
+    def stop(self):
+        raise RuntimeError("router.stop() failed")
+
+
+b24 = rig()
+m24 = manager(b24)
+opened(m24)
+m24._grab_threads = []
+out = io.StringIO()
+with redirect_stdout(out):
+    m24.stop_acquisition()
+session1 = list(m24.last_stream_stats)
+with redirect_stdout(out):
+    m24.start_acquisition([], width=1920, height=1200, fps=100)
+check("start_acquisition drops the previous session's stream statistics "
+      "along with its warnings",
+      session1 and m24.last_stream_stats == [] and m24.last_warnings == [],
+      f"{session1} -> {m24.last_stream_stats}")
+
+m24._grab_threads = []
+m24._router = _RaisingRouter()
+check("a stop that raises before the statistics are read leaves them empty "
+      "rather than holding the previous recording's",
+      raises(RuntimeError, m24.stop_acquisition) is not None
+      and m24.last_stream_stats == [], str(m24.last_stream_stats))
+
+b25 = rig()
+m25 = manager(b25)
+opened(m25)
+m25._grab_threads = []
+out = io.StringIO()
+with redirect_stdout(out):
+    m25.stop_acquisition()
+    m25.abandon()
+check("abandon drops the statistics with the camera set, so an abandoned "
+      "session cannot be reported as the next one's",
+      m25.last_stream_stats == [] and m25.num_cameras == 0,
+      str(m25.last_stream_stats))
+
+# --- the preview restore belongs to the preview, not to the recording -------
+b26 = rig()
+b26.exposure_error = RuntimeError("camera dropped off the bus")
+m26 = manager(b26)
+opened(m26)
+m26._grab_threads = []
+m26.last_warnings = ["cam1: a real capture problem"]
+out = io.StringIO()
+with redirect_stdout(out):
+    m26.resume_preview()
+check("a preview-restore failure is not filed against the recording that "
+      "just finished", m26.last_warnings == ["cam1: a real capture problem"],
+      str(m26.last_warnings))
+check("but it is still printed, so it is not lost",
+      "exposure/gain set failed" in out.getvalue(), out.getvalue())
+
+# --- the gain unit is logged beside the value -------------------------------
+b27 = rig()
+m27 = manager(b27)
+opened(m27, trigger_rate_limit=165.0)
+log27 = exposures(m27, 100)
+check("the gain's unit is logged next to the value", "gain=6.0 dB" in log27,
+      log27)
+
+b28 = rig(gain=12.0, gain_unit="raw")
+m28 = manager(b28)
+opened(m28, trigger_rate_limit=165.0)
+log28 = exposures(m28, 100)
+check("a GainRaw camera's baseline restore is logged in raw steps, not as dB",
+      "gain=12.0 raw" in log28 and "dB" not in log28, log28)
+
+
+class _NoUnitBackend(StubBackend):
+    gain_unit = None
+
+
+class _BadUnitBackend(StubBackend):
+    def gain_unit(self, cam):
+        raise RuntimeError("camera dropped off the bus")
+
+
+for name, cls in (("a backend that cannot report the unit", _NoUnitBackend),
+                  ("a unit read that raises", _BadUnitBackend)):
+    bu = cls([StubCamera("21111111", 1920, 1200)])
+    mu = manager(bu)
+    opened(mu, trigger_rate_limit=165.0)
+    logu = exposures(mu, 100)
+    check(f"{name} still logs the value and applies the exposure",
+          "gain=6.0" in logu and mu.last_warnings == []
+          and bu.exposure_calls, logu + str(mu.last_warnings))
+
+# --- geometry as a predicate a preflight can refuse on ----------------------
+b29 = rig()
+m29 = manager(b29)
+opened(m29)
+check("geometry_mismatch is silent when the profile and the cameras agree",
+      m29.geometry_mismatch(1920, 1200) is None,
+      str(m29.geometry_mismatch(1920, 1200)))
+check("it reports the disagreement a preflight must refuse on, naming both "
+      "sizes",
+      "1280x1024" in (m29.geometry_mismatch(1280, 1024) or "")
+      and "1920x1200" in (m29.geometry_mismatch(1280, 1024) or ""),
+      str(m29.geometry_mismatch(1280, 1024)))
+check("it says nothing when no size was asked for, or no camera is open",
+      m29.geometry_mismatch(0, 0) is None
+      and manager(rig()).geometry_mismatch(1280, 1024) is None)
+
+# --- a refused RE-open leaves nothing open ----------------------------------
+# geometry is None means no cameras are open: every geometry guard is
+# written `if self._geometry and ...`, so cameras left open by a refused
+# re-open would pass the start-time check without their ROI ever being
+# compared with the profile.
+b30 = rig()
+m30 = manager(b30)
+opened(m30, expect_cameras=3)
+ok30, _ = opened(m30, expect_cameras=9)
+check("a re-open refused on the camera count closes the previous set",
+      not ok30 and m30.num_cameras == 0 and m30.geometry is None
+      and sorted(b30.closed) == sorted(b30.order),
+      f"{m30.num_cameras} {m30.geometry} {b30.closed}")
+b31 = rig()
+m31 = manager(b31)
+opened(m31)
+b31.order = []                      # every camera dropped off the bus
+ok31, _ = opened(m31)
+check("a re-open refused because nothing enumerated closes it too",
+      not ok31 and m31.num_cameras == 0 and m31.geometry is None,
+      f"{m31.num_cameras} {m31.geometry}")
+
+b32 = rig()
+m32 = manager(b32)
+opened(m32)
+ok32, _ = opened(m32, only_serials=["21111111", "29999999"])
+check("and so does one refused on a serial that did not enumerate",
+      not ok32 and m32.num_cameras == 0 and m32.geometry is None,
+      f"{m32.num_cameras} {m32.geometry}")
 
 from gui_app import cpu_affinity                                # noqa: E402
 
