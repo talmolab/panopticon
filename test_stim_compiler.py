@@ -258,6 +258,27 @@ def test_ready_ack():
     print("9) RDY ack emitted from both setup and loop config paths: PASS")
 
 
+def test_sketch_identity():
+    """The RDY line carries an 8-hex id of the sketch, so the host can learn
+    which firmware the board runs rather than trust a per-machine record."""
+    TRIG = [2, 4, 6, 8, 10, 12]
+    blank = sc.recording_only_sketch([53], TRIG)
+    paradigm = sc.compile_ino([B("A", pin=53)], [], [53], TRIG)
+    bid, pid = sc.sketch_id(blank), sc.sketch_id(paradigm)
+    assert bid and pid and len(bid) == 8 and int(bid, 16) >= 0
+    assert bid != pid, "two different sketches share an identity"
+    assert bid == sc.sketch_id(sc.recording_only_sketch([53], TRIG)), "id not deterministic"
+    # The id is what announceReady prints, appended to the RDY line.
+    assert f'const char SKETCH_ID[] = "{bid}";' in blank
+    ready = blank.split("void announceReady()")[1].split("}")[0]
+    assert "Serial.println(SKETCH_ID);" in ready
+    assert ready.index("(long)FPS_OUT") < ready.index("SKETCH_ID"), "id must follow fps"
+    assert "@SKETCH_ID@" not in blank, "placeholder leaked into the sketch"
+    # A sketch without the line (older firmware) reads as no identity.
+    assert sc.sketch_id("void setup() {}") is None
+    print("9b) sketch identity: deterministic, distinct, printed in RDY: PASS")
+
+
 # ── per-frame trace (gui_app/stim_trace.py) ──────────────────────────────────
 # Same paradigm semantics, evaluated over time instead of compiled to C. If
 # these two drift apart the trace silently mislabels which frames were stimulated.
@@ -393,6 +414,7 @@ def main():
     test_describe()
     test_generated_sketch_is_wellformed()
     test_ready_ack()
+    test_sketch_identity()
     test_sketch_swap_invalidates_stale_upload()
     if _HAS_NUMPY:
         test_trace_locate()

@@ -230,6 +230,28 @@ def test_trailing_newline():
     print("7) config command is newline-terminated: PASS")
 
 
+def test_board_id_is_captured_from_the_ack():
+    """Firmware appends an 8-hex sketch id to the RDY line; the controller
+    keeps it as board_id so the host can compare it with the wanted sketch.
+    Older firmware without the field leaves board_id None."""
+    c, log, state = controller(lambda cmd, gen: b"RDY 6 100 0AbC12ef\r\n")
+    assert c.board_id is None
+    assert c.start_triggers(PINS, 100) is True, "an ack with an id was rejected"
+    assert c.board_id == "0abc12ef", c.board_id
+    # A stop ack from the same sketch carries the id too.
+    c._ser._respond = lambda cmd, gen: b"RDY 6 0 0abc12ef\r\n"
+    assert c.stop_triggers(PINS) is True
+    # Firmware without the field: still accepted, id unknown.
+    c, log, state = controller(lambda cmd, gen: ACK)
+    assert c.start_triggers(PINS, 100) is True
+    assert c.board_id is None
+    # A malformed id is not an ack at all (the line is not judged), so a board
+    # printing garbage after the numbers cannot pass as a confirmed start.
+    c, log, state = controller(lambda cmd, gen: b"RDY 6 100 xyz\r\n")
+    assert c.start_triggers(PINS, 100) is False
+    print("11) sketch id in the RDY line is captured as board_id: PASS")
+
+
 def test_reopen_failure_and_error_text():
     """A reopen that fails ends the start with False, and open() keeps the
     reason so the operator can tell a missing port from a held one."""
@@ -267,6 +289,7 @@ def main():
     test_stop_is_confirmed_on_rdy_firmware()
     test_stop_failure_paths_return_false()
     test_reopen_failure_and_error_text()
+    test_board_id_is_captured_from_the_ack()
     print("\nALL SERIAL HANDSHAKE TESTS PASS")
 
 

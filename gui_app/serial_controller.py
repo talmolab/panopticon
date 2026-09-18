@@ -187,10 +187,16 @@ class TeensyController:
             # the next read so a line split across two reads is not lost.
             *lines, buf = buf.split("\n")
             for line in lines:
+                if "RDY " not in line:
+                    continue
+                # The board speaks RDY, whatever the rest of the line says, so
+                # the pre-RDY exemption in start_triggers no longer applies.
+                self._speaks_rdy = True
                 m = _RDY_LINE.search(line)
                 if not m:
-                    continue
-                self._speaks_rdy = True
+                    print(f"[teensy] wanted {want!r}, got garbled ack "
+                          f"{line.strip()!r}", flush=True)
+                    return False
                 self.board_id = (m.group(3) or "").lower() or None
                 got_n, got_fps = int(m.group(1)), int(m.group(2))
                 if (got_n, got_fps) == (want_n, want_fps):
