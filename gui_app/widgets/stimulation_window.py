@@ -1140,27 +1140,25 @@ class StimulationWindow(QDialog):
         return self._test_timer is not None
 
     def record_blocker(self) -> str | None:
-        """Reason a RECORDING must not start with this workflow, or None.
+        """Reason an acquisition must not start with this workflow, or None.
 
-        Record does not compile anything — it runs whatever `_ensure_sketch_for`
-        put on the board — so this was never gated, and only `_on_apply` and
-        `_on_test` consulted _blocking_problem. But the canvas is what
-        `stim_paradigm.json` and `stim_trace.csv` describe, and a graph
-        containing a forbidden pin
-        means the .ino on the board may be driving a camera trigger line, which
-        silently breaks the block-ID identity every downstream consumer assumes.
-        CLAUDE.md already claims Record warns here; this makes that true.
+        Record does not compile anything; it runs whatever the main window put
+        on the board. The canvas is nevertheless what `stim_paradigm.json` and
+        `stim_trace.csv` describe, so the canvas is checked here for anything
+        that would make that description wrong or the recording unsafe:
 
-        A failed Apply also blocks. `stim_trace.csv` marks which frames were
-        stimulated by reading the CANVAS, not the board, so after a failed
-        upload it happily reports "900 frames with stimulation active" for a
-        session in which the board never received the paradigm and nothing
-        fired. Observed 2026-09-14: arduino-cli lost a race for the serial port,
-        the upload failed, and the recording went ahead and was labelled
-        stimulated. Data mislabelled as stimulated is worse than no data, so
-        refuse until an Apply succeeds. Only a KNOWN failure blocks -- a
-        paradigm Applied in a previous session is still on the board and stays
-        recordable, which is why this is a separate flag from `_uploaded_ino`.
+        - An upload in flight: arduino-cli holds the serial port, so opening
+          it for the acquisition fails or stalls the UI, and a second flash
+          on the same port leaves the board in an unknown state.
+        - A failed Apply: the board does not carry this canvas, so the trace
+          would label frames as stimulated when nothing fired. Only a known
+          failure blocks; `_uploaded_ino is None` does not, because the main
+          window clears it after every calibration while still holding the
+          applied paradigm it will flash back for the recording. Whether the
+          canvas matches that held paradigm is the main window's check, made
+          against `firmware_source()`.
+        - A forbidden or contested pin: a stim waveform on a camera trigger
+          line breaks the block-ID identity every downstream consumer assumes.
         """
         if self._apply_failed:
             return ("The last Apply FAILED, so the board does not carry this "
@@ -1171,8 +1169,17 @@ class StimulationWindow(QDialog):
                     "using the board's serial port and retry.")
         return self._blocking_problem()
 
-    def provenance(self) -> dict:
-        """Everything needed to reconstruct what the animal actually received."""
+    def provenance(self, flashed_source: str | None = None) -> dict:
+        """Everything needed to reconstruct what the animal actually received.
+
+        `flashed_source` is the exact sketch text the main window put on the
+        board for this acquisition. `matches_uploaded_firmware` is then the
+        canvas compared with that sketch, which is the only comparison that
+        answers "did the animal receive what this file describes". Without
+        it the editor falls back to its own last successful upload, and to
+        None when it has none, because the editor cannot see what the main
+        window swapped onto the board.
+        """
         blocks, edges = self._canvas.get_workflow()
         # Must pass trigger_pins, same as _compile(). Otherwise the two compile
         # calls disagree: this one succeeds on a forbidden-pin graph while
@@ -1180,9 +1187,9 @@ class StimulationWindow(QDialog):
         # .ino beside it does not — a half-described session.
         ino = stim_compiler.compile_ino(blocks, edges, self._get_safe_pins(),
                                         self._get_trigger_pins())
-        # None = nothing was uploaded this session, so the GUI cannot know what
-        # the board is running (it survives app restarts).
-        matches = None if self._uploaded_ino is None else (ino == self._uploaded_ino)
+        reference = flashed_source if flashed_source is not None \
+            else self._uploaded_ino
+        matches = None if reference is None else (ino == reference)
         return {
             "saved_by": "Panopticon Stimulation Editor",
             "safe_low_pins": list(self._get_safe_pins()),
