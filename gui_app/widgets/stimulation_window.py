@@ -1136,10 +1136,26 @@ class StimulationWindow(QDialog):
         clash = stim_compiler.pin_conflicts(blocks, edges)
         if clash:
             pins = ", ".join(str(p) for p in clash)
+            # A block with several incoming arrows sits in every chain that
+            # reaches it, so a join A->C, B->C is itself a pin conflict on C.
+            # Name the merge, otherwise the message reads as a false alarm on
+            # a graph that looks legal.
+            fan_in: dict[str, int] = {}
+            for e in edges:
+                fan_in[e["dst"]] = fan_in.get(e["dst"], 0) + 1
+            merged = [b for b in blocks
+                      if fan_in.get(b["id"], 0) > 1 and int(b["pin"]) in clash]
+            if merged:
+                n = max(fan_in[b["id"]] for b in merged)
+                return (f"Pin {pins} is reached by {n} chains that merge into "
+                        f"one block.\n\nChains run in parallel and cannot join, "
+                        f"so every chain arriving at the merged block drives "
+                        f"its pin at once. Give the merged block its own chain, "
+                        f"or put the joining chains in sequence.")
             return (f"Pin {pins} is driven by more than one chain.\n\nChains run "
                     f"at the same time, so they would fight over the output and "
                     f"the waveform would be neither one. Give each chain its own "
-                    f"pin, or merge them into a single chain.")
+                    f"pin, or put them in sequence as a single chain.")
         return None
 
     def invalidate_upload(self, reason: str = ""):
