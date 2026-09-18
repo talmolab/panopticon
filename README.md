@@ -287,3 +287,13 @@ pinhole guess are dropped before selecting. That is a coarse outlier filter, not
 metric. Each stereo pair needs at least 3 shared frames and runs with intrinsics fixed.
 The pairs are chained from the reference camera along a lowest-error spanning tree, **with
 no global bundle adjustment**, so read the pairwise chart rather than one overall number.
+
+---
+
+## License
+
+Panopticon is licensed under the GNU General Public License, version 3 only
+(`GPL-3.0-only`); the full text is in [LICENSE](LICENSE). The GPL is the license
+that the PyQt5 dependency requires of a program built on it, and PyQt5 is kept, so
+the application carries the same terms. campy, the MIT-licensed lineage credited
+above, is compatible with them.
