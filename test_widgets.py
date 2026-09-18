@@ -35,6 +35,7 @@ from PyQt5.QtWidgets import QApplication
 
 app = QApplication.instance() or QApplication([])
 
+import gui_app.session_config as session_config
 from gui_app.widgets import sidebar as sidebar_module
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.camera_grid import CameraGridWidget
@@ -392,6 +393,73 @@ def test_disabled_toggle_tooltip_names_the_gate():
     sb.close()
 
 
+# --------------------------------------------------------------------------
+# A10-18 / A5-03: a malformed profile is skipped with a warning, not fatal.
+# --------------------------------------------------------------------------
+class _profiles_dir:
+    """Point session_config at a temporary profiles directory."""
+
+    def __init__(self, files: dict):
+        self.files = files
+
+    def __enter__(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="profiles_", dir=_TMP))
+        for name, text in self.files.items():
+            (self.dir / name).write_text(text, encoding="utf-8")
+        self.saved = session_config.PROFILES_DIR
+        session_config.PROFILES_DIR = self.dir
+        return self.dir
+
+    def __exit__(self, *exc):
+        session_config.PROFILES_DIR = self.saved
+
+
+GOOD_PROFILE = (
+    "name: goodrig\n"
+    "metadata_defaults:\n"
+    "  experimenter: AB\n"
+    "  assay: maze\n"
+)
+
+
+def test_malformed_profile_is_skipped_with_warning():
+    files = {
+        "a_bad.yaml": "- this\n- is a list\n",
+        "b_empty.yaml": "",
+        "c_good.yaml": GOOD_PROFILE,
+        "d_typo.yaml": "name: typo\nframe_rate: fast\n",
+    }
+    with _profiles_dir(files):
+        sb = make_sidebar()
+    names = [sb._profile_combo.itemText(i) for i in range(sb._profile_combo.count())]
+    check("only the good profile loaded", names == ["goodrig"], repr(names))
+    w = sb.profile_warnings
+    check("one warning per skipped file", len(w) == 3, repr(w))
+    check("warnings name the skipped files",
+          all(any(n in m for m in w) for n in ("a_bad.yaml", "b_empty.yaml", "d_typo.yaml")), repr(w))
+    check("no warning about the good profile", not any("c_good" in m for m in w))
+    check("current_profile is the good one", sb.current_profile.name == "goodrig")
+    sb.close()
+
+
+def test_no_loadable_profile_names_the_directory():
+    with _profiles_dir({"only_bad.yaml": "42\n"}) as d:
+        sb = make_sidebar()
+    w = sb.profile_warnings
+    check("no profile loaded leaves the combo empty", sb._profile_combo.count() == 0)
+    check("warning names the profiles directory", any(str(d) in m for m in w), repr(w))
+    check("current_profile falls back to defaults", sb.current_profile.name == session_config.RigProfile().name)
+    sb.close()
+
+
+def test_all_good_profiles_give_no_warnings():
+    with _profiles_dir({"one.yaml": GOOD_PROFILE, "two.yaml": "name: two\n"}):
+        sb = make_sidebar()
+    check("no warnings when every profile loads", sb.profile_warnings == [], repr(sb.profile_warnings))
+    check("both profiles listed", sb._profile_combo.count() == 2)
+    sb.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -407,6 +475,9 @@ def main():
     test_zoomed_pane_keeps_sensor_aspect()
     test_disabled_toggle_is_visibly_dimmed()
     test_disabled_toggle_tooltip_names_the_gate()
+    test_malformed_profile_is_skipped_with_warning()
+    test_no_loadable_profile_names_the_directory()
+    test_all_good_profiles_give_no_warnings()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)

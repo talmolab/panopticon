@@ -10,7 +10,8 @@ from PyQt5.QtGui import QFont, QColor
 
 from gui_app.widgets.toggle_switch import ToggleSwitch
 from gui_app.widgets.coverage_graph import CoverageGraphWidget
-from gui_app.session_config import RigProfile, REPO_ROOT
+from gui_app import session_config
+from gui_app.session_config import RigProfile, ProfileError, REPO_ROOT
 
 # Per-machine UI state. The profiles themselves are shared with the 3dface rig
 # via git, so which one is "default" can't live in the repo — it's a property of
@@ -46,11 +47,31 @@ class SidebarWidget(QWidget):
             "QComboBox::drop-down { border: none; }"
             "QComboBox QAbstractItemView { background: #1a1a2e; color: #dcdcdc; selection-background-color: #5078c8; }"
         )
+        # One malformed YAML must not abort launch: the bad file is skipped
+        # with a warning and the good profiles stay usable. Every load failure
+        # is a ProfileError naming the file and the key, so nothing broader is
+        # caught and a programming error still surfaces. The warnings are
+        # collected rather than shown here because no window exists yet; the
+        # main window reads profile_warnings once it is up.
         self._profiles: list[RigProfile] = []
+        self._profile_warnings: list[str] = []
         for path in RigProfile.list_profiles():
-            profile = RigProfile.load(path)
+            try:
+                profile = RigProfile.load(path)
+            except ProfileError as e:
+                msg = f"skipping profile {path.name}: {e}"
+                print(f"[profile] {msg}", flush=True)
+                self._profile_warnings.append(msg)
+                continue
             self._profiles.append(profile)
             self._profile_combo.addItem(profile.name)
+        if not self._profiles:
+            # Read at call time so it names the directory list_profiles used.
+            msg = (f"No rig profile could be loaded from {session_config.PROFILES_DIR}. "
+                   f"Add a <name>.yaml there (profiles/3dpose.yaml is a "
+                   f"complete example) and restart.")
+            print(f"[profile] {msg}", flush=True)
+            self._profile_warnings.append(msg)
         self._profile_combo.currentIndexChanged.connect(self._on_profile_changed)
         layout.addWidget(self._profile_combo)
 
@@ -350,6 +371,14 @@ class SidebarWidget(QWidget):
                 self._apply_profile_dir(profile)
                 return True
         return False
+
+    @property
+    def profile_warnings(self) -> list[str]:
+        """Messages about profiles that failed to load at construction, one
+        per skipped file, plus one naming the profiles directory when none
+        loaded. Empty when every profile loaded. The main window shows them
+        once after the window is up."""
+        return list(self._profile_warnings)
 
     @staticmethod
     def remembered_profile() -> str:
