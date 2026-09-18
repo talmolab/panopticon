@@ -1317,15 +1317,20 @@ class StimulationWindow(QDialog):
             self, "Save Stimulus Config", default, "JSON (*.json)")
         if not path:
             return
+        # The file dialog already confirms an overwrite, so no second prompt.
+        # Written as UTF-8 to match the firmware beside it and the loader, and
+        # a write failure is reported by path rather than as a traceback.
         p = Path(path)
-        if p.exists():
-            if QMessageBox.question(
-                self, "Overwrite?", f"{p.name} already exists. Overwrite?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            ) != QMessageBox.Yes:
-                return
         blocks, edges = self._canvas.get_workflow()
-        p.write_text(json.dumps({"blocks": blocks, "edges": edges}, indent=2))
+        try:
+            p.write_text(json.dumps({"blocks": blocks, "edges": edges}, indent=2),
+                         encoding="utf-8")
+        except OSError as e:
+            self._set_status(f"Could not save {p.name}.", error=True)
+            QMessageBox.critical(
+                self, "Save failed", f"Could not write {p}:\n\n{e}")
+            return
+        self._dirty = False
         self._set_status(f"Saved to {p.name}")
 
     # ── load ─────────────────────────────────────────────────────────────────
