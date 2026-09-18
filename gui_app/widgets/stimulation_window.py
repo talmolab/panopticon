@@ -918,6 +918,7 @@ class StimulationWindow(QDialog):
                  get_output_dir: Callable[[], str],
                  get_fps: Callable[[], int] = lambda: 100,
                  is_busy: Callable[[], bool] = lambda: False,
+                 board_taken: Callable[[], bool] | None = None,
                  get_safe_pins: Callable[[], list] = lambda: list(
                      stim_compiler.DEFAULT_SAFE_LOW_PINS),
                  get_trigger_pins: Callable[[], list] = lambda: [],
@@ -930,6 +931,16 @@ class StimulationWindow(QDialog):
         self._get_output_dir = get_output_dir
         self._get_fps        = get_fps
         self._is_busy        = is_busy
+        # True while something other than this editor holds the trigger
+        # board: an acquisition is RECORDING or CALIBRATING, or a firmware
+        # flash is in flight. _end_test skips its stop write only on this and
+        # never on the wider is_busy, because is_busy also covers camera work
+        # (a profile switch) that leaves the board untouched, and a looping
+        # Test that ends then has nothing else to stop the laser pin. Without
+        # the callback _end_test falls back to is_busy: safe against cutting
+        # a recording's triggers but over-broad, so main_window must supply
+        # it from its acquisition state and firmware worker.
+        self._board_taken    = board_taken
         self._get_safe_pins  = get_safe_pins
         # Needed to refuse a stim chain on a camera trigger line, which would
         # silently break cross-camera block-ID alignment. Defaults to empty so a
@@ -1345,10 +1356,13 @@ class StimulationWindow(QDialog):
         either way: coercing a blank pin to 0 puts a block on the Mega's UART
         RX0 and garbles the link to the board. A duration must be positive,
         because a zero-length step compiles to a chain that never advances;
-        a negative frequency or pulse width has no waveform.
+        a negative frequency or pulse width has no waveform. Each refusal
+        is a ``diagnostic`` status, so the next canvas refresh clears it
+        instead of leaving a stale error standing over a later accepted edit.
         """
         if not self._f_pin.text().strip():
-            self._set_status("Enter a pin number.", error=True)
+            self._set_status("Enter a pin number.", error=True,
+                             kind="diagnostic")
             return None
         try:
             pin  = int(self._f_pin.text())
@@ -1356,15 +1370,17 @@ class StimulationWindow(QDialog):
             pw   = float(self._f_pw.text()   or ("0" if defaults else ""))
             dur  = float(self._f_dur.text()  or ("1" if defaults else ""))
         except ValueError:
-            self._set_status("Invalid parameters.", error=True)
+            self._set_status("Invalid parameters.", error=True,
+                             kind="diagnostic")
             return None
         if dur <= 0:
             self._set_status("Invalid parameters: duration must be > 0 s.",
-                             error=True)
+                             error=True, kind="diagnostic")
             return None
         if freq < 0 or pw < 0:
             self._set_status("Invalid parameters: frequency and pulse width "
-                             "cannot be negative.", error=True)
+                             "cannot be negative.", error=True,
+                             kind="diagnostic")
             return None
         return pin, freq, pw, dur
 
@@ -1379,9 +1395,10 @@ class StimulationWindow(QDialog):
         blk = self._selected_block
         blk.pin, blk.freq, blk.pw, blk.dur = params
         blk.update()
-        self._set_status("")
         # The edit can create or remove a pin conflict and moves the end time,
         # so the diagnostics are recomputed the same as for any other edit.
+        # refresh_starts alone decides the status line: clearing it here
+        # first would downgrade a board notice to info and wipe it.
         self._canvas.refresh_starts()
 
     # ── create ────────────────────────────────────────────────────────────────
@@ -1617,14 +1634,31 @@ class StimulationWindow(QDialog):
             return
         self._set_status(f"Testing — {left:.0f} s remaining.")
 
+    def _board_is_taken(self) -> bool:
+        """True when the shared link a test borrowed is no longer this editor's to write to.
+
+        A closed link means a flash released it; the board_taken callback
+        means an acquisition or flash holds the board. Without the callback
+        the wider is_busy stands in. The link is inspected directly rather
+        than through get_serial, because the main window's get_serial opens
+        the port as a side effect and would fight arduino-cli mid-flash.
+        """
+        if not self._test_serial.is_open:
+            return True
+        if self._board_taken is not None:
+            return self._board_taken()
+        return self._is_busy()
+
     def _end_test(self, message: str) -> bool:
         """Stop a running test; returns False when the board did not confirm.
 
-        When the main window has taken the board for an acquisition or a
-        flash, no stop is written: the acquisition's own start already
-        replaced the test's configuration, and a stop now would cut the
-        recording's camera triggers, while a flash has closed the shared
-        link so the write could only fail and raise a false alarm.
+        No stop is written when something else holds the board: a closed
+        shared link means a flash released it, so the write could only fail
+        and raise a false alarm; board_taken() means an acquisition's own
+        start replaced the test's configuration, and a stop now would cut
+        the recording's camera triggers. The main window being busy with a
+        camera operation is not a reason to skip: the board is untouched and
+        this write is the only thing that stops a looping chain.
         """
         if self._test_timer is not None:
             self._test_timer.stop()
@@ -1632,7 +1666,7 @@ class StimulationWindow(QDialog):
         stopped = True
         superseded = False
         if self._test_serial is not None:
-            if not self._test_owns_serial and self._is_busy():
+            if not self._test_owns_serial and self._board_is_taken():
                 superseded = True
             else:
                 # The most laser-exposed stop in the application: a bench Test

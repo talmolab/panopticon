@@ -14,8 +14,13 @@ Rules pinned here and why:
   calibration while still holding the paradigm it will flash back.
 - Escape and reject() never hide a running test's Stop control; close acts as
   Stop Test and the dialog stays up when the board did not confirm the stop.
-- A test whose board was taken by an acquisition sends no stop, because the
-  stop would cut the recording's camera triggers.
+- A test whose board was taken by an acquisition or a flash sends no stop,
+  because the stop would cut the recording's camera triggers or fail on a
+  released link; a main window that is merely busy with cameras does not
+  count, because that leaves the board untouched and the stop is the only
+  thing that ends a looping chain.
+- A refused Create or Enter edit is a diagnostic that the next accepted edit
+  clears, and an Enter edit never wipes a board notice.
 - provenance(flashed_source) compares the canvas with the sketch the main
   window actually flashed; the fallback is the editor's own last upload.
 - Enter re-runs the diagnostics and refuses a non-positive duration; Load
@@ -59,6 +64,9 @@ class _StubBoard:
         self.stops = 0
         self.stop_ok = stop_ok
         self.closed = False
+        # TeensyController.is_open: False once release_serial_port has handed
+        # the port to arduino-cli for a flash.
+        self.is_open = True
 
     def start_triggers(self, pins, fps):
         self.starts.append((list(pins), fps))
@@ -147,15 +155,21 @@ sw.QFileDialog = _FileDialog
 TMP = Path(tempfile.mkdtemp(prefix="stim_guard_"))
 
 
-def make(board=None, busy=False):
-    """A real editor wired to a stub board; `flags['busy']` is is_busy()."""
+def make(board=None, busy=False, taken=None):
+    """A real editor wired to a stub board; `flags['busy']` is is_busy().
+
+    With `taken` given, `flags['taken']` is the board_taken() callback the
+    main window supplies; left None, the editor falls back to is_busy().
+    """
     board = board if board is not None else _StubBoard()
-    flags = {"busy": busy, "released": 0, "applied": []}
+    flags = {"busy": busy, "taken": taken, "released": 0, "applied": []}
+    extra = {} if taken is None else {"board_taken": lambda: flags["taken"]}
     w = StimulationWindow(
         get_port=lambda: "COM_STUB",
         get_output_dir=lambda: str(TMP),
         get_fps=lambda: 100,
         is_busy=lambda: flags["busy"],
+        **extra,
         get_safe_pins=lambda: list(SAFE_PINS),
         get_trigger_pins=lambda: list(TRIGGER_PINS),
         get_serial=lambda: board,
@@ -622,6 +636,79 @@ d = stim_compiler.describe([{"id": "A", "pin": 53, "freq": 10, "pw": 100,
 check(64, "the helper agrees with stim_compiler.describe() at the threshold",
       d[0]["steps"][0]["mode"] == "constant ON"
       and block_mode(10, 100)[0] == "constant")
+
+# ── the stop is skipped on board ownership, not on generic busyness ──────────
+_MsgBox.reset()
+w = make(taken=False)
+w._begin_test()
+w._flags["busy"] = True               # a profile switch: cameras, not the board
+stopped = w._end_test("Test complete.")
+check(65, "a Test that ends while the main window is busy with cameras still "
+          "sends its stop",
+      stopped and w._board.stops == 1 and not w.is_testing()
+      and "Test complete" in w._status_lbl.text() and _MsgBox.kinds() == [],
+      f"stops={w._board.stops} {w._status_lbl.text()}")
+w = make(taken=False)
+w._begin_test()
+w._flags["taken"] = True              # an acquisition holds the board
+stopped = w._end_test("Test complete.")
+check(66, "board_taken() alone makes _end_test skip the stop and say so",
+      stopped and w._board.stops == 0 and not w.is_testing()
+      and "superseded" in w._status_lbl.text(), w._status_lbl.text())
+_MsgBox.reset()
+w = make(taken=False)
+w._begin_test()
+w._board.is_open = False              # a flash released the shared link
+stopped = w._end_test("Test complete.")
+check(67, "a released link skips the stop without a false STOP NOT CONFIRMED",
+      stopped and w._board.stops == 0 and not w.is_testing()
+      and "superseded" in w._status_lbl.text() and _MsgBox.kinds() == [],
+      f"{w._status_lbl.text()} kinds={_MsgBox.kinds()}")
+
+# ── a refused Create or Enter is a diagnostic the next accepted edit clears ──
+w = make()
+w._f_pin.setText("53")
+w._f_dur.setText("0")
+w._on_create()
+had_error = "Invalid" in w._status_lbl.text()
+w._f_dur.setText("")
+w._on_create()
+check(68, "the 'Invalid parameters' status does not outlive the next "
+          "accepted Create",
+      had_error and len(w._canvas.blocks()) == 1
+      and "Invalid" not in w._status_lbl.text(), w._status_lbl.text())
+w = make()
+w._f_pin.setText("")
+w._on_create()
+had_error = "pin" in w._status_lbl.text().lower()
+w._f_pin.setText("53")
+w._on_create()
+check(69, "'Enter a pin number.' clears the same way",
+      had_error and len(w._canvas.blocks()) == 1
+      and "pin number" not in w._status_lbl.text(), w._status_lbl.text())
+
+# ── an Enter edit keeps a board notice ───────────────────────────────────────
+w = make()
+a = w._canvas.add_block(53, 10, 5, 10)
+w.invalidate_upload("a calibration needed the recording-only sketch")
+a.setSelected(True)
+spin()
+assert w._selected_block is a, "selection did not reach the window"
+w._f_dur.setText("7")
+w._on_field_enter()
+check(70, "an accepted Enter edit leaves the board notice standing, like "
+          "every other canvas edit",
+      a.dur == 7 and "Record flashes" in w._status_lbl.text(),
+      w._status_lbl.text())
+w._f_dur.setText("0")
+w._on_field_enter()
+had_error = "Invalid" in w._status_lbl.text()
+w._f_dur.setText("7")
+w._on_field_enter()
+check(71, "a refused Enter shows the diagnostic and the next accepted Enter "
+          "clears it",
+      had_error and a.dur == 7 and "Invalid" not in w._status_lbl.text(),
+      w._status_lbl.text())
 
 print()
 if failures:
