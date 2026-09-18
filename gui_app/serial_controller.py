@@ -8,6 +8,8 @@ import re
 import time
 import serial
 
+from gui_app.stim_compiler import SIM_PORT, is_sim_port  # noqa: F401 (SIM_PORT re-exported)
+
 #: One complete ack line from the sketch: ``RDY <n_cams> <fps>`` with an
 #: optional 8-hex sketch identity appended by firmware that knows its own
 #: build. Matched against whole lines so a superstring such as ``RDY 6 1000``
@@ -82,6 +84,8 @@ class TeensyController:
         and the two need different actions from the operator.
         """
         self.last_error = None
+        if is_sim_port(self._port):
+            return self._open_sim()
         for _ in range(retries):
             try:
                 # NOTE: this pulses DTR and resets the board. That reset is
@@ -107,6 +111,27 @@ class TeensyController:
         print(f"[teensy] could not open {self._port} after {retries} attempt(s): "
               f"{self.last_error}", flush=True)
         return False
+
+    def _open_sim(self) -> bool:
+        """Stand up the simulated board in place of a serial port.
+
+        gui_app.backends.sim_board is imported lazily so a rig without it pays
+        nothing and the absence reads as a clear message rather than an import
+        error at GUI start. SimSerial takes the same keywords as serial.Serial
+        so the rest of this class cannot tell the difference. No sleep: there
+        is no bootloader to wait for.
+        """
+        try:
+            from gui_app.backends import sim_board
+        except ImportError as e:
+            self.last_error = (f"simulated board requested (port {self._port!r}) "
+                               f"but gui_app.backends.sim_board is not available: {e}")
+            print(f"[teensy] {self.last_error}", flush=True)
+            return False
+        self._ser = sim_board.SimSerial(port=self._port, baudrate=self._baudrate,
+                                        timeout=0.1, write_timeout=1.0)
+        print("[teensy] simulated board opened", flush=True)
+        return True
 
     def start_triggers(self, pins: list[int], fps: int) -> bool:
         """Configure the board for acquisition and confirm it understood.

@@ -277,6 +277,52 @@ def test_reopen_failure_and_error_text():
     print("10) reopen failure -> start False; open() records the error text: PASS")
 
 
+def test_sim_port_hook():
+    """Port 'sim' stands up gui_app.backends.sim_board.SimSerial in place of a
+    serial device, imported lazily; without that module open() fails with a
+    clear message instead of an import error."""
+    import gui_app.serial_controller as scm
+    real_sleep = scm.time.sleep
+    scm.time.sleep = lambda s: (_ for _ in ()).throw(AssertionError("slept on sim"))
+    try:
+        # Module absent: skipped cleanly, nothing else touched.
+        sys.modules["gui_app.backends.sim_board"] = None
+        try:
+            c = TeensyController(port="sim")
+            assert c.open() is False
+            assert "sim_board" in (c.last_error or ""), c.last_error
+            assert c.is_open is False
+        finally:
+            del sys.modules["gui_app.backends.sim_board"]
+
+        # Module present: SimSerial is built with serial.Serial's keywords and
+        # the handshake runs against it unchanged.
+        built = {}
+        class SimSerial(FakePort):
+            def __init__(self, port, baudrate, timeout, write_timeout):
+                built.update(port=port, baudrate=baudrate, timeout=timeout,
+                             write_timeout=write_timeout)
+                super().__init__(board(6), 1, [])
+        fake_mod = types.ModuleType("gui_app.backends.sim_board")
+        fake_mod.SimSerial = SimSerial
+        sys.modules["gui_app.backends.sim_board"] = fake_mod
+        try:
+            c = TeensyController(port="SIM")
+            assert c.open() is True and c.is_open
+            assert built == {"port": "SIM", "baudrate": 115200,
+                             "timeout": 0.1, "write_timeout": 1.0}, built
+            assert c.start_triggers(PINS, 100) is True
+            assert c.stop_triggers(PINS) is True
+            c.close()
+            assert c.is_open is False
+        finally:
+            del sys.modules["gui_app.backends.sim_board"]
+        assert scm.is_sim_port("sim") and not scm.is_sim_port("COM3")
+    finally:
+        scm.time.sleep = real_sleep
+    print("12) port 'sim' builds SimSerial lazily, skips cleanly when absent: PASS")
+
+
 def main():
     test_confirmed_no_reset()
     test_retry_after_reset_succeeds()
@@ -290,6 +336,7 @@ def main():
     test_stop_failure_paths_return_false()
     test_reopen_failure_and_error_text()
     test_board_id_is_captured_from_the_ack()
+    test_sim_port_hook()
     print("\nALL SERIAL HANDSHAKE TESTS PASS")
 
 
