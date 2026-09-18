@@ -668,15 +668,22 @@ void updateStim() {{
       cs->fresh = false;
       continue;
     }}
+    // Each edge advances the anchor by the nominal interval instead of to
+    // nowUs, so the polling gap of the trigger busy-wait does not accumulate
+    // across a block's pulses and the train stays phase-locked to the block
+    // start. A poll so late that a whole further interval has passed
+    // re-anchors to nowUs: one late edge is better than a burst of catch-up
+    // toggles.
     uint32_t elapsed = nowUs - cs->last_toggle_us;
-    if (cs->pin_high && elapsed >= blk->pw_us) {{
-      digitalWrite(blk->pin, LOW);
-      cs->pin_high = false;
-      cs->last_toggle_us = nowUs;
-    }} else if (!cs->pin_high && elapsed >= (blk->period_us - blk->pw_us)) {{
-      digitalWrite(blk->pin, HIGH);
-      cs->pin_high = true;
-      cs->last_toggle_us = nowUs;
+    uint32_t interval = cs->pin_high ? blk->pw_us : (blk->period_us - blk->pw_us);
+    if (elapsed >= interval) {{
+      cs->pin_high = !cs->pin_high;
+      digitalWrite(blk->pin, cs->pin_high ? HIGH : LOW);
+      if (elapsed - interval >= interval) {{
+        cs->last_toggle_us = nowUs;
+      }} else {{
+        cs->last_toggle_us += interval;
+      }}
     }}
   }}
 }}

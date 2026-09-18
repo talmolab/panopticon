@@ -142,7 +142,26 @@ def test_waveform_encoding():
     ino = sc.compile_ino([B("A", dur=5, freq=10, pw=10)], [], [53])
     body = ino.split("void updateStim()")[1].split("// ===== SETUP")[0]
     assert "float" not in body and "0f" not in body, "float math in updateStim()"
+    assert "double" not in body and "1e6" not in body and ".5" not in body
     print("3) waveform -> integer microseconds, no floats in updateStim: PASS")
+
+
+def test_pulse_edges_do_not_reanchor_to_now():
+    """Pulse edges advance the anchor by the nominal interval, so the polling
+    gap of the trigger busy-wait does not accumulate across a block; a poll a
+    whole interval late re-anchors instead of bursting catch-up toggles."""
+    ino = sc.compile_ino([B("A", dur=5, freq=20, pw=5)], [], [53])
+    body = ino.split("void updateStim()")[1].split("// ===== SETUP")[0]
+    pulse = body.split("uint32_t elapsed")[1]
+    assert "cs->last_toggle_us += interval;" in pulse, "edge re-anchors to nowUs"
+    assert "elapsed - interval >= interval" in pulse, "no clamp against a late poll"
+    assert "cs->last_toggle_us = nowUs;" in pulse, "clamp does not re-anchor"
+    # Block boundaries stay drift-free and the fresh edge still anchors.
+    assert "cs->blk_start_ms += blk->dur_ms;" in body
+    fresh = body.split("if (cs->fresh)")[1].split("uint32_t elapsed")[0]
+    assert "cs->last_toggle_us = nowUs;" in fresh
+    assert "float" not in body and "0f" not in body
+    print("3b) pulse edges phase-locked to the block start, clamped when late: PASS")
 
 
 def test_safe_pins():
@@ -707,6 +726,7 @@ def main():
     test_chain_extraction_terminates()
     test_structural_problems()
     test_waveform_encoding()
+    test_pulse_edges_do_not_reanchor_to_now()
     test_safe_pins()
     test_pin_conflicts()
     test_forbidden_pins()
