@@ -61,22 +61,46 @@ class FrameSyncCoordinator:
         """Max frames buffered awaiting a release decision (for monitoring)."""
         return max((len(p) for p in self._pending), default=0)
 
-    def retire(self, cam: int, reason: str = ""):
+    @property
+    def decided_upto(self) -> int:
+        """Highest trigger whose fate (released or dropped) is final."""
+        return self._decided_upto
+
+    def retire(self, cam: int, reason: str = "", announce: bool = True):
         """Drop a camera from the alignment set.
 
         For a camera that stalled and could not be realigned. Without this its
         frozen frontier pins the watermark, every later trigger gets force-
         dropped, and the whole recording yields nothing; retiring keeps the
         remaining cameras aligned and recording.
+
+        Returns the log line (or None if the camera was already retired).
+        `announce=False` leaves printing to the caller, for a caller that holds
+        a lock other threads wait on: a console write can take milliseconds.
         """
         if self._retired[cam]:
-            return
+            return None
         self._retired[cam] = True
         self.retired_reasons.append((cam, reason))
         self._pending[cam].clear()
-        print(f"[sync] cam{cam + 1} RETIRED from the alignment set: {reason}. "
-              f"Remaining cameras stay aligned; this one's video ends here.",
-              flush=True)
+        msg = (f"[sync] cam{cam + 1} RETIRED from the alignment set: {reason}. "
+               f"Remaining cameras stay aligned; this one's video ends here.")
+        if announce:
+            print(msg, flush=True)
+        return msg
+
+    def lag_frames(self) -> list:
+        """Per-camera triggers behind the leading camera; -1 for a retired one.
+
+        Counted in triggers from the cameras' own block IDs, so unlike a
+        wall-clock delivery lag it carries no host/camera oscillator drift.
+        """
+        act = self.active()
+        if not act:
+            return [-1] * self.n
+        lead = max(self._frontier[c] for c in act)
+        return [(lead - self._frontier[c]) if not self._retired[c] else -1
+                for c in range(self.n)]
 
     def lag_report(self) -> str:
         """Who is behind, and who is causing the forced drops."""
@@ -102,6 +126,15 @@ class FrameSyncCoordinator:
         (cam, block_id, frame) ready to encode now, in per-camera order."""
         if self._retired[cam]:
             return []
+        if raw_block_id <= 0:
+            # GVSP reserves block ID 0 and no camera reports a negative one, so
+            # such a value is a placeholder for "the camera did not report an
+            # ordinal". Fed to the unwrap it reads as a 16-bit wrap and places
+            # the camera far ahead, force-dropping every other camera. Refuse
+            # it; the grab thread counts the exception as a frame error.
+            raise ValueError(
+                f"cam{cam + 1}: block ID {raw_block_id} is not a trigger "
+                f"ordinal (0 is reserved, negative means unreported)")
         bid = self._unwrap(cam, raw_block_id)
         self._seen_any[cam] = True
         if bid <= self._decided_upto:
@@ -191,12 +224,11 @@ class FrameSyncCoordinator:
 
 #: Fractional tolerance on the measured block-ID rate.
 #:
-#: Measured, not guessed: across 74 camera-sessions of real data (2026-06-12
-#: through 2026-09-03, both 30 and 100 fps, including the sessions that lost
-#: 24% and 43% of frames) the rate lands between +220 and +250 ppm of the
-#: configured value, every time. That is the fixed offset between the trigger
-#: board's resonator and the cameras' oscillators, and it is stable enough that
-#: the band is 30 ppm wide.
+#: Measured, not guessed: across 74 camera-sessions of real data at 30 and
+#: 100 fps, including sessions that lost 24% and 43% of frames, the rate sits
+#: at +220..+250 ppm of configured, every time. That is the fixed offset
+#: between the trigger board's resonator and the cameras' oscillators, and it
+#: is stable enough that the band is 30 ppm wide.
 #:
 #: 0.3% sits 12x above that worst case and still catches a camera skipping one
 #: trigger in a hundred (10,000 ppm) with 3x to spare — and that is the case

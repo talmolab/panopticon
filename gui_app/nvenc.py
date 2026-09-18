@@ -128,70 +128,89 @@ def load_error() -> str:
 
 def create_h264_encoder(width: int, height: int, qp: int,
                         fps: int = 100,
-                        preset: str = "P3", tuning: str = "low_latency"):
+                        preset: str = "P3", tuning: str = "low_latency",
+                        notes: list | None = None):
     """Create an NVENC H.264 encoder for NV12 input (CPU input buffer).
 
-    Mirrors the validated PoC config. Mono frames are fed as NV12 where the Y
-    plane is the gray data and the UV plane is a constant 128.
+    Mono frames are fed as NV12 where the Y plane is the gray data and the UV
+    plane is a constant 128.
+
+    `notes`, when given, receives one human-readable line per way the created
+    encoder differs from what the profile asked for (a rung below the full
+    config). The caller folds those into the recording's warnings so a
+    degraded encode reaches WARNINGS.txt rather than only stdout.
+
+    Raises RuntimeError when no accepted kwarg set can create an encoder. A
+    caller that cannot get an encoder falls back to raw frames; it never
+    receives an encoder with an unknown GOP.
     """
     _load()
     if _nvc is None:
         raise RuntimeError(f"PyNvVideoCodec unavailable: {_load_error}")
-    # Tolerate older/newer builds that may not accept every kwarg — but say so:
-    # a reduced kwarg set silently changes rate control (constqp -> driver
-    # default), i.e. different output quality than the profile asked for.
+    # Older/newer builds may not accept every kwarg, so descend a ladder of
+    # reduced kwarg sets -- but say so: a reduced set silently changes rate
+    # control (constqp -> driver default), i.e. different output quality than
+    # the profile asked for.
     #
-    # EVERY rung carries gopLength/idrPeriod. No plausible build accepts `rc`/`qp`
-    # but rejects the GOP kwargs, and losing them is far worse than losing quality
-    # settings: without an explicit GOP, NVENC's driver default produced ONE IDR
-    # for a whole 898 s recording (CLAUDE.md), which makes the mp4 unseekable in
-    # the LUC3D labeler and unwalkable by ffprobe. That failure is invisible until
-    # someone opens the file days later, so the GOP is non-negotiable.
+    # EVERY rung carries gopLength/idrPeriod, and there is no bare attempt after
+    # the ladder. Without an explicit GOP, NVENC's driver default can produce ONE
+    # IDR for a whole recording, which makes the mp4 unseekable in the LUC3D
+    # labeler and unwalkable by ffprobe, and that failure is invisible until
+    # someone opens the file days later. Failing to create an encoder is the
+    # better outcome: the callers fall back to raw frames, which encode later
+    # with a known GOP.
     gop = str(fps)
     _gop_kw = dict(gopLength=gop, idrPeriod=gop)
+    ladder = (
+        dict(codec="h264", preset=preset, tuning_info=tuning, rc="constqp",
+             qp=str(qp), **_gop_kw),
+        dict(codec="h264", preset=preset, rc="constqp", qp=str(qp), **_gop_kw),
+        dict(codec="h264", preset=preset, tuning_info=tuning, **_gop_kw),
+        dict(codec="h264", **_gop_kw),
+    )
     last_err = None
-    for n, kw in enumerate((
-            dict(codec="h264", preset=preset, tuning_info=tuning, rc="constqp",
-                 qp=str(qp), **_gop_kw),
-            dict(codec="h264", preset=preset, rc="constqp", qp=str(qp), **_gop_kw),
-            dict(codec="h264", preset=preset, tuning_info=tuning, **_gop_kw),
-            dict(codec="h264", **_gop_kw),
-            dict(codec="h264"))):
+    for n, kw in enumerate(ladder):
         try:
             enc = _nvc.CreateEncoder(width, height, "NV12", True, **kw)
-            if n > 0:
-                lost_gop = "gopLength" not in kw
-                print(f"[nvenc] WARNING: full encoder config rejected ({last_err}); "
-                      f"created with reduced settings {kw} — quality may differ "
-                      f"from profile qp={qp}"
-                      + ("  *** AND WITHOUT AN EXPLICIT GOP: this recording may "
-                         "have a single IDR and be unseekable in the labeler ***"
-                         if lost_gop else ""), flush=True)
-            return enc
         except Exception as e:
             code = _nvenc_status(e)
             if code in _NVENC_FATAL:
-                # Not a config problem — retrying a reduced config cannot fix it,
-                # and if a slot frees mid-ladder we would silently succeed with a
-                # degraded encoder. Give the GC one chance to reap an encoder that
-                # is unreferenced but not yet finalized, then fail loudly.
+                # Not a config problem: retrying a reduced config cannot fix it,
+                # and if a slot frees mid-ladder a later rung would silently
+                # succeed with a degraded encoder. Give the GC one chance to
+                # reap an encoder that is unreferenced but not yet finalized,
+                # then retry THIS rung (the kwarg set the build had accepted so
+                # far, not the full one it may already have rejected) and fail
+                # loudly if that does not take.
                 gc.collect()
                 try:
-                    return _nvc.CreateEncoder(width, height, "NV12", True,
-                                              codec="h264", preset=preset,
-                                              tuning_info=tuning, rc="constqp",
-                                              qp=str(qp), **_gop_kw)
+                    enc = _nvc.CreateEncoder(width, height, "NV12", True, **kw)
                 except Exception as e2:
-                    raise RuntimeError(
-                        f"NVENC unavailable: {_NVENC_FATAL[code]} "
-                        f"(NVENCSTATUS {code}). Concurrent encode sessions are "
-                        f"capped by the driver; the budget is one per camera plus "
-                        f"encode_parallel plus the warm-up session. Original: {e2}"
-                    ) from e2
-            last_err = e
-            continue
-    # Last attempt: surface the real error.
-    return _nvc.CreateEncoder(width, height, "NV12", True, codec="h264")
+                    why = (f"NVENC unavailable: {_NVENC_FATAL[code]} "
+                           f"(NVENCSTATUS {code}). Concurrent encode sessions "
+                           f"are capped by the driver; the budget is one per "
+                           f"camera plus encode_parallel plus the warm-up "
+                           f"session. Original: {e2}")
+                    if n > 0:
+                        # Both causes are visible: the kwarg rejection that
+                        # moved the ladder off rung 0, and the fatal code.
+                        why += f" (rung 0 had been rejected with: {last_err})"
+                    raise RuntimeError(why) from e2
+            else:
+                last_err = e
+                continue
+        if n > 0:
+            note = (f"NVENC full encoder config rejected ({last_err}); created "
+                    f"with reduced settings {kw} -- quality may differ from "
+                    f"profile qp={qp}. The GOP is still explicit "
+                    f"(gopLength={gop}).")
+            print(f"[nvenc] WARNING: {note}", flush=True)
+            if notes is not None:
+                notes.append(note)
+        return enc
+    raise RuntimeError(
+        f"NVENC encoder creation failed with every accepted kwarg set: "
+        f"{last_err}") from last_err
 
 
 def probe_max_sessions_isolated(width: int = 1920, height: int = 1200,

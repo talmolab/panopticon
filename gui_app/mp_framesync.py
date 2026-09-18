@@ -62,9 +62,10 @@ _HEADER_BYTES = _HEADER_SLOTS * 8
 def ring_bits_for(max_lag: int) -> int:
     """Ring size in bits. Must comfortably exceed max_lag.
 
-    4x max_lag, rounded to a byte boundary. At max_lag=480 that is 1920 bits =
-    240 bytes per bitmap — so the whole segment stays trivial and there is a 4x
-    margin before a wrapped bit could ever be misread.
+    The larger of 4096 and 4x max_lag, rounded to a byte boundary: 4096 bits
+    (512 bytes per bitmap) at every max_lag up to 1024, so the whole segment
+    stays trivial and there is at least a 4x margin before a wrapped bit could
+    be misread by a lagging worker.
     """
     return max(4096, int(max_lag) * 4 + 7 & ~7)
 
@@ -260,7 +261,7 @@ class Coordinator:
                 t += 1
             self._submitted[cam] = front
 
-        decided = self._core._decided_upto
+        decided = self._core.decided_upto
         n_new = 0
         prev = seg.decided_upto
         if decided > prev:
@@ -289,7 +290,7 @@ class Coordinator:
         """
         seg = self.seg
         released_now = {bid for (_c, bid, _f) in self._core.flush()}
-        decided = self._core._decided_upto
+        decided = self._core.decided_upto
         prev = seg.decided_upto
         n_new = 0
         for t in range(prev + 1, decided + 1):
@@ -341,6 +342,16 @@ class WorkerLedger:
 
         Read decided_upto FIRST, then the bits — the coordinator writes bits
         before advancing it, so this ordering can never read an unwritten bit.
+
+        Each decided trigger's presence bit is cleared HERE, by the worker that
+        set it. The ring is indexed by T % ring_bits, so a bit left set would
+        alias to trigger T + ring_bits and make the coordinator submit a
+        trigger this camera never announced: the other cameras would encode it
+        and this one would not, which is the equal-count drifting misalignment
+        the module exists to prevent. The worker is the only writer of its own
+        bitmap (a second writer across processes would be a lost-update race on
+        the shared byte), and a late announce the coordinator then skips would
+        have been dropped as late anyway, so the outcome is unchanged.
         """
         decided = self.seg.decided_upto
         out = []
@@ -353,5 +364,6 @@ class WorkerLedger:
                 keep.append(t)
                 continue
             out.append((t, self.seg.released(t)))
+            self.seg.set_presence(self.cam, t, False)
         self._pending = keep
         return out
