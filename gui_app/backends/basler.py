@@ -10,6 +10,7 @@ about these cameras; the comments are the point, not decoration.
 """
 from __future__ import annotations
 
+import pypylon.genicam as genicam
 import pypylon.pylon as pylon
 
 
@@ -184,63 +185,87 @@ class BaslerBackend:
                       "(exposure bounded by sensor readout only)", flush=True)
 
     # ------------------------------------------------------------ exposure/gain
+    #: Candidate node names per control, newest SFNC spelling first. The
+    #: names differ across pylon generations, so the first IMPLEMENTED one wins.
+    EXPOSURE_NODES = ("ExposureTime", "ExposureTimeAbs")
+    GAIN_NODES = ("Gain", "GainRaw")
+
     @staticmethod
-    def get_exposure_gain(cam) -> tuple:
-        """(exposure_us, gain_db) as the .pfs left them, or (None, None).
+    def _find_node(cam, names):
+        """(name, node) of the first implemented candidate, else (None, None).
+
+        Presence is probed here and ONLY here, so that a failure to write a node
+        that exists is never mistaken for the node being absent. The two mean
+        opposite things: an absent node is a camera without that control and
+        the caller gets None; a write that fails on a present node is a real
+        error (out of range, camera busy, access denied) and must propagate,
+        because a swallowed one lets a camera record at the wrong exposure with
+        nothing in the log.
+        """
+        nodemap = cam.GetNodeMap()
+        for n in names:
+            try:
+                node = nodemap.GetNode(n)
+            except genicam.LogicalErrorException:
+                node = None
+            if node is not None and genicam.IsImplemented(node):
+                return n, node
+        return None, None
+
+    @staticmethod
+    def _clamp_to_node(node, v):
+        """Clamp v into the node's [Min, Max] when the node publishes them."""
+        lo = getattr(node, "Min", None)
+        hi = getattr(node, "Max", None)
+        if lo is None or hi is None:
+            return v
+        lo = lo.GetValue() if hasattr(lo, "GetValue") else lo
+        hi = hi.GetValue() if hasattr(hi, "GetValue") else hi
+        return max(lo, min(v, hi))
+
+    @classmethod
+    def get_exposure_gain(cls, cam) -> tuple:
+        """(exposure_us, gain) as the .pfs left them, or None per missing control.
 
         Read once at open so the recording settings can be RESTORED exactly
-        rather than reconstructed. Node names differ across pylon generations,
-        hence the fallbacks.
+        rather than reconstructed. A read failure on a present node propagates
+        for the same reason a write failure does (see _find_node).
         """
         exp = gain = None
-        for n in ("ExposureTime", "ExposureTimeAbs"):
-            try:
-                exp = getattr(cam, n).GetValue()
-                break
-            except Exception:
-                continue
-        for n in ("Gain", "GainRaw"):
-            try:
-                gain = getattr(cam, n).GetValue()
-                break
-            except Exception:
-                continue
+        _, node = cls._find_node(cam, cls.EXPOSURE_NODES)
+        if node is not None:
+            exp = node.GetValue()
+        _, node = cls._find_node(cam, cls.GAIN_NODES)
+        if node is not None:
+            gain = node.GetValue()
         return exp, gain
 
-    @staticmethod
-    def set_exposure_gain(cam, exposure_us=None, gain_db=None) -> tuple:
+    @classmethod
+    def set_exposure_gain(cls, cam, exposure_us=None, gain_db=None) -> tuple:
         """Apply exposure/gain. Returns what was actually set, for logging.
 
-        The caller is responsible for the exposure CEILING — in trigger mode the
+        A control the camera does not implement is skipped and reported as
+        None. A control it does implement is written exactly once, and any
+        error from that write PROPAGATES: the caller logs it per camera, and a
+        calibration exposure left on one camera would otherwise halve that
+        camera's frame rate in the next recording with no trace in the log.
+
+        The caller is responsible for the exposure CEILING: in trigger mode the
         frame-rate timer starts after exposure ends, so the minimum interval is
         `exposure + 1/AcquisitionFrameRate`, and exceeding the trigger period
         silently halves the frame rate rather than erroring.
         """
         applied_exp = applied_gain = None
         if exposure_us is not None:
-            for n in ("ExposureTime", "ExposureTimeAbs"):
-                try:
-                    node = getattr(cam, n)
-                    lo = getattr(node, "Min", None)
-                    hi = getattr(node, "Max", None)
-                    v = float(exposure_us)
-                    if lo is not None and hi is not None:
-                        v = max(lo.GetValue() if hasattr(lo, "GetValue") else lo,
-                                min(v, hi.GetValue() if hasattr(hi, "GetValue") else hi))
-                    node.SetValue(v)
-                    applied_exp = node.GetValue()
-                    break
-                except Exception:
-                    continue
+            _, node = cls._find_node(cam, cls.EXPOSURE_NODES)
+            if node is not None:
+                node.SetValue(cls._clamp_to_node(node, float(exposure_us)))
+                applied_exp = node.GetValue()
         if gain_db is not None:
-            for n in ("Gain", "GainRaw"):
-                try:
-                    node = getattr(cam, n)
-                    node.SetValue(float(gain_db))
-                    applied_gain = node.GetValue()
-                    break
-                except Exception:
-                    continue
+            _, node = cls._find_node(cam, cls.GAIN_NODES)
+            if node is not None:
+                node.SetValue(float(gain_db))
+                applied_gain = node.GetValue()
         return applied_exp, applied_gain
 
     # ----------------------------------------------------------------- grabbing
