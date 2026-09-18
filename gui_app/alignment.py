@@ -116,6 +116,14 @@ def load_blockids(rec_dir: Path):
         b = np.load(bpath)
         if b.ndim != 1:
             raise ValueError(f"{bpath}: expected 1-D block IDs, got {b.shape}")
+        # A camera with no recorded frames has no common set with anyone, so
+        # aligning would trim every other camera to zero frames. It is refused
+        # here with the camera named rather than surfacing later as an
+        # IndexError on the empty array.
+        if b.size == 0:
+            raise ValueError(f"{bpath}: no frames recorded (empty block-ID "
+                             f"array); {cd.name} cannot be aligned and the "
+                             f"recording has no common frames")
         b = _unwrap_blockids(b)  # undo 16-bit wrap so IDs are globally monotonic
         names.append(cd.name)
         blocks.append(b)
@@ -295,8 +303,13 @@ def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
                         proc.stdin.write(frame)
                         written += 1
                     n += 1
-            except BrokenPipeError:
-                pass  # ffmpeg died; the exit-status check below reports it
+            except OSError:
+                # ffmpeg died mid-stream; the exit-status check below reports
+                # its stderr. BrokenPipeError (EPIPE) is what POSIX raises;
+                # Windows raises a plain OSError with EINVAL for a pipe whose
+                # reader has exited, so catching only BrokenPipeError there
+                # replaces the diagnosis with "[Errno 22] Invalid argument".
+                pass
             finally:
                 try:
                     proc.stdin.close()
@@ -386,7 +399,7 @@ def clear_stale_tmp(rec_dir: Path) -> list[Path]:
 def align_recording(rec_dir, fps: int = 100, quality: int = 21,
                     replace: bool = False, parallel: int = 3,
                     progress=None, backend: str | None = None,
-                    should_stop=None) -> dict:
+                    should_stop=None, analysis: Analysis | None = None) -> dict:
     """Align a recording by block ID.
 
     Always writes ``aligned/alignment.{npz,json}`` (the lossless index). When
@@ -407,7 +420,16 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
     The index is written after the replacement pass, with ``frame_index`` for
     a replaced camera set to ``arange(common.size)`` and ``video_is_common``
     marking it, so a consumer cannot apply a pre-replacement index to a video
-    that is now the common set.
+    that is now the common set. The index is derived data; the summary is the
+    record of what happened to the videos. A failure writing it is therefore
+    reported in ``index_error`` (and appended to ``failures``/``warnings``)
+    instead of raised, because raising after the videos were replaced would
+    make the caller report them as left as-is.
+
+    ``analysis`` lets a caller that already built the ``Analysis`` for this
+    recording (the CLI prints its table from one) pass it in, so the block
+    IDs are loaded and intersected once per run; it must describe the same
+    recording at the same fps.
 
     ``progress(done, total, msg)`` is called as cameras complete (thread-safe).
     ``should_stop()`` returning True skips cameras not yet started and aborts
@@ -415,7 +437,14 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
     """
     rec_dir = Path(rec_dir)
     clear_stale_tmp(rec_dir)
-    an = analyse(rec_dir, fps)
+    if analysis is None:
+        an = analyse(rec_dir, fps)
+    else:
+        an = analysis
+        if Path(an.rec_dir).resolve() != rec_dir.resolve() or an.fps != int(fps):
+            raise ValueError(
+                f"analysis describes {an.rec_dir} at {an.fps} fps, not "
+                f"{rec_dir} at {fps} fps")
     names, blocks, videos = an.names, an.blocks, an.videos
     common, frame_index = an.common, an.frame_index
     need = an.needed
@@ -494,10 +523,23 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
         failures=list(failures), replaced_cams=list(replaced_cams),
         failed_cams=list(failed_cams), stopped=bool(stop()),
         warnings=list(an.rate_warnings) + list(failures),
+        index_error=None,
     )
     for nm, flag in zip(names, replaced_flags):
         summary["per_camera"][nm]["video_is_common"] = bool(flag)
 
+    # ``replaced`` is settled above from the camera outcomes alone: the videos
+    # and their metadata are already on disk in their final form, so a disk
+    # full, a locked alignment.npz or a stray file named "aligned" cannot
+    # unmake that, and the caller must still regenerate what derives from the
+    # replaced videos.
     manifest = {k: v for k, v in summary.items() if k != "warnings"}
-    _write_index(rec_dir / "aligned", an, post_index, replaced_flags, manifest)
+    try:
+        _write_index(rec_dir / "aligned", an, post_index, replaced_flags, manifest)
+    except Exception as e:
+        msg = f"aligned/: index write failed: {e}"
+        print(f"[align] WARNING: {msg}", flush=True)
+        summary["index_error"] = msg
+        summary["failures"].append(msg)
+        summary["warnings"].append(msg)
     return summary

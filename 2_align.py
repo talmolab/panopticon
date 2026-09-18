@@ -138,15 +138,24 @@ def main() -> int:
     print("\nAligning..." + (" (re-encode + replace)" if args.replace else
                              " (index only)"))
     try:
+        # The table above was printed from ``an``; passing it in means the
+        # block IDs are loaded and intersected once per run.
         summary = alignment.align_recording(
             args.recording_dir, fps=fps, quality=quality,
             replace=args.replace, parallel=args.parallel, progress=_progress,
-            backend=args.encoder)
+            backend=args.encoder, analysis=an)
     except Exception as e:
         print(f"ERROR: alignment failed: {e}", file=sys.stderr)
         return 1
 
     rc = 0
+    if summary.get("index_error"):
+        # The videos are in their final state whatever happened to the index,
+        # so this is reported on its own rather than as "NOT replaced".
+        rc = 1
+        print(f"\nERROR: {summary['index_error']} (the aligned/ index is "
+              f"derived data; the videos and metadata are as reported below)",
+              file=sys.stderr)
     if args.replace and summary["needed"]:
         if summary["replaced"]:
             print(f"\nReplaced all videos with {summary['common_frames']}-frame "
@@ -157,7 +166,8 @@ def main() -> int:
                   f"(originals kept): {', '.join(summary['failed_cams'])}",
                   file=sys.stderr)
             for w in summary["failures"]:
-                print(f"  - {w}", file=sys.stderr)
+                if w != summary.get("index_error"):
+                    print(f"  - {w}", file=sys.stderr)
             if summary["replaced_cams"]:
                 print(f"Replaced: {', '.join(summary['replaced_cams'])}",
                       file=sys.stderr)

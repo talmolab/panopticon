@@ -264,22 +264,58 @@ class EncodeWorker(QThread):
             print(f"[encode] could not write WARNINGS.txt for {job.cam}: {e}",
                   flush=True)
 
+    @staticmethod
+    def _unlink_quiet(job: _Job, path: Path) -> None:
+        """Best-effort unlink of a staging file; a failure is logged, never raised.
+
+        The staging files (tail.h264, raw_tail.bin, the stderr log) are
+        derived data once the merge is decided, so a locked file (an AV
+        scanner or an Explorer preview holding it) must not change the
+        outcome of the merge or abort the worker.
+        """
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"[encode] {job.cam}: could not remove {path.name}: {e}",
+                  flush=True)
+
     def _tail_done(self, job: _Job, ret: int) -> bool:
         """Finish the tail stage. True => job proceeds to the remux stage."""
         tail_ok = (ret == 0 and job.tail_h264.exists()
                    and job.tail_h264.stat().st_size > 0)
         if tail_ok:
+            # Only the append decides the merge. The size before appending is
+            # the rollback point: a write error midway leaves frames in
+            # stream.h264 that the metadata does not describe, so the file is
+            # cut back to the head before the failure path truncates the
+            # metadata to the same split point.
+            head = job.src.stat().st_size
             try:
                 _append_file(job.src, job.tail_h264)
-                job.tail_h264.unlink()
-                job.tail_bin.unlink()
-                job.err_path.unlink(missing_ok=True)
+            except Exception as e:
+                reason = f"append failed: {e}"
+                try:
+                    os.truncate(job.src, head)
+                except OSError as e2:
+                    self._unlink_quiet(job, job.tail_h264)
+                    self._fail(job, f"raw tail merge FAILED ({reason}) and "
+                                    f"stream.h264 could not be restored to its "
+                                    f"{head}-byte head ({e2}); stream.h264, "
+                                    f"raw_tail.bin and metadata KEPT, no mp4 "
+                                    f"written")
+                    return False
+            else:
+                # The stream now holds every frame the metadata describes.
+                # Removing the staging files is cleanup, not part of the merge:
+                # a failed unlink here must not be reported as a failed merge,
+                # because that would truncate the metadata to the head while
+                # the mp4 holds the full recording, and the alignment pass would
+                # then trim every other camera down to that head.
+                for p in (job.tail_h264, job.tail_bin, job.err_path):
+                    self._unlink_quiet(job, p)
                 print(f"[encode] {job.cam}: appended raw tail "
                       f"({os.path.getsize(job.src)} bytes total)", flush=True)
                 return True
-            except Exception as e:
-                tail_ok = False
-                reason = f"append failed: {e}"
         else:
             reason = (f"ffmpeg exited {ret}; stderr in {job.err_path}: "
                       f"{_log_tail(job.err_path)}")
@@ -287,12 +323,23 @@ class EncodeWorker(QThread):
         # mp4. The metadata must describe only the frames the mp4 will hold,
         # so truncate it to the router's recorded split point; without that
         # record the camera fails rather than over-claim frames.
-        job.tail_h264.unlink(missing_ok=True)
+        self._unlink_quiet(job, job.tail_h264)
         k = _read_encoded_count(job.cam_dir)
         if k is None or k > max(job.n_frames, 0):
             self._fail(job, f"raw tail merge FAILED ({reason}) and "
                             f"{ENCODED_JSON} does not record the split point; "
                             f"stream.h264 and raw_tail.bin KEPT, no mp4 written")
+            return False
+        # No mp4 can come out of an empty head, so nothing is truncated: the
+        # metadata must go on describing the frames in raw_tail.bin, exactly as
+        # in the no-split-point branch. Truncating to zero frames first would
+        # leave an empty blockids.npy that fails the whole recording's
+        # alignment pass, not just this camera.
+        if k == 0 or job.src.stat().st_size == 0:
+            self._fail(job, f"raw tail merge FAILED ({reason}) and stream.h264 "
+                            f"holds no frames ({ENCODED_JSON} encoded={k}, "
+                            f"{job.src.stat().st_size} bytes); raw_tail.bin and "
+                            f"metadata KEPT, no mp4 written")
             return False
         try:
             _truncate_metadata(job.cam_dir, k)
@@ -309,10 +356,6 @@ class EncodeWorker(QThread):
                         f"frame indices still map to the right triggers (full "
                         f"arrays kept as *.full.npy). stream.h264 and the "
                         f"unmerged raw_tail.bin are KEPT.")
-        if job.src.stat().st_size == 0:
-            self._fail(job, "stream.h264 is empty after the failed tail merge; "
-                            "raw_tail.bin KEPT")
-            return False
         return True
 
     def _final_done(self, job: _Job, ret: int) -> None:
@@ -410,7 +453,7 @@ class EncodeWorker(QThread):
                     # failure: truncating the metadata then would discard the
                     # tail's trigger record while the tail itself is still on
                     # disk. Report the stop and keep every source.
-                    job.tail_h264.unlink(missing_ok=True)
+                    self._unlink_quiet(job, job.tail_h264)
                     self._fail(job, f"stopped during {job.stage}; source kept "
                                     f"at {job.src}")
                     continue

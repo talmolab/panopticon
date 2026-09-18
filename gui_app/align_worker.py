@@ -48,6 +48,6 @@ class AlignWorker(QThread):
             summary = dict(error=str(e), needed=False, replaced=False,
                            common_frames=0, warnings=[str(e)],
                            rate_warnings=[], failures=[str(e)],
-                           replaced_cams=[], failed_cams=[],
+                           replaced_cams=[], failed_cams=[], index_error=None,
                            stopped=self._stop.is_set())
         self.finished_align.emit(summary)

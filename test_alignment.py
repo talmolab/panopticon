@@ -38,6 +38,8 @@ STUB_SRC = r'''
   truncate      exit 0, write 16 bytes (an "mp4" too small to be real)
   tail_fail     exit 1 for a '-f h264' (tail) command, ok otherwise
   fail_match:S  exit 1 when the output path contains S, ok otherwise
+  die_early     consume exactly one 16 KiB frame of stdin, then exit 1 (an
+                encoder that dies after the first frame while more are coming)
 Every invocation's argv is appended to FFSTUB_LOG as one JSON line.
 """
 import json, os, sys
@@ -46,9 +48,12 @@ log = os.environ.get("FFSTUB_LOG")
 if log:
     with open(log, "a") as f:
         f.write(json.dumps(args) + "\n")
+mode = os.environ.get("FFSTUB_MODE", "ok")
+if mode == "die_early" and "-" in args:
+    sys.stdin.buffer.read(16384)
+    sys.stderr.write("stub: encoder died mid-stream\n"); sys.exit(1)
 if "-" in args:  # rawvideo on stdin: drain it so the writer never blocks
     sys.stdin.buffer.read()
-mode = os.environ.get("FFSTUB_MODE", "ok")
 out = args[-1]
 def write(n):
     with open(out, "wb") as f:
@@ -564,6 +569,236 @@ def test_encode_worker(tmp: Path, stub: str):
           "empty h264 -> raw.bin, remux failure keeps source, stop, missing ffmpeg: PASS")
 
 
+def test_encode_worker_tail_bookkeeping(tmp: Path, stub: str):
+    """The tail-merge failure paths must never truncate metadata past what the
+    mp4 will hold, and must never truncate at all when no mp4 can be made."""
+    from gui_app import encode_worker
+    saved = ffmpeg_cmd.ffmpeg_exe
+    ffmpeg_cmd.ffmpeg_exe = lambda: stub
+    try:
+        # I) the encoder died at frame 0 and the tail encode fails for the same
+        # reason: encoded.json says 0, stream.h264 is empty. The camera FAILS
+        # and the metadata is left describing the frames in raw_tail.bin. An
+        # empty blockids.npy here would abort the recording's alignment pass.
+        vd = tmp / "enc_i"
+        _cam(vd, "cam1", 60, h264=b"", tail=b"\0" * (8 * 4 * 60), encoded=0)
+        stub_mode("tail_fail")
+        w = _worker(vd, ["cam1"])
+        res = _run(w)
+        assert res == [("cam1", 60, False)], res
+        assert np.load(vd / "cam1" / "blockids.npy").size == 60, "metadata truncated to 0"
+        assert np.load(vd / "cam1" / "frametimes.npy").shape == (2, 60)
+        assert not (vd / "cam1" / "blockids.full.npy").exists()
+        assert not (vd / "cam1" / "WARNINGS.txt").exists(), "a failure is not a warning"
+        assert w.warnings == [], w.warnings
+        assert (vd / "cam1" / "raw_tail.bin").exists()
+        assert alignment.video_for(vd / "cam1") is None
+
+        # I2) encoded.json says 0 but stream.h264 holds parameter sets only:
+        # still nothing to remux, still no truncation.
+        vd = tmp / "enc_i2"
+        _cam(vd, "cam1", 60, h264=b"\0\0\0\1gSPS", tail=b"\0" * (8 * 4 * 60), encoded=0)
+        stub_mode("tail_fail")
+        w = _worker(vd, ["cam1"])
+        res = _run(w)
+        assert res == [("cam1", 60, False)], res
+        assert np.load(vd / "cam1" / "blockids.npy").size == 60
+        assert not (vd / "cam1" / "blockids.full.npy").exists()
+        assert w.warnings == []
+
+        # J) the append succeeds but raw_tail.bin cannot be unlinked (locked by
+        # a scanner or a preview). The mp4 holds all 60 frames, so the merge
+        # is a success and the metadata must NOT be cut to encoded.json's 40:
+        # that would make the alignment pass trim every other camera to 40.
+        vd = tmp / "enc_j"
+        _cam(vd, "cam1", 60, h264=b"HEAD" * 100, tail=b"\0" * (8 * 4 * 20), encoded=40)
+        stub_mode("ok")
+        real_unlink = os.unlink
+
+        def locked_unlink(p, *a, **k):
+            if str(p).endswith("raw_tail.bin"):
+                raise PermissionError(13, "The process cannot access the file")
+            return real_unlink(p, *a, **k)
+        os.unlink = locked_unlink
+        try:
+            w = _worker(vd, ["cam1"])
+            res = _run(w)
+        finally:
+            os.unlink = real_unlink
+        assert res == [("cam1", 60, True)], res
+        assert np.load(vd / "cam1" / "blockids.npy").size == 60, "successful merge truncated"
+        assert not (vd / "cam1" / "blockids.full.npy").exists()
+        assert w.warnings == [], w.warnings
+        assert alignment.video_for(vd / "cam1") is not None
+        assert (vd / "cam1" / "raw_tail.bin").exists(), "the locked file is simply left"
+        assert not (vd / "cam1" / "stream.h264").exists(), "merged source removed after remux"
+
+        # K) the append itself fails midway: stream.h264 is rolled back to its
+        # head so it holds exactly the frames the truncated metadata describes.
+        vd = tmp / "enc_k"
+        head = b"HEAD" * 100
+        _cam(vd, "cam1", 60, h264=head, tail=b"\0" * (8 * 4 * 20), encoded=40)
+        stub_mode("ok")
+        real_append = encode_worker._append_file
+
+        def half_append(dst, src):
+            with open(dst, "ab") as d:
+                d.write(b"PART" * 8)
+            raise OSError(28, "No space left on device")
+        encode_worker._append_file = half_append
+        try:
+            w = _worker(vd, ["cam1"])
+            res = _run(w)
+        finally:
+            encode_worker._append_file = real_append
+        assert res == [("cam1", 40, True)], res
+        assert (vd / "cam1" / "stream.h264").read_bytes() == head, "partial append not rolled back"
+        assert np.load(vd / "cam1" / "blockids.npy").size == 40
+        assert np.load(vd / "cam1" / "blockids.full.npy").size == 60
+        assert len(w.warnings) == 1 and "truncated to 40" in w.warnings[0], w.warnings
+        assert (vd / "cam1" / "raw_tail.bin").exists() and not (vd / "cam1" / "tail.h264").exists()
+    finally:
+        ffmpeg_cmd.ffmpeg_exe = saved
+    print("12) encode_worker tail bookkeeping: empty head fails without truncating, a locked "
+          "staging file is not a failed merge, a partial append rolls back: PASS")
+
+
+def test_align_index_and_analysis(tmp: Path, stub: str):
+    """A failed index write after the videos were replaced must be reported in
+    the summary, not raised; an empty camera is refused by name; a caller's
+    Analysis is reused instead of recomputed."""
+    from gui_app.align_worker import AlignWorker
+    saved = (alignment._ffmpeg_exe, alignment._open_gray_reader, alignment.analyse)
+    alignment._ffmpeg_exe = lambda: stub
+    alignment._open_gray_reader = fake_reader(1200)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    try:
+        # a stray FILE named "aligned" makes mkdir fail after every video was replaced
+        rec = _rec_for_replace(tmp, "index_fail")
+        (rec / "aligned").write_bytes(b"stray")
+        stub_mode("ok")
+        s = alignment.align_recording(rec, fps=100, replace=True)
+        assert s["replaced"] is True, "the videos ARE replaced; the index is derived data"
+        assert sorted(s["replaced_cams"]) == ["cam1", "cam2", "cam3"] and s["failed_cams"] == []
+        assert s["index_error"] and "index write failed" in s["index_error"], s
+        assert s["failures"] == [s["index_error"]] and s["index_error"] in s["warnings"]
+        for cam in ("cam1", "cam2", "cam3"):
+            assert alignment.video_for(rec / cam).read_bytes().startswith(b"STUB")
+            assert np.load(rec / cam / "blockids.npy").size == 1198
+        assert (rec / "aligned").is_file(), "the stray file is left for the operator"
+
+        # the GUI worker sees the same summary: no "error", replaced stays True
+        rec = _rec_for_replace(tmp, "index_fail_worker")
+        (rec / "aligned").write_bytes(b"stray")
+        got = []
+        wk = AlignWorker(rec, 100, 21, parallel=2)
+        wk.finished_align.connect(got.append)
+        wk.run()
+        assert len(got) == 1 and not got[0].get("error"), got
+        assert got[0]["replaced"] is True and got[0]["index_error"], got[0]
+
+        # a clean recording: index_error is None and the manifest carries the key
+        rec = synth_recording(tmp / "index_ok", {"cam1": np.arange(1, 6), "cam2": np.arange(1, 6)})
+        s = alignment.align_recording(rec, fps=100, replace=True)
+        assert s["index_error"] is None
+        man = json.loads((rec / "aligned" / "alignment.json").read_text())
+        assert man["index_error"] is None
+
+        # the CLI (index-only, no ffmpeg needed) names the index failure and exits 1
+        rec = synth_recording(tmp / "index_cli" / "sess",
+                              {"cam1": np.arange(1, 6), "cam2": np.arange(1, 6)})
+        (rec / "aligned").write_bytes(b"stray")
+        r = subprocess.run([PY, str(ROOT / "2_align.py"), str(rec), "--fps", "100"],
+                           capture_output=True, text=True, env=env, cwd=str(ROOT))
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "index write failed" in r.stderr and "alignment failed" not in r.stderr, r.stderr
+
+        # an empty blockids.npy is refused with the camera named, not an IndexError
+        rec = synth_recording(tmp / "empty_cam", {"cam1": np.arange(1, 6), "cam2": np.arange(1, 6)})
+        np.save(rec / "cam2" / "blockids.npy", np.zeros(0, dtype=np.int64))
+        for fn in (lambda: alignment.load_blockids(rec),
+                   lambda: alignment.align_recording(rec, fps=100, replace=True)):
+            try:
+                fn()
+            except ValueError as e:
+                assert "cam2" in str(e) and "no frames recorded" in str(e), e
+            else:
+                raise AssertionError("empty camera accepted")
+        assert alignment.video_for(rec / "cam1").read_bytes().startswith(b"ORIGINAL")
+
+        # a caller's Analysis is used as-is: analyse() is not called again
+        rec = _rec_for_replace(tmp, "reuse")
+        an = alignment.analyse(rec, 100)
+        calls = []
+
+        def counting(*a, **k):
+            calls.append(a)
+            return saved[2](*a, **k)
+        alignment.analyse = counting
+        s = alignment.align_recording(rec, fps=100, replace=False, analysis=an)
+        assert calls == [] and s["common_frames"] == 1198, calls
+        alignment.align_recording(rec, fps=100, replace=False)
+        assert len(calls) == 1
+        for bad in (dict(fps=30, analysis=an),
+                    dict(fps=100, analysis=alignment.analyse(_rec_for_replace(tmp, "other"), 100))):
+            try:
+                alignment.align_recording(rec, replace=False, **bad)
+            except ValueError as e:
+                assert "describes" in str(e), e
+            else:
+                raise AssertionError(f"mismatched analysis accepted: {bad}")
+    finally:
+        alignment._ffmpeg_exe, alignment._open_gray_reader, alignment.analyse = saved
+    print("13) align: index write failure is reported not raised (replaced stays True, CLI exit 1), "
+          "empty camera refused by name, caller's Analysis reused: PASS")
+
+
+def test_extract_aligned_encoder_dies(tmp: Path, stub: str):
+    """An encoder that exits after the first frame must surface as
+    'ffmpeg exited N: <stderr>' when the next frame is written to it.
+
+    A write that is already blocked when the reader exits raises
+    BrokenPipeError on every platform; a write issued AFTER the reader has
+    exited raises OSError(EINVAL) on Windows. The second shape is the real one
+    (the encoder dies, the next decoded frame arrives later), so the frame
+    source pauses long enough for the stub to be gone before frame 2. The
+    frame must also exceed the 8 KiB stdin buffer so that the write reaches
+    the pipe directly, as every real 2.3 MB frame does; a buffered write is
+    flushed later and raises BrokenPipeError instead.
+    """
+    import time
+    saved = (alignment._ffmpeg_exe, alignment._open_gray_reader)
+    alignment._ffmpeg_exe = lambda: stub
+
+    def paused_reader(video):
+        w, h = 1024, 16  # 16 KiB frames: the stub consumes exactly one, then exits
+
+        def gen():
+            yield b"\1" * (w * h)
+            time.sleep(1.5)
+            for _ in range(7):
+                yield b"\2" * (w * h)
+        return w, h, gen()
+    alignment._open_gray_reader = paused_reader
+    d = tmp / "die"
+    d.mkdir()
+    dst = d / alignment.ALIGN_TMP_NAME
+    try:
+        stub_mode("die_early")
+        try:
+            alignment.extract_aligned(d / "v.mp4", np.arange(8), dst, 100, 21)
+        except RuntimeError as e:
+            assert "exited 1" in str(e) and "died mid-stream" in str(e), e
+        except OSError as e:
+            raise AssertionError(f"pipe error escaped instead of the ffmpeg diagnosis: {e!r}")
+        else:
+            raise AssertionError("dead encoder accepted")
+        assert (d / "align_error.log").exists()
+    finally:
+        alignment._ffmpeg_exe, alignment._open_gray_reader = saved
+    print("14) extract_aligned: encoder dying mid-stream reports its stderr, not the pipe errno: PASS")
+
+
 def test_stim_trace():
     from gui_app import stim_compiler
     B = lambda bid, freq, pw, dur, pin=53: {"id": bid, "x": 0, "y": 0, "pin": pin,
@@ -672,6 +907,9 @@ def main():
         test_stim_trace()
         test_cli_2_align(tmp)
         test_cli_3_stim_trace(tmp)
+        test_encode_worker_tail_bookkeeping(tmp, stub)
+        test_align_index_and_analysis(tmp, stub)
+        test_extract_aligned_encoder_dies(tmp, stub)
     finally:
         os.environ.pop("FFSTUB_MODE", None)
         os.environ.pop("FFSTUB_LOG", None)
