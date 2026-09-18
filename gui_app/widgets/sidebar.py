@@ -317,12 +317,14 @@ class SidebarWidget(QWidget):
     def _on_calibrate(self, checked):
         if checked:
             self._last_armed = "calibrate"
+            self.refresh_date()
         self._apply_enablement()
         self.calibrate_toggled.emit(checked)
 
     def _on_record(self, checked):
         if checked:
             self._last_armed = "record"
+            self.refresh_date()
         self._apply_enablement()
         self.record_toggled.emit(checked)
 
@@ -410,8 +412,15 @@ class SidebarWidget(QWidget):
 
     def refresh_date(self):
         """Set the date field to today unless the operator has typed into it.
-        Called on every read of the fields so a session started after
-        midnight is filed under the day it starts."""
+
+        Runs when a toggle is armed, before its signal reaches the main window,
+        so a session started after midnight is filed under the day it starts.
+        It does not run on every read of the fields: the main window rebuilds
+        the config from the form for Solve, for copying calibration.toml and
+        for the stimulation window, and those must resolve the directory the
+        last acquisition was filed under, not the current day. A calibration
+        recorded before midnight and solved after would otherwise look for a
+        directory that does not exist."""
         if "date" not in self._user_edited:
             self._fields["date"].setText(self._today())
 
@@ -458,7 +467,8 @@ class SidebarWidget(QWidget):
         return self._contrast_slider.value()
 
     def get_field_values(self) -> dict:
-        self.refresh_date()
+        """Current form values. A plain read; the date is refreshed only when a
+        toggle is armed (see refresh_date)."""
         return {k: v.text() for k, v in self._fields.items()}
 
     def set_fields_editable(self, editable: bool):

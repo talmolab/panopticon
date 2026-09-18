@@ -30,8 +30,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
-from PyQt5.QtCore import QSettings
+from PyQt5.QtCore import QPoint, QSettings, Qt
 from PyQt5.QtGui import QImage
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 app = QApplication.instance() or QApplication([])
@@ -474,24 +475,47 @@ def test_all_good_profiles_give_no_warnings():
 
 
 # --------------------------------------------------------------------------
-# A5-04: the date refreshes while untouched; experimenter/assay come from the
-# profile's metadata_defaults and never overwrite what the operator typed.
+# A5-04: an untouched date refreshes when a toggle is armed, and only then:
+# a read of the fields must not rewrite it, because the main window rebuilds
+# the config from the form for Solve and calibration-done, which must find
+# the directory the last acquisition was filed under. Experimenter/assay come
+# from the profile's metadata_defaults and never overwrite what was typed.
 # --------------------------------------------------------------------------
 def _user_types(field, text):
     field.setText(text)
     field.textEdited.emit(text)
 
 
-def test_untouched_date_refreshes_on_read():
+def test_untouched_date_refreshes_when_a_toggle_is_armed():
     with _profiles_dir({"one.yaml": GOOD_PROFILE}):
         sb = make_sidebar()
     today = datetime.now().strftime("%Y%m%d")
+    check("date starts as today", sb._fields["date"].text() == today, sb._fields["date"].text())
     sb._fields["date"].setText("19990101")          # stale, as if left open past midnight
-    check("untouched date refreshes to today on read",
-          sb.get_field_values()["date"] == today, sb._fields["date"].text())
+    check("a plain read leaves a stale date alone",
+          sb.get_field_values()["date"] == "19990101", sb._fields["date"].text())
+
+    seen = []
+    sb.calibrate_toggled.connect(lambda on: seen.append(sb.get_field_values()["date"]))
+    sb._calibrate_toggle.setChecked(True)
+    check("arming Calibrate refreshes the date before the signal fires",
+          seen == [today], repr(seen))
+    sb._calibrate_toggle.setChecked(False)
+    sb._fields["date"].setText("19990101")
+    check("disarming does not touch the date", sb._fields["date"].text() == "19990101")
+
+    seen.clear()
+    sb.record_toggled.connect(lambda on: seen.append(sb.get_field_values()["date"]))
+    sb._record_toggle.setChecked(True)
+    check("arming Record refreshes the date before the signal fires",
+          seen == [today], repr(seen))
+    sb._record_toggle.setChecked(False)
+
     _user_types(sb._fields["date"], "20200202")
-    check("a date the operator typed is kept",
+    sb._calibrate_toggle.setChecked(True)
+    check("a date the operator typed survives arming",
           sb.get_field_values()["date"] == "20200202", sb._fields["date"].text())
+    sb._calibrate_toggle.setChecked(False)
     sb.close()
 
 
@@ -539,8 +563,28 @@ def test_thumb_follows_silent_state_changes():
     check("silent setChecked(False) animates the thumb off", tog._anim.endValue() == 0.0)
     check("no private toggled slot remains for callers to reach into",
           not hasattr(ToggleSwitch, "_on_toggled"))
+    tog._anim.setCurrentTime(tog._anim.duration())
+
+    # A real click and the Space key flip the state inside nextCheckState with
+    # the refresh blocked, so checkStateSet never runs for them; click() below
+    # is the programmatic path that reaches both virtuals. All three must move
+    # the thumb, or the arm indicator lies on the path the operator uses.
+    QTest.mouseClick(tog, Qt.LeftButton, Qt.NoModifier, QPoint(20, 18))
+    check("a mouse click checks the switch", tog.isChecked())
+    check("a mouse click animates the thumb on", tog._anim.endValue() == 1.0,
+          repr(tog._anim.endValue()))
+    tog._anim.setCurrentTime(tog._anim.duration())
+    check("thumb reaches the on position after a mouse click", abs(tog.thumb_pos - 1.0) < 1e-6)
+
+    QTest.keyClick(tog, Qt.Key_Space)
+    check("Space unchecks the switch", not tog.isChecked())
+    check("Space animates the thumb off", tog._anim.endValue() == 0.0, repr(tog._anim.endValue()))
+    tog._anim.setCurrentTime(tog._anim.duration())
+    check("thumb reaches the off position after Space", abs(tog.thumb_pos) < 1e-6)
+
     tog.click()
-    check("a click still animates the thumb", tog._anim.endValue() == 1.0 and tog.isChecked())
+    check("a programmatic click still animates the thumb",
+          tog._anim.endValue() == 1.0 and tog.isChecked())
     tog.close()
 
 
@@ -678,7 +722,7 @@ def main():
     test_malformed_profile_is_skipped_with_warning()
     test_no_loadable_profile_names_the_directory()
     test_all_good_profiles_give_no_warnings()
-    test_untouched_date_refreshes_on_read()
+    test_untouched_date_refreshes_when_a_toggle_is_armed()
     test_metadata_defaults_prefill_from_profile()
     test_thumb_follows_silent_state_changes()
     test_output_dir_is_elided_to_fit_the_button()

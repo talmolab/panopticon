@@ -27,20 +27,39 @@ class ToggleSwitch(QAbstractButton):
 
     thumb_pos = pyqtProperty(float, _get_thumb_pos, _set_thumb_pos)
 
-    def checkStateSet(self):
-        """Animate the thumb to the current checked state.
+    # The thumb is driven from the two QAbstractButton virtuals that cover
+    # every way the checked state changes, not from the toggled signal:
+    #  - checkStateSet() runs for setChecked(), including one made under
+    #    blockSignals, so the thumb follows a state a caller sets silently;
+    #  - nextCheckState() runs for a user click and the Space key, which flip
+    #    the state with the refresh blocked and never reach checkStateSet().
+    # Animating from toggled would leave the thumb ON after a silent uncheck;
+    # overriding only checkStateSet leaves it OFF after a real click, which is
+    # the path the operator uses to arm an acquisition.
 
-        QAbstractButton calls this virtual on every setChecked, including one
-        made under blockSignals, so the thumb follows the state a caller sets
-        silently. Driving the animation from the toggled signal instead would
-        leave the thumb painted ON after a silent uncheck, and force callers
-        to reach into the widget to repaint it.
-        """
+    def checkStateSet(self):
+        """Animate the thumb after a programmatic setChecked()."""
+        self._animate_to(self.isChecked())
+
+    def nextCheckState(self):
+        """Animate the thumb after a user click or Space key press."""
+        super().nextCheckState()
         self._animate_to(self.isChecked())
 
     def _animate_to(self, checked: bool):
+        """Run the thumb to the given state. A request for a target the thumb
+        already rests at, or is already heading to, is a no-op, so a path that
+        reaches both virtuals (QAbstractButton.click()) does not restart the
+        motion."""
+        target = 1.0 if checked else 0.0
+        running = self._anim.state() == QPropertyAnimation.Running
+        if running and self._anim.endValue() == target:
+            return
+        if not running and self._thumb_pos == target:
+            return
+        self._anim.stop()
         self._anim.setStartValue(self._thumb_pos)
-        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.setEndValue(target)
         self._anim.start()
 
     #: Opacity of a disabled switch. The sidebar disables a toggle for sibling
