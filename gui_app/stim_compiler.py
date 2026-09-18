@@ -750,11 +750,139 @@ def sketch_sha(ino_content: str) -> str:
     return hashlib.sha256(ino_content.encode("utf-8")).hexdigest()
 
 
-def upload(ino_content: str, port: str) -> tuple[bool, str]:
-    """Compile and upload the .ino to the Arduino. Returns (success, message)."""
+#: Seconds allowed for `arduino-cli compile` and `arduino-cli upload`.
+COMPILE_TIMEOUT_S = 120.0
+UPLOAD_TIMEOUT_S = 60.0
+#: After an upload timeout, how long to wait for the flashing tool (avrdude, a
+#: grandchild of arduino-cli) to exit before giving up on it.
+FLASH_GRACE_S = 90.0
+#: Process names of the tool that actually writes the board's flash.
+FLASH_TOOL_NAMES = ("avrdude",)
+
+#: Port name that selects the simulated board (gui_app.backends.sim_board).
+SIM_PORT = "sim"
+
+
+def is_sim_port(port) -> bool:
+    """True when `port` names the simulated board rather than a serial device."""
+    return str(port).strip().lower() == SIM_PORT
+
+
+def _run_cli(cmd: list[str], timeout: float) -> tuple[int, str, str]:
+    """Run one arduino-cli command to completion. Returns (returncode, out, err).
+
+    Launched with the quiet STARTUPINFO so no console flashes over the GUI,
+    and with stdin closed so the tool can never sit waiting on a prompt.
+    Raises subprocess.TimeoutExpired with ``.process`` set to the still-live
+    Popen so the caller decides what to do with its children.
+    """
+    from gui_app.ffmpeg_cmd import quiet_popen_kwargs
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, **quiet_popen_kwargs())
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        e.process = proc
+        raise
+    return proc.returncode, out or "", err or ""
+
+
+def _flash_children(pid: int) -> list:
+    """Live descendants of `pid` that are the flashing tool, or [] when psutil
+    is unavailable or the process is already gone."""
+    try:
+        import psutil
+    except ImportError:
+        return []
+    try:
+        kids = psutil.Process(pid).children(recursive=True)
+    except Exception:
+        return []
+    out = []
+    for k in kids:
+        try:
+            if any(n in k.name().lower() for n in FLASH_TOOL_NAMES):
+                out.append(k)
+        except Exception:
+            continue
+    return out
+
+
+def _wait_for_flash_children(children, grace_s: float) -> list:
+    """Block until every child exits or grace_s passes. Returns the children
+    still running.
+
+    The flashing tool is waited for, never killed: interrupting avrdude
+    mid-write leaves the Mega with a half-programmed flash and therefore no
+    allStimLow() boot guard, so the laser pin floats on the next power-up.
+    """
+    import time
+    deadline = time.monotonic() + grace_s
+    still = []
+    for ch in children:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            ch.wait(timeout=remaining)
+        except Exception:
+            try:
+                if ch.is_running():
+                    still.append(ch)
+            except Exception:
+                pass
+    return still
+
+
+def _settle_timed_out_upload(proc, grace_s: float) -> str:
+    """After `arduino-cli upload` overran its budget: let avrdude finish, then
+    stop arduino-cli, and say what the operator may safely do next."""
+    kids = _flash_children(proc.pid)
+    still = _wait_for_flash_children(kids, grace_s)
+    try:
+        proc.kill()
+        proc.communicate(timeout=5)
+    except Exception:
+        pass
+    if still:
+        return (f"{FLASH_TOOL_NAMES[0]} is STILL RUNNING {grace_s:.0f} s after the "
+                f"upload timed out. Do NOT power-cycle the board while it runs: "
+                f"interrupting a write leaves a half-programmed flash with no "
+                f"laser-pin boot guard. Wait for it to exit (Task Manager), then "
+                f"power-cycle the board and Apply again.")
+    if kids:
+        return (f"{FLASH_TOOL_NAMES[0]} finished after the upload timed out, so "
+                f"no write was interrupted, but the board's firmware — including "
+                f"the laser-pin boot guard — is unverified. Power-cycle the board "
+                f"and Apply again.")
+    return ("No flashing tool was found running. The board's firmware may have "
+            "been partially written and is in an unknown state; wait 30 s in "
+            "case a write is still in progress, then power-cycle the board and "
+            "Apply again.")
+
+
+def upload(ino_content: str, port: str, *,
+           compile_timeout_s: float = COMPILE_TIMEOUT_S,
+           upload_timeout_s: float = UPLOAD_TIMEOUT_S,
+           flash_grace_s: float = FLASH_GRACE_S) -> tuple[bool, str]:
+    """Compile and upload the .ino to the Arduino. Returns (success, message).
+
+    With port ``"sim"`` nothing is compiled or flashed: the sketch is handed to
+    the simulated board when that module is present and reported as accepted
+    otherwise, so the GUI's Apply path runs end to end with no hardware.
+    """
+    if is_sim_port(port):
+        try:
+            from gui_app.backends import sim_board
+        except ImportError:
+            sim_board = None
+        accept = getattr(sim_board, "accept_upload", None)
+        if accept is not None:
+            accept(ino_content)
+        return True, "Simulated board: sketch accepted, nothing flashed."
+
     # Resolve at call time, not import time: the tool may be installed while the
     # GUI is open, and a missing tool should read as "install this" rather than
-    # as a generic upload failure (the old hardcoded path produced the latter).
+    # as a generic upload failure.
     cli = find_arduino_cli()
     if cli is None:
         return False, arduino_cli_help()
@@ -763,27 +891,26 @@ def upload(ino_content: str, port: str) -> tuple[bool, str]:
     sketch_dir = tmp / "panopticon_stim"
     sketch_dir.mkdir()
     (sketch_dir / "panopticon_stim.ino").write_text(ino_content, encoding="utf-8")
+    stage = "compile"
     try:
-        r = subprocess.run(
-            [str(cli), "compile", "--fqbn", FQBN, str(sketch_dir)],
-            capture_output=True, text=True, timeout=120,
-        )
-        if r.returncode != 0:
+        rc, out, err = _run_cli(
+            [str(cli), "compile", "--fqbn", FQBN, str(sketch_dir)], compile_timeout_s)
+        if rc != 0:
             return False, (
-                f"Compile failed (arduino-cli exit {r.returncode}).\n\n"
+                f"Compile failed (arduino-cli exit {rc}).\n\n"
                 f"This is a problem with the generated sketch or the toolchain, "
                 f"not with the board — nothing was flashed, so the board still "
                 f"runs whatever it ran before.\n\n"
                 f"If the error mentions a missing core, install it:\n"
                 f"    arduino-cli core install arduino:avr\n\n"
-                f"{r.stderr}\n{r.stdout}")
-        r = subprocess.run(
+                f"{err}\n{out}")
+        stage = "upload"
+        rc, out, err = _run_cli(
             [str(cli), "upload", "--fqbn", FQBN, "--port", port, str(sketch_dir)],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0:
+            upload_timeout_s)
+        if rc != 0:
             return False, (
-                f"Upload failed on {port} (arduino-cli exit {r.returncode}).\n\n"
+                f"Upload failed on {port} (arduino-cli exit {rc}).\n\n"
                 f"The sketch compiled, so this is the link to the board. Common "
                 f"causes: the port is held by something else (Arduino Serial "
                 f"Monitor, another Panopticon instance), the wrong port is set "
@@ -792,14 +919,25 @@ def upload(ino_content: str, port: str) -> tuple[bool, str]:
                 f"firmware in an UNKNOWN state, which means the stim/laser pin "
                 f"state is also unknown. Power-cycle the board before relying "
                 f"on it.\n\n"
-                f"{r.stderr}\n{r.stdout}")
+                f"{err}\n{out}")
         return True, "Upload successful — Arduino will restart and wait for record command."
     except subprocess.TimeoutExpired as e:
-        return False, (
-            f"Timed out after {e.timeout:.0f}s during compile/upload.\n\n"
-            f"If it timed out on UPLOAD the board may have been partially "
-            f"flashed and its firmware — including the laser-pin boot guard — "
-            f"is in an unknown state. Power-cycle it.")
+        proc = getattr(e, "process", None)
+        if stage == "compile":
+            # Nothing has touched the board; the compiler is safe to stop.
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=5)
+                except Exception:
+                    pass
+            return False, (f"Timed out after {e.timeout:.0f} s during compile. "
+                           f"Nothing was flashed; the board still runs whatever "
+                           f"it ran before.")
+        advice = (_settle_timed_out_upload(proc, flash_grace_s) if proc is not None
+                  else "Power-cycle the board and Apply again.")
+        return False, (f"Timed out after {e.timeout:.0f} s during upload on "
+                       f"{port}.\n\n{advice}")
     except Exception as e:
         return False, (f"{type(e).__name__}: {e}\n\n"
                        f"arduino-cli used: {cli}")

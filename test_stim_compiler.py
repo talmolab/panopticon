@@ -485,6 +485,162 @@ def test_trace_unwraps_16bit_blockids():
     print("13) trace unwraps 16-bit block-ID rollover: PASS")
 
 
+# ── upload(): the arduino-cli launch ─────────────────────────────────────────
+# arduino-cli is stood in for by a .cmd stub, and avrdude by a renamed copy of
+# ping.exe, so these run with no toolchain, no board and no COM port. Nothing
+# here flashes anything.
+
+def _upload_fixture(tmp, mode):
+    """Write a stub arduino-cli into tmp and point PANOPTICON_ARDUINO_CLI at it.
+
+    mode 'compile-fail': exit 1 on compile with a stderr line.
+    mode 'compile-hang': compile runs ~2 s (a renamed ping), so a short budget trips.
+    mode 'upload-hang':  compile ok; upload launches 'avrdude.exe' (ping, ~2 s)
+                         and waits for it.
+    """
+    import os, shutil, sys
+    assert sys.platform == "win32"
+    avrdude = os.path.join(tmp, "avrdude.exe")
+    shutil.copyfile(os.path.join(os.environ["SystemRoot"], "System32", "PING.EXE"),
+                    avrdude)
+    lines = ["@echo off"]
+    if mode == "compile-fail":
+        lines += ["echo stub: fake compile error 1>&2", "exit /b 1"]
+    elif mode == "compile-hang":
+        lines += [f'"{avrdude}" -n 3 127.0.0.1 >nul', "exit /b 0"]
+    elif mode == "upload-hang":
+        lines += ['if "%1"=="compile" exit /b 0',
+                  f'"{avrdude}" -n 3 127.0.0.1 >nul', "exit /b 0"]
+    stub = os.path.join(tmp, "cli_stub.cmd")
+    with open(stub, "w", newline="\r\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.environ["PANOPTICON_ARDUINO_CLI"] = stub
+    return stub
+
+
+def test_upload_sim_port_short_circuits():
+    """Port 'sim' never reaches arduino-cli, so the Apply path runs with no
+    toolchain and no board."""
+    import os
+    saved = os.environ.get("PANOPTICON_ARDUINO_CLI")
+    os.environ["PANOPTICON_ARDUINO_CLI"] = r"C:\nonexistent\arduino-cli.exe"
+    try:
+        import sys
+        # Make sure the sim module is absent for this call, whether or not the
+        # repo has grown one: the hook must skip cleanly without it.
+        sys.modules["gui_app.backends.sim_board"] = None
+        try:
+            ok, msg = sc.upload("// sketch", "sim")
+        finally:
+            del sys.modules["gui_app.backends.sim_board"]
+        assert ok is True and "nothing flashed" in msg, (ok, msg)
+        assert sc.is_sim_port(" SIM ") and not sc.is_sim_port("COM3")
+        # A real port with no tool installed gets the install message. The
+        # lookup is stubbed so the real toolchain, if present, is never run.
+        real_find = sc.find_arduino_cli
+        sc.find_arduino_cli = lambda: None
+        try:
+            ok, msg = sc.upload("// sketch", "COM99")
+        finally:
+            sc.find_arduino_cli = real_find
+        assert ok is False and "arduino-cli was not found" in msg
+    finally:
+        if saved is None:
+            os.environ.pop("PANOPTICON_ARDUINO_CLI", None)
+        else:
+            os.environ["PANOPTICON_ARDUINO_CLI"] = saved
+    print("15) upload() on port 'sim' accepts the sketch without arduino-cli: PASS")
+
+
+def test_run_cli_is_quiet_and_has_no_stdin():
+    """Every arduino-cli launch gets the shared quiet STARTUPINFO (no console
+    flash over the GUI) and a closed stdin (no prompt can hang it)."""
+    import subprocess, sys
+    seen = {}
+    class FakeProc:
+        pid = 4242
+        returncode = 0
+        def communicate(self, timeout=None):
+            return "out", "err"
+    real = sc.subprocess.Popen
+    sc.subprocess.Popen = lambda cmd, **kw: seen.update(cmd=cmd, **kw) or FakeProc()
+    try:
+        rc, out, err = sc._run_cli(["cli", "compile"], 5)
+    finally:
+        sc.subprocess.Popen = real
+    assert (rc, out, err) == (0, "out", "err")
+    assert seen["stdin"] is subprocess.DEVNULL
+    if sys.platform == "win32":
+        assert "startupinfo" in seen and seen["creationflags"] & subprocess.CREATE_NO_WINDOW
+    print("16) arduino-cli launched with quiet STARTUPINFO and stdin closed: PASS")
+
+
+def test_upload_timeout_waits_for_avrdude():
+    """An upload that overruns must not leave avrdude writing while the operator
+    is told to power-cycle: the flashing tool is waited for, then reported."""
+    import os, sys, tempfile, time
+    if sys.platform != "win32":
+        print("17) upload timeout handling SKIPPED — Windows-only fixture")
+        return
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        print("17) upload timeout handling SKIPPED — psutil not installed")
+        return
+    saved = os.environ.get("PANOPTICON_ARDUINO_CLI")
+    tmp = tempfile.mkdtemp()
+    try:
+        # compile failure: message names the stage and carries the tool's stderr
+        _upload_fixture(tmp, "compile-fail")
+        ok, msg = sc.upload("// s", "COM99")
+        assert ok is False and "Compile failed" in msg and "fake compile error" in msg, msg
+
+        # compile timeout: safe to kill, and says nothing was flashed
+        _upload_fixture(tmp, "compile-hang")
+        t0 = time.monotonic()
+        ok, msg = sc.upload("// s", "COM99", compile_timeout_s=0.3)
+        assert ok is False and "during compile" in msg and "Nothing was flashed" in msg, msg
+        assert time.monotonic() - t0 < 5, "compile timeout did not stop the tool"
+
+        # upload timeout with a live avrdude grandchild: waited for, not killed
+        _upload_fixture(tmp, "upload-hang")
+        t0 = time.monotonic()
+        ok, msg = sc.upload("// s", "COM99", upload_timeout_s=0.3, flash_grace_s=15)
+        took = time.monotonic() - t0
+        assert ok is False and "during upload" in msg, msg
+        assert "avrdude finished" in msg, msg
+        assert took >= 1.0, f"did not wait for the flashing tool ({took:.1f} s)"
+        assert "Power-cycle" in msg
+
+        # grace exhausted while it still runs: the message says NOT to power-cycle
+        _upload_fixture(tmp, "upload-hang")
+        ok, msg = sc.upload("// s", "COM99", upload_timeout_s=0.3, flash_grace_s=0.2)
+        assert ok is False and "STILL RUNNING" in msg and "Do NOT power-cycle" in msg, msg
+        time.sleep(2.5)                       # let the stray ping copy exit
+    finally:
+        if saved is None:
+            os.environ.pop("PANOPTICON_ARDUINO_CLI", None)
+        else:
+            os.environ["PANOPTICON_ARDUINO_CLI"] = saved
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # The wait helper itself, with stand-ins: an exiting child is done, a
+    # child whose wait times out is reported, a vanished one is not.
+    class Exits:
+        def wait(self, timeout): return 0
+        def is_running(self): return False
+    class Stays:
+        def wait(self, timeout): raise TimeoutError()
+        def is_running(self): return True
+    class Vanished:
+        def wait(self, timeout): raise TimeoutError()
+        def is_running(self): raise ProcessLookupError()
+    still = sc._wait_for_flash_children([Exits(), Stays(), Vanished()], 0.05)
+    assert len(still) == 1 and isinstance(still[0], Stays)
+    print("17) upload timeout: compile killed, avrdude waited for, advice matches: PASS")
+
+
 # ── the sketch-swap invalidation rule (added 2026-09-04) ────────────────────
 # A calibration always flashes the recording-only sketch. If the stim editor is
 # not told, its _uploaded_ino still holds the paradigm, so Test finds canvas ==
@@ -539,6 +695,9 @@ def main():
     test_ready_ack()
     test_sketch_identity()
     test_sketch_swap_invalidates_stale_upload()
+    test_upload_sim_port_short_circuits()
+    test_run_cli_is_quiet_and_has_no_stdin()
+    test_upload_timeout_waits_for_avrdude()
     if _HAS_NUMPY:
         test_trace_locate()
         test_trace_ttl_matches_firmware()
