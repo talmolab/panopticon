@@ -62,7 +62,7 @@ def main():
     #    probe is not, or a harmless run would block every other probe.
     for name in ("gui.py", "probe_lag.py", "probe_abuse.py",
                  "probe_multiproc.py", "probe_release_gil.py",
-                 "probe_zerocopy.py", "probe_seq.py", "probe_gui_record.py"):
+                 "probe_zerocopy.py", "probe_seq.py"):
         check(f"{name} is a marker", name in g.PANOPTICON_MARKERS)
     check("probe_network.py is not a marker",
           "probe_network.py" not in g.PANOPTICON_MARKERS)

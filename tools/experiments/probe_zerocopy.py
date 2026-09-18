@@ -31,12 +31,10 @@ WHAT THIS CHECKS BEFORE THE HOT PATH IS EDITED
     uv run tools/experiments/probe_zerocopy.py --seconds 12
 """
 import argparse
-import ctypes
 import json
 import statistics
 import sys
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 import numpy as np
@@ -50,25 +48,7 @@ sys.path.insert(0, str(REPO))
 
 from gui_app.probe_guard import (add_force_argument,
                                  refuse_if_panopticon_running)
-
-_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_k32.QueryThreadCycleTime.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ulonglong)]
-_k32.QueryThreadCycleTime.restype = wintypes.BOOL
-_k32.GetCurrentThread.restype = wintypes.HANDLE
-
-
-def cycles(_b=ctypes.c_ulonglong()):
-    _k32.QueryThreadCycleTime(_k32.GetCurrentThread(), ctypes.byref(_b))
-    return _b.value
-
-
-def calibrate(dur=0.25):
-    c0, t0 = cycles(), time.perf_counter()
-    x = 0
-    while time.perf_counter() - t0 < dur:
-        for i in range(10000):
-            x += i
-    return (cycles() - c0) / (time.perf_counter() - t0)
+from tools.perfclock import calibrate_cycles_per_s, thread_cycles as cycles
 
 
 def main():
@@ -83,7 +63,7 @@ def main():
     # holds it; a second opener changes the frame rate this A/B compares.
     refuse_if_panopticon_running(force=args.force)
 
-    cps = calibrate()
+    cps = calibrate_cycles_per_s()
     tl = pylon.TlFactory.GetInstance()
     devs = tl.EnumerateDevices()
     if not devs:

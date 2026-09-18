@@ -39,8 +39,8 @@ from pathlib import Path
 #: probe starts happily over it. ``probe_network.py`` is deliberately absent --
 #: its default discovery pass sends a UDP query and opens nothing, so listing it
 #: would let a harmless run block every other probe.
-PANOPTICON_MARKERS = ("gui.py", "probe_gui_record.py", "probe_seq.py",
-                      "probe_lag.py", "probe_abuse.py", "probe_multiproc.py",
+PANOPTICON_MARKERS = ("gui.py", "probe_seq.py", "probe_lag.py",
+                      "probe_abuse.py", "probe_multiproc.py",
                       "probe_release_gil.py", "probe_zerocopy.py",
                       "panopticon")
 

@@ -26,8 +26,7 @@ find. `--force` overrides the guard once you have checked the machine by hand.
 | `probe_network.py` | Which switch is each camera plugged into, and is it on the right subnet? | Camera NICs; no camera is opened | Yes: discovery is one UDP query |
 | `probe_network.py --sweep` | Does each camera's path carry 9000-byte packets? | Every camera | No: opens cameras, guarded |
 | `probe_lag.py` | What is the cross-camera submission lag at the shipped profile? | Every camera plus the trigger board | No: guarded |
-| `probe_seq.py` | Does a mixed sequence of recordings and calibrations in one GUI process degrade? | The whole rig | No: guarded |
-| `probe_gui_record.py` | Does an unattended GUI recording reproduce a lag the headless probe does not? | The whole rig | No: guarded |
+| `probe_seq.py` | Does a mixed sequence of recordings and calibrations in one GUI process degrade? A single `--steps r:300` is an unattended recording, with `--stim` and `--display-hz`. | The whole rig | No: guarded |
 | `probe_abuse.py` | Does the GUI survive rapid toggling, a second serial handle, a mid-recording quit, and stim in tandem? | The whole rig | No: guarded |
 | `probe_cpu_load.py` | How much acquisition margin is left under background CPU load? | Nothing | Yes, deliberately: it is the load |
 | `configure_nic.ps1 -Check` | Do the camera NICs meet the receive-path thresholds? | Camera NICs | Yes: reads and reports only |

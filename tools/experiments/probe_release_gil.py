@@ -28,12 +28,10 @@ alongside a measurement has invalidated a conclusion on this rig before.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import statistics
 import sys
 import threading
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 #: The repository root, three levels up from tools/experiments/. Output and
@@ -46,26 +44,7 @@ from gui_app.backends import load_backend
 from gui_app.probe_guard import (add_force_argument,
                                  refuse_if_panopticon_running)
 from gui_app.session_config import RigProfile
-
-# --- QueryThreadCycleTime: cycles this thread actually EXECUTED ---------------
-_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_k32.QueryThreadCycleTime.argtypes = [wintypes.HANDLE,
-                                      ctypes.POINTER(ctypes.c_ulonglong)]
-_k32.QueryThreadCycleTime.restype = wintypes.BOOL
-
-
-def cycles(_buf=ctypes.c_ulonglong()):
-    _k32.QueryThreadCycleTime(_k32.GetCurrentThread(), ctypes.byref(_buf))
-    return _buf.value
-
-
-def calibrate_cycles_per_s(dur=0.3):
-    """Cycles per second for this thread, so cycles convert to milliseconds."""
-    c0, t0 = cycles(), time.perf_counter()
-    x = 0
-    while time.perf_counter() - t0 < dur:
-        x += 1
-    return (cycles() - c0) / (time.perf_counter() - t0)
+from tools.perfclock import calibrate_cycles_per_s, thread_cycles as cycles
 
 
 def main() -> int:
