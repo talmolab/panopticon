@@ -39,7 +39,8 @@ def test_start_resolution():
                                       [E("A", "B"), E("B", "C")])
     assert starts == {"A"} and needs == set()
 
-    # Fan-in: two parallel chains merging both start.
+    # Fan-in: both sources resolve as starts here; compile_ino then refuses
+    # the graph because C would run in two chains at once (test 2b).
     starts, needs = sc.resolve_starts([B("A"), B("B"), B("C")],
                                       [E("A", "C"), E("B", "C")])
     assert starts == {"A", "B"} and needs == set()
@@ -87,10 +88,64 @@ def test_chain_extraction_terminates():
     print("2) chain extraction terminates on cycles (linear/loop/rho): PASS")
 
 
+def test_structural_problems():
+    """Shapes the walker would silently collapse are refused with a message
+    that names the block, instead of compiling a different paradigm."""
+    # Two outgoing arrows: the walker used to keep the last edge and drop B.
+    blocks, edges = [B("A"), B("B"), B("C")], [E("A", "B"), E("A", "C")]
+    probs = sc.structural_problems(blocks, edges)
+    assert len(probs) == 1 and "block A" in probs[0] and "outgoing" in probs[0], probs
+    assert refuses(blocks, edges), "two out-edges compiled to a single chain"
+    # The same edge listed twice is one successor, not a branch.
+    assert sc.structural_problems([B("A"), B("B")], [E("A", "B"), E("A", "B")]) == []
+
+    # Fan-in: A->C, B->C puts C in two concurrent chains. pin_conflicts() used
+    # to name the symptom (the pin) with no pin choice that could fix it.
+    blocks, edges = [B("A", pin=44), B("B", pin=45), B("C", pin=46)], \
+        [E("A", "C"), E("B", "C")]
+    probs = sc.structural_problems(blocks, edges)
+    assert len(probs) == 1 and "block C" in probs[0] and "fan-in" in probs[0], probs
+    assert refuses(blocks, edges), "fan-in compiled with C in two chains"
+    # Fan-in with Starting ticked on one source: resolve_starts() lets the flag
+    # win, so B is in no chain, compile_ino used to succeed and pin 44 was
+    # silently absent from the firmware. It is refused with B named.
+    blocks, edges = [B("A", pin=53, start=True), B("B", pin=44), B("C", pin=45)], \
+        [E("A", "C"), E("B", "C")]
+    probs = sc.structural_problems(blocks, edges)
+    assert len(probs) == 1 and "block B" in probs[0] and "not reached" in probs[0], probs
+    assert refuses(blocks, edges), "unreached source B compiled away silently"
+    # A lead-in into a flagged chain is the same shape (C->A(start)->B).
+    probs = sc.structural_problems([B("A", start=True), B("B"), B("C")],
+                                   [E("A", "B"), E("C", "A")])
+    assert len(probs) == 1 and "block C" in probs[0], probs
+    # A pure loop with no Starting flag has no start, so every block is
+    # unreached and compile_ino refuses instead of emitting zero chains.
+    probs = sc.structural_problems([B("A"), B("B")], [E("A", "B"), E("B", "A")])
+    assert len(probs) == 2 and all("not reached" in p for p in probs), probs
+    assert refuses([B("A"), B("B")], [E("A", "B"), E("B", "A")])
+    # A disconnected block is its own start, not unreached.
+    assert sc.structural_problems([B("A", start=True), B("B", pin=44)], []) == []
+
+    # A lead-in feeding a loop (rho) re-enters B from its own chain: one chain
+    # looping, so it is accepted and keeps its loop_to.
+    rho_b, rho_e = [B("A"), B("B"), B("C")], [E("A", "B"), E("B", "C"), E("C", "B")]
+    assert sc.structural_problems(rho_b, rho_e) == []
+    assert "{CHAIN_0, CHAIN_0_LEN, 1}" in sc.compile_ino(rho_b, rho_e, [53])
+    # Plain shapes are untouched: linear, pinned loop, two independent chains.
+    assert sc.structural_problems([B("A"), B("B")], [E("A", "B")]) == []
+    assert sc.structural_problems([B("A", start=True), B("B")],
+                                  [E("A", "B"), E("B", "A")]) == []
+    assert sc.structural_problems([B("A"), B("B", pin=44)], []) == []
+    # Edges to unknown ids are ignored, as everywhere else in the compiler.
+    assert sc.structural_problems([B("A")], [E("A", "ghost"), E("A", "ghost2")]) == []
+    print("2b) two out-edges, fan-in and unreached blocks refused with the "
+          "block named: PASS")
+
+
 def test_waveform_encoding():
     """freq/pulse-width -> integer microseconds, including the 100%-duty case."""
     def blk_line(freq, pw):
-        ino = sc.compile_ino([B("A", dur=5, freq=freq, pw=pw)], [])
+        ino = sc.compile_ino([B("A", dur=5, freq=freq, pw=pw)], [], [53])
         return [l for l in ino.splitlines() if l.startswith("  {53u")][0]
 
     # 10 Hz / 10 ms = a real train: 100000 us period, 10000 us pulse.
@@ -104,10 +159,42 @@ def test_waveform_encoding():
     # No floating point may reach the sketch: updateStim() runs inside the
     # camera trigger busy-wait, where an AVR float divide (~30 us) blunts the
     # trigger edge precision.
-    ino = sc.compile_ino([B("A", dur=5, freq=10, pw=10)], [])
+    ino = sc.compile_ino([B("A", dur=5, freq=10, pw=10)], [], [53])
     body = ino.split("void updateStim()")[1].split("// ===== SETUP")[0]
     assert "float" not in body and "0f" not in body, "float math in updateStim()"
+    assert "double" not in body and "1e6" not in body and ".5" not in body
     print("3) waveform -> integer microseconds, no floats in updateStim: PASS")
+
+
+def test_pulse_edges_do_not_reanchor_to_now():
+    """The rising edge is timed from a nominal anchor that advances by the
+    period, so the polling gap of the trigger busy-wait does not accumulate
+    across a block; the falling edge is timed from the ACTUAL rising edge, so a
+    late rising poll can only lengthen a pulse, never shorten it. A rising poll
+    a whole period late re-anchors instead of bursting catch-up pulses."""
+    ino = sc.compile_ino([B("A", dur=5, freq=20, pw=5)], [], [53])
+    body = ino.split("void updateStim()")[1].split("// ===== SETUP")[0]
+    fresh = body.split("if (cs->fresh)")[1].split("if (cs->pin_high)")[0]
+    pulse = body.split("if (cs->pin_high)")[1]
+    high, low = pulse.split("} else {", 1)
+    # Falling edge: measured from rise_us, the time the pin actually went HIGH.
+    assert "nowUs - cs->rise_us >= blk->pw_us" in high, "pulse width timed from the nominal edge"
+    assert "period_anchor_us" not in high, "falling edge touches the period anchor"
+    # Rising edge: measured from the nominal anchor, which then advances by
+    # one period; a poll a whole period late re-anchors to nowUs.
+    assert "nowUs - cs->period_anchor_us" in low, "rising edge not timed from the anchor"
+    assert "cs->period_anchor_us += blk->period_us;" in low, "rising edge re-anchors to nowUs"
+    assert "elapsed - blk->period_us >= blk->period_us" in low, "no clamp against a late poll"
+    assert "cs->period_anchor_us = nowUs;" in low, "clamp does not re-anchor"
+    assert "cs->rise_us = nowUs;" in low, "rising edge does not record its actual time"
+    # The first pulse of a block anchors both, and block boundaries stay drift-free.
+    assert "cs->period_anchor_us = nowUs;" in fresh and "cs->rise_us = nowUs;" in fresh
+    assert "cs->blk_start_ms += blk->dur_ms;" in body
+    # Nothing in the sketch times an edge from a "last toggle" any more.
+    assert "last_toggle_us" not in ino
+    assert "float" not in body and "0f" not in body
+    print("3b) rising edges phase-locked to the block start, pulse width never "
+          "shortened, clamped when late: PASS")
 
 
 def test_safe_pins():
@@ -124,7 +211,17 @@ def test_safe_pins():
     # anything after it leaves the pin floating until the GUI connects.
     setup = sc.compile_ino([], [], [53]).split("void setup()")[1]
     assert setup.index("allStimLow();") < setup.index("Serial.begin")
-    print("4) safe pins: empty workflow, union, no-stim rig, boot order: PASS")
+    # safe_pins is required: gui_app/ is shared between rigs, so the compiler
+    # must not fall back to one rig's laser pin when a caller forgets it.
+    for call in (lambda: sc.compile_ino([], []),
+                 lambda: sc.recording_only_sketch()):
+        try:
+            call()
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("compiled with a default safe-pin list")
+    print("4) safe pins: empty workflow, union, no-stim rig, boot order, required: PASS")
 
 
 def test_pin_conflicts():
@@ -162,6 +259,89 @@ def test_forbidden_pins():
     # And still compiles normally for a good graph.
     assert "void setup()" in sc.compile_ino([B("A", pin=53)], [], [53], TRIG)
     print("5b) forbidden pins: trigger lines + RX0/TX0 refused at compile: PASS")
+
+
+def refuses(blocks, edges=(), safe=(53,), trig=(2, 4, 6, 8, 10, 12)):
+    """True iff compile_ino raises ValueError for this graph."""
+    try:
+        sc.compile_ino(blocks, list(edges), list(safe), list(trig))
+    except ValueError:
+        return True
+    return False
+
+
+def test_pin_range():
+    """A pin the board does not have compiles to a silent no-op (70..255) or,
+    above 255, truncates onto a different physical pin; 530 for 53 is one
+    keystroke. Refuse at compile so the .ino never reaches the board."""
+    for pin in (-1, 70, 255, 256, 530):
+        bad = sc.forbidden_pin_uses([B("A", pin=pin)])
+        assert [p for p, _ in bad] == [pin], (pin, bad)
+        assert "not a digital pin" in bad[0][1]
+        assert refuses([B("A", pin=pin)]), f"compile_ino accepted pin {pin}"
+    # The board's full range is accepted: 2 is the first free pin, 69 = A15.
+    for pin in (2, 53, 69):
+        assert sc.forbidden_pin_uses([B("A", pin=pin)]) == [], pin
+    # The ceiling is a parameter, so another board can widen or narrow it.
+    assert sc.forbidden_pin_uses([B("A", pin=70)], max_pin=80) == []
+    assert sc.MEGA_MAX_DIGITAL_PIN == 69
+    print("5d) pins outside 2..69 refused at compile: PASS")
+
+
+def test_parameter_ranges():
+    """Waveform numbers the firmware cannot execute as written are refused
+    instead of compiling to a block that silently holds LOW or spins."""
+    # freq >= 2 MHz rounds to a 0 us period, which the sketch reads as 'hold LOW'.
+    assert refuses([B("A", freq=2e6)]), "2 MHz compiled to a silent LOW block"
+    assert [bid for bid, _ in sc.parameter_problems([B("A", freq=2e6)])] == ["A"]
+    # A NON-ZERO pulse width that rounds to 0 us is the same silent LOW.
+    assert refuses([B("A", freq=10, pw=0.0001)])
+    assert refuses([B("A", freq=10, pw=0.0004)])
+    # A pulse width of exactly 0 is an off period everywhere (firmware,
+    # describe(), stim_trace), and it is what the editor's blank width field
+    # submits, so it compiles rather than escaping as an uncaught ValueError.
+    assert sc.parameter_problems([B("A", freq=10, pw=0)]) == []
+    ino = sc.compile_ino([B("A", dur=5, freq=10, pw=0)], [], [53])
+    assert "{53u, 100000UL, 0UL, 5000UL}" in ino
+    assert sc.describe([B("A", freq=10, pw=0)], [])[0]["steps"][0]["mode"] == "off (pin LOW)"
+    # An off period is also freq 0 (pw irrelevant), and that is still accepted.
+    assert sc.parameter_problems([B("A", freq=0, pw=0)]) == []
+    assert sc.parameter_problems([B("A", freq=0, pw=100)]) == []
+    # The shortest emittable pulse, 1 us, is accepted.
+    assert sc.parameter_problems([B("A", freq=10, pw=0.001)]) == []
+    # dur < 1 ms rounds to 0 ms: a zero-length block spins the advance loop.
+    assert refuses([B("A", dur=0)]), "dur 0 compiled"
+    assert refuses([B("A", dur=0.0004)])
+    assert sc.parameter_problems([B("A", dur=0.001)]) == []
+    # Anything above uint32 truncates in the sketch's fields.
+    assert refuses([B("A", freq=1e-4)]), "period 1e10 us accepted"
+    assert refuses([B("A", pw=5e6)]), "pulse width 5e9 us accepted"
+    assert refuses([B("A", dur=5e6)]), "duration 5e9 ms accepted"
+    # Negative numbers are not a waveform.
+    assert refuses([B("A", freq=-10)]) and refuses([B("A", pw=-1)]) \
+        and refuses([B("A", dur=-1)])
+    # pw >= period is constant ON by design (CLAUDE.md), never a problem.
+    assert sc.parameter_problems([B("A", freq=10, pw=100)]) == []
+    assert sc.parameter_problems([B("A", freq=10, pw=500)]) == []
+    # The 1 MHz ceiling itself is usable.
+    assert sc.parameter_problems([B("A", freq=1e6, pw=0.001)]) == []
+    print("5e) frequency/pulse/duration ranges refused at compile: PASS")
+
+
+def test_duration_rounding_parity():
+    """The sketch and describe() share one rounding, so the per-frame trace
+    can model exactly the block boundaries the board executes."""
+    assert sc.dur_to_ms(1.001) == 1001, "truncated 1.001 s to 1000 ms"
+    assert sc.dur_to_ms(1.003) == 1003 and sc.dur_to_ms(0.0015) == 2
+    ino = sc.compile_ino([B("A", dur=1.001, freq=10, pw=10)], [], [53])
+    line = [l for l in ino.splitlines() if l.startswith("  {53u")][0]
+    assert "{53u, 100000UL, 10000UL, 1001UL}" in line, line
+    step = sc.describe([B("A", dur=1.001, freq=10, pw=10)], [])[0]["steps"][0]
+    assert step["duration_ms"] == 1001 and step["duration_s"] == 1.001
+    # Across the whole ms grid up to 20 s no duration loses a millisecond.
+    for k in range(1, 20001):
+        assert sc.dur_to_ms(k / 1000) == k, k
+    print("5f) duration rounding: sketch and describe() agree, none truncated: PASS")
 
 
 def test_recording_only_sketch():
@@ -258,6 +438,27 @@ def test_ready_ack():
     print("9) RDY ack emitted from both setup and loop config paths: PASS")
 
 
+def test_sketch_identity():
+    """The RDY line carries an 8-hex id of the sketch, so the host can learn
+    which firmware the board runs rather than trust a per-machine record."""
+    TRIG = [2, 4, 6, 8, 10, 12]
+    blank = sc.recording_only_sketch([53], TRIG)
+    paradigm = sc.compile_ino([B("A", pin=53)], [], [53], TRIG)
+    bid, pid = sc.sketch_id(blank), sc.sketch_id(paradigm)
+    assert bid and pid and len(bid) == 8 and int(bid, 16) >= 0
+    assert bid != pid, "two different sketches share an identity"
+    assert bid == sc.sketch_id(sc.recording_only_sketch([53], TRIG)), "id not deterministic"
+    # The id is what announceReady prints, appended to the RDY line.
+    assert f'const char SKETCH_ID[] = "{bid}";' in blank
+    ready = blank.split("void announceReady()")[1].split("}")[0]
+    assert "Serial.println(SKETCH_ID);" in ready
+    assert ready.index("(long)FPS_OUT") < ready.index("SKETCH_ID"), "id must follow fps"
+    assert "@SKETCH_ID@" not in blank, "placeholder leaked into the sketch"
+    # A sketch without the line (older firmware) reads as no identity.
+    assert sc.sketch_id("void setup() {}") is None
+    print("9b) sketch identity: deterministic, distinct, printed in RDY: PASS")
+
+
 # ── per-frame trace (gui_app/stim_trace.py) ──────────────────────────────────
 # Same paradigm semantics, evaluated over time instead of compiled to C. If
 # these two drift apart the trace silently mislabels which frames were stimulated.
@@ -345,6 +546,187 @@ def test_trace_unwraps_16bit_blockids():
     print("13) trace unwraps 16-bit block-ID rollover: PASS")
 
 
+# ── upload(): the arduino-cli launch ─────────────────────────────────────────
+# arduino-cli is stood in for by a .cmd stub, and avrdude by a renamed copy of
+# ping.exe, so these run with no toolchain, no board and no COM port. Nothing
+# here flashes anything.
+
+def _upload_fixture(tmp, mode):
+    """Write a stub arduino-cli into tmp and point PANOPTICON_ARDUINO_CLI at it.
+
+    mode 'compile-fail': exit 1 on compile with a stderr line.
+    mode 'compile-hang': compile runs ~2 s (a renamed ping), so a short budget trips.
+    mode 'upload-hang':  compile ok; upload launches 'avrdude.exe' (ping, ~2 s)
+                         and waits for it.
+    """
+    import os, shutil, sys
+    assert sys.platform == "win32"
+    avrdude = os.path.join(tmp, "avrdude.exe")
+    shutil.copyfile(os.path.join(os.environ["SystemRoot"], "System32", "PING.EXE"),
+                    avrdude)
+    lines = ["@echo off"]
+    if mode == "compile-fail":
+        lines += ["echo stub: fake compile error 1>&2", "exit /b 1"]
+    elif mode == "compile-hang":
+        lines += [f'"{avrdude}" -n 3 127.0.0.1 >nul', "exit /b 0"]
+    elif mode == "upload-hang":
+        lines += ['if "%1"=="compile" exit /b 0',
+                  f'"{avrdude}" -n 3 127.0.0.1 >nul', "exit /b 0"]
+    stub = os.path.join(tmp, "cli_stub.cmd")
+    with open(stub, "w", newline="\r\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.environ["PANOPTICON_ARDUINO_CLI"] = stub
+    return stub
+
+
+def test_upload_sim_port_short_circuits():
+    """Port 'sim' never reaches arduino-cli, so the Apply path runs with no
+    toolchain and no board."""
+    import os
+    saved = os.environ.get("PANOPTICON_ARDUINO_CLI")
+    os.environ["PANOPTICON_ARDUINO_CLI"] = r"C:\nonexistent\arduino-cli.exe"
+    try:
+        import sys
+        # Make sure the sim module is absent for this call, whether or not the
+        # repo has grown one: the hook must skip cleanly without it.
+        sys.modules["gui_app.backends.sim_board"] = None
+        try:
+            ok, msg = sc.upload("// sketch", "sim")
+        finally:
+            del sys.modules["gui_app.backends.sim_board"]
+        assert ok is True and "nothing flashed" in msg, (ok, msg)
+        assert sc.is_sim_port(" SIM ") and not sc.is_sim_port("COM3")
+        # A real port with no tool installed gets the install message. The
+        # lookup is stubbed so the real toolchain, if present, is never run.
+        real_find = sc.find_arduino_cli
+        sc.find_arduino_cli = lambda: None
+        try:
+            ok, msg = sc.upload("// sketch", "COM99")
+        finally:
+            sc.find_arduino_cli = real_find
+        assert ok is False and "arduino-cli was not found" in msg
+    finally:
+        if saved is None:
+            os.environ.pop("PANOPTICON_ARDUINO_CLI", None)
+        else:
+            os.environ["PANOPTICON_ARDUINO_CLI"] = saved
+    print("15) upload() on port 'sim' accepts the sketch without arduino-cli: PASS")
+
+
+def test_arduino_cli_discovery():
+    """Discovery runs at Apply time, not import, and covers the per-user
+    Arduino IDE 2.x install; an unset variable drops its entry."""
+    import os
+    assert not hasattr(sc, "ARDUINO_CLI"), "arduino-cli looked up at import time"
+    saved = os.environ.get("LOCALAPPDATA")
+    try:
+        os.environ["LOCALAPPDATA"] = r"C:\Users\someone\AppData\Local"
+        cands = sc.arduino_cli_candidates()
+        assert any(c.startswith(r"C:\Users\someone\AppData\Local\Programs\Arduino IDE")
+                   for c in cands), cands
+        assert not any("%" in c for c in cands)
+        os.environ.pop("LOCALAPPDATA")
+        cands = sc.arduino_cli_candidates()
+        assert not any("LOCALAPPDATA" in c or "%" in c for c in cands), cands
+        assert len(cands) == len(sc._ARDUINO_CLI_CANDIDATES) - 1
+        assert "Programs" not in sc.arduino_cli_help() or "%" not in sc.arduino_cli_help()
+    finally:
+        if saved is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = saved
+    print("15b) arduino-cli discovery: call-time only, per-user IDE path covered: PASS")
+
+
+def test_run_cli_is_quiet_and_has_no_stdin():
+    """Every arduino-cli launch gets the shared quiet STARTUPINFO (no console
+    flash over the GUI) and a closed stdin (no prompt can hang it)."""
+    import subprocess, sys
+    seen = {}
+    class FakeProc:
+        pid = 4242
+        returncode = 0
+        def communicate(self, timeout=None):
+            return "out", "err"
+    real = sc.subprocess.Popen
+    sc.subprocess.Popen = lambda cmd, **kw: seen.update(cmd=cmd, **kw) or FakeProc()
+    try:
+        rc, out, err = sc._run_cli(["cli", "compile"], 5)
+    finally:
+        sc.subprocess.Popen = real
+    assert (rc, out, err) == (0, "out", "err")
+    assert seen["stdin"] is subprocess.DEVNULL
+    if sys.platform == "win32":
+        assert "startupinfo" in seen and seen["creationflags"] & subprocess.CREATE_NO_WINDOW
+    print("16) arduino-cli launched with quiet STARTUPINFO and stdin closed: PASS")
+
+
+def test_upload_timeout_waits_for_avrdude():
+    """An upload that overruns must not leave avrdude writing while the operator
+    is told to power-cycle: the flashing tool is waited for, then reported."""
+    import os, sys, tempfile, time
+    if sys.platform != "win32":
+        print("17) upload timeout handling SKIPPED — Windows-only fixture")
+        return
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        print("17) upload timeout handling SKIPPED — psutil not installed")
+        return
+    saved = os.environ.get("PANOPTICON_ARDUINO_CLI")
+    tmp = tempfile.mkdtemp()
+    try:
+        # compile failure: message names the stage and carries the tool's stderr
+        _upload_fixture(tmp, "compile-fail")
+        ok, msg = sc.upload("// s", "COM99")
+        assert ok is False and "Compile failed" in msg and "fake compile error" in msg, msg
+
+        # compile timeout: safe to kill, and says nothing was flashed
+        _upload_fixture(tmp, "compile-hang")
+        t0 = time.monotonic()
+        ok, msg = sc.upload("// s", "COM99", compile_timeout_s=0.3)
+        assert ok is False and "during compile" in msg and "Nothing was flashed" in msg, msg
+        assert time.monotonic() - t0 < 5, "compile timeout did not stop the tool"
+
+        # upload timeout with a live avrdude grandchild: waited for, not killed
+        _upload_fixture(tmp, "upload-hang")
+        t0 = time.monotonic()
+        ok, msg = sc.upload("// s", "COM99", upload_timeout_s=0.3, flash_grace_s=15)
+        took = time.monotonic() - t0
+        assert ok is False and "during upload" in msg, msg
+        assert "avrdude finished" in msg, msg
+        assert took >= 1.0, f"did not wait for the flashing tool ({took:.1f} s)"
+        assert "Power-cycle" in msg
+
+        # grace exhausted while it still runs: the message says NOT to power-cycle
+        _upload_fixture(tmp, "upload-hang")
+        ok, msg = sc.upload("// s", "COM99", upload_timeout_s=0.3, flash_grace_s=0.2)
+        assert ok is False and "STILL RUNNING" in msg and "Do NOT power-cycle" in msg, msg
+        time.sleep(2.5)                       # let the stray ping copy exit
+    finally:
+        if saved is None:
+            os.environ.pop("PANOPTICON_ARDUINO_CLI", None)
+        else:
+            os.environ["PANOPTICON_ARDUINO_CLI"] = saved
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # The wait helper itself, with stand-ins: an exiting child is done, a
+    # child whose wait times out is reported, a vanished one is not.
+    class Exits:
+        def wait(self, timeout): return 0
+        def is_running(self): return False
+    class Stays:
+        def wait(self, timeout): raise TimeoutError()
+        def is_running(self): return True
+    class Vanished:
+        def wait(self, timeout): raise TimeoutError()
+        def is_running(self): raise ProcessLookupError()
+    still = sc._wait_for_flash_children([Exits(), Stays(), Vanished()], 0.05)
+    assert len(still) == 1 and isinstance(still[0], Stays)
+    print("17) upload timeout: compile killed, avrdude waited for, advice matches: PASS")
+
+
 # ── the sketch-swap invalidation rule (added 2026-09-04) ────────────────────
 # A calibration always flashes the recording-only sketch. If the stim editor is
 # not told, its _uploaded_ino still holds the paradigm, so Test finds canvas ==
@@ -384,16 +766,26 @@ def test_sketch_swap_invalidates_stale_upload():
 def main():
     test_start_resolution()
     test_chain_extraction_terminates()
+    test_structural_problems()
     test_waveform_encoding()
+    test_pulse_edges_do_not_reanchor_to_now()
     test_safe_pins()
     test_pin_conflicts()
     test_forbidden_pins()
+    test_pin_range()
+    test_parameter_ranges()
+    test_duration_rounding_parity()
     test_recording_only_sketch()
     test_durations()
     test_describe()
     test_generated_sketch_is_wellformed()
     test_ready_ack()
+    test_sketch_identity()
     test_sketch_swap_invalidates_stale_upload()
+    test_upload_sim_port_short_circuits()
+    test_arduino_cli_discovery()
+    test_run_cli_is_quiet_and_has_no_stdin()
+    test_upload_timeout_waits_for_avrdude()
     if _HAS_NUMPY:
         test_trace_locate()
         test_trace_ttl_matches_firmware()
