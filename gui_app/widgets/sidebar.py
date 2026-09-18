@@ -74,6 +74,9 @@ class SidebarWidget(QWidget):
             self._profile_warnings.append(msg)
         self._profile_combo.currentIndexChanged.connect(self._on_profile_changed)
         layout.addWidget(self._profile_combo)
+        # The fields are built below; the first profile's values are applied
+        # once they exist so the form is prefilled even before the main window
+        # selects the remembered profile.
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -97,19 +100,29 @@ class SidebarWidget(QWidget):
         form.setSpacing(6)
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
+        # Experimenter and assay have no built-in default: they are rig
+        # properties and come from the profile's metadata_defaults, so a
+        # shared codebase does not ship one operator's initials. The date is
+        # refreshed on read while the operator has not typed into it, because
+        # a GUI left open past midnight would otherwise file the session
+        # under the previous day.
         self._fields: dict[str, QLineEdit] = {}
+        self._user_edited: set[str] = set()
         defaults = [
-            ("date", datetime.now().strftime("%Y%m%d")),
+            ("date", self._today()),
             ("mouse_1", ""),
             ("mouse_2", ""),
-            ("assay", "open_field"),
-            ("experimenter", "IT"),
+            ("assay", ""),
+            ("experimenter", ""),
             ("cohort", ""),
             ("cage", ""),
             ("notes", ""),
         ]
         for name, default in defaults:
             field = QLineEdit(default)
+            # textEdited fires for keyboard input only, never for setText, so
+            # it separates operator intent from programmatic prefill.
+            field.textEdited.connect(lambda _text, n=name: self._user_edited.add(n))
             field.setStyleSheet(
                 "QLineEdit { background: #1a1a2e; color: #dcdcdc; border: 1px solid #444; "
                 "border-radius: 3px; padding: 4px 6px; font-size: 11px; }"
@@ -124,6 +137,8 @@ class SidebarWidget(QWidget):
 
         layout.addLayout(form)
         layout.addSpacing(12)
+        if self._profiles:
+            self._apply_profile(self._profiles[0])
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
@@ -348,15 +363,36 @@ class SidebarWidget(QWidget):
     def _on_profile_changed(self, index: int):
         if 0 <= index < len(self._profiles):
             profile = self._profiles[index]
-            self._apply_profile_dir(profile)
+            self._apply_profile(profile)
             _SETTINGS.setValue("profile_name", profile.name)
             self.profile_changed.emit(profile)
 
-    def _apply_profile_dir(self, profile: RigProfile):
+    def _apply_profile(self, profile: RigProfile):
+        """Take the output directory and the metadata defaults from a profile.
+
+        A metadata field the operator has typed into is left alone: the
+        profile supplies defaults, not overrides, and switching profiles must
+        not discard what was entered for this session.
+        """
         if profile.output_dir:
             self._output_dir = profile.output_dir
             self._dir_button.setText(self._truncate_path(self._output_dir))
             self._dir_button.setToolTip(self._output_dir)
+        for key, value in profile.metadata_defaults.items():
+            field = self._fields.get(key)
+            if field is not None and key not in self._user_edited:
+                field.setText("" if value is None else str(value))
+
+    @staticmethod
+    def _today() -> str:
+        return datetime.now().strftime("%Y%m%d")
+
+    def refresh_date(self):
+        """Set the date field to today unless the operator has typed into it.
+        Called on every read of the fields so a session started after
+        midnight is filed under the day it starts."""
+        if "date" not in self._user_edited:
+            self._fields["date"].setText(self._today())
 
     def select_profile(self, name: str) -> bool:
         """Select a profile by name without re-emitting profile_changed.
@@ -368,7 +404,7 @@ class SidebarWidget(QWidget):
                 self._profile_combo.blockSignals(True)
                 self._profile_combo.setCurrentIndex(i)
                 self._profile_combo.blockSignals(False)
-                self._apply_profile_dir(profile)
+                self._apply_profile(profile)
                 return True
         return False
 
@@ -401,6 +437,7 @@ class SidebarWidget(QWidget):
         return self._contrast_slider.value()
 
     def get_field_values(self) -> dict:
+        self.refresh_date()
         return {k: v.text() for k, v in self._fields.items()}
 
     def set_fields_editable(self, editable: bool):

@@ -23,6 +23,7 @@ never writes the operator's remembered profile.
 import os
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -460,6 +461,53 @@ def test_all_good_profiles_give_no_warnings():
     sb.close()
 
 
+# --------------------------------------------------------------------------
+# A5-04: the date refreshes while untouched; experimenter/assay come from the
+# profile's metadata_defaults and never overwrite what the operator typed.
+# --------------------------------------------------------------------------
+def _user_types(field, text):
+    field.setText(text)
+    field.textEdited.emit(text)
+
+
+def test_untouched_date_refreshes_on_read():
+    with _profiles_dir({"one.yaml": GOOD_PROFILE}):
+        sb = make_sidebar()
+    today = datetime.now().strftime("%Y%m%d")
+    sb._fields["date"].setText("19990101")          # stale, as if left open past midnight
+    check("untouched date refreshes to today on read",
+          sb.get_field_values()["date"] == today, sb._fields["date"].text())
+    _user_types(sb._fields["date"], "20200202")
+    check("a date the operator typed is kept",
+          sb.get_field_values()["date"] == "20200202", sb._fields["date"].text())
+    sb.close()
+
+
+def test_metadata_defaults_prefill_from_profile():
+    files = {"a_one.yaml": GOOD_PROFILE, "b_two.yaml": "name: two\n"}
+    with _profiles_dir(files):
+        sb = make_sidebar()
+        vals = sb.get_field_values()
+        check("experimenter prefilled from the first profile", vals["experimenter"] == "AB", vals["experimenter"])
+        check("assay prefilled from the first profile", vals["assay"] == "maze", vals["assay"])
+        check("no hardcoded initials anywhere", "IT" not in vals.values())
+
+        sb._profile_combo.setCurrentIndex(1)          # profile without metadata_defaults
+        vals = sb.get_field_values()
+        check("switching to a profile with blank defaults clears the prefill",
+              vals["experimenter"] == "" and vals["assay"] == "", repr(vals))
+
+        _user_types(sb._fields["experimenter"], "ZZ")
+        sb._profile_combo.setCurrentIndex(0)
+        vals = sb.get_field_values()
+        check("operator-typed experimenter survives a profile switch", vals["experimenter"] == "ZZ")
+        check("untouched assay follows the profile", vals["assay"] == "maze")
+
+        check("select_profile also applies metadata", sb.select_profile("two") and
+              sb.get_field_values()["assay"] == "")
+    sb.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -478,6 +526,8 @@ def main():
     test_malformed_profile_is_skipped_with_warning()
     test_no_loadable_profile_names_the_directory()
     test_all_good_profiles_give_no_warnings()
+    test_untouched_date_refreshes_on_read()
+    test_metadata_defaults_prefill_from_profile()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)
