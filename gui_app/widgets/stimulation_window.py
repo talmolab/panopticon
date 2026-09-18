@@ -483,6 +483,11 @@ class StimCanvas(QGraphicsView):
         if event.key() == Qt.Key_Delete:
             self._delete_selected()
             return
+        # Escape clears the selection and stops here. Left to propagate it
+        # reaches QDialog, whose default Escape handling hides the editor.
+        if event.key() == Qt.Key_Escape:
+            self.scene().clearSelection()
+            return
         if event.modifiers() & Qt.ControlModifier:
             if event.key() == Qt.Key_C:
                 self._copy_selected()
@@ -847,6 +852,12 @@ class StimulationWindow(QDialog):
         self._test_serial: TeensyController | None = None
         self._test_timer:  QTimer | None = None
         self._test_end_at: float | None = None
+        #: True once the canvas has changed since it was last saved or loaded.
+        #: Load asks before replacing a dirty canvas; closing the dialog only
+        #: hides it, so the canvas survives and close does not ask.
+        self._dirty = False
+        #: Kind of the status line currently shown; see _set_status.
+        self._status_kind = "info"
 
         self.setWindowTitle("Stimulation Editor")
         self.setMinimumSize(860, 560)
@@ -1013,31 +1024,44 @@ class StimulationWindow(QDialog):
 
     @pyqtSlot(int)
     def _on_starts_changed(self, n_stuck: int):
-        if n_stuck:
-            self._set_status(
-                f"{n_stuck} block(s) form a loop with no start — select one "
-                f"and tick 'Starting'.", error=True)
+        """Recompute the canvas diagnostic shown in the status line.
+
+        The wording comes from _blocking_problem, the same text Apply, Test
+        and Record refuse with, so the status can never describe a problem
+        differently from the dialog that later blocks on it. Priority: a
+        canvas error beats everything; a notice about the board (from
+        invalidate_upload or a failed upload) survives canvas edits; the
+        end-time line and a stale diagnostic are replaced freely.
+        """
+        problem = self._blocking_problem()
+        if problem:
+            first = problem.split("\n\n")[0]
+            self._set_status(first, error=True, kind="diagnostic")
+            self._status_lbl.setToolTip(problem)
             return
+        self._status_lbl.setToolTip("")
         blocks, edges = self._canvas.get_workflow()
-        clash = stim_compiler.pin_conflicts(blocks, edges)
-        if clash:
-            self._set_status(
-                f"Pin {', '.join(str(p) for p in clash)} is driven by two chains "
-                f"at once — they will fight.", error=True)
-            return
-        if any(b.get("end") for b in blocks) and \
-                stim_compiler.end_time_s(blocks, edges) is None:
+        end_t = stim_compiler.end_time_s(blocks, edges)
+        if any(b.get("end") for b in blocks) and end_t is None:
             self._set_status(
                 "The 'Ending' block is not reachable from any start — the "
-                "recording will not stop on its own.", error=True)
+                "recording will not stop on its own.", error=True,
+                kind="diagnostic")
             return
-        end_t = stim_compiler.end_time_s(blocks, edges)
+        if self._status_kind == "notice":
+            return
         if end_t:
-            self._set_status(f"Recording will stop {end_t:g} s after start.")
-        elif self._status_lbl.text().startswith(("The 'Ending'", "Recording will",
-                                                 "Invalid", "Pin")) \
-                or "loop with no start" in self._status_lbl.text():
-            self._set_status("")
+            self._set_status(f"Recording will stop {end_t:g} s after start.",
+                             kind="diagnostic")
+        elif self._status_kind == "diagnostic":
+            self._set_status("", kind="diagnostic")
+
+    def _on_canvas_modified(self):
+        self._dirty = True
+
+    def has_unsaved_changes(self) -> bool:
+        """True when the canvas changed since it was last saved or loaded."""
+        return self._dirty and bool(self._canvas.blocks())
 
     def end_time_s(self) -> float | None:
         """Seconds after record start at which the paradigm's end block finishes."""
@@ -1077,16 +1101,22 @@ class StimulationWindow(QDialog):
     def invalidate_upload(self, reason: str = ""):
         """Forget that this canvas is on the board, because it no longer is.
 
-        Called when something outside the editor reflashes the board. Without
-        it `provenance()` would keep reporting matches_uploaded_firmware: true
-        against firmware that no longer holds this paradigm, and a recording
-        made without re-applying would carry a confident but false record of
-        what the animal received. `None` — "unknown" — is the honest state.
+        Called when something outside the editor reflashes the board or fails
+        to. Test compares the canvas with `_uploaded_ino` to decide whether an
+        upload is needed, so a stale value lets Test drive a board whose
+        sketch has no chains and report nothing. `None` is the honest state.
+
+        The status names what each button does next rather than demanding a
+        re-Apply: the main window swaps sketches per acquisition on its own,
+        so Record needs no Apply unless the paradigm changed, while Test
+        always asks to upload once nothing is known to be on the board.
         """
         self._uploaded_ino = None
         self._set_status(
-            f"Board reflashed{' — ' + reason if reason else ''}. "
-            f"Press Apply again before recording.", error=True)
+            f"The board no longer holds this editor's last upload"
+            f"{' — ' + reason if reason else ''}. Record flashes the right "
+            f"sketch on its own; Test will ask to upload first.",
+            error=True, kind="notice")
 
     def is_uploading(self) -> bool:
         """True while arduino-cli is compiling/flashing the board.
@@ -1278,7 +1308,8 @@ class StimulationWindow(QDialog):
         if not ok:
             self._test_after_upload = False
             self._apply_failed = True
-            self._set_status("Upload failed — see details.", error=True)
+            self._set_status("Upload failed — see details.", error=True,
+                             kind="notice")
             QMessageBox.critical(self, "Upload failed", msg)
             return
         self._apply_failed = False
@@ -1324,12 +1355,19 @@ class StimulationWindow(QDialog):
         ino = self._compile()
         if ino != self._uploaded_ino:
             # The sequence lives in the sketch, so an un-uploaded edit would
-            # silently test the previous paradigm.
+            # silently test the previous paradigm. The wording says which case
+            # applies: nothing known on the board, or a canvas that drifted.
+            if self._uploaded_ino is None:
+                text = ("Nothing has been uploaded from this editor since the "
+                        "board was last flashed, so it may hold a different "
+                        "paradigm or none at all.\n\nUpload and then test? "
+                        "(~30 s)")
+            else:
+                text = ("The workflow has changed since the last upload, so the "
+                        "board is still running the previous paradigm.\n\n"
+                        "Upload and then test? (~30 s)")
             if QMessageBox.question(
-                self, "Upload first?",
-                "The workflow has changed since the last upload, so the board is "
-                "still running the previous paradigm.\n\nUpload and then test? "
-                "(~30 s)",
+                self, "Upload first?", text,
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
             ) != QMessageBox.Yes:
                 return
@@ -1424,7 +1462,7 @@ class StimulationWindow(QDialog):
                              "the board, so no stop was sent.", error=True)
         elif not stopped:
             self._set_status("STOP NOT CONFIRMED — stim may still be running.",
-                             error=True)
+                             error=True, kind="notice")
             QMessageBox.critical(
                 self, "Stim may still be running",
                 "The trigger board did not accept the stop command.\n\n"
@@ -1437,15 +1475,68 @@ class StimulationWindow(QDialog):
         return stopped
 
     def closeEvent(self, event):
-        if self._test_timer is not None:
-            self._end_test("Test stopped.")
-        super().closeEvent(event)
+        if not self._can_dismiss():
+            event.ignore()
+            return
+        # QDialog.closeEvent re-enters reject() and ignores the close while
+        # the dialog is still visible afterwards; with reject() routed to
+        # close() that nested call is a no-op and the dialog would never
+        # hide. done() is what reject() ends in: it hides and emits finished.
+        self.done(QDialog.Rejected)
+        event.accept()
 
-    def _set_status(self, text: str, error: bool = False):
+    def _set_status(self, text: str, error: bool = False, kind: str = "info"):
+        """Show text in the status line.
+
+        `kind` decides what may replace the text later: ``diagnostic`` is a
+        statement about the canvas and is recomputed on every edit; ``notice``
+        is a statement about the board (a reflash, a failed upload, a stop
+        that was not confirmed) and survives canvas edits until another
+        status is set explicitly; ``info`` is transient and yields to either.
+        """
         color = "#dd6666" if error else "#88aabb"
+        self._status_kind = kind
         self._status_lbl.setText(text)
         self._status_lbl.setStyleSheet(
             f"color: {color}; font-size: 11px; border: none;")
 
     def get_workflow(self) -> tuple[list[dict], list[dict]]:
         return self._canvas.get_workflow()
+
+    # ── dialog lifecycle ──────────────────────────────────────────────────────
+    def keyPressEvent(self, event):
+        # Escape never hides the editor. QDialog's default binds it to
+        # reject(), and a hidden editor with a test running has its only Stop
+        # control out of sight; here it only clears the canvas selection.
+        if event.key() == Qt.Key_Escape:
+            self._canvas.scene().clearSelection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def reject(self):
+        # Every way of dismissing the dialog goes through closeEvent, because
+        # QDialog.reject() hides without one and closeEvent is where a running
+        # test is stopped.
+        self.close()
+
+    def _can_dismiss(self) -> bool:
+        """Stop a running test and ask about unsaved work; False keeps the dialog.
+
+        Closing hides the dialog, so it acts as Stop Test; the dialog stays
+        up when the board did not confirm the stop, because the operator
+        must see the warning that stim may still be running. The dialog
+        outlives a close unless it is set to delete on close, in which case
+        the canvas goes with it and unsaved work is asked about.
+        """
+        if self.is_testing() and not self._end_test("Test stopped."):
+            return False
+        if self.testAttribute(Qt.WA_DeleteOnClose) and self.has_unsaved_changes():
+            if QMessageBox.question(
+                self, "Discard changes?",
+                "The canvas has changes that were not saved.\n\nClose and "
+                "discard them?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return False
+        return True
