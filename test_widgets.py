@@ -559,6 +559,39 @@ def test_output_dir_is_elided_to_fit_the_button():
     sb.close()
 
 
+# --------------------------------------------------------------------------
+# A5-09: sensor aspect and column count are settings, not constants.
+# --------------------------------------------------------------------------
+def test_camera_aspect_and_columns_are_configurable():
+    grid = CameraGridWidget()
+    grid.setup_grid(6)
+    check("default grid aspect is the Basler 3x2 shape", abs(grid.grid_aspect() - 2.4) < 1e-9)
+    grid.set_camera_aspect(1600, 1200)
+    check("4:3 sensors give a 2.0 grid aspect at 3x2", abs(grid.grid_aspect() - 2.0) < 1e-9,
+          str(grid.grid_aspect()))
+    grid.set_columns(2)
+    grid.setup_grid(4)
+    positions = [grid._layout.getItemPosition(grid._layout.indexOf(c))[:2] for c in grid._cells]
+    check("two columns lay four cameras out 2x2",
+          positions == [(0, 0), (0, 1), (1, 0), (1, 1)], repr(positions))
+    check("2x2 of 4:3 sensors is a 4:3 grid", abs(grid.grid_aspect() - 4 / 3) < 1e-9)
+    cols = [grid._layout.columnStretch(c) for c in range(grid._layout.columnCount())]
+    check("third column from the earlier 3-wide grid holds no stretch",
+          cols[:2] == [1, 1] and all(c == 0 for c in cols[2:]), repr(cols))
+    for bad in ((0, 1200), (1920, 0)):
+        try:
+            grid.set_camera_aspect(*bad)
+            check(f"set_camera_aspect{bad} refused", False)
+        except ValueError:
+            check(f"set_camera_aspect{bad} refused", True)
+    try:
+        grid.set_columns(0)
+        check("set_columns(0) refused", False)
+    except ValueError:
+        check("set_columns(0) refused", True)
+    grid.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -581,6 +614,7 @@ def main():
     test_metadata_defaults_prefill_from_profile()
     test_thumb_follows_silent_state_changes()
     test_output_dir_is_elided_to_fit_the_button()
+    test_camera_aspect_and_columns_are_configurable()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)

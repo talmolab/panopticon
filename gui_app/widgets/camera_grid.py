@@ -106,6 +106,10 @@ class CameraCell(QWidget):
 
 
 class CameraGridWidget(QWidget):
+    #: Defaults for a rig that has not declared its sensor shape or column
+    #: count. Both are instance settings (set_camera_aspect, set_columns) so
+    #: a rig with 4:3 or square sensors, or four cameras, gets an honest
+    #: window aspect instead of the Basler ace shape baked in.
     COLS = 3
     CAM_ASPECT = 1920 / 1200
 
@@ -117,12 +121,27 @@ class CameraGridWidget(QWidget):
         self._cells: list[CameraCell] = []
         self._zoomed_index: int = -1
         self._num_cameras = 0
+        self._cols = self.COLS
+        self._cam_aspect = self.CAM_ASPECT
+
+    def set_camera_aspect(self, frame_width: int, frame_height: int):
+        """Declare the sensor shape the window is sized for (profile
+        frame_width/frame_height). Takes effect on the next grid_aspect."""
+        if frame_width <= 0 or frame_height <= 0:
+            raise ValueError(f"frame size must be positive, got {frame_width}x{frame_height}")
+        self._cam_aspect = frame_width / frame_height
+
+    def set_columns(self, cols: int):
+        """Declare the column count. Takes effect on the next setup_grid."""
+        if cols <= 0:
+            raise ValueError(f"column count must be positive, got {cols}")
+        self._cols = int(cols)
 
     def grid_aspect(self) -> float:
         if self._num_cameras == 0:
             return 2.4
-        rows = math.ceil(self._num_cameras / self.COLS)
-        return (self.COLS * self.CAM_ASPECT) / rows
+        rows = math.ceil(self._num_cameras / self._cols)
+        return (self._cols * self._cam_aspect) / rows
 
     def _reset_stretches(self):
         """Zero every row and column stretch the layout has ever held.
@@ -147,17 +166,17 @@ class CameraGridWidget(QWidget):
         self._num_cameras = num_cameras
         self._reset_stretches()
 
-        rows = math.ceil(num_cameras / self.COLS) if num_cameras > 0 else 1
+        rows = math.ceil(num_cameras / self._cols) if num_cameras > 0 else 1
 
         for i in range(num_cameras):
             cell = CameraCell(i, self)
-            row, col = divmod(i, self.COLS)
+            row, col = divmod(i, self._cols)
             self._layout.addWidget(cell, row, col)
             self._cells.append(cell)
 
         for r in range(rows):
             self._layout.setRowStretch(r, 1)
-        for c in range(self.COLS):
+        for c in range(self._cols):
             self._layout.setColumnStretch(c, 1)
 
     def toggle_zoom(self, index: int):
@@ -166,13 +185,13 @@ class CameraGridWidget(QWidget):
             self._zoomed_index = -1
             self._reset_stretches()
             for i, cell in enumerate(self._cells):
-                row, col = divmod(i, self.COLS)
+                row, col = divmod(i, self._cols)
                 self._layout.addWidget(cell, row, col)
                 cell.setVisible(True)
-            rows = math.ceil(self._num_cameras / self.COLS)
+            rows = math.ceil(self._num_cameras / self._cols)
             for r in range(rows):
                 self._layout.setRowStretch(r, 1)
-            for c in range(self.COLS):
+            for c in range(self._cols):
                 self._layout.setColumnStretch(c, 1)
         else:
             # Zoom — remove all from layout, add only the target at (0,0)
@@ -181,12 +200,9 @@ class CameraGridWidget(QWidget):
                 self._layout.removeWidget(cell)
                 cell.setVisible(i == index)
             self._layout.addWidget(self._cells[index], 0, 0)
-            # Clear stretches for unused rows/cols
-            rows = math.ceil(self._num_cameras / self.COLS)
-            for r in range(rows):
-                self._layout.setRowStretch(r, 0)
-            for c in range(self.COLS):
-                self._layout.setColumnStretch(c, 0)
+            # Only (0,0) keeps a stretch; every other row and column is zeroed
+            # so the zoomed pane takes the whole grid.
+            self._reset_stretches()
             self._layout.setRowStretch(0, 1)
             self._layout.setColumnStretch(0, 1)
 
