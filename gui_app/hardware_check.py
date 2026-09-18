@@ -11,6 +11,7 @@ or a compiled-in feature list. REASON: the whole point of a preflight is to
 disagree with the machine's own optimism; a check that cannot fail is worse
 than no check, because the warning it owns never fires.
 """
+import os
 import shutil
 import subprocess
 import time
@@ -99,20 +100,46 @@ def check_nvenc_runtime() -> bool:
 _ffmpeg_nvenc_ok: bool | None = None
 
 
-def estimate_disk_speed(target_dir: Path, size_mb: int = 16) -> float:
+#: Chunk written repeatedly to make up the test size. Random once and reused,
+#: because generating 256 MB of randomness costs more than the write it is
+#: meant to time, and NTFS does not compress by default so repetition is free.
+_SPEED_TEST_CHUNK_MB = 16
+
+
+def estimate_disk_speed(target_dir: Path | None, size_mb: int = 256) -> float:
+    """Sustained write rate of the output drive in MB/s, or -1 when unknown.
+
+    RULE: write at least 256 MB and `os.fsync` before stopping the clock.
+    REASON: a 16 MB write followed by `flush()` only reaches the OS page cache
+    and finishes in a few milliseconds on any drive, so the rate came back in
+    GB/s on every machine and the `< 500 MB/s` warning could not fire on the
+    slow disk it exists for.
+
+    RULE: no target directory means no test. REASON: the fallback was the
+    current working directory — the repository — which measures a different
+    drive from the one the recording lands on and leaves a large file behind
+    if the process dies mid-write.
+    """
+    if target_dir is None:
+        return -1.0
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         return -1.0
     test_file = target_dir / ".panopticon_speed_test"
-    data = np.random.bytes(size_mb * 1024 * 1024)
+    chunk_mb = min(_SPEED_TEST_CHUNK_MB, max(1, size_mb))
+    chunk = np.random.bytes(chunk_mb * 1024 * 1024)
+    chunks = max(1, size_mb // chunk_mb)
+    written_mb = chunk_mb * chunks
     try:
         t0 = time.perf_counter()
         with open(test_file, "wb") as f:
-            f.write(data)
+            for _ in range(chunks):
+                f.write(chunk)
             f.flush()
+            os.fsync(f.fileno())
         elapsed = time.perf_counter() - t0
-        return size_mb / elapsed if elapsed > 0 else -1.0
+        return written_mb / elapsed if elapsed > 0 else -1.0
     except OSError:
         return -1.0
     finally:
@@ -149,7 +176,8 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
 
     target = Path(output_dir) if output_dir else Path(".")
     report.disk_free_gb = _get_disk_free(target)
-    report.disk_write_mb_s = estimate_disk_speed(target)
+    # Only the configured output drive is measured; see estimate_disk_speed.
+    report.disk_write_mb_s = estimate_disk_speed(target if output_dir else None)
     report.has_nvenc = check_nvenc()
     report.nvenc_runtime = check_nvenc_runtime()
     _ffmpeg_nvenc_ok = report.has_nvenc
@@ -632,10 +660,14 @@ def check_capacity(n_cams: int, width: int, height: int,
                 f"Disk is tight: a {minutes:g}-minute recording needs "
                 f"~{need_disk_gb:.0f} GiB of {free_gb:.0f} GiB free.")
     if not encodes_realtime and per_s / 2 ** 30 > 1.5:
+        # RULE: state the rule, not this rig's drive models. REASON: gui_app is
+        # shared with other installs, and naming "both NVMe drives" and a
+        # "990 PRO" tells an operator elsewhere to do something impossible.
         warnings.append(
-            f"Raw capture will write {per_s / 2**30:.2f} GiB/s. Spread the "
-            f"output across both NVMe drives — a single 990 PRO drops to "
-            f"~1.6 GB/s once its SLC cache is exhausted.")
+            f"Raw capture will write {per_s / 2**30:.2f} GiB/s. Consumer NVMe "
+            f"drives fall to ~1-2 GB/s once their SLC cache is exhausted, so "
+            f"use a drive rated for sustained writes at this rate, or split "
+            f"the cameras across drives.")
     return blocking, warnings
 
 

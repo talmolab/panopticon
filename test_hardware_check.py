@@ -313,6 +313,44 @@ def test_thread_exposes_a_non_shadowing_signal():
           "compatibility signal: PASS")
 
 
+def test_disk_test_is_real_and_optional():
+    import tempfile
+    from pathlib import Path
+
+    assert hw.estimate_disk_speed(None) == -1.0, (
+        "no output directory means no test, never a write into the repo")
+    tmp = Path(tempfile.mkdtemp(prefix="p9disk_"))
+    try:
+        rate = hw.estimate_disk_speed(tmp, size_mb=32)
+        assert rate > 0, rate
+        assert not list(tmp.iterdir()), "the test file must be removed"
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
+    assert hw.run_hardware_check("").disk_write_mb_s == -1.0
+    print("13) the disk test fsyncs, cleans up, and is skipped when no output "
+          "directory is configured: PASS")
+
+
+def test_raw_warning_states_a_rule_not_this_rig():
+    monkey: dict = {}
+    stub_sessions(monkey, 0)
+    stub_bench(-1.0)
+    try:
+        _b, warnings = hw.check_capacity(
+            n_cams=9, width=W, height=H, ring_n=RING_N,
+            max_num_buffer=MAX_NUM_BUFFER, realtime=False, output_dir="",
+            fps=FPS, encoder="raw")
+    finally:
+        restore(monkey)
+    text = " ".join(warnings)
+    assert "GiB/s" in text, text
+    for rig_specific in ("990 PRO", "both NVMe"):
+        assert rig_specific not in text, text
+    print("14) the raw-capture warning states the sustained-write rule "
+          "instead of this rig's drive models: PASS")
+
+
 def main():
     test_unavailable_is_not_a_pass()
     test_shortfall_and_surplus()
@@ -326,6 +364,8 @@ def main():
     test_select_encoder_installs_the_factory()
     test_report_text_states_the_measured_limits()
     test_thread_exposes_a_non_shadowing_signal()
+    test_disk_test_is_real_and_optional()
+    test_raw_warning_states_a_rule_not_this_rig()
     print("\nALL HARDWARE CHECK TESTS PASS")
 
 
