@@ -12,7 +12,9 @@
 #
 # TRADE-OFF: this bypasses `uv run`, so it does NOT sync dependencies first. If
 # pyproject.toml changes, run `uv sync` once. _launch.bat is kept for exactly
-# that case -- and for when you want to SEE the console output while debugging.
+# that case -- and for seeing console output while debugging: it runs
+# python.exe, not pythonw.exe, and pauses on a non-zero exit so a failure
+# before the log file opens stays on screen.
 [CmdletBinding()]
 param(
     [string] $ShortcutPath = "$([Environment]::GetFolderPath('Desktop'))\Panopticon.lnk",
@@ -55,4 +57,5 @@ Write-Host "  Args   : $($sc.Arguments)"
 Write-Host "  WorkDir: $($sc.WorkingDirectory)"
 Write-Host ""
 Write-Host "No console window will appear. If the app fails to start and you"
-Write-Host "need to see why, run _launch.bat instead -- it keeps the console."
+Write-Host "need to see why, run _launch.bat instead -- it keeps the console"
+Write-Host "open and pauses on failure so the traceback can be read."
