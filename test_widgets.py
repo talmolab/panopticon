@@ -40,6 +40,7 @@ import gui_app.session_config as session_config
 from gui_app.widgets import sidebar as sidebar_module
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.camera_grid import CameraGridWidget
+from gui_app.widgets.coverage_graph import CoverageGraphWidget
 from gui_app.widgets.toggle_switch import ToggleSwitch
 
 _TMP = tempfile.mkdtemp(prefix="panopticon_widgets_")
@@ -592,6 +593,62 @@ def test_camera_aspect_and_columns_are_configurable():
     grid.close()
 
 
+# --------------------------------------------------------------------------
+# A5-10: the coverage graph reads the detector directly and keeps no dead
+# fields; a renamed detector attribute fails loudly.
+# --------------------------------------------------------------------------
+class _DetectorStub:
+    """The attributes BoardDetector.reset()/_update_ready() define."""
+
+    def __init__(self, n=3):
+        self.n = n
+        self.glow = np.zeros(n)
+        self.shared = np.zeros((n, n), dtype=int)
+        self.shared[0, 1] = self.shared[1, 0] = 25
+        self.per_cam_frames = np.array([50, 40, 0])
+        self.per_cam_covis = np.array([999, 999, 999])   # display-only, must not be shown
+        self.optimal_shared = 200
+        self.min_per_cam_shared = 120
+        self.grid_covered = np.zeros((n, 2, 2), dtype=bool)
+        self.grid_cells_hit = np.array([4, 3, 0])
+        self.MIN_GRID_CELLS = 3
+        self.components = [[0, 1], [2]]
+        self.ready = False
+
+
+def test_coverage_graph_reads_detector_directly():
+    g = CoverageGraphWidget()
+    g.resize(228, 210)
+    g.show()
+    g.setup(3)
+    check("setup starts with no groups", g._components == [])
+    g.grab()                                  # paints before the first tick
+    det = _DetectorStub()
+    g.update_from(det)
+    check("per-camera counter is the READY one, not the display one",
+          list(g._per_cam) == [50, 40, 0], repr(g._per_cam))
+    check("target comes from the detector", g._target == 120)
+    check("grid threshold comes from the detector", g._min_grid_cells == 3)
+    check("groups snapshot the detector's components", g._components == [[0, 1], [2]])
+    check("no dead bridge/min_edge fields",
+          not hasattr(g, "_bridge") and not hasattr(g, "_min_edge"))
+    shot = g.grab()
+    check("graph paints with two groups", not shot.isNull())
+    g.setup(4)
+    check("setup clears the previous session's groups", g._components == [])
+
+    class Renamed(_DetectorStub):
+        pass
+    bad = Renamed()
+    del bad.per_cam_frames
+    try:
+        g.update_from(bad)
+        check("a renamed detector attribute fails loudly", False)
+    except AttributeError:
+        check("a renamed detector attribute fails loudly", True)
+    g.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -615,6 +672,7 @@ def main():
     test_thumb_follows_silent_state_changes()
     test_output_dir_is_elided_to_fit_the_button()
     test_camera_aspect_and_columns_are_configurable()
+    test_coverage_graph_reads_detector_directly()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)
