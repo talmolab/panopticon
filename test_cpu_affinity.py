@@ -318,6 +318,93 @@ check(n, "only offered selectors are written",
       written == {"FrameStart", "FrameBurstStart"}, str(written))
 
 # ===========================================================================
+# GigE transport knobs: GevSCFTD, GevSCBWR/GevSCBWRA, and GevSCFJM in
+# stream_stats. Opt-in, no GUI caller; the contract pinned here is what P02
+# and P19 will call.
+# ===========================================================================
+
+# 13 -- set_transmission_delay writes GevSCFTD and returns the read-back; the
+#       module-level spelling is the same function.
+n += 1
+cam = StubCamera({"GevSCFTD": StubNode(0)})
+got = basler.set_transmission_delay(cam, 12500)
+check(n, "set_transmission_delay writes GevSCFTD and returns it",
+      got == 12500 and cam._nodes["GevSCFTD"].writes == [12500]
+      and basler.set_transmission_delay == B.set_transmission_delay, f"got={got}")
+
+# 14 -- a camera without the node is a configuration error naming the node;
+#       a write error propagates.
+n += 1
+raised = None
+try:
+    B.set_transmission_delay(StubCamera({}), 1)
+except RuntimeError as e:
+    raised = e
+wboom = RuntimeError("OutOfRangeException")
+raised2 = None
+try:
+    B.set_transmission_delay(StubCamera({"GevSCFTD": StubNode(0, fail=wboom)}), 1)
+except Exception as e:
+    raised2 = e
+check(n, "missing GevSCFTD raises naming the node; write error propagates",
+      raised is not None and "GevSCFTD" in str(raised) and raised2 is wboom,
+      f"{raised} / {raised2!r}")
+
+# 15 -- set_bandwidth_reserve selects Manual mode first, writes both knobs,
+#       and reports the assigned bandwidth when the camera publishes it.
+n += 1
+cam = StubCamera({"BandwidthReserveMode": StubNode("Standard"),
+                  "GevSCBWR": StubNode(5), "GevSCBWRA": StubNode(3),
+                  "GevSCBWA": StubNode(118_000_000)})
+out = B.set_bandwidth_reserve(cam, percent=15, accumulation=6)
+check(n, "set_bandwidth_reserve: Manual mode first, both knobs written, GevSCBWA reported",
+      cam._nodes["BandwidthReserveMode"].writes == ["Manual"]
+      and out.get("GevSCBWR") == 15 and out.get("GevSCBWRA") == 6
+      and out.get("GevSCBWA") == 118_000_000
+      and out.get("BandwidthReserveMode") == "Manual", str(out))
+
+# 16 -- None leaves a knob alone; both None writes nothing at all (not even
+#       the mode), so an unset profile is a true no-op.
+n += 1
+cam = StubCamera({"BandwidthReserveMode": StubNode("Standard"),
+                  "GevSCBWR": StubNode(5), "GevSCBWRA": StubNode(3)})
+out_none = B.set_bandwidth_reserve(cam)
+out_one = B.set_bandwidth_reserve(cam, percent=20)
+check(n, "set_bandwidth_reserve: None leaves alone, all-None is a no-op",
+      out_none == {} and cam._nodes["BandwidthReserveMode"].writes == ["Manual"]
+      and cam._nodes["GevSCBWRA"].writes == [] and out_one.get("GevSCBWR") == 20
+      and "GevSCBWRA" not in out_one, f"{out_none} / {out_one}")
+
+# 17 -- a camera without the reserve nodes (USB, or Manual mode absent)
+#       raises for the knob, but the mode node is optional.
+n += 1
+raised = None
+try:
+    B.set_bandwidth_reserve(StubCamera({"GevSCBWR": StubNode(5)}), accumulation=4)
+except RuntimeError as e:
+    raised = e
+ok_no_mode = B.set_bandwidth_reserve(StubCamera({"GevSCBWR": StubNode(5)}), percent=7)
+check(n, "missing GevSCBWRA raises; absent BandwidthReserveMode is tolerated",
+      raised is not None and "GevSCBWRA" in str(raised)
+      and ok_no_mode == {"GevSCBWR": 7}, f"{raised} / {ok_no_mode}")
+
+# 18 -- stream_stats reads GevSCFJM and the transport knobs from the camera
+#       node map when present, and omits them when absent, next to the
+#       stream-grabber counters.
+n += 1
+cam = StubCamera({"GevSCFJM": StubNode(48_000), "GevSCFTD": StubNode(0),
+                  "GevSCBWR": StubNode(10)},
+                 sg_nodes={"Statistic_Failed_Buffer_Count": StubNode(0),
+                           "Statistic_Resend_Request_Count": StubNode(11)})
+st = B().stream_stats(cam)
+st_bare = B().stream_stats(StubCamera({}, sg_nodes={}))
+check(n, "stream_stats carries GevSCFJM and the knobs when present, omits when absent",
+      st.get("GevSCFJM") == 48_000 and st.get("GevSCFTD") == 0
+      and st.get("GevSCBWR") == 10 and "GevSCBWRA" not in st
+      and st.get("Resend_Request_Count") == 11 and st.get("Failed_Buffer_Count") == 0
+      and st_bare == {}, f"{st} / {st_bare}")
+
+# ===========================================================================
 # cpu_affinity: efficiency-class parsing on hosts this machine is not
 # (A3-23 top class only, A3-24 processor groups)
 # ===========================================================================
@@ -340,14 +427,14 @@ def cpu_set_buffer(spec, **kw):
 P285K = [0, 1, 10, 11, 12, 13, 22, 23]
 two_class = cpu_set_buffer([(c, 1 if c in P285K else 0) for c in range(24)])
 
-# 13 -- two classes: the top class is the P-core set, exactly as before.
+# 19 -- two classes: the top class is the P-core set, exactly as before.
 n += 1
 r = ca.classify_cpu_sets(two_class)
 check(n, "two-class host: top class is the P-core set",
       r.fast == P285K and r.slow == [c for c in range(24) if c not in P285K]
       and r.groups == {0} and r.reason == "", f"fast={r.fast} reason={r.reason!r}")
 
-# 14 -- three classes (LP-E = 0, E = 1, P = 2): ONLY class 2 is fast; the
+# 20 -- three classes (LP-E = 0, E = 1, P = 2): ONLY class 2 is fast; the
 #       E-cores in the middle class must not be pinned as P-cores.
 n += 1
 three_class = cpu_set_buffer([(c, 2) for c in range(0, 12)]        # 6 P-cores x2 threads
@@ -358,12 +445,12 @@ check(n, "three-class host: only the top class is fast, both lower classes are s
       r.fast == list(range(12)) and r.slow == list(range(12, 22))
       and sorted(r.by_class) == [0, 1, 2], f"fast={r.fast} slow={r.slow}")
 
-# 15 -- the middle class is never in `fast` even when it is the largest class.
+# 21 -- the middle class is never in `fast` even when it is the largest class.
 n += 1
 check(n, "E-cores (middle class) excluded from the P-core set",
       not (set(range(12, 20)) & set(r.fast)), str(r.fast))
 
-# 16 -- more than one processor group: indices repeat per group and a 64-bit
+# 22 -- more than one processor group: indices repeat per group and a 64-bit
 #       mask cannot address the machine, so pinning is refused with a reason.
 n += 1
 multi_group = cpu_set_buffer([(c, 1 if c < 8 else 0, 0) for c in range(64)]
@@ -374,20 +461,20 @@ check(n, "multiple processor groups disable pinning",
       and "processor groups" in r.reason and r.ids == {},
       f"fast={r.fast} reason={r.reason!r}")
 
-# 17 -- the log line names the groups so the host is recognisable.
+# 23 -- the log line names the groups so the host is recognisable.
 n += 1
 line = ca.describe_classes(r)
 check(n, "describe_classes names every class and the group count",
       "class 0:" in line and "class 1:" in line and "processor groups [0, 1]" in line
       and "no pinning" in line, line)
 
-# 18 -- one class: not hybrid, nothing to prefer.
+# 24 -- one class: not hybrid, nothing to prefer.
 n += 1
 r = ca.classify_cpu_sets(cpu_set_buffer([(c, 0) for c in range(16)]))
 check(n, "single class: not hybrid, empty P-core set with reason",
       r.fast == [] and r.slow == [] and "not hybrid" in r.reason, r.reason)
 
-# 19 -- the process affinity mask prunes P-cores the process may not use, and
+# 25 -- the process affinity mask prunes P-cores the process may not use, and
 #       an empty intersection refuses rather than pins partially.
 n += 1
 mask = sum(1 << c for c in range(24) if c not in (0, 1))
@@ -397,7 +484,7 @@ check(n, "process mask prunes the P-core set; empty intersection refuses",
       r.fast == [10, 11, 12, 13, 22, 23] and r2.fast == []
       and "process mask" in r2.reason, f"{r.fast} / {r2.reason!r}")
 
-# 20 -- records are walked by their own Size field (a newer Windows may grow
+# 26 -- records are walked by their own Size field (a newer Windows may grow
 #       the struct) and records of another Type are skipped.
 n += 1
 grown = cpu_set_buffer([(c, 1 if c in P285K else 0) for c in range(24)], size=40)
@@ -406,7 +493,7 @@ r = ca.classify_cpu_sets(foreign + grown)
 check(n, "variable record size honoured, non-CPU-set records skipped",
       r.fast == P285K and 99 not in r.slow, f"fast={r.fast}")
 
-# 21 -- CPU Set ids are kept per logical CPU (SetThreadSelectedCpuSets takes
+# 27 -- CPU Set ids are kept per logical CPU (SetThreadSelectedCpuSets takes
 #       ids, not indices) and a truncated buffer does not raise.
 n += 1
 r = ca.classify_cpu_sets(two_class)
@@ -415,7 +502,7 @@ check(n, "CPU Set ids mapped per logical CPU; truncated buffer parses what it ca
       r.ids[10] == 266 and len(r.ids) == 24 and len(truncated.by_class) >= 1,
       f"ids[10]={r.ids.get(10)} n={len(r.ids)}")
 
-# 22 -- the live path on this host: enumerates without raising and agrees
+# 28 -- the live path on this host: enumerates without raising and agrees
 #       with its own classification (any Windows host, hybrid or not).
 n += 1
 live = ca.performance_cores()
@@ -455,7 +542,7 @@ t = threading.Thread(target=_knob_body)
 t.start()
 t.join(10)
 
-# 23 -- CPU Set ids come from the enumeration, an unknown CPU never pins, and
+# 29 -- CPU Set ids come from the enumeration, an unknown CPU never pins, and
 #       restrict/clear report booleans (True on a hybrid Windows host).
 n += 1
 hybrid = bool(ca.performance_cores())
@@ -467,7 +554,7 @@ check(n, "CPU Sets helpers: ids from enumeration, unknown CPU refused, clear wor
       and knob_out.get("clear") is True,
       f"{ {k: knob_out.get(k) for k in ('ids', 'restrict', 'clear', 'unknown')} }")
 
-# 24 -- the power-throttling opt-out and its reset both take on Windows.
+# 30 -- the power-throttling opt-out and its reset both take on Windows.
 n += 1
 check(n, "power-throttling opt-out and system reset return booleans (True on Windows)",
       isinstance(knob_out.get("throttle_off"), bool)
@@ -475,7 +562,7 @@ check(n, "power-throttling opt-out and system reset return booleans (True on Win
       and (knob_out.get("throttle_off") is True) == (sys.platform == "win32"),
       f"off={knob_out.get('throttle_off')} sys={knob_out.get('throttle_sys')}")
 
-# 25 -- MMCSS registration hands back a handle that revert accepts; reverting
+# 31 -- MMCSS registration hands back a handle that revert accepts; reverting
 #       nothing is False rather than an error.
 n += 1
 h = knob_out.get("mmcss")
