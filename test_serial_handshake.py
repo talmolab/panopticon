@@ -230,6 +230,31 @@ def test_trailing_newline():
     print("7) config command is newline-terminated: PASS")
 
 
+def test_reopen_failure_and_error_text():
+    """A reopen that fails ends the start with False, and open() keeps the
+    reason so the operator can tell a missing port from a held one."""
+    c, log, state = controller(lambda cmd, gen: b"")
+    c.open = lambda retries=10: False
+    assert c.start_triggers(PINS, 100) is False, "recorded with no port at all"
+
+    import gui_app.serial_controller as scm
+    real_serial, real_sleep = scm.serial.Serial, scm.time.sleep
+    attempts = []
+    def failing_serial(**kw):
+        attempts.append(kw["port"])
+        raise SerialException("could not open port 'COM9': PermissionError(13)")
+    scm.serial.Serial, scm.time.sleep = failing_serial, lambda s: None
+    try:
+        fresh = TeensyController(port="COM9")
+        assert fresh.open(retries=3) is False
+        assert len(attempts) == 3, attempts
+        assert "PermissionError" in fresh.last_error, fresh.last_error
+        assert fresh.REOPEN_RETRIES <= 3, "in-start reopen would block the UI too long"
+    finally:
+        scm.serial.Serial, scm.time.sleep = real_serial, real_sleep
+    print("10) reopen failure -> start False; open() records the error text: PASS")
+
+
 def main():
     test_confirmed_no_reset()
     test_retry_after_reset_succeeds()
@@ -241,6 +266,7 @@ def main():
     test_trailing_newline()
     test_stop_is_confirmed_on_rdy_firmware()
     test_stop_failure_paths_return_false()
+    test_reopen_failure_and_error_text()
     print("\nALL SERIAL HANDSHAKE TESTS PASS")
 
 

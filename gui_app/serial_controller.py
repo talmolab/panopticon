@@ -44,11 +44,17 @@ class TeensyController:
     # The budget is shorter than ACK_TIMEOUT because a stop is issued on the UI
     # thread at the end of every acquisition and at quit.
     STOP_ACK_TIMEOUT = 2.0
+    # Attempts for the reopen inside start_triggers(); the eager open at launch
+    # keeps its own, longer count via open(retries=...).
+    REOPEN_RETRIES = 3
 
     def __init__(self, port: str = "COM3", baudrate: int = 115200):
         self._port = port
         self._baudrate = baudrate
         self._ser = None
+        #: Text of the SerialException from the most recent failed open(), for
+        #: the caller's dialog; None after a successful open.
+        self.last_error: str | None = None
         # True once ANY `RDY` line has been seen from this board, matching or
         # not. A board that answers `RDY 6 0` to a 100 fps request has
         # mis-parsed the config, so it must be refused rather than treated as
@@ -67,6 +73,15 @@ class TeensyController:
         return self._speaks_rdy
 
     def open(self, retries: int = 10) -> bool:
+        """Open the port, retrying once a second. False after `retries` failures.
+
+        The text of the last SerialException is kept in ``last_error`` and
+        printed once, because pyserial folds the cause into the message
+        ("could not open port ... FileNotFoundError" for a wrong COM number or an
+        unplugged board, "PermissionError" for a port held by another program)
+        and the two need different actions from the operator.
+        """
+        self.last_error = None
         for _ in range(retries):
             try:
                 # NOTE: this pulses DTR and resets the board. That reset is
@@ -86,8 +101,11 @@ class TeensyController:
                                           timeout=0.1, write_timeout=1.0)
                 time.sleep(1.0)
                 return True
-            except serial.SerialException:
+            except serial.SerialException as e:
+                self.last_error = str(e)
                 time.sleep(1)
+        print(f"[teensy] could not open {self._port} after {retries} attempt(s): "
+              f"{self.last_error}", flush=True)
         return False
 
     def start_triggers(self, pins: list[int], fps: int) -> bool:
@@ -107,8 +125,11 @@ class TeensyController:
 
         print("[teensy] no ack — reopening port to force a board reset", flush=True)
         self.close()
-        if not self.open():
-            print("[teensy] could not reopen port", flush=True)
+        # Few retries here: this runs on the UI thread at Record, and the port
+        # was open a moment ago, so a failure now is a vanished or seized
+        # device that ten more seconds of retrying cannot bring back.
+        if not self.open(retries=self.REOPEN_RETRIES):
+            print(f"[teensy] could not reopen port: {self.last_error}", flush=True)
             return False
         if self._send(pins, fps):
             return True
