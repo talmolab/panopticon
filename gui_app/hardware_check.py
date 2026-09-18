@@ -205,6 +205,40 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
 
 _nvenc_sessions: int | None = None    # highest count CONFIRMED grantable
 _nvenc_saturated = False              # last probe stopped at its limit, not at a failure
+_nvenc_probe_error = ""               # why the last probe could not answer at all
+
+
+def nvenc_probe_error() -> str:
+    """Why the last session probe could not answer; '' when it did.
+
+    A probe that could not run is NOT the same answer as "the driver granted
+    N". The preflight warns on the first and refuses on the second, so the two
+    must be distinguishable by the caller.
+    """
+    return _nvenc_probe_error
+
+
+def invalidate_nvenc_cache(reason: str = "") -> None:
+    """Forget the cached session count so the next preflight re-probes.
+
+    RULE: an NVENC init failure during a recording invalidates this cache.
+    REASON: the cache keeps the HIGHEST count ever confirmed, and the early
+    return means that once a probe granted enough sessions no later Record
+    re-probes. Sessions taken afterwards by another process — an orphaned
+    h264_nvenc ffmpeg from a tail merge, a browser's hardware encode — are
+    then invisible to preflight, while the router's partial-failure path drops
+    each camera beyond the cap onto raw.bin at ~129 GiB per 10 min with the
+    4.6 KB/frame disk budget.
+
+    Sessions are free once a recording has finished, so calling this at the
+    end of an acquisition that reported an encoder failure costs one probe and
+    keeps the next start honest.
+    """
+    global _nvenc_sessions, _nvenc_saturated, _nvenc_probe_error
+    if _nvenc_sessions is not None:
+        print(f"[hw] NVENC session cache invalidated"
+              + (f": {reason}" if reason else ""), flush=True)
+    _nvenc_sessions, _nvenc_saturated, _nvenc_probe_error = None, False, ""
 
 
 def nvenc_session_capacity(width: int, height: int, want: int,
@@ -223,9 +257,10 @@ def nvenc_session_capacity(width: int, height: int, want: int,
     we have, and a larger request re-probes only when the previous answer was
     limit-bound. Returns -1 if NVENC is unavailable entirely.
     """
-    global _nvenc_sessions, _nvenc_saturated
+    global _nvenc_sessions, _nvenc_saturated, _nvenc_probe_error
     if _nvenc_sessions is not None and not force and _nvenc_sessions >= want:
         return _nvenc_sessions
+    _nvenc_probe_error = ""
     # Cached value is below what we need — ALWAYS re-probe rather than trusting
     # it. A shortfall is often transient: another process holding sessions for a
     # second (a browser's hardware encode, an orphaned h264_nvenc ffmpeg), or a
@@ -242,7 +277,21 @@ def nvenc_session_capacity(width: int, height: int, want: int,
             # driver will grant, and the router asks for n_cams of them moments
             # later. In-process that release races the allocation and hangs at
             # this very line; a child process's exit frees them for certain.
-            got = nvenc.probe_max_sessions_isolated(width, height, limit=limit)
+            try:
+                got = nvenc.probe_max_sessions_isolated(width, height,
+                                                        limit=limit)
+            except TimeoutError as exc:
+                # RULE: a probe timeout never falls back to the in-process
+                # probe. REASON: the in-process probe is what the isolated one
+                # replaced, and running it here would allocate the sessions
+                # the timed-out child was struggling for, in the GUI process,
+                # on the UI thread. Answer "unknown" and let check_capacity
+                # warn: an unknown cap is a reason to be careful, not a reason
+                # to hang the window.
+                _nvenc_probe_error = str(exc)
+                _nvenc_saturated = False
+                print(f"[hw] NVENC session probe timed out: {exc}", flush=True)
+                return _nvenc_sessions if _nvenc_sessions is not None else -1
             if got < 0:
                 got = nvenc.probe_max_sessions(width, height, limit=limit)
             _nvenc_sessions = max(got, _nvenc_sessions or 0)
@@ -357,6 +406,17 @@ def select_encoder(profile, n_cams: int, fps: int, width: int,
 
     if want in ("nvenc", "auto"):
         sessions = nvenc_session_capacity(width, height, n_cams + 2)
+        if nvenc_probe_error():
+            # RULE: an unprobeable cap keeps the profile's path. REASON: the
+            # probe timing out says nothing about the GPU's real capacity, and
+            # switching a working NVENC rig to CPU encoding on a transient
+            # failure costs cores the capture threads need. check_capacity
+            # warns instead, so the operator sees the uncertainty.
+            _install("nvenc")
+            return EncoderChoice(
+                encoder="nvenc", sessions=sessions,
+                reason=f"the NVENC session cap could not be probed "
+                       f"({nvenc_probe_error()}); keeping the GPU path")
         if sessions >= n_cams:
             choice = EncoderChoice(
                 encoder="nvenc", sessions=sessions,
@@ -486,7 +546,18 @@ def check_capacity(n_cams: int, width: int, height: int,
     if not raw_mode and path in ("auto", "nvenc"):
         got = nvenc_session_capacity(width, height, n_cams + 2)
         cpu_cams = x264_camera_count(fps, "ultrafast")
-        if got < n_cams:
+        if nvenc_probe_error():
+            # Unknown is not zero, and it is not the cap either: warn, do not
+            # refuse. The disk budget stays on the H.264 rate because the
+            # likely reading is that NVENC works and the probe was unlucky;
+            # the warning names what it costs if that reading is wrong.
+            warnings.append(
+                f"The NVENC session cap could not be probed "
+                f"({nvenc_probe_error()}). Starting anyway, but a camera that "
+                f"cannot get a session falls back to raw.bin at "
+                f"~{frame_b*fps/2**30*600:.0f} GiB per 10 min. Watch the disk, "
+                f"or set `encoder: x264` to encode on the CPU instead.")
+        elif got < n_cams:
             if path == "auto" and cpu_cams >= n_cams:
                 # The CPU path covers it; say so rather than refusing, because
                 # select_encoder has already installed libx264 for this run.
