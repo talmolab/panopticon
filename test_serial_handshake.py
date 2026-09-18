@@ -156,14 +156,69 @@ def test_ack_is_matched_as_a_whole_line():
     print("5b) ack matched as a whole line with integer comparison: PASS")
 
 
+def board(n_cams):
+    """A well-behaved Panopticon sketch: echoes the camera count and the fps it
+    parsed, clamping the stop's -1 to 0 the way readFPS() does."""
+    def respond(cmd, gen):
+        fields = cmd.split(",")
+        fps = max(int(fields[-1]), 0)
+        return f"RDY {n_cams} {fps}\r\n".encode()
+    return respond
+
+
 def test_test_mode_command_shape():
     """The Test button sends zero camera pins, so no TTLs reach the cameras."""
-    c, log, state = controller(lambda cmd, gen: b"RDY 0 100\r\n")
+    c, log, state = controller(board(0))
     assert c.start_triggers([], 100) is True
     assert log[0] == ("write", "0,100\n"), log
-    c.stop_triggers([])
+    assert c.stop_triggers([]) is True
     assert log[-1] == ("write", "0,-1\n"), log
     print("6) test-mode sends 0 camera pins, stop sends -1: PASS")
+
+
+def test_stop_is_confirmed_on_rdy_firmware():
+    """A stop is what ends a paradigm, so on RDY firmware it is confirmed by the
+    `RDY n 0` the sketch prints from its reconfigure branch; the write leaving
+    the host proves nothing about the board."""
+    c, log, state = controller(board(6))
+    assert c.start_triggers(PINS, 100) is True
+    assert c.stop_triggers(PINS) is True, "stop ack `RDY 6 0` not accepted"
+    assert [k for k, *_ in log] == ["write", "write"], log
+
+    # Same board, but it goes mute on the stop: the write succeeds and the
+    # caller must still hear that the board did not stand down.
+    c, log, state = controller(
+        lambda cmd, gen: b"RDY 6 100\r\n" if cmd == START else b"")
+    c.STOP_ACK_TIMEOUT = 0.3
+    assert c.start_triggers(PINS, 100) is True
+    assert c.stop_triggers(PINS) is False, "unconfirmed stop reported as success"
+
+    # A stop acked with the wrong camera count is a mis-parse, not a stand-down.
+    c, log, state = controller(
+        lambda cmd, gen: b"RDY 6 100\r\n" if cmd == START else b"RDY 2 0\r\n")
+    assert c.start_triggers(PINS, 100) is True
+    assert c.stop_triggers(PINS) is False
+
+    # Firmware that never spoke RDY keeps write-only semantics, so a stock
+    # trigger.ino rig is not shown a dialog it cannot act on.
+    c, log, state = controller(lambda cmd, gen: b"")
+    assert c.stop_triggers(PINS) is True
+    assert c._speaks_rdy is False
+    print("8) stop confirmed by `RDY n 0` on RDY firmware, write-only on legacy: PASS")
+
+
+def test_stop_failure_paths_return_false():
+    """The two ways a stop can fail before the board is even asked."""
+    c, log, state = controller(board(6))
+    c._ser = None
+    assert c.stop_triggers(PINS) is False, "no link reported as a stop"
+
+    c, log, state = controller(board(6))
+    def broken_write(data):
+        raise SerialException("write timeout")
+    c._ser.write = broken_write
+    assert c.stop_triggers(PINS) is False, "a failed write reported as a stop"
+    print("9) stop with no link / failing write -> False: PASS")
 
 
 def test_trailing_newline():
@@ -184,6 +239,8 @@ def main():
     test_ack_is_matched_as_a_whole_line()
     test_test_mode_command_shape()
     test_trailing_newline()
+    test_stop_is_confirmed_on_rdy_firmware()
+    test_stop_failure_paths_return_false()
     print("\nALL SERIAL HANDSHAKE TESTS PASS")
 
 

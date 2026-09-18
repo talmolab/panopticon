@@ -39,6 +39,11 @@ class TeensyController:
     # worse: without the trailing newline _send() now appends, the final
     # parseFloat() burned its own 1 s timeout as well.)
     ACK_TIMEOUT = 4.0
+    # A stop lands in loop()'s reconfigure branch, which acks after one
+    # delay(500) and no bootloader wait, so the ack arrives well inside 1.5 s.
+    # The budget is shorter than ACK_TIMEOUT because a stop is issued on the UI
+    # thread at the end of every acquisition and at quit.
+    STOP_ACK_TIMEOUT = 2.0
 
     def __init__(self, port: str = "COM3", baudrate: int = 115200):
         self._port = port
@@ -180,14 +185,25 @@ class TeensyController:
         return False
 
     def stop_triggers(self, pins: list[int]) -> bool:
-        """Stop triggering and drive the stim pins low. True iff the board got it.
+        """Stop triggering and drive the stim pins low.
+
+        Returns True when the write succeeded and, on RDY firmware, the board
+        acked the stop with ``RDY <n_pins> 0``. On firmware that has never
+        spoken RDY the write alone counts, so stock trigger.ino rigs do not get
+        a "stop not confirmed" dialog they cannot act on.
 
         This cannot be fire-and-forget. The sketch's reconfigure branch runs
         `camsLow(); allStimLow(); FPS_OUT=0`, so this command is what ends a
         paradigm — and a *looping* stim chain otherwise runs forever, driving the
-        laser pin with the GUI showing IDLE. CLAUDE.md's invariant is "closing the
-        GUI can never leave a paradigm or laser running", and a swallowed failure
-        here breaks exactly that.
+        laser pin with the GUI showing IDLE. A write that leaves the host is not
+        proof the board acted: a wedged sketch, a board still in its bootloader
+        after an upload, or foreign firmware all accept the bytes and stop
+        nothing, so the ack is what confirms the stand-down.
+
+        Waiting for the ack also serialises stop and start on the host: the
+        sketch drains its input for ~0.5 s before acking, and a start written
+        into that window is swallowed, times out and forces a port reset — the
+        laser flash the long-lived connection exists to avoid.
 
         The caller MUST NOT infer success from the port being open: pyserial's
         `is_open` stays True after the USB device disappears, so an unplugged
@@ -200,6 +216,9 @@ class TeensyController:
             return False
         cmd = ",".join(str(x) for x in [len(pins)] + list(pins) + [-1]) + "\n"
         try:
+            # Discard anything the board printed since the last exchange so the
+            # ack read below judges only the reply to this command.
+            self._ser.reset_input_buffer()
             self._ser.write(cmd.encode())
         except (serial.SerialException, OSError) as e:
             print(f"[teensy] STOP WRITE FAILED: {e} — the board may still be "
@@ -207,7 +226,16 @@ class TeensyController:
                   f"Power-cycle the board and key off the laser.", flush=True)
             return False
         print(f"[teensy] sent stop: {cmd!r}", flush=True)
-        return True
+        if not self._speaks_rdy:
+            return True
+        # readFPS() clamps the -1 to 0, so the stop is acked as `RDY <n> 0`.
+        if self._await_ack(len(pins), 0, timeout=self.STOP_ACK_TIMEOUT):
+            return True
+        print("[teensy] STOP NOT CONFIRMED: the board speaks RDY but did not ack "
+              "the stop — it may still be triggering and any stim paradigm may "
+              "still be running. Power-cycle the board and key off the laser.",
+              flush=True)
+        return False
 
     def close(self):
         if self._ser and self._ser.is_open:
