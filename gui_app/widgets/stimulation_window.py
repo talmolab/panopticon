@@ -1204,39 +1204,59 @@ class StimulationWindow(QDialog):
     def firmware_source(self) -> str:
         return self._compile()
 
+    def _read_params(self, defaults: bool) -> tuple[int, float, float, float] | None:
+        """Parse the four parameter fields, or report why they are invalid.
+
+        With `defaults` a blank freq/pw reads as 0 and a blank duration as 1 s,
+        which is how Create fills in what the operator left out; an edit of
+        an existing block takes the fields as typed. The pin has no default
+        either way: coercing a blank pin to 0 puts a block on the Mega's UART
+        RX0 and garbles the link to the board. A duration must be positive,
+        because a zero-length step compiles to a chain that never advances;
+        a negative frequency or pulse width has no waveform.
+        """
+        if not self._f_pin.text().strip():
+            self._set_status("Enter a pin number.", error=True)
+            return None
+        try:
+            pin  = int(self._f_pin.text())
+            freq = float(self._f_freq.text() or ("0" if defaults else ""))
+            pw   = float(self._f_pw.text()   or ("0" if defaults else ""))
+            dur  = float(self._f_dur.text()  or ("1" if defaults else ""))
+        except ValueError:
+            self._set_status("Invalid parameters.", error=True)
+            return None
+        if dur <= 0:
+            self._set_status("Invalid parameters: duration must be > 0 s.",
+                             error=True)
+            return None
+        if freq < 0 or pw < 0:
+            self._set_status("Invalid parameters: frequency and pulse width "
+                             "cannot be negative.", error=True)
+            return None
+        return pin, freq, pw, dur
+
     def _on_field_enter(self):
         """Enter edits the selected block, or creates one when nothing is selected."""
         if self._selected_block is None:
             self._on_create()
             return
-        try:
-            self._selected_block.pin  = int(self._f_pin.text())
-            self._selected_block.freq = float(self._f_freq.text())
-            self._selected_block.pw   = float(self._f_pw.text())
-            self._selected_block.dur  = float(self._f_dur.text())
-            self._selected_block.update()
-            self._set_status("")
-        except ValueError:
-            self._set_status("Invalid parameters.", error=True)
+        params = self._read_params(defaults=False)
+        if params is None:
+            return
+        blk = self._selected_block
+        blk.pin, blk.freq, blk.pw, blk.dur = params
+        blk.update()
+        self._set_status("")
+        # The edit can create or remove a pin conflict and moves the end time,
+        # so the diagnostics are recomputed the same as for any other edit.
+        self._canvas.refresh_starts()
 
     # ── create ────────────────────────────────────────────────────────────────
     def _on_create(self):
-        try:
-            # No default for the pin. Coercing a blank field to "0" silently
-            # created a block on pin 0 = UART RX0, which garbles the link to the
-            # trigger board; and on a rig whose trigger pins start at 2 a
-            # mistyped pin is far better refused than guessed.
-            if not self._f_pin.text().strip():
-                self._set_status("Enter a pin number.", error=True)
-                return
-            pin  = int(self._f_pin.text())
-            freq = float(self._f_freq.text() or "0")
-            pw   = float(self._f_pw.text()   or "0")
-            dur  = float(self._f_dur.text()  or "1")
-        except ValueError:
-            self._set_status("Invalid parameters.", error=True)
-            return
-        self._canvas.add_block(pin, freq, pw, dur)
+        params = self._read_params(defaults=True)
+        if params is not None:
+            self._canvas.add_block(*params)
 
     def _on_clear(self):
         if QMessageBox.question(
