@@ -28,6 +28,12 @@ PORT_R = 6
 GRID = 20
 SNAP_RADIUS = 26          # scene-unit snap distance
 ARROW_LEN, ARROW_HALF = 11, 5
+#: Scale bounds for the canvas view. The lower bound keeps blocks readable and
+#: the upper bound keeps a few wheel notches from pushing the graph off-canvas.
+MIN_ZOOM, MAX_ZOOM = 0.2, 4.0
+#: Below this view scale the 20-unit grid is denser than the pixels and is
+#: skipped, because drawing it costs one point per intersection of the scene.
+GRID_MIN_ZOOM = 0.4
 
 
 def _pin_color(pin: int) -> QColor:
@@ -342,14 +348,43 @@ class StimCanvas(QGraphicsView):
     # ── background ────────────────────────────────────────────────────────────
     def drawBackground(self, painter: QPainter, rect: QRectF):
         painter.fillRect(rect, QColor("#111820"))
+        # The grid is one point per 20-unit intersection of the exposed rect,
+        # so it is drawn as a single drawPoints call and skipped once the view
+        # is zoomed out far enough that the points would be denser than pixels.
+        if self.zoom() < GRID_MIN_ZOOM:
+            return
         painter.setPen(QPen(QColor("#1e2a38"), 1))
-        x = int(rect.left()  // GRID) * GRID
-        while x <= rect.right():
-            y = int(rect.top() // GRID) * GRID
-            while y <= rect.bottom():
-                painter.drawPoint(int(x), int(y))
-                y += GRID
-            x += GRID
+        x0 = int(rect.left() // GRID) * GRID
+        y0 = int(rect.top() // GRID) * GRID
+        pts = QPolygonF([
+            QPointF(x, y)
+            for x in range(x0, int(rect.right()) + 1, GRID)
+            for y in range(y0, int(rect.bottom()) + 1, GRID)
+        ])
+        painter.drawPoints(pts)
+
+    def zoom(self) -> float:
+        """Current uniform view scale."""
+        return self.transform().m11()
+
+    def zoom_by(self, factor: float):
+        """Scale the view by factor, clamped to [MIN_ZOOM, MAX_ZOOM]."""
+        target = min(MAX_ZOOM, max(MIN_ZOOM, self.zoom() * factor))
+        self.scale(target / self.zoom(), target / self.zoom())
+
+    def fit_to_content(self):
+        """Bring every block into view, or reset the view on an empty canvas."""
+        blocks = self.blocks()
+        if not blocks:
+            self.resetTransform()
+            self.centerOn(0, 0)
+            return
+        rect = blocks[0].sceneBoundingRect()
+        for b in blocks[1:]:
+            rect = rect.united(b.sceneBoundingRect())
+        self.fitInView(rect.adjusted(-50, -50, 50, 50), Qt.KeepAspectRatio)
+        if self.zoom() > MAX_ZOOM:
+            self.zoom_by(MAX_ZOOM / self.zoom())
 
     # ── snap helper ───────────────────────────────────────────────────────────
     def _find_snap_port(self, sp: QPointF,
@@ -488,8 +523,7 @@ class StimCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(factor, factor)
+        self.zoom_by(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
@@ -507,6 +541,9 @@ class StimCanvas(QGraphicsView):
             if event.key() == Qt.Key_V:
                 self._paste()
                 return
+        if event.key() == Qt.Key_Home:
+            self.fit_to_content()
+            return
         super().keyPressEvent(event)
 
     # ── selection signal ──────────────────────────────────────────────────────
