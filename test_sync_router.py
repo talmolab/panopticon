@@ -1,14 +1,47 @@
 """Headless integration test of SyncEncodeRouter with REAL NVENC encoders and
 concurrent submitting threads (no cameras). Verifies the router produces, per
 camera, a stream.h264 that decodes to the common frame count, with identical
-block IDs across cameras."""
-import os, shutil, tempfile, threading, time, random
+block IDs across cameras.
+
+Needs an NVIDIA GPU and cv2, so it is a rig test, not one of the offline
+suites. It opens one NVENC session per camera: the concurrent-session cap is a
+driver property and is measured, never assumed, so a --cameras above it fails
+with NVENCSTATUS 21 rather than anything this test did wrong.
+
+    python test_sync_router.py
+    python test_sync_router.py --cameras 9
+    python test_sync_router.py --profile 3dpose
+"""
+import argparse, os, shutil, tempfile, threading, time, random
 from pathlib import Path
 import numpy as np, cv2
 from gui_app.sync_encode import SyncEncodeRouter
 
-W, H, N, NCAM = 1920, 1200, 3000, 6
+ap = argparse.ArgumentParser(description="SyncEncodeRouter smoke test")
+ap.add_argument("--cameras", type=int, default=6)
+ap.add_argument("--width", type=int, default=1920)
+ap.add_argument("--height", type=int, default=1200)
+ap.add_argument("--frames", type=int, default=3000, help="triggers to simulate")
+ap.add_argument("--profile", default=None,
+                help="take the camera count and frame size from this rig "
+                     "profile, so the test matches what the rig records")
+args = ap.parse_args()
+
+# The geometry comes from argv or the profile, never from a constant: a test
+# pinned to one rig's six 1920x1200 cameras cannot be run on the other rig, and
+# the camera count is exactly the variable that decides whether the router
+# still aligns.
+if args.profile:
+    from gui_app.session_config import RigProfile
+    prof = next(RigProfile.load(p) for p in RigProfile.list_profiles()
+                if p.stem == args.profile)
+    NCAM = prof.n_cameras or args.cameras
+    W, H = prof.frame_width, prof.frame_height
+else:
+    NCAM, W, H = args.cameras, args.width, args.height
+N = args.frames
 random.seed(7)
+print(f"config: {NCAM} cameras, {W}x{H}, {N} triggers")
 
 tmp = Path(tempfile.mkdtemp(prefix="router_test_"))
 raw_paths = []
@@ -30,7 +63,10 @@ common_expected = sorted(common_expected)
 print(f"simulated: per-cam {[len(d) for d in delivered]}, expected common {len(common_expected)}")
 
 router = SyncEncodeRouter(raw_paths, W, H, 21)
-assert router.available, "NVENC unavailable"
+if not router.available:
+    print("RESULT: FAIL -- NVENC unavailable")
+    shutil.rmtree(tmp, ignore_errors=True)
+    raise SystemExit(1)
 router.start()
 
 def cam_thread(i):
@@ -68,5 +104,9 @@ for i in range(NCAM):
 
 ids_identical = all(results[i][2] == results[0][2] for i in range(NCAM))
 print(f"\nall cameras identical block IDs: {ids_identical}")
-print("RESULT:", "ALL PASS" if (ok and ids_identical) else "FAIL")
+passed = ok and ids_identical
+print("RESULT:", "ALL PASS" if passed else "FAIL")
 shutil.rmtree(tmp, ignore_errors=True)
+# Exit status, not just a printed verdict: a harness or shell loop reads the
+# status, and a failing run that exits 0 is reported as a success.
+raise SystemExit(0 if passed else 1)
