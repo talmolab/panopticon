@@ -1,5 +1,17 @@
-# 3DPose — 6x Basler a2A1920-165g5m GigE, 1920x1200, 100 fps
+# 3DPose — 9x Basler a2A1920-165g5m GigE, 1920x1200, 100 fps
 name: 3dpose
+# Camera backend module (gui_app/backends/<name>.py). The profile names the
+# vendor so porting a rig is a profile edit; "basler" is the only one shipped.
+camera_backend: basler
+# Video encoder: auto = NVENC when a session is free, else libx264; nvenc, x264
+# or raw force one path. auto keeps a driver that lowers the NVENC session cap
+# from turning into a failed recording.
+encoder: auto
+# Sidebar pre-fill for a new session. These are this rig's operator and assay,
+# written into every session_metadata.json, so they live here and not in code.
+metadata_defaults:
+  experimenter: IT
+  assay: open_field
 frame_width: 1920
 frame_height: 1200
 frame_rate: 100
