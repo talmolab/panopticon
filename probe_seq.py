@@ -29,7 +29,8 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
@@ -69,7 +70,7 @@ def main():
     win = MainWindow()
     win.show()
 
-    scratch = Path("probe_out") / "gui_scratch"
+    scratch = REPO / "probe_out" / "gui_scratch"
     if scratch.exists():
         import shutil
         shutil.rmtree(scratch, ignore_errors=True)

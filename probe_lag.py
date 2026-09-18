@@ -21,7 +21,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
 
 import numpy as np
 
@@ -95,9 +96,12 @@ def main():
     prof = next(RigProfile.load(p) for p in RigProfile.list_profiles()
                 if p.stem == args.profile)
     max_lag = args.max_lag if args.max_lag is not None else prof.kick_max_lag
-    out = Path("probe_out") / args.label
+    # Anchored to the repository, never to the working directory: a probe
+    # started from another shell otherwise writes its trace and its scratch
+    # recordings wherever it was launched.
+    out = REPO / "probe_out" / args.label
     out.mkdir(parents=True, exist_ok=True)
-    scratch = Path("probe_out") / "_scratch"
+    scratch = REPO / "probe_out" / "_scratch"
     if scratch.exists():
         shutil.rmtree(scratch, ignore_errors=True)
 

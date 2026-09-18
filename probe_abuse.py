@@ -14,7 +14,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import QTimer
@@ -65,7 +66,7 @@ def main():
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
-    scratch = Path("probe_out") / "abuse"
+    scratch = REPO / "probe_out" / "abuse"
     scratch.mkdir(parents=True, exist_ok=True)
     win._sidebar._output_dir = str(scratch)
     win._sidebar._fields["mouse_1"].setText("abuse")

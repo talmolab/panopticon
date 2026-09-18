@@ -13,7 +13,8 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
@@ -44,7 +45,7 @@ def main():
     # Unique session id + scratch output dir: otherwise this reuses the default
     # m1_m2 path, and _start_acquisition would block forever on the "Overwrite?"
     # dialog with nobody to click it ... and would clobber real data if answered.
-    scratch = Path("probe_out") / "gui_scratch"
+    scratch = REPO / "probe_out" / "gui_scratch"
     # Clear it first. The GUI raises a MODAL "Overwrite?" dialog when the
     # session directory already holds data, and an unattended probe has nobody
     # to answer it: on 2026-09-14 two 600 s runs sat on that dialog forever and

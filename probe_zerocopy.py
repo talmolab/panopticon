@@ -39,7 +39,8 @@ from pathlib import Path
 import numpy as np
 from pypylon import pylon
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
 
 from gui_app.probe_guard import (add_force_argument,
                                  refuse_if_panopticon_running)
@@ -67,7 +68,9 @@ def calibrate(dur=0.25):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=12)
-    ap.add_argument("--out", default="probe_out/zerocopy.json")
+    ap.add_argument("--out", default=None,
+                    help="results JSON (default: probe_out/zerocopy.json "
+                         "inside the repository, not the working dir)")
     add_force_argument(ap)
     args = ap.parse_args()
     # Opens a camera, so it must not run beside an instance that already
@@ -190,7 +193,7 @@ def main():
     run("np.frombuffer(GetBuffer())", fb)
 
     cam.Close()
-    out = Path(args.out)
+    out = Path(args.out) if args.out else REPO / "probe_out" / "zerocopy.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"padding_x": padx, "w": W, "h": H,
                                "results": results}, indent=1))
