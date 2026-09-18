@@ -326,12 +326,18 @@ class SidebarWidget(QWidget):
         self._apply_enablement()
         self.record_toggled.emit(checked)
 
+    #: Toggle names and the acquisition types the main window uses for the
+    #: same thing, so a caller can pass its acq_type verbatim.
+    _TOGGLE_KINDS = {"calibrate": "calibrate", "calibration": "calibrate",
+                     "record": "record", "recording": "record"}
+
     def _toggle_for(self, kind: str) -> ToggleSwitch:
-        if kind == "calibrate":
+        canonical = self._TOGGLE_KINDS.get(kind)
+        if canonical == "calibrate":
             return self._calibrate_toggle
-        if kind == "record":
+        if canonical == "record":
             return self._record_toggle
-        raise ValueError(f"unknown toggle kind {kind!r}; expected 'calibrate' or 'record'")
+        raise ValueError(f"unknown toggle kind {kind!r}; expected one of {sorted(self._TOGGLE_KINDS)}")
 
     _SOLVE_TIP = "Solve the camera calibration from the recorded calibration videos"
     _CALIBRATE_TIP = "Start or stop a calibration recording"

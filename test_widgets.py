@@ -179,6 +179,17 @@ def test_clear_toggles_silently_alias_uses_last_armed():
     sb._calibrate_toggle.setChecked(True)
     sb.clear_toggles_silently("calibrate")
     check("alias with an explicit kind delegates", not sb._calibrate_toggle.isChecked())
+    sb._record_toggle.setChecked(True)
+    sb.clear_toggle_silently("recording")          # main_window's acq_type spelling
+    check("acq_type spelling 'recording' is accepted", not sb._record_toggle.isChecked())
+    sb._calibrate_toggle.setChecked(True)
+    sb.clear_toggle_silently("calibration")
+    check("acq_type spelling 'calibration' is accepted", not sb._calibrate_toggle.isChecked())
+    try:
+        sb.clear_toggle_silently("snapshot")
+        check("unknown kind is refused", False)
+    except ValueError:
+        check("unknown kind is refused", True)
     sb.close()
 
 
