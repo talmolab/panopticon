@@ -118,9 +118,9 @@ the trigger instant is half a period after `FRAME_START`.
 `camsHigh()` and `camsLow()` write every trigger pin inside a
 `noInterrupts()`/`interrupts()` pair, so skew between pins is bounded by the
 write loop and cannot be stretched by an interrupt landing mid-loop. The design
-comes from campy, by Kyle Severson (`campy/campy/trigger/trigger.ino`), which
-documents ±0.35 µs inter-frame interval precision and roughly 30 ns synchronicity
-between pins.
+comes from campy, by Kyle Severson (`trigger.ino` in the upstream repository,
+<https://github.com/ksseverson57/campy>), which documents ±0.35 µs inter-frame
+interval precision and roughly 30 ns synchronicity between pins.
 
 And nothing on the host is in the timing path. The host names the pins and the
 rate; after that the board is on its own.

@@ -36,9 +36,9 @@ needs to seek, sits at the front of the file instead of the end, and one IDR key
 second means scrubbing to frame N does not decode the N frames before it.
 `calibration.toml` sits alongside, read as-is.
 
-Built on **[campy](https://github.com/ksseverson57/campy)** by Kyle Severson. A fork is
-vendored here as a git submodule; the trigger firmware lineage and the raw-capture
-approach come from campy.
+Built on **[campy](https://github.com/ksseverson57/campy)** by Kyle Severson (MIT
+licensed). The trigger firmware lineage and the raw-capture approach come from campy;
+Panopticon carries no campy code and has no submodule.
 
 **Credits:** Isaac Tang (author and maintainer), Kay Tye, Talmo Pereira. Tye Lab and
 Talmo Lab, Salk Institute.
