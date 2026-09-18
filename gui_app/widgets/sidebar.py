@@ -126,6 +126,10 @@ class SidebarWidget(QWidget):
         self._busy = False
         self._toggles_gate = True
         self._solve_running = False
+        # Which toggle most recently went on. A refused start is delivered
+        # synchronously inside that toggle's own emission, so this names the
+        # refused toggle for callers that do not pass the kind themselves.
+        self._last_armed: str | None = None
 
         self._calibrate_toggle = ToggleSwitch("Calibrate", QColor(66, 133, 244))
         self._record_toggle = ToggleSwitch("Record", QColor(234, 67, 53))
@@ -257,12 +261,23 @@ class SidebarWidget(QWidget):
         return self._output_dir
 
     def _on_calibrate(self, checked):
+        if checked:
+            self._last_armed = "calibrate"
         self._apply_enablement()
         self.calibrate_toggled.emit(checked)
 
     def _on_record(self, checked):
+        if checked:
+            self._last_armed = "record"
         self._apply_enablement()
         self.record_toggled.emit(checked)
+
+    def _toggle_for(self, kind: str) -> ToggleSwitch:
+        if kind == "calibrate":
+            return self._calibrate_toggle
+        if kind == "record":
+            return self._record_toggle
+        raise ValueError(f"unknown toggle kind {kind!r}; expected 'calibrate' or 'record'")
 
     def _apply_enablement(self):
         """Recompute the enabled state of Calibrate, Record and Solve from the
@@ -385,31 +400,55 @@ class SidebarWidget(QWidget):
         self._solve_running = not enabled
         self._apply_enablement()
 
-    def clear_toggles_silently(self):
-        """Force both toggles off WITHOUT emitting — for refusing a start.
+    def clear_toggle_silently(self, kind: str):
+        """Force ONE toggle off without emitting: the refuse-at-non-IDLE path.
 
-        Emitting here would re-enter the stop path we are already guarding.
+        ``kind`` is the acquisition that was refused ('calibrate' or
+        'record'). Only that toggle is cleared, because the other one belongs
+        to the acquisition that is still running: painting it off would show
+        an idle rig while the cameras stream, and leave the operator nothing to
+        click to stop it. Emitting is suppressed because the toggled signal is
+        the start/stop path this call is refusing from inside.
 
-        But blockSignals also suppresses the widget's OWN animation, because
-        ToggleSwitch wires `toggled -> _on_toggled` in its constructor
-        (toggle_switch.py:18). Unchecking alone therefore leaves the thumb
-        painted fully ON while isChecked() is False — an arm indicator that lies,
-        on a rig with a laser. Drive the animation by hand instead.
+        blockSignals also suppresses the widget's own thumb animation, which
+        ToggleSwitch drives from toggled, so the animation is driven by hand;
+        otherwise the thumb stays painted ON while isChecked() is False, an arm
+        indicator that lies on a rig with a laser.
 
-        Deliberately does NOT touch enabled state: the only caller is the
-        non-IDLE guard, i.e. a real acquisition is in progress, and the state
-        machine owns which toggles are available then. The refuse-at-IDLE path
-        uses reset_toggles() instead, which restores enablement properly.
+        Enablement is recomputed afterwards: the refused click disabled the
+        acquiring toggle through sibling exclusion, and clearing the refused
+        toggle is what re-enables it.
         """
-        for t in (self._calibrate_toggle, self._record_toggle):
-            t.blockSignals(True)
-            t.setChecked(False)
-            t.blockSignals(False)
-            t._on_toggled(False)
+        t = self._toggle_for(kind)
+        t.blockSignals(True)
+        t.setChecked(False)
+        t.blockSignals(False)
+        t._on_toggled(False)
+        self._apply_enablement()
+
+    def clear_toggles_silently(self, kind: str | None = None):
+        """Deprecated alias of clear_toggle_silently, kept for one release.
+
+        Without ``kind`` the most recently armed toggle is cleared, which is
+        the refused one when called from inside its own emission; if nothing
+        has been armed, both toggles are cleared.
+        """
+        kind = kind or self._last_armed
+        if kind is None:
+            for k in ("calibrate", "record"):
+                self.clear_toggle_silently(k)
+            return
+        self.clear_toggle_silently(kind)
 
     def stop_record(self):
-        """Flip Record off programmatically — emits record_toggled like a click."""
-        self._record_toggle.setChecked(False)
+        """Flip Record off programmatically, emitting record_toggled like a
+        click. When the toggle is already off (a silent clear painted it off
+        while the recording continued) the signal is emitted directly, so an
+        automatic stop still reaches the recording."""
+        if self._record_toggle.isChecked():
+            self._record_toggle.setChecked(False)
+        else:
+            self.record_toggled.emit(False)
 
     def reset_toggles(self):
         """Return both toggles to off and reopen the toggles gate: the IDLE

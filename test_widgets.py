@@ -130,11 +130,76 @@ def test_busy_overlay_does_not_touch_stimulation():
     sb.close()
 
 
+# --------------------------------------------------------------------------
+# A5-02: a refused start clears only the refused toggle; stop_record always
+# reaches the stop path.
+# --------------------------------------------------------------------------
+def test_clear_toggle_silently_keeps_the_live_toggle():
+    sb = make_sidebar()
+    emitted = []
+    sb.calibrate_toggled.connect(lambda c: emitted.append(("calibrate", c)))
+    sb.record_toggled.connect(lambda c: emitted.append(("record", c)))
+
+    sb._record_toggle.setChecked(True)            # a live recording
+    # The exclusion normally forbids this click; force the state a bypassing
+    # caller could produce and refuse it the way main_window does.
+    sb._calibrate_toggle.setEnabled(True)
+    sb._calibrate_toggle.setChecked(True)
+    emitted.clear()
+    sb.clear_toggle_silently("calibrate")
+    check("refused calibrate is off", not sb._calibrate_toggle.isChecked())
+    check("live record stays on", sb._record_toggle.isChecked())
+    check("live record is enabled again (can be stopped)", sb._record_toggle.isEnabled())
+    check("refused calibrate is disabled while record is on",
+          not sb._calibrate_toggle.isEnabled())
+    check("silent clear emitted nothing", emitted == [], repr(emitted))
+    check("refused thumb animates towards off",
+          sb._calibrate_toggle._anim.endValue() == 0.0)
+    sb.close()
+
+
+def test_clear_toggles_silently_alias_uses_last_armed():
+    sb = make_sidebar()
+    sb._calibrate_toggle.setChecked(True)         # live calibration
+    sb._record_toggle.setEnabled(True)
+    sb._record_toggle.setChecked(True)            # the refused click
+    sb.clear_toggles_silently()                   # zero-arg legacy call
+    check("alias cleared the refused (last armed) toggle", not sb._record_toggle.isChecked())
+    check("alias left the live toggle on", sb._calibrate_toggle.isChecked())
+    check("alias re-enabled the live toggle", sb._calibrate_toggle.isEnabled())
+    sb.close()
+
+    sb = make_sidebar()
+    sb._calibrate_toggle.setChecked(True)
+    sb.clear_toggles_silently("calibrate")
+    check("alias with an explicit kind delegates", not sb._calibrate_toggle.isChecked())
+    sb.close()
+
+
+def test_stop_record_emits_when_already_off():
+    sb = make_sidebar()
+    emitted = []
+    sb.record_toggled.connect(lambda c: emitted.append(c))
+    check("record starts off", not sb._record_toggle.isChecked())
+    sb.stop_record()
+    check("stop_record on an off toggle still emits False", emitted == [False], repr(emitted))
+    emitted.clear()
+    sb._record_toggle.setChecked(True)
+    emitted.clear()
+    sb.stop_record()
+    check("stop_record on an on toggle emits False once", emitted == [False], repr(emitted))
+    check("stop_record turned the toggle off", not sb._record_toggle.isChecked())
+    sb.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
     test_toggles_gate_survives_busy_and_reset_reopens()
     test_busy_overlay_does_not_touch_stimulation()
+    test_clear_toggle_silently_keeps_the_live_toggle()
+    test_clear_toggles_silently_alias_uses_last_armed()
+    test_stop_record_emits_when_already_off()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)
