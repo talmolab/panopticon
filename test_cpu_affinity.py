@@ -607,15 +607,20 @@ t.start()
 t.join(10)
 
 # 34 -- CPU Set ids come from the enumeration, an unknown CPU never pins, and
-#       restrict/clear report booleans (True on a hybrid Windows host).
+#       restrict/clear report booleans. On a hybrid Windows host the restrict
+#       takes; on a non-hybrid one `fast` is empty, so the same call CLEARS
+#       and also returns True -- the assertion must not tie True to hybrid.
+#       Clearing (an empty set) is True on any Windows host, False elsewhere.
 n += 1
 hybrid = bool(ca.performance_cores())
+on_windows = sys.platform == "win32"
 check(n, "CPU Sets helpers: ids from enumeration, unknown CPU refused, clear works",
       not t.is_alive() and knob_out.get("ids_match") is True
       and knob_out.get("unknown") is False
       and isinstance(knob_out.get("restrict"), bool)
-      and (knob_out.get("restrict") is True) == hybrid
-      and knob_out.get("clear") is True,
+      and (not (hybrid and on_windows) or knob_out.get("restrict") is True)
+      and knob_out.get("clear") is on_windows,
+      f"hybrid={hybrid} "
       f"{ {k: knob_out.get(k) for k in ('ids', 'restrict', 'clear', 'unknown')} }")
 
 # 35 -- the power-throttling opt-out and its reset both take on Windows.
@@ -634,6 +639,87 @@ check(n, "MMCSS register/revert round-trip; revert(None) is False",
       (h is None or (h and knob_out.get("revert") is True))
       and knob_out.get("revert_none") is False,
       f"handle={h} revert={knob_out.get('revert')}")
+
+# ===========================================================================
+# Review follow-ups. Appended after the live cases so the numbers above stay
+# stable: commit messages and handoff notes cite them.
+# ===========================================================================
+
+# 37 -- (A3-13) set_exposure_gain refuses a value in the wrong unit BEFORE
+#       writing: a dB profile value on a GainRaw camera, or a raw step count
+#       on a dB camera, raises ValueError and the gain node is untouched; a
+#       matching unit or None (the node's own unit, the baseline restore)
+#       writes as before. The exposure is applied before the gain is checked.
+n += 1
+raw_cam = StubCamera({"ExposureTime": StubNode(2000.0),
+                      "GainRaw": StubNode(36, lo=StubNode(0), hi=StubNode(63))})
+db_cam = StubCamera({"Gain": StubNode(0.0, lo=StubNode(0.0), hi=StubNode(24.0))})
+refused = {}
+for label, cam_, val, unit in (("dB->raw", raw_cam, 6.0, "dB"),
+                               ("raw->dB", db_cam, 6, "raw"),
+                               ("bogus", db_cam, 6.0, "steps")):
+    try:
+        B.set_exposure_gain(cam_, 3000.0, val, gain_unit=unit)
+        refused[label] = None
+    except ValueError as e:
+        refused[label] = str(e)
+raw_ok = B.set_exposure_gain(raw_cam, None, 40, gain_unit="raw")
+raw_none = B.set_exposure_gain(raw_cam, None, 36, gain_unit=None)
+db_ok = B.set_exposure_gain(db_cam, None, 6.0, gain_unit="dB")
+check(n, "gain_unit: dB value refused on GainRaw, raw refused on Gain, no write on refusal",
+      all(refused[k] for k in ("dB->raw", "raw->dB", "bogus"))
+      and "GainRaw" in refused["dB->raw"] and "dB" in refused["dB->raw"]
+      and raw_cam._nodes["GainRaw"].writes == [40, 36]
+      and db_cam._nodes["Gain"].writes == [6.0]
+      and raw_cam._nodes["ExposureTime"].writes == [3000.0]
+      and (raw_ok[1], raw_none[1], db_ok[1]) == (40, 36, 6.0),
+      f"refused={ {k: bool(v) for k, v in refused.items()} } "
+      f"raw_writes={raw_cam._nodes['GainRaw'].writes} "
+      f"db_writes={db_cam._nodes['Gain'].writes}")
+
+# 38 -- the process affinity mask prunes the E-core set too: a
+#       SetThreadAffinityMask with any CPU outside the process mask fails
+#       whole, which would leave every encoder thread unpinned. An empty
+#       `slow` is not an error (no E-core to confine to, so no pin).
+n += 1
+ecores = [c for c in range(24) if c not in P285K]
+mask_no_low_e = sum(1 << c for c in range(24) if c not in (2, 3, 4))
+r = ca.classify_cpu_sets(two_class, process_mask=mask_no_low_e)
+mask_p_only = sum(1 << c for c in P285K)
+r2 = ca.classify_cpu_sets(two_class, process_mask=mask_p_only)
+check(n, "process mask prunes the E-core set; P-only mask leaves slow empty, fast intact",
+      r.fast == P285K and r.slow == [c for c in ecores if c not in (2, 3, 4)]
+      and r2.fast == P285K and r2.slow == [] and r2.reason == "",
+      f"slow={r.slow} / fast2={r2.fast} slow2={r2.slow}")
+
+# 39 -- a failing log line never costs the pin: performance_cores caches the
+#       classification BEFORE printing, and a print that raises (closed or
+#       full log file under pythonw) leaves the P-core set intact. Runs on
+#       any host by substituting the enumeration and the platform flag.
+n += 1
+saved = (ca._pcores_cache, ca._classes_cache, ca._IS_WINDOWS,
+         ca._read_cpu_set_buffer, ca._process_mask, ca.describe_classes)
+
+
+def _boom(_classes):
+    raise OSError(28, "No space left on device")
+
+
+try:
+    ca._pcores_cache = None
+    ca._classes_cache = None
+    ca._IS_WINDOWS = True
+    ca._read_cpu_set_buffer = lambda: two_class
+    ca._process_mask = lambda: 0
+    ca.describe_classes = _boom
+    got = ca.performance_cores()
+    got_classes = ca.cpu_classes()
+finally:
+    (ca._pcores_cache, ca._classes_cache, ca._IS_WINDOWS,
+     ca._read_cpu_set_buffer, ca._process_mask, ca.describe_classes) = saved
+check(n, "performance_cores keeps the P-core set when the log line fails",
+      got == P285K and got_classes.fast == P285K and got_classes.reason == "",
+      f"got={got} reason={got_classes.reason!r}")
 
 print()
 if failures:

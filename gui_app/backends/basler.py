@@ -353,8 +353,10 @@ class BaslerBackend:
         """'dB', 'raw', or None when the camera has no gain control.
 
         The caller decides what a dB-denominated profile value means on a
-        'raw' camera (refuse, or convert with the model's step); the baseline
-        restore needs no decision because it reads and writes the same node.
+        'raw' camera (refuse, or convert with the model's step), and states
+        the unit of the value it passes via set_exposure_gain(gain_unit=...)
+        so a mismatch is refused there; the baseline restore needs no
+        decision because it reads and writes the same node.
         """
         name, _ = cls._find_node(cam, cls.GAIN_NODES)
         return cls.GAIN_UNITS.get(name)
@@ -406,7 +408,8 @@ class BaslerBackend:
         return exp, gain
 
     @classmethod
-    def set_exposure_gain(cls, cam, exposure_us=None, gain_db=None) -> tuple:
+    def set_exposure_gain(cls, cam, exposure_us=None, gain_db=None,
+                          gain_unit=None) -> tuple:
         """Apply exposure/gain. Returns what was actually set, for logging.
 
         A control the camera does not implement is skipped and reported as
@@ -422,12 +425,22 @@ class BaslerBackend:
 
         Gain is written in the UNIT OF THE NODE FOUND (see gain_unit): a float
         in dB to `Gain`, an integer step count to `GainRaw`, clamped into the
-        node's range. Restoring the baseline read by get_exposure_gain is
-        therefore exact on either kind of camera. A dB value from the profile
-        is only meaningful on a 'dB' camera; the caller checks gain_unit()
-        before applying one, because this function cannot tell the two
-        sources apart.
+        node's range. `gain_unit` names the unit the VALUE is in, so a value
+        in the wrong unit is refused instead of written:
+          - None: the value is in the node's own unit. This is the baseline
+            restore, which writes back what get_exposure_gain read from the
+            same node, so it is exact on either kind of camera.
+          - 'dB': a profile value such as calibration_gain_db. On a 'raw'
+            camera it raises ValueError BEFORE any write, because the step
+            size is model-specific and 6 dB written as 6 steps is a wrong
+            gain that nothing in the log would reveal.
+          - 'raw': a step count; refused on a 'dB' camera for the same reason.
+        The exposure is applied before the gain is checked, so a refused gain
+        never leaves the exposure unset.
         """
+        if gain_unit not in (None, "dB", "raw"):
+            raise ValueError(f"gain_unit must be None, 'dB' or 'raw', "
+                             f"not {gain_unit!r}")
         applied_exp = applied_gain = None
         if exposure_us is not None:
             _, node = cls._find_node(cam, cls.EXPOSURE_NODES)
@@ -437,7 +450,14 @@ class BaslerBackend:
         if gain_db is not None:
             name, node = cls._find_node(cam, cls.GAIN_NODES)
             if node is not None:
-                if cls.GAIN_UNITS.get(name) == "raw":
+                unit = cls.GAIN_UNITS.get(name)
+                if gain_unit is not None and gain_unit != unit:
+                    raise ValueError(
+                        f"gain value {gain_db!r} is in {gain_unit} but this "
+                        f"camera's {name} node takes {unit}; no dB<->raw "
+                        f"conversion exists because the step size is "
+                        f"model-specific")
+                if unit == "raw":
                     v = int(round(float(gain_db)))
                 else:
                     v = float(gain_db)

@@ -189,9 +189,12 @@ def classify_cpu_sets(raw: bytes, process_mask: int = 0) -> CpuClasses:
       - More than one processor group means LogicalProcessorIndex repeats per
         group and a single 64-bit affinity mask cannot address the machine, so
         `fast` is empty rather than pinned to whichever group the caller is in.
-      - `fast` is intersected with the process affinity mask when one is
-        given: a pin outside it fails, and a PARTIAL pin is worse than none,
-        because the unpinned thread is exactly the one that lags.
+      - Both `fast` and `slow` are intersected with the process affinity mask
+        when one is given: SetThreadAffinityMask fails outright for a mask
+        with any CPU outside the process mask, and a PARTIAL pin is worse
+        than none, because the unpinned thread is exactly the one that lags.
+        An empty `fast` after the intersection refuses with a reason; an
+        empty `slow` just leaves the encoder threads unpinned.
     """
     recs = parse_cpu_set_information(raw)
     by_class: dict = {}
@@ -216,6 +219,7 @@ def classify_cpu_sets(raw: bytes, process_mask: int = 0) -> CpuClasses:
     slow = sorted(x for c, xs in by_class.items() if c != top for x in xs)
     if process_mask:
         fast = [c for c in fast if process_mask & (1 << c)]
+        slow = [c for c in slow if process_mask & (1 << c)]
         if not fast:
             return CpuClasses([], slow, by_class, groups, ids,
                               "no performance core inside the process mask")
@@ -272,10 +276,17 @@ def performance_cores() -> list[int]:
     try:
         classes = classify_cpu_sets(_read_cpu_set_buffer(), _process_mask())
         _classes_cache = classes
-        print(describe_classes(classes), flush=True)
         _pcores_cache = list(classes.fast)
     except Exception:
         _pcores_cache = []
+        return _pcores_cache
+    # The log line is written AFTER the caches are set and in its own guard:
+    # stdout may be a closed or full log file (the GUI runs under pythonw with
+    # stdout redirected), and a print failure must never cost the pin.
+    try:
+        print(describe_classes(classes), flush=True)
+    except Exception:
+        pass
     return _pcores_cache
 
 
