@@ -343,6 +343,21 @@ class BaslerBackend:
     #: names differ across pylon generations, so the first IMPLEMENTED one wins.
     EXPOSURE_NODES = ("ExposureTime", "ExposureTimeAbs")
     GAIN_NODES = ("Gain", "GainRaw")
+    #: Unit of each gain node. `Gain` is a float in dB (SFNC 2, ace2);
+    #: `GainRaw` is an INTEGER in sensor steps whose dB size is model-specific,
+    #: so the two are not interchangeable and no conversion is attempted here.
+    GAIN_UNITS = {"Gain": "dB", "GainRaw": "raw"}
+
+    @classmethod
+    def gain_unit(cls, cam):
+        """'dB', 'raw', or None when the camera has no gain control.
+
+        The caller decides what a dB-denominated profile value means on a
+        'raw' camera (refuse, or convert with the model's step); the baseline
+        restore needs no decision because it reads and writes the same node.
+        """
+        name, _ = cls._find_node(cam, cls.GAIN_NODES)
+        return cls.GAIN_UNITS.get(name)
 
     @classmethod
     def _find_node(cls, cam, names):
@@ -404,6 +419,14 @@ class BaslerBackend:
         frame-rate timer starts after exposure ends, so the minimum interval is
         `exposure + 1/AcquisitionFrameRate`, and exceeding the trigger period
         silently halves the frame rate rather than erroring.
+
+        Gain is written in the UNIT OF THE NODE FOUND (see gain_unit): a float
+        in dB to `Gain`, an integer step count to `GainRaw`, clamped into the
+        node's range. Restoring the baseline read by get_exposure_gain is
+        therefore exact on either kind of camera. A dB value from the profile
+        is only meaningful on a 'dB' camera; the caller checks gain_unit()
+        before applying one, because this function cannot tell the two
+        sources apart.
         """
         applied_exp = applied_gain = None
         if exposure_us is not None:
@@ -412,9 +435,13 @@ class BaslerBackend:
                 node.SetValue(cls._clamp_to_node(node, float(exposure_us)))
                 applied_exp = node.GetValue()
         if gain_db is not None:
-            _, node = cls._find_node(cam, cls.GAIN_NODES)
+            name, node = cls._find_node(cam, cls.GAIN_NODES)
             if node is not None:
-                node.SetValue(float(gain_db))
+                if cls.GAIN_UNITS.get(name) == "raw":
+                    v = int(round(float(gain_db)))
+                else:
+                    v = float(gain_db)
+                node.SetValue(cls._clamp_to_node(node, v))
                 applied_gain = node.GetValue()
         return applied_exp, applied_gain
 
