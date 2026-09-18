@@ -312,6 +312,9 @@ class ArrowItem(QGraphicsItem):
 class StimCanvas(QGraphicsView):
     block_selected = pyqtSignal(object)  # BlockItem or None
     starts_changed = pyqtSignal(int)     # count of blocks stuck without a start
+    #: Emitted on every structural change (block or arrow added or removed,
+    #: flag toggled, load, clear) so the window can track unsaved work.
+    modified = pyqtSignal()
 
     def __init__(self):
         scene = QGraphicsScene()
@@ -534,6 +537,7 @@ class StimCanvas(QGraphicsView):
                 blk._is_start, blk._needs_start = s, n
                 blk.update()
         self.starts_changed.emit(len(needs))
+        self.modified.emit()
 
     def _component(self, blk: BlockItem) -> set[BlockItem]:
         """All blocks reachable from blk ignoring arrow direction."""
@@ -571,12 +575,29 @@ class StimCanvas(QGraphicsView):
 
     # ── block / arrow operations ──────────────────────────────────────────────
     def add_block(self, pin, freq, pw, dur) -> BlockItem:
-        existing = self.blocks()
         blk = BlockItem(pin, freq, pw, dur)
-        blk.setPos(len(existing) * (BW + 30), 0)
+        blk.setPos(self._free_spot())
         self.scene().addItem(blk)
+        self.ensureVisible(blk)
         self.refresh_starts()
         return blk
+
+    def _free_spot(self) -> QPointF:
+        """Grid-snapped position for a new block that overlaps nothing.
+
+        Starts at the centre of what the operator is looking at and steps
+        right until the slot is clear, so a new block never lands off-screen
+        or on top of another block.
+        """
+        c = self.mapToScene(self.viewport().rect().center())
+        x = round((c.x() - BW / 2) / GRID) * GRID
+        y = round((c.y() - BH / 2) / GRID) * GRID
+        occupied = [b.sceneBoundingRect() for b in self.blocks()]
+        for _ in range(1000):
+            if not any(QRectF(x, y, BW, BH).intersects(r) for r in occupied):
+                break
+            x += BW + 30
+        return QPointF(x, y)
 
     def _delete_selected(self):
         """Delete selected blocks and/or arrows cleanly with no ghost graphics."""
@@ -896,6 +917,7 @@ class StimulationWindow(QDialog):
         self._canvas = StimCanvas()
         self._canvas.block_selected.connect(self._on_block_selected)
         self._canvas.starts_changed.connect(self._on_starts_changed)
+        self._canvas.modified.connect(self._on_canvas_modified)
         splitter.addWidget(self._canvas)
 
         # ── bottom panel ──────────────────────────────────────────────────────
@@ -1286,6 +1308,7 @@ class StimulationWindow(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         ) == QMessageBox.Yes:
             self._canvas.clear()
+            self._dirty = False
 
     # ── save ─────────────────────────────────────────────────────────────────
     def _on_save(self):
@@ -1307,6 +1330,16 @@ class StimulationWindow(QDialog):
 
     # ── load ─────────────────────────────────────────────────────────────────
     def _on_load(self):
+        # Load replaces the whole canvas, so unsaved work is asked about first,
+        # before the file dialog, the same as Clear asks.
+        if self.has_unsaved_changes():
+            if QMessageBox.question(
+                self, "Discard changes?",
+                "The canvas has changes that were not saved. Loading a file "
+                "replaces it.\n\nDiscard the unsaved changes?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Stimulus Config",
             str(self._get_output_dir()), "JSON (*.json)")
