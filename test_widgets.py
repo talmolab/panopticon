@@ -36,6 +36,7 @@ app = QApplication.instance() or QApplication([])
 
 from gui_app.widgets import sidebar as sidebar_module
 from gui_app.widgets.sidebar import SidebarWidget
+from gui_app.widgets.camera_grid import CameraGridWidget
 
 _TMP = tempfile.mkdtemp(prefix="panopticon_widgets_")
 # Redirect the per-machine settings so no test touches the real registry.
@@ -192,6 +193,61 @@ def test_stop_record_emits_when_already_off():
     sb.close()
 
 
+# --------------------------------------------------------------------------
+# A5-06: shrinking the camera count leaves no stale row/column stretch.
+# --------------------------------------------------------------------------
+def _stretches(grid):
+    lay = grid._layout
+    rows = [lay.rowStretch(r) for r in range(lay.rowCount())]
+    cols = [lay.columnStretch(c) for c in range(lay.columnCount())]
+    return rows, cols
+
+
+def test_shrinking_grid_zeroes_stale_stretches():
+    grid = CameraGridWidget()
+    grid.resize(900, 600)
+    grid.show()
+    grid.setup_grid(9)
+    app.processEvents()
+    rows, _ = _stretches(grid)
+    check("9 cameras: three rows stretched", rows[:3] == [1, 1, 1], repr(rows))
+
+    grid.setup_grid(3)
+    app.processEvents()
+    rows, cols = _stretches(grid)
+    check("9->3 cameras: only row 0 keeps a stretch",
+          rows[0] == 1 and all(r == 0 for r in rows[1:]), repr(rows))
+    check("9->3 cameras: three columns stretched", cols[:3] == [1, 1, 1], repr(cols))
+    cell_h = grid._cells[0].height()
+    check("9->3 cameras: the single row fills the widget height",
+          cell_h > 0.8 * grid.height(), f"cell {cell_h} of {grid.height()}")
+    grid.close()
+
+
+def test_unzoom_restores_from_clean_stretches():
+    grid = CameraGridWidget()
+    grid.resize(900, 600)
+    grid.show()
+    grid.setup_grid(6)
+    app.processEvents()
+    grid.toggle_zoom(4)
+    app.processEvents()
+    rows, cols = _stretches(grid)
+    check("zoomed: only (0,0) stretched",
+          rows[0] == 1 and all(r == 0 for r in rows[1:])
+          and cols[0] == 1 and all(c == 0 for c in cols[1:]), repr((rows, cols)))
+    check("zoomed: other panes hidden",
+          all(c.isHidden() != (i == 4) for i, c in enumerate(grid._cells)))
+    grid.toggle_zoom(4)
+    app.processEvents()
+    rows, cols = _stretches(grid)
+    check("unzoomed: two rows and three columns stretched",
+          rows[:2] == [1, 1] and all(r == 0 for r in rows[2:]) and cols[:3] == [1, 1, 1],
+          repr((rows, cols)))
+    check("unzoomed: every pane visible", all(not c.isHidden() for c in grid._cells))
+    grid.close()
+
+
 def main():
     test_exclusion_survives_busy_cycle()
     test_solve_gate_survives_busy_cycle()
@@ -200,6 +256,8 @@ def main():
     test_clear_toggle_silently_keeps_the_live_toggle()
     test_clear_toggles_silently_alias_uses_last_armed()
     test_stop_record_emits_when_already_off()
+    test_shrinking_grid_zeroes_stale_stretches()
+    test_unzoom_restores_from_clean_stretches()
     if _failures:
         print(f"\n{len(_failures)} FAILED: {_failures}")
         sys.exit(1)

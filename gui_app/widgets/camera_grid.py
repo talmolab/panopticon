@@ -60,6 +60,20 @@ class CameraGridWidget(QWidget):
         rows = math.ceil(self._num_cameras / self.COLS)
         return (self.COLS * self.CAM_ASPECT) / rows
 
+    def _reset_stretches(self):
+        """Zero every row and column stretch the layout has ever held.
+
+        QGridLayout keeps a row in the distribution while its stretch is
+        non-zero even when no widget occupies it, and rowCount() never shrinks
+        after widgets are removed. Setting only the rows the new count needs
+        therefore leaves a larger previous grid's empty rows sharing the
+        height, which squashes the live panes into the top of the widget.
+        """
+        for r in range(self._layout.rowCount()):
+            self._layout.setRowStretch(r, 0)
+        for c in range(self._layout.columnCount()):
+            self._layout.setColumnStretch(c, 0)
+
     def setup_grid(self, num_cameras: int):
         for c in self._cells:
             self._layout.removeWidget(c)
@@ -67,6 +81,7 @@ class CameraGridWidget(QWidget):
         self._cells.clear()
         self._zoomed_index = -1
         self._num_cameras = num_cameras
+        self._reset_stretches()
 
         rows = math.ceil(num_cameras / self.COLS) if num_cameras > 0 else 1
 
@@ -83,8 +98,9 @@ class CameraGridWidget(QWidget):
 
     def toggle_zoom(self, index: int):
         if self._zoomed_index == index:
-            # Unzoom — restore full grid
+            # Unzoom: restore the full grid from a clean stretch table.
             self._zoomed_index = -1
+            self._reset_stretches()
             for i, cell in enumerate(self._cells):
                 row, col = divmod(i, self.COLS)
                 self._layout.addWidget(cell, row, col)
