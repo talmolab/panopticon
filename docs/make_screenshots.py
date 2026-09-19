@@ -26,6 +26,14 @@ REASON: the offscreen platform grabs the widgets with every drawText dropped,
 so the figures come out with no node numbers and no caption -- and the caption
 is where the thresholds and the group count are, which is the whole reason
 these images are regenerated rather than kept.
+
+RULE: a regenerated coverage-stage figure ships in the SAME change as the
+captions that read its numerals -- the stage walk-through in docs/WORKFLOW.md
+and the coverage section of docs/OVERVIEW.md. REASON: the prose quotes the
+thresholds the figures were drawn against, says which segments the caption
+carried, and reasons about which single pair is weak; regenerating against
+another profile moves every one of those and turns stale prose into false
+prose, which reads as a documented fact rather than as an old picture.
 """
 import argparse
 import sys

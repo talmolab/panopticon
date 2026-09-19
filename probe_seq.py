@@ -65,6 +65,56 @@ def parse_steps(spec: str):
     return out
 
 
+def launch_window(app, MainWindow, drain_s: float = 0.4):
+    """Build the real window and report the dialogs the LAUNCH itself raises.
+
+    RULE: the reporting shim covers the construction and the first moments of
+    the event loop, and nothing after that. REASON: the startup camera open
+    runs on whichever profile this machine REMEMBERS, which is not the one
+    `--profile` asks for; on a host that lacks that rig's SDK it fails and
+    posts a modal about 100 ms in, and the first processEvents enters a nested
+    exec loop an unattended probe has nobody to answer. Later modals must stay
+    real -- the Overwrite prompt would clobber a previous acquisition if
+    something answered it for the operator -- so the probe keeps avoiding
+    those by construction instead of suppressing them.
+    """
+    from gui_app import main_window as mw_mod
+
+    real_box = mw_mod.QMessageBox
+
+    class _Reported(real_box):
+        """Prints a dialog to the console and answers it, for the launch only."""
+
+        @staticmethod
+        def _say(kind, parent, title, text, *a, **k):
+            print(f"[probe] launch {kind}: {title}: {text}", flush=True)
+            return real_box.Ok
+
+        @staticmethod
+        def warning(*a, **k):
+            return _Reported._say("warning", *a, **k)
+
+        @staticmethod
+        def critical(*a, **k):
+            return _Reported._say("critical", *a, **k)
+
+        @staticmethod
+        def information(*a, **k):
+            return _Reported._say("information", *a, **k)
+
+    mw_mod.QMessageBox = _Reported
+    try:
+        win = MainWindow()
+        win.show()
+        end = time.monotonic() + drain_s
+        while time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.01)
+    finally:
+        mw_mod.QMessageBox = real_box
+    return win
+
+
 def select_profile(app, win, name: str, timeout_s: float = 180.0) -> None:
     """Switch the window to the named rig profile and wait for the cameras.
 
@@ -135,8 +185,7 @@ def main():
     from gui_app.main_window import MainWindow, State as S
 
     app = QApplication(sys.argv)
-    win = MainWindow()
-    win.show()
+    win = launch_window(app, MainWindow)
 
     # Before anything else: the profile carries the cameras, the serial port
     # and the encoder, so every setting below has to be applied to the rig the

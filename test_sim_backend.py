@@ -550,6 +550,50 @@ check(15, "every third grab fails and Total_Buffer_Count still equals the "
        and st15["Buffer_Underrun_Count"] == 0),
       f"buffers={buffers15} failed={failed15} stats={st15}")
 
+# 16 -- a camera armed between two pulse trains anchors to the NEW one -------
+# The application arms every camera BEFORE it tells the board to start, so the
+# ordinal a camera computes at StartGrabbing belongs to the train that has just
+# ended. `SimBoard.start` restarts ordinals at 1, so without a re-anchor the
+# camera ignores every trigger of the new train until that stale number comes
+# round -- and it is silent, because the frames that do arrive still carry
+# block IDs from 1 and stay contiguous. The witness is the DELIVERED TRIGGER,
+# recovered from the result's device timestamp against the new epoch: block ID
+# 1 alone proves nothing, since the counter restarts with the arm either way.
+brd16 = sim_board.reset_board(speed=4.0)
+b16 = SimBackend(n_cameras=1, width=W, height=H)
+cam16 = b16.open(b16.enumerate_devices()[0], "unused.pfs", 600)
+b16.set_triggered(cam16, 165.0)
+#: Virtual seconds the first train runs. Long enough that waiting out its
+#: ordinal would be unmistakable: 50 triggers at 100 fps, against the one
+#: trigger period a re-anchored camera waits.
+FIRST_TRAIN_S = 0.5
+b16.start_grabbing(cam16)
+brd16.start(FPS, PINS)
+time.sleep(FIRST_TRAIN_S / brd16.speed)
+brd16.stop()
+# Re-armed while the board is stopped, exactly as a second acquisition does.
+b16.stop_grabbing(cam16)
+b16.start_grabbing(cam16)
+stale16 = b16.cameras[0]._next
+epoch16 = brd16.start(FPS, PINS)
+st16 = brd16.state()
+t16 = time.perf_counter()
+r16 = b16.retrieve(cam16, 2000)
+waited16 = time.perf_counter() - t16
+bid16 = r16.BlockID
+# trigger_v(i) = epoch_v + i / fps, and the timestamp is that instant in ns,
+# skewed by the camera's oscillator error (zero here).
+ordinal16 = round((r16.TimeStamp / 1e9 - st16.epoch_v) * st16.fps)
+r16.Release()
+brd16.stop()
+b16.close(cam16)
+check(16, "a camera armed before the board starts delivers trigger 1 of the "
+          "NEW pulse train, not the ordinal left over from the old one",
+      (stale16 > 1 and ordinal16 == 1 and bid16 == 1
+       and waited16 < (FIRST_TRAIN_S / 2) / brd16.speed),
+      f"stale_next={stale16} delivered_ordinal={ordinal16} bid={bid16} "
+      f"waited={waited16 * 1000:.1f}ms")
+
 print()
 if failures:
     print(f"{len(failures)} SIM-BACKEND TEST(S) FAILED: {failures}")

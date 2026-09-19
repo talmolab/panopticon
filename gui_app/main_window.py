@@ -262,8 +262,23 @@ class MainWindow(QMainWindow):
         return list(profiles)
 
     def _open_cameras(self):
-        """Open cameras for the current profile (synchronous — startup only)."""
-        ok = self._open_cameras_bg()
+        """Open cameras for the current profile (synchronous — startup only).
+
+        RULE: a raised exception is turned into the same value
+        `_apply_camera_open_result` already accepts, never allowed out of
+        here. REASON: this runs inside `__init__`, so anything that escapes
+        destroys the window before it exists — and the vendor SDK is loaded
+        for the first time under this call, on the profile the machine
+        happens to remember. A host with no `pypylon` would then have no
+        window at all, hence no profile dropdown, hence no way to select a
+        backend that needs no SDK. The live profile-switch path gets this for
+        free: CallableWorker delivers the exception as its result.
+        """
+        try:
+            ok = self._open_cameras_bg()
+        except Exception as exc:
+            traceback.print_exc()
+            ok = exc
         self._apply_camera_open_result(ok)
 
     def _open_cameras_bg(self):

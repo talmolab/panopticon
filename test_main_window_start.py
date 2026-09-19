@@ -16,15 +16,27 @@ worker made synchronous so a start can be driven to completion. One case does
 open the SIMULATED backend through the same profile plumbing the GUI uses, to
 prove the profile's camera_backend really reaches open_all.
 
+The last case is the exception: it builds the REAL window, because the launch
+itself is what it asserts. `pypylon` is made un-importable for the whole file
+so that case can prove a host with no vendor SDK still gets a window and a
+dialog rather than an exception out of the constructor.
+
     set QT_QPA_PLATFORM=offscreen && uv run python test_main_window_start.py
 """
 import contextlib
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# RULE: set before any gui_app import. REASON: the launch case below asserts
+# that a window still comes up on a host with no vendor SDK, and an import
+# that has already succeeded cannot be un-done afterwards.
+sys.modules["pypylon"] = None
+sys.modules["pypylon.pylon"] = None
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtCore import QSettings
@@ -1210,6 +1222,76 @@ with tempfile.TemporaryDirectory() as td:
           f"hint={hint_after!r}")
     if w._teensy is not None:
         w._teensy.close()
+
+
+# 81 ── the launch survives a host with no vendor SDK ──────────────────────
+# The only case that builds the REAL window instead of stubbing one, because
+# the defect lives in __init__ itself: the startup camera open is synchronous
+# and it is where the profile's backend is imported for the first time. On a
+# host with no pypylon and a remembered profile that names basler, an
+# unguarded open takes the whole window down -- and with no window there is no
+# profile dropdown, so the operator cannot select the backend that needs no
+# SDK. pypylon is un-importable for this whole file (see the top).
+class _NoHwCheck:
+    """HardwareCheckThread stand-in: the host survey is not what this tests."""
+
+    class _Signal:
+        def connect(self, slot):
+            pass
+
+    def __init__(self, *a, **k):
+        self.report_ready = _NoHwCheck._Signal()
+
+    def start(self):
+        pass
+
+    def isRunning(self):
+        return False
+
+    def wait(self, ms=None):
+        return True
+
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    _MsgBox.reset()
+    _real_hw_check = mw.HardwareCheckThread
+    mw.HardwareCheckThread = _NoHwCheck
+    win = None
+    raised = None
+    try:
+        with temp_settings(tmp):
+            store = settings.app_settings()
+            store.setValue(settings.KEY_PROFILE, "3dpose")
+            store.sync()
+            try:
+                win = MainWindow()
+            except Exception as exc:                      # the defect
+                raised = exc
+            # The dialog is posted through a 100 ms singleShot, so it needs
+            # the event loop. Bounded well under the 1.5 s the launch waits
+            # before it claims the serial port: no real port may be opened.
+            end = time.monotonic() + 1.0
+            while (win is not None and "Camera Error" not in _MsgBox.titles()
+                   and time.monotonic() < end):
+                _APP.processEvents()
+                time.sleep(0.01)
+    finally:
+        mw.HardwareCheckThread = _real_hw_check
+        if win is not None:
+            win._display_timer.stop()
+            win._thermal_timer.stop()
+            win.close()
+            win.deleteLater()
+        _APP.processEvents()
+    check(81, "a launch with no vendor SDK and a basler profile remembered "
+              "still builds the window, with no cameras and one dialog that "
+              "names the profile field to change",
+          raised is None and win is not None
+          and "Camera Error" in _MsgBox.titles()
+          and "camera_backend" in _MsgBox.texts()
+          and win._camera_names == [],
+          f"raised={raised!r} titles={_MsgBox.titles()}")
 
 
 print()
