@@ -27,6 +27,8 @@ from gui_app.hardware_check import (HardwareCheckThread, format_report,
                                     check_capacity)
 from gui_app.coverage_worker import CoverageWorker
 from gui_app import rig_setup
+from gui_app import settings
+from gui_app import stim_compiler
 from gui_app.session_config import SessionConfig, RigProfile
 from gui_app.widgets.camera_grid import CameraGridWidget
 from gui_app.widgets.sidebar import SidebarWidget
@@ -123,6 +125,12 @@ class MainWindow(QMainWindow):
         # a launch always starts stimulation-free. Within a session it lets
         # calibration and recording swap firmware automatically.
         self._session_stim_ino: str | None = None
+        #: True while the board has not spoken since the last flash, so its
+        #: reported identity is the PREVIOUS sketch's and must not be believed.
+        self._board_id_stale = True
+        #: One reflash per launch from the identity check, so a board whose
+        #: firmware can never identify itself is not flashed in a loop.
+        self._board_identity_reflashed = False
 
         self._camera_mgr = CameraManager()
         self._teensy = TeensyController()
@@ -1091,6 +1099,9 @@ class MainWindow(QMainWindow):
         # retrieve timeouts is read as the board not yet running, so a camera
         # dead from the start is only retired when the pre-trigger grace
         # expires, minutes into the session.
+        # The board has just printed its RDY line, so what it reports as its
+        # sketch identity describes the firmware running now.
+        self._board_id_stale = False
         self._camera_mgr.signal_triggers_started()
         print("[acq] start_acquisition done", flush=True)
         return {"ok": True}
@@ -1209,12 +1220,10 @@ class MainWindow(QMainWindow):
         recording swap firmware automatically, so Apply is only needed when the
         paradigm itself changes.
         """
-        from gui_app import stim_compiler
         self._session_stim_ino = ino
         try:
-            from PyQt5.QtCore import QSettings
-            QSettings("Salk", "Panopticon").setValue(
-                "board_sketch_sha", stim_compiler.sketch_sha(ino))
+            settings.set_board_sketch_hint(stim_compiler.sketch_sha(ino))
+            self._board_id_stale = True
         except Exception as e:
             print(f"[stim] could not record the applied sketch hash: {e}",
                   flush=True)
@@ -1222,12 +1231,81 @@ class MainWindow(QMainWindow):
 
     def _sketch_for(self, acq_type: str):
         """(source, label) of the firmware this acquisition must run under."""
-        from gui_app import stim_compiler
         blank = stim_compiler.recording_only_sketch(
             self._profile.stim_safe_pins, self._profile.trigger_pins)
         if acq_type == "calibration" or not self._session_stim_ino:
             return blank, "recording-only"
         return self._session_stim_ino, "recording + stimulation"
+
+    def _board_needs_flash(self, want: str) -> bool:
+        """Whether the board has to be flashed to be carrying ``want``.
+
+        RULE: the board's own RDY identity decides, and the stored sketch hash
+        is consulted only when the board cannot identify itself. REASON: that
+        hash records what THIS MACHINE last flashed onto whatever was on the
+        port, so a board flashed from the Arduino IDE, swapped for another, or
+        shared with a second rig leaves it claiming to be stimulation-free
+        while carrying a paradigm — which is the case the flash exists to
+        cover, and exactly the case the shortcut skips.
+
+        A board that has not spoken since the last flash is not asked: the id
+        it last printed is the previous sketch's, and reflashing what was just
+        written would cost 30 s at every acquisition.
+        """
+        want_sha = stim_compiler.sketch_sha(want)
+        want_id = stim_compiler.sketch_id(want)
+        heard = getattr(self._teensy, "board_id", None)
+        if heard is not None and want_id is not None and not self._board_id_stale:
+            return heard != want_id
+        return settings.board_sketch_hint() != want_sha
+
+    def _confirm_board_identity(self):
+        """Ask the board what it is carrying, and reflash if it disagrees.
+
+        Standing the board down is how the identity is obtained: the sketch
+        prints its RDY line only in answer to a config, and a stop is the one
+        config that is always safe to send — it drives the camera pins and
+        every stim pin LOW, which is also the right state for a board that has
+        just been found running a paradigm from a previous session.
+
+        At most one reflash per launch, so firmware that can never print an
+        identity is not flashed over and over.
+        """
+        teensy = self._teensy
+        if teensy is None or not teensy.is_open:
+            return
+        try:
+            teensy.stop_triggers(self._profile.trigger_pins)
+        except Exception as e:
+            print(f"[acq] could not stand the board down at launch: {e}",
+                  flush=True)
+            return
+        if not getattr(teensy, "_speaks_rdy", False):
+            # Pre-RDY firmware can never identify itself, so what this machine
+            # last flashed is all there is, and it was already acted on.
+            print("[acq] trigger board does not speak RDY; its contents are "
+                  "known only from what this machine last flashed", flush=True)
+            return
+        want, _label = self._sketch_for("calibration")
+        want_id = stim_compiler.sketch_id(want)
+        heard = teensy.board_id
+        self._board_id_stale = False
+        if heard and want_id and heard == want_id:
+            print(f"[acq] trigger board reports sketch {heard}: the "
+                  f"recording-only sketch", flush=True)
+            settings.set_board_sketch_hint(stim_compiler.sketch_sha(want))
+            return
+        if self._board_identity_reflashed:
+            print(f"[acq] trigger board still reports sketch "
+                  f"{heard or 'none'}; not flashing again this launch",
+                  flush=True)
+            return
+        print(f"[acq] trigger board reports sketch {heard or 'none'}, not the "
+              f"recording-only {want_id}; flashing", flush=True)
+        self._board_identity_reflashed = True
+        # Forget the hint first: it is what claimed the board was clean.
+        settings.set_board_sketch_hint("")
+        self._ensure_clean_firmware()
 
     def _ensure_sketch_for(self, acq_type: str) -> bool:
         """Make the board carry the firmware this acquisition needs.
@@ -1241,12 +1319,10 @@ class MainWindow(QMainWindow):
         stimulation, then record — the calibration finds the launch-time
         stimulation-free sketch already in place and costs nothing.
         """
-        from gui_app import stim_compiler
-        from PyQt5.QtCore import QSettings
-        settings = QSettings("Salk", "Panopticon")
         try:
             want, label = self._sketch_for(acq_type)
             want_sha = stim_compiler.sketch_sha(want)
+            needs_flash = self._board_needs_flash(want)
         except Exception as e:
             QMessageBox.critical(
                 self, "Cannot prepare the trigger board",
@@ -1255,7 +1331,7 @@ class MainWindow(QMainWindow):
             self._sidebar.reset_toggles()
             return False
 
-        if settings.value("board_sketch_sha", "", type=str) == want_sha:
+        if not needs_flash:
             return True                      # already correct; no flash
 
         print(f"[acq] board needs the {label} sketch for a {acq_type}; flashing",
@@ -1273,7 +1349,8 @@ class MainWindow(QMainWindow):
                 # Refusing is correct. The flash is what makes the board's
                 # contents known, so a failed flash means they are not.
                 print(f"[acq] firmware flash failed: {msg}", flush=True)
-                settings.setValue("board_sketch_sha", "")
+                settings.set_board_sketch_hint("")
+                self._board_id_stale = True
                 if self._stim_window is not None:
                     self._stim_window.invalidate_upload(
                         "the flash failed, so the board's contents are unknown")
@@ -1285,7 +1362,9 @@ class MainWindow(QMainWindow):
                     f"check the board, then retry.\n\n{msg}")
                 self._sidebar.reset_toggles()
                 return
-            settings.setValue("board_sketch_sha", want_sha)
+            settings.set_board_sketch_hint(want_sha)
+            # Whatever the board printed last is the OLD sketch's identity.
+            self._board_id_stale = True
             # The board now carries `want`. If that is not the paradigm the stim
             # editor last uploaded, the editor's record of what is on the board
             # is stale and MUST be cleared. Otherwise Test compares the canvas
@@ -1313,23 +1392,31 @@ class MainWindow(QMainWindow):
         """Put the board back to the recording-only sketch at every launch.
 
         A paradigm lives in the Arduino's FLASH, so it survives closing the GUI,
-        power cycles and USB unplugs — while the canvas comes up empty and
-        nothing can read the firmware back over serial. That combination means a
-        blank-looking editor over a fully armed board, and Record would then
-        fire a paradigm nobody chose. Stim is therefore opt-in per session:
-        unless it was Applied since this launch, the board carries no stim.
+        power cycles and USB unplugs, while the canvas comes up empty. That
+        combination means a blank-looking editor over a fully armed board, and
+        Record would then fire a paradigm nobody chose. Stim is therefore
+        opt-in per session: unless it was Applied since this launch, the board
+        carries no stim.
 
-        Flashing takes ~30 s, so the SHA of whatever we last uploaded is kept in
-        QSettings: if the board already has the recording-only sketch we skip.
-        The slow path is only hit on the first launch after a session that used
-        stim, which is exactly when it is worth paying for.
+        Flashing takes ~30 s, so the SHA of what this machine last uploaded is
+        kept and the flash is skipped when it already matches. That record is a
+        hint about this machine, not about the board, which is why
+        _confirm_board_identity asks the board itself once the port is open and
+        calls this again when the two disagree.
 
         Runs BEFORE _warm_serial: arduino-cli needs the port to itself.
         """
-        from PyQt5.QtCore import QSettings
-        self._settings = QSettings("Salk", "Panopticon")
+        # Defer rather than run alongside anything: this fires 1.5 s after
+        # the window becomes interactive, so an acquisition or another flash
+        # can already be under way, and assigning over a running _fw_op drops
+        # the last reference to a live QThread (a qFatal) and puts a second
+        # arduino-cli on a port the first avrdude holds.
+        if (self._busy or self._state != State.IDLE
+                or (self._fw_op is not None and self._fw_op.isRunning())):
+            print("[acq] busy; deferring the launch firmware check", flush=True)
+            QTimer.singleShot(1000, self._ensure_clean_firmware)
+            return
         try:
-            from gui_app import stim_compiler
             blank = stim_compiler.recording_only_sketch(
                 self._profile.stim_safe_pins, self._profile.trigger_pins)
             self._pending_sha = stim_compiler.sketch_sha(blank)
@@ -1338,7 +1425,7 @@ class MainWindow(QMainWindow):
             self._warm_serial()
             return
 
-        if self._settings.value("board_sketch_sha", "", type=str) == self._pending_sha:
+        if settings.board_sketch_hint() == self._pending_sha:
             print("[acq] board already carries the recording-only sketch "
                   "(no stim); skipping flash", flush=True)
             self._warm_serial()
@@ -1348,9 +1435,7 @@ class MainWindow(QMainWindow):
               "flashing the recording-only sketch", flush=True)
         self._begin_busy("Clearing stim firmware…")
         port = self._profile.serial_port
-        self._fw_op = CallableWorker(
-            lambda: __import__("gui_app.stim_compiler", fromlist=["upload"])
-            .upload(blank, port))
+        self._fw_op = CallableWorker(lambda: stim_compiler.upload(blank, port))
         self._fw_op.done.connect(self._on_clean_firmware_done)
         self._fw_op.start()
 
@@ -1364,7 +1449,8 @@ class MainWindow(QMainWindow):
         self._sidebar.set_status("IDLE", "#888")
         ok, msg = result if isinstance(result, tuple) else (False, str(result))
         if ok:
-            self._settings.setValue("board_sketch_sha", self._pending_sha)
+            settings.set_board_sketch_hint(self._pending_sha)
+            self._board_id_stale = True
             print("[acq] board flashed with the recording-only sketch; stim is "
                   "off until you Apply one", flush=True)
         else:
@@ -1393,6 +1479,8 @@ class MainWindow(QMainWindow):
         if self._teensy_connection(retries=1) is None:
             print(f"[acq] trigger board not reachable on {self._profile.serial_port} "
                   f"at startup; will retry on first use", flush=True)
+            return
+        self._confirm_board_identity()
 
     def _teensy_connection(self, retries: int = 10) -> TeensyController | None:
         """The one serial link to the trigger board, kept open for the session.
@@ -1406,6 +1494,10 @@ class MainWindow(QMainWindow):
         if self._teensy is not None and self._teensy.port != self._profile.serial_port:
             self._teensy.close()          # profile switched to a different port
             self._teensy = None
+            # A different port is a different board: what this machine last
+            # flashed says nothing about what is on this one.
+            settings.set_board_sketch_hint("")
+            self._board_id_stale = True
         if self._teensy is None:
             self._teensy = TeensyController(port=self._profile.serial_port)
         if not self._teensy.is_open:
