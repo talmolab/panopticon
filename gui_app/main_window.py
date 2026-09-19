@@ -102,6 +102,10 @@ class MainWindow(QMainWindow):
         self._config: SessionConfig | None = None
         self._video_dir: Path | None = None
         self._busy = False                 # a blocking camera op is running
+        # True once this acquisition's data is fully written. Quitting reads
+        # it, because the state still says RECORDING while the finalize runs.
+        self._finalized = True
+        self._created_dirs: list = []
         self._cam_op: CallableWorker | None = None
         self._fw_op: CallableWorker | None = None
         # The paradigm applied during THIS session, if any. Never persisted:
@@ -789,6 +793,7 @@ class MainWindow(QMainWindow):
         self._thermal_warnings = []
         self._thermal_reported = set()
         self._thermal_alert = None
+        self._finalized = False
         for cam in self._camera_names:
             cam_dir = self._video_dir / cam
             if not cam_dir.exists():
@@ -1473,6 +1478,7 @@ class MainWindow(QMainWindow):
                 self._save_frametimes(e.results)
                 self._save_acquisition_metadata()
                 self._write_stim_trace()
+                self._finalized = True
                 raise
             self._save_frametimes(cam_results)
             # Read thermals BEFORE resume_preview: DeviceTemperature starts
@@ -1485,6 +1491,10 @@ class MainWindow(QMainWindow):
                 print(f"[acq] thermals unavailable: {e}", flush=True)
             self._save_acquisition_metadata()
             self._write_stim_trace()   # needs blockids, so after _save_frametimes
+            # Set before resume_preview, which is the one step after this that
+            # can still fail: everything the session consists of is on disk by
+            # now, so a quit racing the restore must not delete it.
+            self._finalized = True
             self._camera_mgr.resume_preview()
 
         self._cam_op = CallableWorker(_finalize)
@@ -1918,23 +1928,72 @@ class MainWindow(QMainWindow):
         # flash. Same hazard as the editor's Apply above and for the same
         # reason: it is arduino-cli driving avrdude, so it must never be torn
         # down silently.
+        # The launch hardware check writes a speed-test file and runs ffmpeg,
+        # typically 1-3 s. Closing inside that window used to return from
+        # closeEvent with the QThread still running, which Qt answers with
+        # "QThread: Destroyed while thread is still running" and an abort.
         if self._stim_window is not None and self._stim_window.is_uploading():
             return True
         return any(w is not None and w.isRunning() for w in
                    (self._encode_worker, self._align_worker, self._calib_worker,
-                    self._cam_op, self._coverage_worker, self._fw_op))
+                    self._cam_op, self._coverage_worker, self._fw_op,
+                    self._hw_check_thread))
+
+    def _delete_on_quit(self) -> bool:
+        """Whether quitting right now should remove the session directory.
+
+        RULE: only a capture still in flight whose data has not been written.
+        REASON: in ENCODING and ALIGNING the capture is OVER — blockids.npy,
+        frametimes.npy and a flushed stream.h264 are on disk and the remaining
+        work is a remux that can be re-run in seconds — so deleting there
+        destroys a good session the dialog calls incomplete; and a finalize
+        that completed inside the quit's wait has saved everything while the
+        state still reads RECORDING.
+        """
+        if self._state not in (State.RECORDING, State.CALIBRATING):
+            return False
+        return not self._finalized
 
     def closeEvent(self, event):
+        # A firmware flash is never interrupted and never waited for on the UI
+        # thread. avrdude stopped mid-write leaves the Mega with a
+        # half-programmed flash and no allStimLow() boot guard, so the laser
+        # pin floats at the next power-up; and blocking the window on the
+        # flash instead shows "not responding" for up to a minute, which is
+        # what tempts an operator to end the task from Task Manager and does
+        # the same damage.
+        if ((self._fw_op is not None and self._fw_op.isRunning())
+                or (self._stim_window is not None
+                    and self._stim_window.is_uploading())):
+            QMessageBox.information(
+                self, "Firmware upload in progress",
+                "The trigger board is being flashed (~30 s).\n\nPanopticon "
+                "will not close until it finishes: interrupting the upload "
+                "leaves the board with no laser-safety boot guard.\n\nClose "
+                "again once the upload reports that it is done.")
+            event.ignore()
+            return
+
         # Quitting mid-session can't be finalized — confirm, then ABANDON the
         # half-baked data rather than blocking the close on encode/align/solve
         # workers (which is what made it freeze on "quit anyway").
         busy = self._state != State.IDLE or self._busy or self._workers_running()
         if busy:
+            if self._delete_on_quit():
+                text = (f"State is {self._state.value}. Quit anyway?\n\n"
+                        "This capture is still running, so it cannot be "
+                        "finished — its incomplete data will be DELETED.")
+            elif self._state in (State.ENCODING, State.ALIGNING):
+                text = (f"State is {self._state.value}. Quit anyway?\n\n"
+                        "The capture is COMPLETE and will be KEPT. Only the "
+                        "mp4 wrapping is unfinished, and it can be re-run "
+                        "later from the same directory.")
+            else:
+                text = ("Work is still in progress — a solve, a profile switch "
+                        "or a camera operation.\n\nQuit anyway? It will be "
+                        "cancelled. No data is deleted.")
             reply = QMessageBox.question(
-                self, "Work in progress",
-                f"State is {self._state.value}. Quit anyway?\n\n"
-                "The current session is not finished — its incomplete data "
-                "will be DELETED.",
+                self, "Work in progress", text,
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.No:
                 event.ignore()
@@ -1966,12 +2025,20 @@ class MainWindow(QMainWindow):
 
     def _abandon_and_cleanup(self):
         """Kill in-flight ffmpeg/solve subprocesses, tear down capture without
-        draining, and delete the incomplete session's data — so 'quit anyway'
-        returns immediately instead of waiting on workers."""
-        # Only the actively-written session's data is incomplete; a Solve
-        # (state IDLE) operates on already-complete videos, so don't delete those.
-        delete_data = self._state in (
-            State.RECORDING, State.CALIBRATING, State.ENCODING, State.ALIGNING)
+        draining, and delete the session's data only when it is genuinely
+        incomplete — so 'quit anyway' returns immediately instead of waiting
+        on workers."""
+        # Ask the encode and align workers to stop BEFORE killing anything.
+        # Without a stop flag a worker whose ffmpeg was killed records the
+        # failure and launches the next job, so fresh children appear after
+        # the kill, hold the output files open and outlast the wait.
+        for w in (self._encode_worker, self._align_worker):
+            if w is not None and w.isRunning():
+                try:
+                    w.request_stop()
+                except Exception as e:
+                    print(f"[quit] could not ask a worker to stop: {e}",
+                          flush=True)
         # Kill child processes (ffmpeg remux/encode, the uv-run solve): unblocks
         # the workers and unlocks output files so they can be removed.
         #
@@ -2009,16 +2076,18 @@ class MainWindow(QMainWindow):
         # excepthook cannot save us. Killing the child processes above is what
         # lets these waits actually return.
         for w in (self._cam_op, self._encode_worker, self._align_worker,
-                  self._calib_worker, self._coverage_worker):
+                  self._calib_worker, self._coverage_worker,
+                  self._hw_check_thread):
             if w is not None and w.isRunning():
                 w.wait(3000)
-        # A flash gets far longer, because it is not being killed above and
-        # abandoning the QThread under a live avrdude is the thing this is
-        # avoiding. arduino-cli's compile+upload is ~30 s.
+        # A flash is not killed above and must not be abandoned under a live
+        # avrdude, so closeEvent refuses to close while one is running. This
+        # is the backstop for a flash that started between that check and
+        # here: a short wait, not the minute-long UI freeze it replaces.
         if self._fw_op is not None and self._fw_op.isRunning():
-            print("[quit] waiting for the firmware flash to finish before "
-                  "tearing down", flush=True)
-            self._fw_op.wait(60000)
+            print("[quit] a firmware flash is still running; waiting briefly "
+                  "rather than tearing it down", flush=True)
+            self._fw_op.wait(5000)
         if self._cam_op is not None and self._cam_op.isRunning():
             # Still inside pylon after 3 s. Leaking the camera handles costs
             # nothing at process exit; closing them under a live native call
@@ -2030,6 +2099,37 @@ class MainWindow(QMainWindow):
                 self._camera_mgr.abandon()
             except Exception as e:
                 print(f"[quit] abandon failed: {e}", flush=True)
-        if delete_data and self._video_dir and Path(self._video_dir).exists():
-            shutil.rmtree(self._video_dir, ignore_errors=True)
-            print(f"[quit] deleted incomplete session data: {self._video_dir}", flush=True)
+        # Read the flag AFTER the waits: a finalize that completed inside them
+        # has written the whole session, and deleting it then would destroy
+        # exactly the data the wait was there to save.
+        if not (self._delete_on_quit() and self._video_dir):
+            return
+        target = Path(self._video_dir)
+        if not target.exists():
+            return
+        try:
+            base = Path(self._sidebar.output_dir).resolve()
+            inside = target.resolve().is_relative_to(base)
+        except (OSError, ValueError):
+            inside = False
+        if not inside:
+            # The session path is built from free-text fields. A component
+            # that escaped validation must never turn this into an rmtree of
+            # somewhere else.
+            print(f"[quit] refusing to delete {target}: outside the output "
+                  f"directory", flush=True)
+            return
+
+        def _report(func, path, exc_info):
+            print(f"[quit] could not remove {path}: {exc_info[1]}", flush=True)
+
+        shutil.rmtree(target, onerror=_report)
+        if target.exists():
+            # ignore_errors used to leave a half-deleted directory behind a
+            # log line claiming success; a file a dying ffmpeg still holds is
+            # the normal way that happens.
+            print(f"[quit] session data only PARTLY removed; files remain in "
+                  f"{target}", flush=True)
+        else:
+            print(f"[quit] deleted incomplete session data: {target}",
+                  flush=True)
