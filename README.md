@@ -45,6 +45,54 @@ Talmo Lab, Salk Institute.
 
 ---
 
+## Quick start
+
+Windows, in PowerShell, with [uv](https://docs.astral.sh/uv/) installed. The
+Basler pylon SDK has to be installed first for the GUI itself; the tests do not
+need it.
+
+```powershell
+git clone https://github.com/talmolab/panopticon.git
+cd panopticon
+uv sync                      # no cameras or NVIDIA GPU here? uv sync --no-group rig
+uv run python test_frame_sync.py
+uv run gui.py
+```
+
+There are no submodules, so a plain clone is complete.
+[docs/INSTALLATION.md](docs/INSTALLATION.md) takes it from there: the hardware
+arithmetic, the network, and the two files that describe your rig.
+
+## Verify without hardware
+
+Every `test_*.py` in the repository root except `test_sync_router.py` runs with
+no cameras, no trigger board and no GPU, and that whole set is the acceptance
+run for a fresh install:
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+Get-ChildItem test_*.py | ForEach-Object { uv run python $_ }
+```
+
+Each ends in one `ALL ... PASS` line and exits non-zero on the first failure.
+[docs/INTERNALS.md](docs/INTERNALS.md#tests-and-probes) says what each suite
+covers.
+
+The application itself also runs with nothing plugged in: `profiles/sim.yaml`
+selects a simulated camera backend and a simulated trigger board, so preview,
+Calibrate, Record, Stop and the stimulation editor's Apply all work end to end.
+Pick `sim` from the profile dropdown.
+[docs/INSTALLATION.md](docs/INSTALLATION.md#3-verify-it-works) has both paths.
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rules that matter here: which test
+suite guards which module, why a change to the capture hot path needs a
+frame-loss figure from a real rig before it can merge, and the comment
+convention. Most defects in this program are silent — a wrong change records a
+perfect-looking session whose frames are misaligned — which is what those rules
+exist to catch.
+
 ## Where to go next
 
 | Page | What is in it |
@@ -53,6 +101,9 @@ Talmo Lab, Salk Institute.
 | **[docs/OVERVIEW.md](docs/OVERVIEW.md)** | Every control, screen by screen, including the calibration coverage HUD and the stimulation editor. |
 | **[docs/WORKFLOW.md](docs/WORKFLOW.md)** | A session start to finish: calibrate, solve, record, check the result. |
 | **[docs/INTERNALS.md](docs/INTERNALS.md)** | How it works underneath: the grab loop, GPU encoding, frame alignment, tuning and porting. |
+| **[docs/CPU_ENCODE.md](docs/CPU_ENCODE.md)** | The libx264 encode path for a machine whose GPU cannot serve every camera, and exactly how much of it is wired up. |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to set up, which suite to run after touching which module, and what a hot-path change has to prove. |
+| `docs/PERF_EXPERIMENTS.md` | The engineering notebook behind the performance numbers quoted in these pages. Kept on the rig machine and deliberately not published, so a clone does not carry it. |
 
 ---
 
