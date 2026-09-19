@@ -100,6 +100,15 @@ class MainWindow(QMainWindow):
         self._state = State.IDLE
         self._acq_type = ""
         self._acq_fps = 0
+        self._camera_names: list[str] = []
+        self._capture_warnings: list[str] = []
+        #: Preview tick counter: the fps readout and the health line are
+        #: refreshed every tenth repaint, not every one.
+        self._display_tick = 0
+        self._lut = None
+        self._lut_key = None
+        #: SHA of the sketch the launch-time flash is putting on the board.
+        self._pending_sha = ""
         self._detector = None
         self._coverage_worker: CoverageWorker | None = None
         self._encode_worker: EncodeWorker | None = None
@@ -121,6 +130,7 @@ class MainWindow(QMainWindow):
         self._created_dirs: list = []
         self._cam_op: CallableWorker | None = None
         self._fw_op: CallableWorker | None = None
+        self._snap_op: CallableWorker | None = None
         # The paradigm applied during THIS session, if any. Never persisted:
         # a launch always starts stimulation-free. Within a session it lets
         # calibration and recording swap firmware automatically.
@@ -162,7 +172,11 @@ class MainWindow(QMainWindow):
         self._sidebar.profile_changed.connect(self._on_profile_changed)
 
         self._stim_window: StimulationWindow | None = None
-        self._stim_end_timer: QTimer | None = None
+        # One timer for the life of the window: a QTimer per recording is a
+        # child QObject per recording, never deleted.
+        self._stim_end_timer = QTimer(self)
+        self._stim_end_timer.setSingleShot(True)
+        self._stim_end_timer.timeout.connect(self._on_stim_end)
 
         self._display_timer = QTimer()
         self._display_timer.timeout.connect(self._refresh_displays)
@@ -186,7 +200,7 @@ class MainWindow(QMainWindow):
         if self._sidebar.select_profile(self._sidebar.remembered_profile()):
             self._profile = self._sidebar.current_profile
         else:
-            for prof in self._sidebar._profiles:
+            for prof in self._sidebar_profiles():
                 if prof.pfs_path and Path(prof.pfs_path).exists():
                     self._sidebar.select_profile(prof.name)
                     self._profile = prof
@@ -214,6 +228,17 @@ class MainWindow(QMainWindow):
         # After the window is up, so the warning is a dialog over a live
         # window rather than a message behind the splash screen.
         QTimer.singleShot(0, self._show_profile_warnings)
+
+    def _sidebar_profiles(self) -> list:
+        """Every profile the sidebar loaded, newest accessor first.
+
+        The public property is the one to use; the private list is the
+        fallback until the sidebar exposes one.
+        """
+        profiles = getattr(self._sidebar, "profiles", None)
+        if profiles is None:
+            profiles = self._sidebar._profiles
+        return list(profiles)
 
     def _open_cameras(self):
         """Open cameras for the current profile (synchronous — startup only)."""
@@ -284,6 +309,12 @@ class MainWindow(QMainWindow):
         A caller with no new state to show must set it back to IDLE itself."""
         QApplication.restoreOverrideCursor()
         self._sidebar.set_busy(False)
+        # set_busy(False) re-enables the profile combo and the output-dir
+        # button, which the acquisition locked. Re-apply the session lock:
+        # ENCODING and ALIGNING still belong to this session, and a profile
+        # changed there leaves the dropdown showing one rig while the window
+        # holds another and persists the wrong one for the next launch.
+        self._sidebar.set_fields_editable(self._state == State.IDLE)
         self._busy = False
         self._display_timer.start(self._display_interval_ms())
 
@@ -403,24 +434,35 @@ class MainWindow(QMainWindow):
         p.setColor(QPalette.ToolTipText, QColor(220, 220, 220))
         app.setPalette(p)
 
+    def _preview_lut(self):
+        """The brightness/contrast table, or None when both sliders are zero.
+
+        RULE: the adjustment is a 256-entry lookup, rebuilt only when a slider
+        moves. REASON: it runs on the Qt main thread for every camera on every
+        repaint, and two float32 copies of each frame there is work taken
+        straight out of the grab threads' budget — the same budget the repaint
+        period is widened to protect.
+        """
+        key = (self._sidebar.brightness, self._sidebar.contrast)
+        if key == (0, 0):
+            return None
+        if key != self._lut_key:
+            brightness, contrast = key
+            table = np.arange(256, dtype=np.float32) - 128.0
+            table *= (100 + contrast) / 100.0
+            table += 128.0 + brightness
+            self._lut = np.clip(table, 0, 255).astype(np.uint8)
+            self._lut_key = key
+        return self._lut
+
     def _refresh_displays(self):
-        self._display_tick = getattr(self, '_display_tick', 0) + 1
-        brightness = self._sidebar.brightness
-        contrast = self._sidebar.contrast
+        self._display_tick += 1
+        lut = self._preview_lut()
 
         for i, frame in enumerate(self._camera_mgr.latest_frames):
             if frame is not None:
-                if brightness != 0 or contrast != 0:
-                    f = frame.astype(np.float32)
-                    if contrast != 0:
-                        factor = (100 + contrast) / 100
-                        np.subtract(f, 128, out=f)
-                        np.multiply(f, factor, out=f)
-                        np.add(f, 128, out=f)
-                    if brightness != 0:
-                        np.add(f, brightness, out=f)
-                    np.clip(f, 0, 255, out=f)
-                    frame = f.astype(np.uint8)
+                if lut is not None:
+                    frame = lut[frame]
                 self._camera_grid.update_frame(i, frame)
 
         if self._display_tick % 10 == 0:
@@ -507,7 +549,7 @@ class MainWindow(QMainWindow):
 
     def _start_thermal_watch(self):
         """Begin polling temperatures for this acquisition, if enabled."""
-        secs = float(getattr(self._profile, "thermal_poll_s", 0.0) or 0.0)
+        secs = float(self._profile.thermal_poll_s or 0.0)
         if secs <= 0:
             return
         self._thermal_timer.start(int(secs * 1000))
@@ -987,7 +1029,7 @@ class MainWindow(QMainWindow):
         no 'existing data' for the next attempt to move aside and no path
         holding real data can be removed here.
         """
-        for path in reversed(getattr(self, "_created_dirs", [])):
+        for path in reversed(self._created_dirs):
             try:
                 for leftover in path.iterdir():
                     if leftover.is_file() and leftover.stat().st_size == 0:
@@ -1193,22 +1235,16 @@ class MainWindow(QMainWindow):
         secs = self._stim_window.end_time_s()
         if not secs or secs <= 0:
             return
-        self._stim_end_timer = QTimer(self)
-        self._stim_end_timer.setSingleShot(True)
-        self._stim_end_timer.timeout.connect(self._on_stim_end)
         self._stim_end_timer.start(int(secs * 1000))
         print(f"[stim] auto-stop armed: {secs:g}s", flush=True)
 
     def _on_stim_end(self):
-        self._stim_end_timer = None
         if self._state == State.RECORDING:
             print("[stim] end block reached — stopping recording", flush=True)
             self._sidebar.stop_record()
 
     def _cancel_stim_autostop(self):
-        if self._stim_end_timer is not None:
-            self._stim_end_timer.stop()
-            self._stim_end_timer = None
+        self._stim_end_timer.stop()
 
     # ── shared trigger-board link ─────────────────────────────────────────────
     def _on_stim_applied(self, ino: str):
@@ -2161,23 +2197,60 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(250, self._save_snapshots)
 
     def _save_snapshots(self):
+        """Write the stashed full-resolution frames, off the UI thread.
+
+        PNG-compressing one full-resolution frame per camera is seconds of
+        work, and it used to run in a timer slot. A camera whose frame did not
+        arrive is named rather than silently counted out: with the triggers
+        stopped every frame is missing, and "saved 0/9" does not say why.
+        """
+        try:
+            cfg = self._build_config().validate()
+        except ValueError as e:
+            self.statusBar().showMessage(f"Snapshot: {e}")
+            return
+        if self._snap_op is not None and self._snap_op.isRunning():
+            self.statusBar().showMessage(
+                "Snapshot: the previous save is still running")
+            return
+        out_dir = (cfg.session_dir / "snapshots"
+                   / f"{cfg.date}_{datetime.now().strftime('%H%M%S')}")
+        frames = list(self._camera_mgr.snapshots)
+        names = [self._camera_label(i + 1) for i in range(len(frames))]
+        self._snap_op = CallableWorker(
+            lambda: self._write_snapshots(out_dir, frames, names))
+        self._snap_op.done.connect(self._on_snapshots_saved)
+        self._snap_op.start()
+        self.statusBar().showMessage(f"Snapshot: saving {len(frames)} cameras…")
+
+    @staticmethod
+    def _write_snapshots(out_dir: Path, frames: list, names: list) -> dict:
+        """Save one PNG per camera that produced a frame. Worker thread."""
         from PIL import Image
-        cfg = self._build_config()
-        out_dir = cfg.session_dir / "snapshots" / f"{cfg.date}_{datetime.now().strftime('%H%M%S')}"
         out_dir.mkdir(parents=True, exist_ok=True)
-        frames = self._camera_mgr.snapshots
-        saved = 0
-        for i, frame in enumerate(frames):
+        saved, missing = 0, []
+        for frame, cam in zip(frames, names):
             if frame is None:
+                missing.append(cam)
                 continue
-            cam = self._camera_names[i] if i < len(self._camera_names) else f"cam{i+1}"
             try:
                 Image.fromarray(frame).save(out_dir / f"{cam}.png")
                 saved += 1
             except Exception as e:
                 print(f"[snapshot] {cam} failed: {e}", flush=True)
+                missing.append(cam)
+        return {"saved": saved, "total": len(frames), "missing": missing,
+                "out_dir": out_dir}
+
+    def _on_snapshots_saved(self, result):
+        if not isinstance(result, dict):
+            self.statusBar().showMessage(f"Snapshot failed: {result}")
+            return
+        tail = (f"  —  no frame from: {', '.join(result['missing'])}"
+                if result["missing"] else "")
         self.statusBar().showMessage(
-            f"Snapshot: saved {saved}/{len(frames)} cameras → {out_dir}")
+            f"Snapshot: saved {result['saved']}/{result['total']} cameras → "
+            f"{result['out_dir']}{tail}")
 
     def _on_stimulation(self):
         if self._stim_window is None:
@@ -2224,7 +2297,7 @@ class MainWindow(QMainWindow):
         return any(w is not None and w.isRunning() for w in
                    (self._encode_worker, self._align_worker, self._calib_worker,
                     self._cam_op, self._coverage_worker, self._fw_op,
-                    self._hw_check_thread))
+                    self._hw_check_thread, self._snap_op))
 
     def _delete_on_quit(self) -> bool:
         """Whether quitting right now should remove the session directory.
@@ -2366,7 +2439,7 @@ class MainWindow(QMainWindow):
         # lets these waits actually return.
         for w in (self._cam_op, self._encode_worker, self._align_worker,
                   self._calib_worker, self._coverage_worker,
-                  self._hw_check_thread):
+                  self._hw_check_thread, self._snap_op):
             if w is not None and w.isRunning():
                 w.wait(3000)
         # A flash is not killed above and must not be abandoned under a live
