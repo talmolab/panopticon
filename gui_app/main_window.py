@@ -148,6 +148,14 @@ class MainWindow(QMainWindow):
         #: firmware can never identify itself is not flashed in a loop.
         self._board_identity_reflashed = False
 
+        # Constructed before the profile is resolved, which is safe only
+        # because the manager LOADS no backend until it opens cameras: the
+        # profile's camera_backend reaches it through rig_setup.open_kwargs
+        # into open_all(backend=...), and that is the call that decides which
+        # vendor SDK is imported. RULE: nothing here may ask the manager for
+        # its backend object. REASON: the ask alone would load the class
+        # default and import pypylon, so the window would refuse to build on
+        # a host with no vendor SDK whatever the profile names.
         self._camera_mgr = CameraManager()
         #: Built by _teensy_connection, not here. RULE: the controller is
         #: never constructed before the profile is resolved. REASON: the

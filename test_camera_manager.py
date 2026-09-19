@@ -173,12 +173,11 @@ def manager(backend):
     what the manager does to the cameras, so the thread start is recorded
     rather than performed.
     """
-    saved = cm.load_backend
-    cm.load_backend = lambda name: backend
-    try:
-        mgr = CameraManager("stub")
-    finally:
-        cm.load_backend = saved
+    # The stub is assigned rather than registered: the manager loads a backend
+    # by name only when it has none, so handing it the object here is both how
+    # a test supplies one and the path a live profile switch takes.
+    mgr = CameraManager("stub")
+    mgr._backend = backend
     mgr.started_threads = []
     mgr._start_grab_threads = lambda *a, **kw: mgr.started_threads.append(kw)
     mgr._stop_grab_threads = lambda: None
@@ -617,6 +616,53 @@ check("a host with no performance-core set reports pinning as a no-op, not "
 m23 = manager(rig())
 check("pinning off says so in one line", m23.pinning_report() == "cpu pinning: off",
       m23.pinning_report())
+
+# --- the backend is loaded on first use, never at construction --------------
+# The window builds the manager before the profile that names the backend is
+# known, so a manager that loaded one eagerly would import the vendor SDK
+# whatever the profile says -- and the application could not be built at all
+# on a host that has none. These cases pin the deferral itself, because it is
+# invisible on a machine where every backend happens to import.
+def _quiet(mgr):
+    """A manager whose grab threads are stubbed out, as `manager()` does."""
+    mgr._start_grab_threads = lambda *a, **kw: None
+    mgr._stop_grab_threads = lambda: None
+    return mgr
+
+
+_loads = []
+_saved_load = cm.load_backend
+cm.load_backend = lambda name: _loads.append(name) or rig()
+try:
+    m24 = _quiet(CameraManager("basler"))
+    check("constructing a manager loads no backend",
+          _loads == [] and m24.backend_loaded is False
+          and m24.backend_name == "basler", str(_loads))
+
+    # open_all(backend=...) is the profile's seam. The manager must not read
+    # its current backend to decide whether the name changed: that read is
+    # itself the import this defers.
+    ok24, _log24 = opened(m24, backend="sim", expect_cameras=3)
+    check("open_all(backend=...) loads only the backend the profile names",
+          ok24 is True and _loads == ["sim"] and m24.backend_name == "sim",
+          str(_loads))
+
+    m25 = _quiet(CameraManager())
+    check("a manager given no name still defaults to basler, and still waits",
+          m25.backend_name == "basler" and not m25.backend_loaded)
+    check("the default is loaded on the first vendor call and only once",
+          m25._backend is m25._backend and _loads == ["sim", "basler"],
+          str(_loads))
+finally:
+    cm.load_backend = _saved_load
+    m24.close_all()
+
+m26 = _quiet(CameraManager("basler"))
+m26._backend = rig()
+check("a backend assigned directly is used as it stands, and its own name "
+      "becomes the manager's so re-opening under that name loads nothing",
+      m26.backend_loaded and m26.backend_name == "stub",
+      m26.backend_name)
 
 # --- rig_setup --------------------------------------------------------------
 
