@@ -37,6 +37,27 @@ _OPEN_KWARG_FIELDS = {
 }
 
 
+def _expect_geometry(profile):
+    """The profile's (frame_width, frame_height), or None when either is unset.
+
+    The pair travels as ONE keyword because open_all compares it to the ROI
+    the cameras report as a pair; sent as two keywords, the signature filter
+    could drop one of them and the check would pass on half the geometry.
+    """
+    w = getattr(profile, "frame_width", None)
+    h = getattr(profile, "frame_height", None)
+    if not w or not h:
+        return None
+    return (int(w), int(h))
+
+
+#: open_all keywords built from more than one profile field: keyword ->
+#: callable(profile) returning the value, or None to leave the keyword out.
+_DERIVED_OPEN_KWARGS = {
+    "expect_geometry": _expect_geometry,
+}
+
+
 def apply_profile_to_manager(mgr, profile: RigProfile,
                              log=functools.partial(print, flush=True)) -> list | None:
     """Copy the thread-placement flags onto ``mgr`` and set the capture core
@@ -69,7 +90,8 @@ def apply_profile_to_manager(mgr, profile: RigProfile,
 def open_kwargs(mgr, profile: RigProfile) -> dict:
     """The ``open_all`` keyword arguments for ``profile`` that ``mgr`` accepts.
 
-    The candidate set is every profile field that configures the open path;
+    The candidate set is every profile field that configures the open path,
+    plus the keywords derived from more than one field (expect_geometry);
     it is filtered by ``inspect.signature(mgr.open_all)`` so a manager built
     before a field's consumer landed still opens, and a manager that takes
     ``**kwargs`` receives everything. Optional fields whose value is None are
@@ -85,6 +107,10 @@ def open_kwargs(mgr, profile: RigProfile) -> dict:
         if kw == "only_serials" and not value:
             continue
         candidates[kw] = value
+    for kw, build in _DERIVED_OPEN_KWARGS.items():
+        value = build(profile)
+        if value is not None:
+            candidates[kw] = value
     try:
         params = inspect.signature(mgr.open_all).parameters
     except (TypeError, ValueError):
