@@ -303,6 +303,38 @@ class TeensyController:
               flush=True)
         return False
 
+    def identify(self, pins: list[int] = ()) -> str | None:
+        """Stand the board down and read the sketch identity it answers with.
+
+        RULE: the ack is awaited once even when this controller has never
+        heard a RDY line. REASON: stop_triggers() skips the ack until one has
+        been seen, and at launch none has — a freshly constructed controller,
+        before any start — so firmware that DOES speak RDY is mislabelled
+        pre-RDY, no identity is ever read, and the launch-time decision falls
+        back to the per-machine hint. A board flashed from the Arduino IDE,
+        swapped, or shared with a second rig is exactly what the hint cannot
+        see and exactly what the identity is for. Pre-RDY firmware answers
+        nothing and costs one STOP_ACK_TIMEOUT, once per launch.
+
+        A stop is the one config always safe to send: it drives the camera
+        pins and every stim pin LOW, which is also the right state for a board
+        found carrying a previous session's paradigm.
+
+        Returns ``board_id`` — None when the link is down or the firmware
+        prints no identity.
+        """
+        pins = list(pins)
+        self.stop_triggers(pins)
+        if self._ser and not self._speaks_rdy:
+            # readFPS() clamps the stop's -1 to 0, so the board acks it as
+            # `RDY <n> 0` and the identity rides on that line.
+            try:
+                self._await_ack(len(pins), 0, timeout=self.STOP_ACK_TIMEOUT)
+            except (serial.SerialException, OSError) as e:
+                print(f"[teensy] could not read the board's identity: {e}",
+                      flush=True)
+        return self.board_id
+
     def close(self):
         if self._ser and self._ser.is_open:
             self._ser.close()

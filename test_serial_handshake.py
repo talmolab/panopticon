@@ -350,6 +350,39 @@ def test_sim_port_hook():
     print("12) port 'sim' builds SimSerial lazily, skips cleanly when absent: PASS")
 
 
+
+def test_identify_reads_the_id_before_any_start():
+    """A board that has never acked must still be asked who it is.
+
+    stop_triggers() skips the ack until a RDY line has been seen, and at
+    launch none has. Without a read that does not depend on that flag, RDY
+    firmware is mislabelled pre-RDY and the launch decides from the
+    per-machine hint alone -- which is blind to a board flashed elsewhere,
+    swapped, or shared with a second rig.
+    """
+    c, log, state = controller(lambda cmd, gen: b"RDY 6 0 0abc12ef\r\n")
+    c.STOP_ACK_TIMEOUT = 0.3
+    assert c._speaks_rdy is False and c.board_id is None
+    got = c.identify(PINS)
+    assert got == "0abc12ef", got
+    assert c._speaks_rdy is True, "the RDY line was heard but not classified"
+    assert log[0][1].strip() == "6,2,4,6,8,10,12,-1", log
+    assert state["opens"] == 0, "identify must not reset the board"
+
+    # Pre-RDY firmware says nothing: one timeout, no id, no exception.
+    c, log, state = controller(lambda cmd, gen: b"")
+    c.STOP_ACK_TIMEOUT = 0.2
+    assert c.identify(PINS) is None
+    assert c._speaks_rdy is False
+
+    # No link at all: reported, not raised.
+    c, log, state = controller(lambda cmd, gen: b"")
+    c._ser = None
+    assert c.identify(PINS) is None
+    print("13) identify() stands the board down and reads its sketch id even "
+          "before the first ack: PASS")
+
+
 def main():
     test_confirmed_no_reset()
     test_retry_after_reset_succeeds()
@@ -365,6 +398,7 @@ def main():
     test_reopen_failure_and_error_text()
     test_board_id_is_captured_from_the_ack()
     test_sim_port_hook()
+    test_identify_reads_the_id_before_any_start()
     print("\nALL SERIAL HANDSHAKE TESTS PASS")
 
 
