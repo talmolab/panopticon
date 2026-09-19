@@ -296,6 +296,17 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, lambda: QMessageBox.warning(
             self, "Camera Error", reason))
 
+    @staticmethod
+    def _worker_busy(worker) -> bool:
+        """True when a worker slot still holds a running thread.
+
+        RULE: no worker attribute is assigned over one. REASON: the
+        assignment drops the last Python reference to a live QThread, and sip
+        deleting the C++ object under it is a qFatal, which sys.excepthook
+        cannot intercept — instant process death, mid-operation.
+        """
+        return worker is not None and worker.isRunning()
+
     def _begin_busy(self, text: str):
         self._busy = True
         self._display_timer.stop()
@@ -411,6 +422,11 @@ class MainWindow(QMainWindow):
         # run it off the UI thread so the window doesn't go "not responding".
         self._begin_busy("Switching cameras…")
         self._profile = profile
+
+        if self._worker_busy(self._cam_op):
+            print("[acq] a camera operation is still running; not switching "
+                  "profile", flush=True)
+            return
 
         def _switch():
             self._camera_mgr.close_all()
@@ -976,6 +992,11 @@ class MainWindow(QMainWindow):
         # NV12 ring) and the board's ack add up to seconds, and the rollback
         # for a failed start can cost the whole stop budget. On the UI thread
         # that is a 'not responding' window with the Stop toggle out of reach.
+        if self._worker_busy(self._cam_op):
+            print("[acq] a camera operation is still running; not starting",
+                  flush=True)
+            self._sidebar.reset_toggles()
+            return
         self._begin_busy("Starting...")
         self._cam_op = CallableWorker(
             lambda: self._start_body(acq_type, raw_paths, display_every,
@@ -1389,6 +1410,13 @@ class MainWindow(QMainWindow):
         print(f"[acq] board needs the {label} sketch for a {acq_type}; flashing",
               flush=True)
         self.release_serial_port()           # arduino-cli needs the port alone
+        if self._worker_busy(self._fw_op):
+            QMessageBox.information(
+                self, "Firmware upload in progress",
+                "The trigger board is already being flashed. Wait for that to "
+                "finish and start again.")
+            self._sidebar.reset_toggles()
+            return False
         self._begin_busy(f"Flashing {label} firmware…")
         port = self._profile.serial_port
         self._fw_op = CallableWorker(lambda: stim_compiler.upload(want, port))
@@ -1464,7 +1492,7 @@ class MainWindow(QMainWindow):
         # the last reference to a live QThread (a qFatal) and puts a second
         # arduino-cli on a port the first avrdude holds.
         if (self._busy or self._state != State.IDLE
-                or (self._fw_op is not None and self._fw_op.isRunning())):
+                or self._worker_busy(self._fw_op)):
             print("[acq] busy; deferring the launch firmware check", flush=True)
             QTimer.singleShot(1000, self._ensure_clean_firmware)
             return
@@ -1714,6 +1742,10 @@ class MainWindow(QMainWindow):
 
         # Draining the encoders + reconfiguring 6 cameras back to preview is ~1 s
         # of blocking work; run it off the UI thread so the window stays live.
+        if self._worker_busy(self._cam_op):
+            print("[acq] a camera operation is still running; the stop will "
+                  "be completed by it", flush=True)
+            return
         self._begin_busy("Finishing…")
 
         def _finalize():
@@ -2023,6 +2055,11 @@ class MainWindow(QMainWindow):
         and returning to IDLE first would let a new acquisition move
         _video_dir under the worker.
         """
+        if self._worker_busy(self._cam_op):
+            print("[stim] a camera operation is still running; the trace is "
+                  "left as it is", flush=True)
+            then()
+            return
         self._begin_busy("Updating the stimulus trace...")
         self._cam_op = CallableWorker(self._write_stim_trace)
 
@@ -2225,7 +2262,7 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             self.statusBar().showMessage(f"Snapshot: {e}")
             return
-        if self._snap_op is not None and self._snap_op.isRunning():
+        if self._worker_busy(self._snap_op):
             self.statusBar().showMessage(
                 "Snapshot: the previous save is still running")
             return
