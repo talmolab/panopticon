@@ -471,8 +471,12 @@ The profile's `max_num_buffer` sets the driver-side buffers per camera, applied
 at open (`camera_manager.MAX_NUM_BUFFER = 1000` is only the default for callers
 that do not pass one). At 1920x1200 mono8 each buffer is 2.3 MB, so the pool is
 `n_cameras x max_num_buffer x 2.3 MB` — 19.3 GiB at nine cameras and 1000
-buffers, which is why the reference rig runs 250 instead: 4.8 GiB, and still
-2.5 s of slack at 100 fps. This is the pool half of the RAM budget in
+buffers, which is why the reference rig runs 600 instead: 11.6 GiB, and still
+6 s of slack at 100 fps. The pool is also floored by the coordinator: it must be
+at least `kick_max_lag` deep, or the driver reuses a buffer holding a frame the
+coordinator is still waiting on, and a recoverable lag becomes a lost one (the
+rule is stated on `ENCODE_QUEUE_DEPTH` in `gui_app/grab_thread.py`). This is the
+pool half of the RAM budget in
 [INSTALLATION.md](INSTALLATION.md). `GrabStrategy_OneByOne` delivers oldest-first.
 
 Deep slack absorbs network jitter, and it hides a per-frame deficit. A grab loop
@@ -778,16 +782,14 @@ drops are counted and attributed in `forced_by[]`, and the router logs
 `lag_behind_leader[...] forced=... forced_by[...]` about every five seconds. Read
 that line when a session is losing frames: it names the camera responsible.
 
-`max_lag` trades against RAM, and it has been measured. A clean A/B on 2026-08-11
-over 100,968 frames and 17 minutes, identical camera settings and only the cap
-differing, gave **87.68 fps released and 12.34% loss at 240, against 99.14 fps
-and 0.88% loss at 480**, which is why the reference profile ships 480. The cost
-is linear: `max_lag + queue + 64` NV12 buffers per camera, about 2.39 GiB each at
-480. Bigger is not automatically better, and 1000 **starved capture outright**,
-at 24% loss on 2026-06-17. Since the grab-loop fix of 2026-09-03 the observed
-cross-camera lag is median 0, p95 1, max 2 frames, so the current headroom buys
-nothing in practice and 240 would very likely do. Lowering it is deferred pending
-a rig A/B rather than being wrong.
+`max_lag` trades against RAM, and the cost is linear: `max_lag + queue + 64`
+NV12 buffers per camera, about 2.39 GiB each at 480. Bigger is not automatically
+better — a cap large enough to outgrow the machine has starved capture outright
+— and a cap below the lag the rig really shows force-drops triggers every camera
+captured. `max_num_buffer` must stay at or above it, so the pool outlasts the
+coordinator's patience. The reference profile ships 480; the comment on
+`kick_max_lag` in `profiles/3dpose.yaml` is the single source for why, and for
+the condition under which another value would be right.
 
 Two smaller pieces complete the coordinator. `retire(cam, reason)` drops a camera
 from the alignment set, clears its pending deque, and records the reason so it
@@ -1586,7 +1588,7 @@ warns. Redo this arithmetic for a different rig:
 frame_bytes  = width * height                      # mono8
 nv12_bytes   = width * (height * 3 // 2)
 ring_n       = kick_max_lag + 200 + 64             # kick mode
-pool_bytes   = n_cams * MAX_NUM_BUFFER * frame_bytes
+pool_bytes   = n_cams * max_num_buffer * frame_bytes
 ring_bytes   = n_cams * ring_n * nv12_bytes        # real-time only
 disk_per_s   = n_cams * fps * (4600 if realtime else frame_bytes)
 ```

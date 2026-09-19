@@ -304,46 +304,53 @@ NV12 ring          = n_cams x (kick_max_lag + ENCODE_QUEUE_DEPTH + 64)
                             x 1.5 x frame_bytes
 ```
 
-`MAX_NUM_BUFFER = 1000` (`gui_app/camera_manager.py`), 10 seconds of slack at
+Pool depth is the profile field **`max_num_buffer`**, covered in step 7. That
+name is the one to edit: `MAX_NUM_BUFFER = 1000` in `gui_app/camera_manager.py`
+is only the fallback for a caller that passes no depth, and `MaxNumBuffer` is
+pylon's own node name. The shipped profile sets 600, six seconds of slack at
 100 fps. `ENCODE_QUEUE_DEPTH = 200` (`gui_app/grab_thread.py`). The factor 1.5
 is NV12: a full-size luma plane plus a half-size chroma plane held at a constant
 128. The `+ 64` is spare slots so a buffer cannot be reused while still in
 flight. The ring exists only in real-time encode mode; in kick-out mode it is
 sized as above, otherwise `ENCODE_QUEUE_DEPTH + 4` buffers per camera.
 
-Worked example, 6 cameras at 1920x1200 with `kick_max_lag: 480`:
+Worked example at the shipped settings, `max_num_buffer: 600` and
+`kick_max_lag: 480`, 6 cameras at 1920x1200:
 
 ```
-pool  = 6 x 1000 x 2,304,000 B                   = 12.9 GiB
+pool  = 6 x 600 x 2,304,000 B                    =  7.7 GiB
 ring buffers per camera = 480 + 200 + 64         = 744
 ring  = 6 x 744 x (1920 x 1800) B                = 14.4 GiB
-total                                            = 27.2 GiB
+total                                            = 22.1 GiB
 ```
 
-The same settings at 9 cameras: 19.3 + 21.6 = **40.9 GiB**. Halving the cap to
+The same settings at 9 cameras: 11.6 + 21.6 = **33.1 GiB**. Halving the cap to
 `kick_max_lag: 240` does not halve the ring, because the queue depth and spare
 slots stay put: 504 buffers instead of 744, or 1.62 GiB per camera, giving
-22.6 GiB at 6 cameras and 33.9 GiB at 9.
+17.4 GiB at 6 cameras and 26.2 GiB at 9. Keep the pool at or above
+`kick_max_lag` whichever way you move it: a pool shallower than the coordinator's
+patience empties before the coordinator gives up on a laggard, and a recoverable
+lag becomes lost frames.
 
 Those totals have to be *available* when Record is pressed, with the operating
 system and the GUI on top, so budget roughly twice the pool-plus-ring figure for
-your camera count, not a little more. Twice 27.2 GiB is why the reference rig
-carries 63.4 GB for six cameras at `kick_max_lag: 480`.
+your camera count, not a little more. The reference rig carries 63.4 GB against
+a nine-camera demand of 33.1 GiB, so more than half the machine is buffers.
 
 The application does this arithmetic at Record time, against the cameras
 actually open, and **refuses to start if it will not fit** in available memory:
 
 ```
-Not enough RAM for 9 cameras: 40.9 GiB needed (19.3 pylon pool + 21.6 NV12
-ring), 31.2 GiB available. Lower MaxNumBuffer or kick_max_lag, or close other
-applications.
+Not enough RAM for 9 cameras: 33.1 GiB needed (11.6 pylon pool + 21.6 NV12
+ring), 31.2 GiB available. Lower `max_num_buffer` or `kick_max_lag` in the rig
+profile, or close other applications.
 ```
 
 Above 75% of available memory it warns and asks before proceeding.
 
 Separately, the startup check warns below 16 GB of RAM in total, a floor for the
 application to run at all. A 16 GB machine passes the launch check happily and
-is then refused by every six-camera recording, 27.2 GiB being nowhere near it.
+is then refused by every six-camera recording, 22.1 GiB being nowhere near it.
 Size against your own figure, not the startup warning.
 
 ### GPU
@@ -1007,21 +1014,18 @@ assumes, is on because the profile says so, not because the field is optional.
 Leave it out and you silently get post-hoc alignment with a re-encode instead,
 and nothing will tell you.
 
-**Choosing `kick_max_lag`.** This trades RAM against frames, and the evidence is
-specific. A clean A/B on 2026-08-11 (100,968 frames over 17 minutes, identical
-camera settings, only the cap differing) released 87.68 fps with 12.34% loss at
-240, against 99.14 fps with 0.88% loss at 480. The 4.7 GiB that 240 saves at six
-cameras was not free when it was measured. Going the other way is no free win
-either: `kick_max_lag: 1000` starved capture outright, losing 24% of frames on
-2026-06-17, and the ring grows linearly with the cap the whole way there.
+**Choosing `kick_max_lag`.** This trades RAM against frames, and both directions
+have cost frames on a real rig, so it is not a free dial. The ring grows
+linearly with the cap, a cap far above the lag the rig actually shows buys
+nothing, and a cap high enough to outgrow the machine starves capture outright.
+Two rules hold whatever value you pick: `max_num_buffer` stays at or above
+`kick_max_lag`, and a change is A/B'd on the rig rather than reasoned about.
 
-What has changed since is the grab loop. After the fix of 2026-09-03 the
-observed cross-camera lag on the reference rig is median 0, p95 1, max 2 frames,
-so 480 frames of headroom currently buys nothing. Dropping back to 240 would
-very likely be free now; that reduction is deferred pending an A/B on the rig
-rather than being wrong. Until that measurement exists: size RAM for 480 to keep
-the shipped configuration, and treat 240 as a tested-but-superseded option to
-A/B on your own rig, never a blind saving.
+The shipped value is 480, and the comment on `kick_max_lag` in
+`profiles/3dpose.yaml` is the single source for what that number is worth here:
+it records the measurements that raised it, the measurements that lowered it,
+and the condition under which lowering it again would be safe. Read that comment
+before changing the field, and size RAM for whatever it says.
 
 ### Step 8 — flash the trigger firmware
 
@@ -1407,7 +1411,7 @@ of your message.
 | Message | Cause and fix |
 |---|---|
 | `No cameras are open. Recording would run the trigger protocol — and any baked-in stim paradigm — while saving nothing.` | Open the cameras first: pick a profile whose `pfs_path` resolves and whose cameras enumerate. |
-| `Not enough RAM for N cameras: ...` | The buffers do not fit in available memory. The message breaks it into pool and ring. Lower `kick_max_lag`, lower `MAX_NUM_BUFFER`, or close other applications. |
+| `Not enough RAM for N cameras: ...` | The buffers do not fit in available memory. The message breaks it into pool and ring. Lower `max_num_buffer` or `kick_max_lag` in the rig profile, or close other applications. Both are profile fields: neither `MAX_NUM_BUFFER` nor `MaxNumBuffer` appears in the YAML you edit. |
 | `RAM is tight for N cameras: ...` | Over 75% of available memory. It asks before proceeding. |
 | `NVENC granted only N concurrent sessions but M cameras need one each.` | The driver's session cap is below the camera count, often because another process holds sessions (a browser's hardware encode, an orphaned ffmpeg). Close them, record fewer cameras, or set `realtime_encode: false` in the profile to put every camera on the raw path deliberately. Both shipped profiles carry that field set to `true`, so it is a value you change rather than a line you add. Read the *Disk* part of section 1 first: raw needs roughly 500x the space. |
 | `NVENC granted no encode sessions, so real-time encoding cannot start.` | No sessions available at all. Set `realtime_encode: false` in the profile to write raw frames and encode afterwards, and read the *Disk* part of section 1 first, because that is a completely different disk budget. |
