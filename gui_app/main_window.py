@@ -1431,6 +1431,13 @@ class MainWindow(QMainWindow):
             pass
 
     def _stop_acquisition(self):
+        # Stop the temperature poll FIRST. It is a GVCP register read on every
+        # camera, made from the UI thread, and the finalize worker is about to
+        # be inside pylon on the same devices; two threads making native calls
+        # on one device is an access violation, not an exception. _poll_thermals
+        # only stops itself on a state change, and the state does not change
+        # until the finalize returns.
+        self._thermal_timer.stop()
         self._cancel_stim_autostop()
         # Stop the triggers but KEEP the port open: reopening it would reset the
         # board at the start of the next recording and flash a connected laser.
@@ -1453,7 +1460,20 @@ class MainWindow(QMainWindow):
             # SAVE the captured data before restoring preview — restoring can
             # fail if a camera dropped off the bus mid-session, and saving first
             # guarantees the surviving cameras' recordings aren't lost.
-            cam_results = self._camera_mgr.stop_acquisition()
+            try:
+                cam_results = self._camera_mgr.stop_acquisition()
+            except AcquisitionStopIncomplete as e:
+                # A grab thread outlived the stop bounds. The healthy cameras'
+                # data is on the exception and must be written BEFORE the slot
+                # abandons, or blockids.npy and frametimes.npy are written for
+                # NO camera and even the cameras that finished cannot be
+                # aligned. The cameras are left untouched for abandon().
+                print(f"[acq] stop incomplete, saving what was collected: {e}",
+                      flush=True)
+                self._save_frametimes(e.results)
+                self._save_acquisition_metadata()
+                self._write_stim_trace()
+                raise
             self._save_frametimes(cam_results)
             # Read thermals BEFORE resume_preview: DeviceTemperature starts
             # decaying the moment the load comes off, and these cameras have no
@@ -1463,7 +1483,7 @@ class MainWindow(QMainWindow):
                 self._config.camera_thermals = self._camera_mgr.thermals()
             except Exception as e:
                 print(f"[acq] thermals unavailable: {e}", flush=True)
-            self._config.save_metadata()
+            self._save_acquisition_metadata()
             self._write_stim_trace()   # needs blockids, so after _save_frametimes
             self._camera_mgr.resume_preview()
 
@@ -1471,17 +1491,42 @@ class MainWindow(QMainWindow):
         self._cam_op.done.connect(self._on_acquisition_finalized)
         self._cam_op.start()
 
+    def _save_acquisition_metadata(self):
+        """Write session_metadata.json for THIS acquisition.
+
+        RULE: the file goes beside the videos it describes and carries the
+        cameras' transport statistics from the same stop. REASON: a single
+        session-level file was overwritten by whichever acquisition ran last,
+        so a recording's thermals, timestamp and environment were replaced by
+        the calibration's; and the resend, failed-buffer and bandwidth figures
+        are the network state of that one session, which nothing can recover
+        once the rig has moved on.
+        """
+        try:
+            path = self._config.save_metadata(self._acq_type)
+        except Exception as e:
+            print(f"[acq] could not write session metadata: {e}", flush=True)
+            return
+        stats = list(getattr(self._camera_mgr, "last_stream_stats", []) or [])
+        if not stats:
+            return
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            meta["camera_stream_stats"] = stats
+            path.write_text(json.dumps(meta, indent=2, default=str),
+                            encoding="utf-8")
+        except Exception as e:
+            print(f"[acq] could not record stream statistics: {e}", flush=True)
+
     def _on_acquisition_finalized(self, _result):
         self._end_busy()
-        # CallableWorker delivers a raised exception AS the result
-        # (CallableWorker.run), and this slot used to ignore its argument. So if
-        # _finalize raised — a full disk at np.save, anything inside
-        # _router.stop() — camera_manager.stop_acquisition() never reached
-        # `self._router = None`, the encoder threads never got their sentinel and
-        # blocked forever holding NVENC sessions, and the GUI marched on to
-        # ENCODING and remuxed an unflushed stream.h264, then deleted the source.
-        # Silently. _apply_camera_open_result already does this check; the
-        # pattern was understood and simply not applied here.
+        # This slot MUST inspect its argument: CallableWorker delivers a
+        # raised exception AS the result, and if _finalize raised (a full disk
+        # at np.save, anything inside _router.stop()) and the exception is
+        # ignored, camera_manager never reached `self._router = None`, the
+        # encoder threads never got their sentinel and blocked forever holding
+        # NVENC sessions, and the GUI marched on to ENCODING and remuxed an
+        # unflushed stream.h264, then deleted the source. Silently.
         # Capture-side problems (a retired camera, block-ID truncation) reach
         # the operator here or not at all: camera_manager drops the router right
         # after reading them.
@@ -1489,6 +1534,10 @@ class MainWindow(QMainWindow):
         if isinstance(_result, Exception):
             print(f"[acq] FINALIZE FAILED: {type(_result).__name__}: {_result}",
                   flush=True)
+            stuck = ""
+            if isinstance(_result, AcquisitionStopIncomplete) and _result.stuck:
+                stuck = ", ".join(self._camera_label(i + 1)
+                                  for i in _result.stuck)
             try:
                 self._camera_mgr.abandon()
             except Exception as e:
@@ -1498,12 +1547,24 @@ class MainWindow(QMainWindow):
             self._sidebar.set_status("IDLE", "#888888")
             self._sidebar.set_toggles_enabled(True)
             self._sidebar.reset_toggles()
+            # abandon() closed every camera, so the preview is dead and the
+            # next start would be refused with "No cameras are open". Say so,
+            # and give the fields back: the dialog tells the operator to record
+            # somewhere else, which is exactly what editing them is for.
+            self._sidebar.set_fields_editable(True)
+            self._camera_grid.setup_grid(0)
+            self._camera_names = []
             QMessageBox.critical(
                 self, "Recording did not finish cleanly",
                 f"Saving the recording failed:\n\n{type(_result).__name__}: "
-                f"{_result}\n\nThe raw capture files are still in:\n"
+                f"{_result}\n\n"
+                + (f"Still running when the stop gave up: {stuck}.\n\n"
+                   if stuck else "")
+                + f"The raw capture files are still in:\n"
                 f"{self._video_dir}\n\nThey have NOT been encoded or deleted. Do "
-                f"not start another recording into that directory.")
+                f"not start another recording into that directory.\n\nThe "
+                f"cameras have been closed: switch profile and back, or restart "
+                f"Panopticon, to reopen them.")
             return
         self._state = State.ENCODING
         self._sidebar.set_status("ENCODING", "#ffaa00")
