@@ -67,6 +67,18 @@ uv sync --no-group rig
 
 Everything below runs in that environment.
 
+RULE: run the offline suite at least once with `PyNvVideoCodec` un-importable
+before believing it is hardware-free. REASON: `profiles/sim.yaml` says
+`encoder: auto`, so the launch preflight picks NVENC on a machine that has it
+and libx264 on one that does not, and the CPU path raises two dialogs the GPU
+path never shows — the capacity preflight's "Proceed?" and the completion
+warning carrying libx264's own note. A suite green on an NVENC workstation can
+therefore still fail on the acceptance host. `test_sim_gui.py` derives every
+dialog expectation from the encoder that was actually installed, which is what
+makes one file cover both; a host that has the GPU can reproduce the other
+branch by putting a `sitecustomize.py` on `PYTHONPATH` whose meta-path finder
+raises `ImportError` for `PyNvVideoCodec`.
+
 ---
 
 ## `profiles/sim.yaml`
@@ -242,13 +254,25 @@ The two that are specifically about the simulated rig:
 - **`test_sim_gui.py`** builds the actual `MainWindow` on `profiles/sim.yaml`
   and drives a calibration then a recording through the sidebar toggles,
   twice — once on whichever encoder the launch preflight selects, once on
-  libx264 — asserting that both reach IDLE with no dialog left open, that
-  block IDs are contiguous, equal-length and identical across the three
-  cameras, that there is one mp4 per camera as long as the trigger record,
-  that `session_metadata.json` sits beside each acquisition's videos, that an
-  applied paradigm produces `stim_trace.csv`, and that the second pass moves
-  the first one's folders aside rather than recording over them. It takes
-  about 15 seconds.
+  libx264. Each acquisition runs for the duration the acceptance names, 20
+  virtual seconds of calibration and 40 of recording, compressed by the
+  virtual clock (`SPEED`) into about 35 seconds of wall clock for the whole
+  file. What it asserts:
+  - both passes reach IDLE having shown exactly the dialogs the selected
+    encoder implies — none on the GPU path, "Proceed?" plus "Recording
+    completed with problems" on the CPU one, and the move-aside prompt on the
+    second pass;
+  - block IDs contiguous, equal-length and identical across the three
+    cameras, with `frametimes.npy` beside them holding one entry each;
+  - one mp4 per camera, as long as the trigger record;
+  - that the mp4s came from the encoder the pass demands — the installed
+    factory, and the libx264 note in each camera's `WARNINGS.txt`, which is
+    present on the CPU path and absent on the GPU one;
+  - that `alignment.load_blockids` reads the acquisition back and finds
+    nothing to trim;
+  - `session_metadata.json` beside each acquisition's videos, `stim_trace.csv`
+    and `stim_paradigm.json`/`.ino` under an applied paradigm, and the
+    moved-aside folders on the second pass.
 
 ### Known gaps
 
