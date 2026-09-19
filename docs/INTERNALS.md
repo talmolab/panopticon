@@ -77,7 +77,7 @@ The code follows that shape, so the module map doubles as a map of the diagram:
 | `gui_app/stim_trace.py` | Per-frame model of what the paradigm delivered |
 | `gui_app/board_detector.py`, `coverage_worker.py` | Live ChArUco coverage during calibration |
 | `1_calibrate.py` | The calibration solve — a standalone script, run through `uv run` in the project environment |
-| `2_align.py`, `3_stim_trace.py` | Standalone equivalents of the in-app passes; these two are PEP 723 scripts, carrying their dependencies in an inline header |
+| `2_align.py`, `3_stim_trace.py` | Standalone equivalents of the in-app passes. Like `1_calibrate.py` they run in the project environment (`uv run python 2_align.py …`) and carry no inline dependency header, so a rig with no network can still run them |
 
 ---
 
@@ -1441,7 +1441,7 @@ It sets no repair in motion. The alignment pass removes frames one camera has an
 another lacks; a camera that ignored triggers has none, so the pass finds the
 recording already aligned and returns without rewriting a video. That is right:
 these frames are misdated rather than missing, and trimming cannot re-date a
-frame. Nor can anything else. `uv run 2_align.py <recording_dir>` re-derives the
+frame. Nor can anything else. `uv run python 2_align.py <recording_dir>` re-derives the
 warning from a recording on disk, useful for confirming the diagnosis weeks
 later. So when the warning names one camera, meaning a camera really skipping
 triggers rather than the uniform offset above, **that recording cannot be

@@ -1158,8 +1158,19 @@ whatever else says otherwise. They are NumPy binaries, so run this on the
 finished recording folder instead of opening them:
 
 ```
-uv run 2_align.py <recording_dir>
+uv run python 2_align.py <recording_dir>
 ```
+
+`uv run python <script>` runs it in the project environment, the one `uv sync`
+built. Every script here does: none of them resolves an environment of its own,
+so the check works on a rig with no network.
+
+The trigger rate it compares against comes from the recording's own
+`session_metadata.json` — `frame_rate` for a recording folder,
+`calibration_frame_rate` for a calibration one — and the run prints which field
+it read. Pass `--fps <rate>` only when that file is missing, which is when the
+command says so and falls back to 100; on a 30 fps calibration folder the
+fallback would report every camera as running at a third of the rate.
 
 It prints the camera list, the union trigger span, the number of common
 (aligned) frames, and a per-camera table:
@@ -1349,7 +1360,7 @@ kick-out, or one that lost frames unevenly, adds `aligned/`.
 
 `aligned/` means two different things. It appears when the alignment pass ran on
 a recording that needed it, and also when somebody ran
-`uv run 2_align.py <recording_dir>` just to check, since that command always
+`uv run python 2_align.py <recording_dir>` just to check, since that command always
 writes the index. Open `aligned/alignment.json` to tell which: `replaced: false`
 with every camera's `dropped` at 0 is a check on a clean recording, while
 nonzero `dropped` values are the real thing. A re-encode only ever happens with
@@ -1410,7 +1421,7 @@ session that looks fine and is not, so read it before you need it.
 | `cam3: encoder did not finish draining, so the frame-to-trigger mapping is UNVERIFIED.` | Counters were still moving at teardown, so no repair was attempted rather than one guessed from a moving target. Check that camera's mp4 frame count against `blockids.npy` before trusting its alignment. |
 | `cam5 was RETIRED mid-recording (…). Its video ends at that point; the other cameras continued and stay aligned with each other.` | That camera's stream stalled, or its trigger ordinals could not be re-established after a restart, so it was dropped from the alignment set. The alternative — publishing frames under a guessed ordinal — would corrupt every camera. The survivors are fine. |
 | `Recording did not finish cleanly` | Saving failed, for example a full disk. The raw capture files are still in the folder and have **not** been encoded or deleted. Do not start another recording into that folder. |
-| `Alignment failed: … — videos left as-is` | The alignment pass could not complete. The originals are untouched. `uv run 2_align.py <recording_dir> --replace` retries it from a terminal. |
+| `Alignment failed: … — videos left as-is` | The alignment pass could not complete. The originals are untouched. `uv run python 2_align.py <recording_dir> --replace` retries it from a terminal. |
 | `Trigger board did not confirm the stop` | The stop command was not accepted. The board may still be triggering, and a looping stimulation chain never ends on its own. Power-cycle the board and key off the laser. |
 | `cam2: block IDs advanced at 99.31/s while the trigger board runs at 100/s …` | That camera did not produce one frame per trigger, so its frames are paired with the other cameras' frames from a different instant. See [When a recording looks perfect and is not](#when-a-recording-looks-perfect-and-is-not) below — this is the one failure that presents as success. |
 | `All 6 cameras report the same block-ID rate (99.31/s), which is off the configured 100/s by the same amount.` | Not a camera fault. Cameras do not fail identically, so suspect the reference: the profile's frame rate may not match what the board is driving, or these cameras may not report device timestamps in nanoseconds. The videos are probably aligned with each other; it is the absolute timebase that is in question. |
@@ -1438,7 +1449,7 @@ the "Recording completed with problems" dialog and in
 `<recording>/WARNINGS.txt`. The tolerance and the measurements behind it are in
 [INTERNALS.md](INTERNALS.md#checking-the-axiom-against-an-independent-clock).
 
-It also runs inside the alignment pass, so **`uv run 2_align.py <recording_dir>`
+It also runs inside the alignment pass, so **`uv run python 2_align.py <recording_dir>`
 re-examines an existing recording**, including one made before this check
 existed. It writes the alignment index and prints any rate warning without
 needing `--replace`, and the check happens even when the recording reports as

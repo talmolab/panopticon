@@ -593,13 +593,21 @@ ends with a line like `Installed 22 packages in 42s`. Later runs are instant:
 
 ```
 Resolved 26 packages in 1ms
-warning: Skipping installation of entry points (`project.scripts`) for package
-`panopticon` because this project is not packaged; ...
 Checked 22 packages in 0.82ms
 ```
 
-That warning is normal. The command creates a `.venv` folder in the repository
-holding the interpreter and all packages; nothing is installed system-wide.
+The command creates a `.venv` folder in the repository holding the interpreter
+and all packages; nothing is installed system-wide.
+
+On a machine with no Basler cameras and no NVIDIA GPU, leave the vendor SDKs
+out:
+
+```powershell
+uv sync --no-group rig
+```
+
+Everything except the acquisition GUI itself runs in that environment,
+including every hardware-free test suite and the post-session tools.
 
 Check the important imports:
 
@@ -611,7 +619,10 @@ Expected: `ok`. Anything else means the sync did not complete; run `uv sync`
 again and read the error.
 
 This step and the clone are the only ones that need internet. Acquisition,
-encoding and calibration all run offline.
+encoding, the calibration solve and the post-session checks all run offline
+afterwards, because every script runs in the environment `uv sync` just built
+rather than resolving one of its own. Run them as
+`uv run python <script>.py`.
 
 ### Step 5 — put the cameras on the network (GigE)
 
@@ -1417,7 +1428,6 @@ of your message.
 | `uv : The term 'uv' is not recognized` | PowerShell was opened before uv was installed. Open a new window; if it persists, sign out and back in. |
 | `git : The term 'git' is not recognized` | Install Git for Windows, then reopen PowerShell. |
 | `uv sync` fails to download | No internet, or a proxy. The clone and this step are the only ones that need it. |
-| `warning: Skipping installation of entry points (project.scripts)` | Normal. The project is not packaged; nothing is wrong. |
 | `make_shortcut.ps1` prints `No venv at ...` | `uv sync` has not been run in this copy of the repository. |
 | `... cannot be loaded because running scripts is disabled` | Launch the script as `powershell -ExecutionPolicy Bypass -File <script>.ps1`, as shown above. |
 | `This must run elevated (Set-NetAdapterRss needs admin).` | `configure_nic.ps1` needs an Administrator PowerShell window. |
@@ -1510,7 +1520,7 @@ The videos look perfect while drifting apart in time.
 hardware oscillator, independent of its block-ID counter, so the two together
 settle the question: over any span, block IDs must advance at the trigger rate.
 That comparison runs per camera when a recording stops, and again inside
-`align_recording()`, so `uv run 2_align.py <recording_dir>` can re-examine a
+`align_recording()`, so `uv run python 2_align.py <recording_dir>` can re-examine a
 recording you already have. Nothing was added to the per-frame hot path; the
 device timestamps were already collected. When a camera fails, a *Recording
 completed with problems* dialog names the camera, its measured rate and roughly
