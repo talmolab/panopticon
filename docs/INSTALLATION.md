@@ -1443,6 +1443,7 @@ of your message.
 | `git : The term 'git' is not recognized` | Install Git for Windows, then reopen PowerShell. |
 | `uv sync` fails to download | No internet, or a proxy. The clone and this step are the only ones that need it. |
 | `make_shortcut.ps1` prints `No venv at ...` | `uv sync` has not been run in this copy of the repository. |
+| A dialog reads `Panopticon failed to start` and names a file under `logs/` | The window never got as far as opening. The dialog gives the exception and the log path, because the desktop shortcut runs `pythonw.exe` and has no console to print to. The usual first-run causes are the pylon SDK not installed, a profile that will not load, or an incomplete `uv sync`; an `ImportError` adds a line saying so. |
 | `... cannot be loaded because running scripts is disabled` | Launch the script as `powershell -ExecutionPolicy Bypass -File <script>.ps1`, as shown above. |
 | `This must run elevated (Set-NetAdapterRss needs admin).` | `configure_nic.ps1` needs an Administrator PowerShell window. |
 

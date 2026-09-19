@@ -236,24 +236,27 @@ the ruler is worth ten seconds.
 
 A calibration is a full acquisition, so **every check described under
 [Record](#8-record) applies to Calibrate as well**: the same stimulation-graph
-refusal, the same RAM, NVENC and disk preflight, and the same
-`Existing files found in: <path>  Overwrite?` prompt, naming the `calibration/`
-folder.
+refusal, the same RAM, NVENC and disk preflight, and the same move-aside
+prompt, naming the `calibration/` folder.
 
-On a *repeat* calibration into the same session, Yes overwrites the videos and
-removes each camera's transient and bookkeeping files (`raw.bin`,
-`raw_tail.bin`, `stream.h264`, `tail.h264`, `encode_error.log` and
-`WARNINGS.txt`) plus the acquisition-level `WARNINGS.txt`.
+On a *repeat* calibration into the same session, nothing is overwritten and
+nothing is deleted. A dialog headed *Existing data will be moved aside* names
+both paths and waits; on Continue the whole `calibration/` folder is renamed
+`calibration.previous-<HHMMSS>` beside itself and the new capture starts in a
+fresh, empty `calibration/`. Cancel leaves everything as it was and the
+acquisition does not start.
 
-It leaves the previous solve's output alone: `calibration.toml`,
-`reprojection_error_histogram.png` and `codet_frames.json` all stay. Until the
-next Solve, the plot and the `.toml` beside your fresh videos describe the
-*previous* attempt. And if the coverage HUD did not run this time (no OpenCV
-installed, or a board config that matches nothing), that stale
-`codet_frames.json` is what the next Solve uses as its frame hints.
+The new acquisition keeps the canonical folder name because Solve,
+`alignment.video_for` and `2_align.py` all resolve a session by it. The previous
+attempt's solve output travels with the folder that moved —
+`calibration.toml`, `reprojection_error_histogram.png` and `codet_frames.json`
+all live inside it — so nothing stale is left beside the fresh videos, and the
+next Solve cannot silently reuse the last attempt's frame hints. To read the old
+numbers, open them under the `.previous-` name.
 
-So change a metadata field to land the recording in a new session folder, or
-delete the `calibration/` folder before recalibrating.
+Several repeat calibrations therefore leave several `.previous-<HHMMSS>`
+folders in the session. Nothing prunes them; delete the ones you do not want by
+hand.
 
 Flip the **Calibrate** toggle to begin. Three things change at once: the cameras
 switch to hardware-triggered mode at the profile's `calibration_frame_rate` (30
@@ -1016,13 +1019,26 @@ Two more, tight RAM and short disk space, are warnings you can override with
 **Start anyway?**, because the disk figure assumes a ten-minute recording and a
 shorter one may fit.
 
-**An existing recording in the target folder** is checked last. If the folder
-already holds an `.mp4`, `raw.bin`, `stream.h264`, `blockids.npy`,
-`frametimes.npy` or `alignment.npz`, you are asked
-`Existing files found in: <path>  Overwrite?` and nothing is touched unless you
-say yes. Metadata counts as data here: a folder whose videos have been moved
-away for labelling still holds the small files that make those videos
-interpretable.
+**An existing recording in the target folder** is checked last, and it is never
+overwritten. If the folder holds a non-empty `.mp4`, `raw.bin`, `stream.h264`,
+`blockids.npy`, `frametimes.npy` or `alignment.npz`, a dialog headed *Existing
+data will be moved aside* names where it is going and waits. On Continue the
+folder is renamed `<name>.previous-<HHMMSS>` and this acquisition records into
+the original name; on Cancel nothing moves and the acquisition does not start.
+Nothing is ever deleted, which matters because recording over old files only
+replaces the ones this run writes: a camera that captured nothing would keep the
+previous session's mp4 and metadata under identical names, and the alignment
+would then intersect two different sessions.
+
+Metadata counts as data here: a folder whose videos have been moved away for
+labelling still holds the small files that make those videos interpretable.
+Zero-length files do not, so an earlier start that was refused after opening its
+streams leaves nothing to move.
+
+If the start is refused *after* the move — a serial port another program holds,
+a camera that will not enter trigger mode, a board that never acks — the rename
+is undone and the previous acquisition is back under its own name before the
+refusal reaches you.
 
 With the checks passed, the cameras go to triggered mode at the profile's
 `frame_rate` with the `.pfs` exposure and gain *restored*: the original values
@@ -1397,7 +1413,7 @@ session that looks fine and is not, so read it before you need it.
 | `NVENC granted only 5 concurrent sessions but 6 cameras need one each.` | The GPU driver caps concurrent encode sessions, and that cap has changed across driver generations. Cameras beyond it would silently fall back to writing raw frames. Close anything else holding encode sessions, record fewer cameras, or set `realtime_encode: false` in the profile to record raw deliberately. |
 | `Disk may be short: a 10-minute recording would need ~X GiB and only Y GiB is free.` | A warning, not a refusal: ten minutes is an assumption, not a known recording length. A shorter recording is fine. |
 | `Disk is tight: a 10-minute recording needs ~X GiB of Y GiB free.` | The milder version of the same check, raised once ten minutes would use more than 80% of the free space. This session will fit; a second one may not. Clear space now rather than between recordings. |
-| `Existing files found in: <path>  Overwrite?` | The target folder already holds videos or their metadata. It fires for a calibration as well as a recording, so it is what you see on a second calibration into the same session. Yes replaces the videos and sweeps each camera's transient and bookkeeping files, but leaves a previous solve's `calibration.toml`, `reprojection_error_histogram.png` and `codet_frames.json` in place. Change the metadata fields to name a new session if you would rather keep the old attempt. |
+| `Existing data will be moved aside` | The target folder already holds videos or their metadata. It fires for a calibration as well as a recording, so it is what you see on a second calibration into the same session. Continue renames the whole folder to `<name>.previous-<HHMMSS>` and records into the original name; nothing is deleted or written over, and the previous solve's `calibration.toml`, `reprojection_error_histogram.png` and `codet_frames.json` go with it. Cancel abandons the start. Change the metadata fields first if you would rather the two attempts sat in separate sessions. |
 | `Could not open serial port COM3. Close Arduino Serial Monitor / other apps holding the port and retry.` | Something else has the port: an Arduino Serial Monitor, a second copy of the application, or the wrong port in the profile. |
 | `The trigger board did not acknowledge the start command, so no triggers would be sent.` | The board did not confirm the configuration, even after a forced reset, and it has confirmed before. The cameras are rolled back rather than recording a full-length session with no frames in it. Check the USB cable and that the board is running the Panopticon sketch. |
 | `Cannot record with this stim workflow` | The canvas has a forbidden pin, one pin driven by two chains, or a loop with no Starting block. The message names which. Fix the graph. |
