@@ -222,10 +222,9 @@ host ports = ceil(n_cameras / cameras that fit on one port)
 ```
 
 Six 100 fps cameras at three per 10 GbE port is two host ports, and three
-cameras need a switch in between. That is how the reference rig is built: six
-cameras in two groups of three, each group behind its own switch, each switch
-uplinked to its own 10 GbE port on the host. Nine cameras would be three groups,
-three switches and three ports.
+cameras need a switch in between. That is how the reference rig is built, and
+how it grew: nine cameras in three groups of three, each group behind its own
+switch, each switch uplinked to its own 10 GbE port on the host.
 
 Two things about those switches are easy to overlook. Their access ports have to
 run at the camera's own link speed, not just the uplink; a switch with 1 GbE
@@ -396,8 +395,8 @@ in the rig profile to put every camera on the raw path deliberately.
 ```
 
 On the reference rig the probe returns **12 sessions on an RTX 5080**, more than
-the six cameras it runs and more than the nine it is being scaled towards, so a
-current consumer card is not the binding constraint. The historic caps of 2 and
+the nine cameras it runs, so a current consumer card is not the binding
+constraint. The historic caps of 2 and
 3 are why the number is probed: an older card really can grant fewer sessions
 than you have cameras.
 
@@ -478,13 +477,16 @@ list.
 | CPU | Intel Ultra 9 285K, 24 cores (8 performance + 16 efficiency) |
 | RAM | 63.4 GB |
 | GPU | NVIDIA RTX 5080, 12 concurrent NVENC sessions measured |
-| Cameras | 6x Basler a2A1920-165g5m (5 GigE), 1920x1200 mono8 at 100 fps |
-| Network | 2 switches, 3 cameras each, one 10 GbE host port per switch |
-| Trigger board | Arduino Mega 2560 on `COM3`, one pin per camera |
+| Cameras | 9x Basler a2A1920-165g5m (5 GigE), 1920x1200 mono8 at 100 fps |
+| Network | 3 switches, 3 cameras each, one 10 GbE host port per switch |
+| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins fanned out across the nine cameras |
 | OS | Windows |
 
-On that machine a 60-second six-camera run at 100 fps captured 100.00% of
-triggers; section 3 quotes the rest of that run's numbers.
+Every performance figure in these pages names the camera count it was measured
+at, because nearly all of them scale with it: the 60-second run at 100 fps that
+captured 100.00% of triggers was six cameras, and the flow-control and
+thread-placement measurements were nine. Section 3 quotes the rest of that
+60-second run's numbers.
 
 ---
 
@@ -976,7 +978,9 @@ output_dir: "data"
 board_config: "configs/boards/charuco_8x8_15mm.yaml"
 
 serial_port: COM3                    # the trigger board's port
-trigger_pins: [2, 4, 6, 8, 10, 12]   # one output pin per camera
+trigger_pins: [2, 4, 6, 8, 10, 12]   # every pin that drives a camera; one pin
+                                     # may feed several, so this is not a
+                                     # camera count
 n_cameras: 6                         # refuse to start unless exactly this many
 
 stim_safe_pins: [53]                 # YOUR stim pins, forced LOW from the
@@ -1021,7 +1025,7 @@ the table sort out where those two part company.
 | `output_dir` | — | Where recordings go. The sidebar's directory button overrides it per machine. |
 | `board_config` | — | The printed ChArUco board, in `configs/boards/*.yaml`. The shipped `charuco_8x8_15mm.yaml` describes the reference rig's own board, `board_legacy: true` and all, so it is the wrong starting point for a freshly printed one; see *Calibration* in section 4. Measure your board and correct `square_length`: it sets the world scale of the solve, so a wrong value scales every 3D coordinate downstream. |
 | `serial_port` | `COM3`, the reference rig's port rather than a sensible fallback | The trigger board's serial port. Step 8 shows how to find yours. |
-| `trigger_pins` | `[2, 4, 6, 8, 10, 12]`, the reference rig's wiring rather than a sensible fallback | One output pin per camera, each wired to that camera's `Line1`; see *Wiring the trigger line* in section 1. Also refused as stimulation pins, since extra edges on one camera would break alignment. |
+| `trigger_pins` | `[2, 4, 6, 8, 10, 12]`, the reference rig's wiring rather than a sensible fallback | Every pin driving a camera's `Line1`, which is **not** necessarily one pin per camera: the reference rig fans these six pins out across nine cameras. What matters is that no camera sits on a pin the list omits; see *Wiring the trigger line* in section 1. A pin here is refused as a stimulation pin, and a pin on the serial link or in `stim_safe_pins` is refused here, both when the profile loads. |
 | `n_cameras` | 0, a code fallback nobody should keep | Refuse to start unless exactly this many cameras enumerate. `0` disables the check. Camera names are positional by serial-number order, so a camera that fails to enumerate renames every camera after it and attaches the calibration extrinsics to the wrong physical cameras. Set it. |
 | `stim_safe_pins` | `[53]`, the reference rig's laser pin, which is no protection at all on a rig wired differently | **Set this to the pin or pins your own stimulus hardware is wired to**; `[]` if you have none. They go LOW in the first statement of the sketch's `setup()`, before the serial handshake. `setup()` blocks on that handshake until the GUI connects, so a pin not listed here floats for the whole wait, and a powered laser driver reads floating as ON. Pins a loaded paradigm uses are added automatically, so this list is the floor protecting the recording-only sketch, the one flashed at launch when no paradigm is loaded. |
 | `calibration_exposure_us` | 0.0 | Exposure for calibration captures only; the `.pfs` values return for recordings. `0` keeps the `.pfs` value. The binding limit here is motion blur rather than the ceiling: at 15 ms a briskly waved board smears and its corners stop resolving, so move it slowly and pause at each pose. |
@@ -1045,9 +1049,9 @@ in section 4.
 
 **What the shipped profiles deliberately override.** Copying
 `profiles/3dpose.yaml` gets all of this right without thinking. Writing a
-minimal profile from scratch does not, because three of the fallbacks above are
+minimal profile from scratch does not, because several of the fallbacks above are
 not what the reference rig runs: the shipped profile sets `realtime_kick: true`,
-`kick_max_lag: 480` and `n_cameras: 6`. Real-time kick-out, the mode the rest of
+`kick_max_lag: 480`, `max_num_buffer: 600` and `n_cameras: 9`. Real-time kick-out, the mode the rest of
 this documentation describes and the one the RAM arithmetic in section 1
 assumes, is on because the profile says so, not because the field is optional.
 Leave it out and you silently get post-hoc alignment with a re-encode instead,
@@ -1194,8 +1198,8 @@ What to check in that output:
   single-threaded)`, so the first acquisition answers this. The probe asks for
   two more sessions than there are cameras and stops as soon as it gets them,
   which is why it reads `[hw] NVENC sessions: 8 (at least — probe stopped at its
-  limit), needed 8` on the six-camera reference rig even though that card will
-  grant 12 if asked for more.
+  limit), needed 8` on a six-camera rig even though that card will grant 12 if
+  asked for more.
 
 Every launch writes the same text to `logs/panopticon_<date>_<time>.log`, which
 is where to look when the app starts from the desktop shortcut and has no

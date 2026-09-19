@@ -4,8 +4,9 @@ How Panopticon gets from photons to files, in enough detail to fix it, port it,
 or run it on hardware that is not the reference rig. To run a session,
 [WORKFLOW.md](WORKFLOW.md) walks through one.
 
-Numbers from the reference rig (6x Basler a2A1920-165g5m GigE, 1920x1200 mono8,
-100 fps) are examples of the arithmetic, not requirements. Each derives from
+Numbers from the reference rig (9x Basler a2A1920-165g5m GigE, 1920x1200 mono8,
+100 fps, six trigger pins fanned out across them) are examples of the
+arithmetic, not requirements. Each derives from
 resolution, frame rate and camera count, and the derivation is given so you can
 redo it for your rig.
 
@@ -125,12 +126,13 @@ interval precision and roughly 30 ns synchronicity between pins.
 And nothing on the host is in the timing path. The host names the pins and the
 rate; after that the board is on its own.
 
-On the reference rig the pins are `[2, 4, 6, 8, 10, 12]` (profile field
-`trigger_pins`), one per camera, each wired to that camera's `Line1`, all written
-inside the same `noInterrupts()` block. One fanned-out line is electrically
-equivalent provided the output can source every input. The sketch drives whatever
-pin count the serial command carries, so adding a camera means adding a pin to
-the profile.
+On the reference rig those six pins `[2, 4, 6, 8, 10, 12]` (profile field
+`trigger_pins`) drive nine cameras: some of them feed more than one `Line1`, and
+all are written inside the same `noInterrupts()` block. A fanned-out line is
+electrically equivalent to one pin per camera provided the output can source
+every input's current, which is the only thing that limits it. The sketch drives
+whatever pin count the serial command carries, so a camera hung off an existing
+pin needs no profile change at all, and one on a new pin needs that pin listed.
 
 ### Why the same board owns stimulation
 
