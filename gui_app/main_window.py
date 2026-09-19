@@ -128,7 +128,13 @@ class MainWindow(QMainWindow):
         # it, because the state still says RECORDING while the finalize runs.
         self._finalized = True
         self._created_dirs: list = []
+        #: (canonical, moved) when this start renamed a previous acquisition
+        #: out of the way, so a start refused afterwards can put it back.
+        self._moved_aside: tuple | None = None
         self._cam_op: CallableWorker | None = None
+        #: The capacity preflight, which runs off the UI thread because the
+        #: NVENC session probe it may trigger spawns an isolated child.
+        self._cap_op: CallableWorker | None = None
         self._fw_op: CallableWorker | None = None
         self._snap_op: CallableWorker | None = None
         # The paradigm applied during THIS session, if any. Never persisted:
@@ -143,7 +149,14 @@ class MainWindow(QMainWindow):
         self._board_identity_reflashed = False
 
         self._camera_mgr = CameraManager()
-        self._teensy = TeensyController()
+        #: Built by _teensy_connection, not here. RULE: the controller is
+        #: never constructed before the profile is resolved. REASON: the
+        #: controller carries the port, and _teensy_connection treats a
+        #: controller whose port differs from the profile's as a DIFFERENT
+        #: board and forgets the board-sketch hint — so a placeholder built on
+        #: the class default wipes that hint at every launch on any rig whose
+        #: profile names another port, costing a 30 s reflash each time.
+        self._teensy: TeensyController | None = None
         self._hw_check_thread: HardwareCheckThread | None = None
 
         self._camera_grid = CameraGridWidget()
@@ -307,6 +320,54 @@ class MainWindow(QMainWindow):
         """
         return worker is not None and worker.isRunning()
 
+    def _session_rig(self, config=None):
+        """The rig this session runs on: the profile its config was built from.
+
+        RULE: rig facts - geometry, quality, encoder counts, the kick cap, the
+        calibration exposure - are read from the PROFILE, never from the
+        scalars SessionConfig mirrors from it. REASON: two sources for one
+        fact is how a session comes to be encoded at a geometry the cameras
+        were never configured for; the mirror exists only until its last
+        reader is gone, and this window was its last reader.
+
+        Falls back to the live profile for a window that has not built a
+        config yet, and for a config assembled by hand in a test.
+        """
+        if config is None:
+            config = self._config
+        rig = getattr(config, "profile", None)
+        return rig if rig is not None else self._profile
+
+    def _solve_running(self) -> bool:
+        """True while a calibration solve is running.
+
+        RULE: a solve counts as an owner of the sidebar's gates, beside the
+        state machine, the busy cycle and the stimulation editor's flash.
+        REASON: a solve runs for minutes and never leaves State.IDLE, so a
+        gate recomputed from the state alone reopens under it - which hands
+        back the fields the solve locked and lets a Record start on top of the
+        running solve child.
+        """
+        return self._worker_busy(self._calib_worker)
+
+    def _toggles_permitted(self) -> bool:
+        """Whether the acquisition toggles may be live right now.
+
+        RULE: every owner of the sidebar's single toggles gate is consulted
+        here, and an owner that wants the toggles shut asks through this.
+        REASON: set_toggles_enabled IS one gate, shared by the
+        ENCODING/ALIGNING phases, the solve, the no-profile lockout and the
+        editor's firmware upload, so an owner that writes it from its own
+        state alone reopens a gate another owner closed - and a Record that
+        reaches the start path during a solve runs an acquisition on top of
+        it, because the state machine reads IDLE throughout.
+        """
+        return (self._state is State.IDLE
+                and not self._solve_running()
+                and bool(self._profile.name)
+                and not (self._stim_window is not None
+                         and self._stim_window.is_uploading()))
+
     def _begin_busy(self, text: str):
         self._busy = True
         self._display_timer.stop()
@@ -325,7 +386,12 @@ class MainWindow(QMainWindow):
         # ENCODING and ALIGNING still belong to this session, and a profile
         # changed there leaves the dropdown showing one rig while the window
         # holds another and persists the wrong one for the next launch.
-        self._sidebar.set_fields_editable(self._state == State.IDLE)
+        # A running solve holds the same lock and never leaves IDLE, so the
+        # state alone does not say whether the fields may come back: a busy
+        # cycle that overlaps one - a deferred firmware check, a trace rebuild
+        # - would otherwise hand back the mouse ids the solve is filing under.
+        self._sidebar.set_fields_editable(self._state == State.IDLE
+                                          and not self._solve_running())
         self._busy = False
         self._display_timer.start(self._display_interval_ms())
 
@@ -395,7 +461,13 @@ class MainWindow(QMainWindow):
                 ("\n".join(warnings) or "No rig profile could be loaded.")
                 + "\n\nAcquisition is disabled until one loads: a profile is "
                   "what says how many cameras there are, what rate they run "
-                  "at and which pins the trigger board drives.")
+                  "at and which pins the trigger board drives.\n\nThe trigger "
+                  "board is left alone for the same reason: with no profile "
+                  "there is no serial port to reach it on and no pin list to "
+                  "drive low, so the launch-time stim-clearing flash does not "
+                  "run and the board may still carry a paradigm from a "
+                  "previous session. Key off the laser, load a profile, then "
+                  "start Panopticon again.")
             return
         if warnings:
             QMessageBox.warning(self, "Rig profiles", "\n".join(warnings))
@@ -409,6 +481,15 @@ class MainWindow(QMainWindow):
     def _on_profile_changed(self, profile: RigProfile):
         if self._state != State.IDLE or self._busy:
             return
+        if self._solve_running():
+            # A solve never leaves IDLE, so the state guard above misses it.
+            QMessageBox.information(
+                self, "A solve is running",
+                "A calibration solve is running. Switch profiles once it has "
+                "finished: a profile carries the rig's cameras, and closing "
+                "and reopening them under the solve leaves the window "
+                "describing one rig while another is streaming.")
+            return
         if self._stim_window is not None and self._stim_window.is_uploading():
             # A profile carries the serial port, and arduino-cli is holding it.
             QMessageBox.information(
@@ -418,15 +499,22 @@ class MainWindow(QMainWindow):
                 "changing it under a running upload leaves the board in an "
                 "unknown state.")
             return
-        # close_all + open 6 cameras (+ .pfs load) is ~1-2 s of GigE round-trips;
-        # run it off the UI thread so the window doesn't go "not responding".
-        self._begin_busy("Switching cameras…")
-        self._profile = profile
-
+        # RULE: every refusal is answered BEFORE _begin_busy and before the new
+        # profile is adopted. REASON: a return placed between them leaves the
+        # wait cursor pushed, the sidebar disabled, the preview timer stopped
+        # and _busy True for the rest of the session - every later start,
+        # profile switch and firmware check then refuses on _busy - while
+        # self._profile already describes a rig whose cameras were never
+        # opened, so the geometry, the trigger pins and the serial port name a
+        # rig that is not the one streaming.
         if self._worker_busy(self._cam_op):
             print("[acq] a camera operation is still running; not switching "
                   "profile", flush=True)
             return
+        # close_all + open 6 cameras (+ .pfs load) is ~1-2 s of GigE round-trips;
+        # run it off the UI thread so the window doesn't go "not responding".
+        self._begin_busy("Switching cameras…")
+        self._profile = profile
 
         def _switch():
             self._camera_mgr.close_all()
@@ -540,7 +628,7 @@ class MainWindow(QMainWindow):
         retired = [self._camera_label(i + 1) for i, n in enumerate(lags) if n < 0]
         tail = f"  |  RETIRED: {', '.join(retired)}" if retired else ""
         worst, idx = max(live)
-        cap = max(1, int(self._config.kick_max_lag) if self._config else 1)
+        cap = max(1, int(self._session_rig().kick_max_lag))
         name = self._camera_label(idx + 1)
         if worst < cap * 0.25:
             return (f"Capture healthy — every camera within {worst} trigger(s) "
@@ -730,27 +818,34 @@ class MainWindow(QMainWindow):
             pass       # a dialog failure must not mask the printed warning
         return False
 
-    def _preflight_capacity(self, acq_type: str) -> bool:
-        """Refuse an acquisition the rig cannot complete. True to continue.
+    def _geometry_refusal(self) -> str:
+        """The cameras disagreeing with the profile about geometry, or "".
 
-        Checks the cameras' real geometry against the profile, then RAM, NVENC
-        sessions and disk against the ACTUAL camera count and the frame rate
-        THIS acquisition will run at. Cheap arithmetic plus a cached NVENC
-        session probe, so it costs nothing per recording after the first.
+        The profile's width/height size the NV12 ring and the raw decode, so
+        a disagreement with the cameras' ROI retires every camera in real-time
+        mode and shears a full-length recording in raw mode. Answered on the
+        UI thread and before anything is started: start_acquisition can only
+        refuse by raising, and by then the session directory has been touched.
         """
         p = self._profile
-        # The profile's width/height size the NV12 ring and the raw decode, so
-        # a disagreement with the cameras' ROI retires every camera in
-        # real-time mode and shears a full-length recording in raw mode.
-        # Refusing HERE keeps it a dialog: start_acquisition can only refuse by
-        # raising, and by then the session directory has been touched.
-        mismatch = self._camera_mgr.geometry_mismatch(p.frame_width,
-                                                      p.frame_height)
-        if mismatch:
-            print(f"[acq] REFUSING to start: {mismatch}", flush=True)
-            QMessageBox.critical(self, "Cannot start", mismatch)
-            return False
+        return self._camera_mgr.geometry_mismatch(p.frame_width,
+                                                  p.frame_height) or ""
 
+    def _preflight_capacity(self, acq_type: str) -> tuple:
+        """(blocking, warnings) for this acquisition. Runs on a worker thread.
+
+        Weighs RAM, NVENC sessions and disk against the ACTUAL camera count
+        and the frame rate THIS acquisition will run at.
+
+        RULE: never called on the UI thread; the caller runs it under
+        _begin_busy. REASON: the NVENC session count is cached, but a cached
+        value BELOW what this start needs is always re-probed - a shortfall is
+        usually another process holding sessions for a moment - and the probe
+        spawns an isolated child and waits for it. On the UI thread that is a
+        frozen window with no busy indicator, in exactly the transient case
+        the probe exists to re-measure.
+        """
+        p = self._profile
         realtime = bool(p.realtime_encode)
         kick = realtime and bool(p.realtime_kick)
         # One formula, and it lives in grab_thread: the ring the preflight
@@ -771,7 +866,23 @@ class MainWindow(QMainWindow):
         except Exception as e:
             # A broken preflight must never be what stops a recording.
             print(f"[acq] capacity preflight failed to run: {e}", flush=True)
-            return True
+            return [], []
+        return list(blocking or []), list(warnings or [])
+
+    def _on_capacity_checked(self, result):
+        """Answer the capacity preflight, then carry the start on. UI thread."""
+        self._end_busy()
+        self._sidebar.set_status("IDLE", "#888")
+        acq_type = self._acq_type
+        if isinstance(result, tuple) and len(result) == 2:
+            blocking, warnings = list(result[0] or []), list(result[1] or [])
+        else:
+            # CallableWorker delivers a raised exception AS the result, and a
+            # preflight that could not answer must never be what stops a
+            # recording.
+            print(f"[acq] capacity preflight did not answer: {result}",
+                  flush=True)
+            blocking, warnings = [], []
         for w in warnings:
             print(f"[acq] capacity warning: {w}", flush=True)
         if blocking:
@@ -780,14 +891,21 @@ class MainWindow(QMainWindow):
                 self, "Cannot start",
                 "\n\n".join(blocking)
                 + ("\n\nWarnings:\n- " + "\n- ".join(warnings) if warnings else ""))
-            return False
+            self._sidebar.reset_toggles()
+            return
         if warnings:
             reply = QMessageBox.warning(
                 self, "Proceed?", "\n\n".join(warnings) + "\n\nStart anyway?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.No:
-                return False
-        return True
+                self._sidebar.reset_toggles()
+                return
+        # Firmware, then the port, then everything with a side effect:
+        # arduino-cli needs the port to itself, and both have to be settled
+        # before anything is written to disk or a camera is reconfigured.
+        if not self._ensure_sketch_for(acq_type):
+            return          # a flash is running; it re-enters _arm_acquisition
+        self._arm_acquisition(acq_type)
 
     def _refuse_start(self, title: str, message: str) -> bool:
         """Report a refused start and put the sidebar back. Always False.
@@ -889,6 +1007,19 @@ class MainWindow(QMainWindow):
             self._sidebar.clear_toggle_silently(acq_type)
             return
 
+        # A solve runs for minutes and never leaves IDLE, so the guard above
+        # does not see it. Starting on top of one puts an acquisition and a
+        # running solve child on the same machine, the same calibration.toml
+        # and the same encoders.
+        if self._solve_running():
+            self._refuse_start(
+                "A solve is running",
+                "A calibration solve is still running.\n\nWait for it to "
+                "finish: it is reading the calibration videos and writing "
+                "calibration.toml, and an acquisition started on top of it "
+                "competes for the same CPU and the same files.")
+            return
+
         refusal = self._stim_refusal(acq_type)
         if refusal:
             self._refuse_start(*refusal)
@@ -906,72 +1037,65 @@ class MainWindow(QMainWindow):
                                f"{e}\n\nFix the field and start again.")
             return
 
-        if not self._preflight_capacity(acq_type):
-            self._sidebar.reset_toggles()
+        mismatch = self._geometry_refusal()
+        if mismatch:
+            self._refuse_start("Cannot start", mismatch)
             return
 
         self._config = config
         self._acq_type = acq_type
-        # Firmware, then the port, then everything with a side effect:
-        # arduino-cli needs the port to itself, and both have to be settled
-        # before anything is written to disk or a camera is reconfigured.
-        if not self._ensure_sketch_for(acq_type):
-            return          # a flash is running; it re-enters _arm_acquisition
-        self._arm_acquisition(acq_type)
+        if self._worker_busy(self._cap_op):
+            print("[acq] a capacity check is still running; not starting",
+                  flush=True)
+            self._sidebar.reset_toggles()
+            return
+        # The rest of the start continues in _on_capacity_checked: the
+        # capacity answer can cost an NVENC session probe, which is a child
+        # process this thread would otherwise wait for.
+        self._begin_busy("Checking capacity\u2026")
+        self._cap_op = CallableWorker(lambda: self._preflight_capacity(acq_type))
+        self._cap_op.done.connect(self._on_capacity_checked)
+        self._cap_op.start()
 
     def _arm_acquisition(self, acq_type: str):
         """Everything with a side effect, once nothing can refuse the start.
 
-        Re-entered by the firmware flash's completion callback, which is why
-        the checks are not repeated here.
+        Re-entered by the firmware flash's completion callback. The checks
+        that must NOT be repeated are the capacity preflight and the
+        move-aside prompt: one is slow, the other asks the operator a question
+        they have already answered. The stimulation predicate IS repeated,
+        because it is pure and the canvas can be edited during the ~30 s
+        flash - and a canvas edited there records a paradigm the board was
+        never given.
+
+        RULE: the only file side effect here is the move-aside, which needs
+        the operator. Creating the directories and clearing the previous run's
+        files belongs to the start worker, after the serial claim. REASON:
+        the claim, the camera start and the board's ack can all still refuse,
+        and a refused start must leave the target directory as it found it.
         """
+        refusal = self._stim_refusal(acq_type)
+        if refusal:
+            self._refuse_start(*refusal)
+            return
+
         config = self._config
         video_dir = config.video_dir(acq_type)
+        self._moved_aside = None
         if not self._move_existing_aside(video_dir):
             self._sidebar.reset_toggles()
             return
 
         self._video_dir = video_dir
         # What this start created, so a refused start can take it back out
-        # instead of leaving an empty session folder behind.
+        # instead of leaving an empty session folder behind. The worker fills
+        # it, because the worker is what makes the directories.
         self._created_dirs = []
-        if not video_dir.exists():
-            self._created_dirs.append(video_dir)
-        # Session-level warnings from a PREVIOUS run into this directory would
-        # otherwise sit beside a clean recording and be believed months later.
-        for stale in ("WARNINGS.txt", "codet_frames.json"):
-            # A hint file from a previous calibration points at frame numbers
-            # in videos this run is about to replace; the solve refuses a
-            # mismatched one, but only once it has opened the mp4s.
-            try:
-                (video_dir / stale).unlink(missing_ok=True)
-            except OSError:
-                pass
         self._capture_warnings = []
         self._thermal_warnings = []
         self._thermal_reported = set()
         self._thermal_alert = None
         self._finalized = False
-        for cam in self._camera_names:
-            cam_dir = self._video_dir / cam
-            if not cam_dir.exists():
-                self._created_dirs.append(cam_dir)
-            cam_dir.mkdir(parents=True, exist_ok=True)
-            # Remove stale capture artifacts from a previous run in this dir -
-            # a leftover raw_tail.bin would otherwise be appended to the NEW
-            # recording's stream at stop.
-            # WARNINGS.txt is swept too: it is the only durable trace of a
-            # block-ID reconciliation, so a stale one left beside a clean
-            # recording is exactly what someone would trust months later.
-            # Every check that can refuse has already passed, so this sweep
-            # can no longer destroy a previous run's sources for an
-            # acquisition that then never starts.
-            for stale in ("raw.bin", "raw_tail.bin", "stream.h264",
-                          "tail.h264", "encode_error.log", "WARNINGS.txt"):
-                try:
-                    (cam_dir / stale).unlink(missing_ok=True)
-                except OSError:
-                    pass
 
         raw_paths = [self._video_dir / cam / "raw.bin"
                      for cam in self._camera_names]
@@ -982,8 +1106,9 @@ class MainWindow(QMainWindow):
         fps = config.rate_for(acq_type)
         self._acq_fps = fps
         display_every = 1 if acq_type == "calibration" else 10
-        rt = config.realtime_encode
-        kick = config.realtime_kick
+        rig = self._session_rig(config)
+        rt = rig.realtime_encode
+        kick = rig.realtime_kick
         print(f"[acq] start_acquisition({acq_type}) fps={fps} realtime={rt} "
               f"kick={kick}: switching cameras to trigger mode", flush=True)
 
@@ -1048,6 +1173,10 @@ class MainWindow(QMainWindow):
                 f"anything holding a file open in that folder, or move it by "
                 f"hand, then start again.")
             return False
+        # Remembered so a start refused AFTER this point can put it back:
+        # the dialog above promises the acquisition records into the original
+        # folder name, and every consumer resolves a session by that name.
+        self._moved_aside = (video_dir, moved)
         print(f"[acq] existing data moved aside to {moved}", flush=True)
         return True
 
@@ -1068,6 +1197,98 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
         self._created_dirs = []
+
+    def _restore_moved_aside(self):
+        """Put a previous acquisition back under its canonical name when this
+        start was refused after moving it out of the way.
+
+        RULE: the canonical directory name - 'recording', 'calibration' -
+        exists again whenever the start that renamed it did not run. REASON:
+        1_calibrate, alignment.video_for, 2_align and the Solve button all
+        resolve a session BY that name, so a start refused after the rename -
+        a port another program holds, a camera that will not enter trigger
+        mode, a board that never acks - otherwise leaves the session holding
+        only '<name>.previous-HHMMSS' and every consumer finding nothing,
+        against a dialog that promised the original folder name.
+
+        The move is undone only when the canonical path is gone, so nothing
+        the refused start managed to write is ever overwritten.
+        """
+        pair, self._moved_aside = self._moved_aside, None
+        if not pair:
+            return
+        canonical, moved = pair
+        if not moved.exists():
+            return
+        if canonical.exists():
+            # The refused start left something behind that could not be taken
+            # back out, so the previous acquisition stays under its aside
+            # name rather than being written over.
+            print(f"[acq] {canonical} still exists; leaving the previous "
+                  f"acquisition in {moved.name}", flush=True)
+            return
+        try:
+            moved.rename(canonical)
+        except OSError as e:
+            print(f"[acq] could not put {moved} back as {canonical}: {e}",
+                  flush=True)
+            return
+        print(f"[acq] start refused; {moved.name} restored as "
+              f"{canonical.name}", flush=True)
+
+    def _create_capture_dirs(self):
+        """Make this acquisition's directories and clear what it writes into.
+
+        Runs on the start worker, after the serial claim. Only the files the
+        capture itself opens are removed here - a leftover raw.bin or
+        stream.h264 from a previous run would otherwise be written into or
+        appended to. A non-empty one of either is data, so _move_existing_aside
+        has already moved the whole directory away and what is removed here is
+        the zero-length remains of a start that was refused.
+        """
+        if not self._video_dir.exists():
+            self._created_dirs.append(self._video_dir)
+        for cam in self._camera_names:
+            cam_dir = self._video_dir / cam
+            if not cam_dir.exists():
+                self._created_dirs.append(cam_dir)
+            cam_dir.mkdir(parents=True, exist_ok=True)
+            for stale in ("raw.bin", "stream.h264"):
+                try:
+                    (cam_dir / stale).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _sweep_stale_diagnostics(self):
+        """Remove a previous run's reports from this directory.
+
+        RULE: runs only once the board has acked the start, i.e. once nothing
+        can still refuse. REASON: these files are not capture sources - they
+        are written at stop, at encode and after the solve - so nothing reads
+        them between the start and here, while they ARE what the failed-camera
+        dialog sends the operator to read. Swept before the refusable steps, a
+        start the port or the board turned down destroys the evidence of the
+        run before it, and _remove_created_dirs cannot put them back.
+
+        They must go, though: WARNINGS.txt is the only durable trace of a
+        block-ID reconciliation, and a stale one beside a clean recording is
+        exactly what someone trusts months later; a leftover raw_tail.bin is
+        appended to THIS recording's stream at stop; and a codet_frames.json
+        from a previous calibration points at frame numbers in videos this run
+        replaces.
+        """
+        for stale in ("WARNINGS.txt", "codet_frames.json"):
+            try:
+                (self._video_dir / stale).unlink(missing_ok=True)
+            except OSError:
+                pass
+        for cam in self._camera_names:
+            for stale in ("raw_tail.bin", "tail.h264", "encode_error.log",
+                          "WARNINGS.txt"):
+                try:
+                    (self._video_dir / cam / stale).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _start_body(self, acq_type, raw_paths, display_every, realtime, kick,
                     fps) -> dict:
@@ -1093,13 +1314,17 @@ class MainWindow(QMainWindow):
                           kick, fps) -> dict:
         """The start sequence proper.
 
-        RULE: serial claim, cameras, readiness barrier, triggers - in that
-        order. REASON: the barrier exists so the board is never started while a
-        grab thread is still allocating its ring, and the serial claim comes
-        first because a port that cannot be opened must not leave every camera
-        sitting in trigger mode waiting for triggers that will never come.
+        RULE: serial claim, directories, cameras, readiness barrier,
+        triggers, and only then the sweep of the previous run's reports - in
+        that order. REASON: the barrier exists so the board is never started
+        while a grab thread is still allocating its ring; the serial claim
+        comes first because a port that cannot be opened must not leave every
+        camera sitting in trigger mode waiting for triggers that will never
+        come, and because it is the refusal that must not have cost the
+        target directory anything; and the sweep comes last because the files
+        it removes are the ones a refused start needs to leave behind.
         """
-        config = self._config
+        rig = self._session_rig()
         teensy = self._teensy_connection(retries=self.START_SERIAL_RETRIES)
         if teensy is None:
             # Nothing has been started, so there is nothing to stand down: no
@@ -1115,22 +1340,35 @@ class MainWindow(QMainWindow):
                         f"holding the port, check the cable, then start again."
                         + (f"\n\n{reason}" if reason else ""))}
 
+        # The port is held, so the first file side effect of the whole start
+        # happens here and not before.
+        try:
+            self._create_capture_dirs()
+        except OSError as e:
+            return {"ok": False,
+                    "title": "Could not create the session directories",
+                    "message": (
+                        f"{self._video_dir}\n\ncould not be created:\n\n{e}"
+                        f"\n\nNothing has been started and nothing has been "
+                        f"recorded. Check the output directory, then start "
+                        f"again.")}
+
         try:
             self._camera_mgr.start_acquisition(
                 raw_paths, display_every=display_every,
-                realtime=realtime, width=config.frame_width,
-                height=config.frame_height, quality=config.quality,
-                fps=fps, realtime_kick=kick, kick_max_lag=config.kick_max_lag,
+                realtime=realtime, width=rig.frame_width,
+                height=rig.frame_height, quality=rig.quality,
+                fps=fps, realtime_kick=kick, kick_max_lag=rig.kick_max_lag,
                 # Calibration gets its own exposure/gain when the profile sets
                 # them; a recording passes None, which RESTORES the .pfs
                 # values. Restoring rather than re-deriving is what guarantees
                 # a long calibration exposure can never leak into a 100 fps
                 # session, where it would silently halve the frame rate.
-                exposure_us=(config.calibration_exposure_us or None
+                exposure_us=(rig.calibration_exposure_us or None
                              if acq_type == "calibration" else None),
-                gain_db=(config.calibration_gain_db
+                gain_db=(rig.calibration_gain_db
                          if acq_type == "calibration"
-                         and config.calibration_gain_db >= 0 else None))
+                         and rig.calibration_gain_db >= 0 else None))
         except AcquisitionStartRefused as e:
             # Raised only once the cameras are back in free-run preview with
             # nothing recorded, so there is nothing to roll back.
@@ -1174,6 +1412,9 @@ class MainWindow(QMainWindow):
         # The board has just printed its RDY line, so what it reports as its
         # sketch identity describes the firmware running now.
         self._board_id_stale = False
+        # Nothing can refuse the start from here, so the previous run's
+        # reports can go.
+        self._sweep_stale_diagnostics()
         self._camera_mgr.signal_triggers_started()
         print("[acq] start_acquisition done", flush=True)
         return {"ok": True}
@@ -1189,6 +1430,9 @@ class MainWindow(QMainWindow):
                       "message": f"{type(result).__name__}: {result}"}
         if not result.get("ok"):
             self._remove_created_dirs()
+            # After the empty directories, so the canonical name is free for
+            # the previous acquisition to move back into.
+            self._restore_moved_aside()
             self._video_dir = None
             self._state = State.IDLE
             self._sidebar.set_status("IDLE", "#888")
@@ -1200,6 +1444,9 @@ class MainWindow(QMainWindow):
                                  result.get("message", ""))
             return
 
+        # The start is committed, so the previous acquisition stays where the
+        # operator was told it would go.
+        self._moved_aside = None
         self._sidebar.set_fields_editable(False)
         self._start_thermal_watch()
         if self._acq_type == "calibration":
@@ -1348,20 +1595,20 @@ class MainWindow(QMainWindow):
         if teensy is None or not teensy.is_open:
             return
         try:
-            teensy.stop_triggers(self._profile.trigger_pins)
+            heard = self._read_board_identity(teensy)
         except Exception as e:
             print(f"[acq] could not stand the board down at launch: {e}",
                   flush=True)
             return
-        if not getattr(teensy, "_speaks_rdy", False):
-            # Pre-RDY firmware can never identify itself, so what this machine
-            # last flashed is all there is, and it was already acted on.
-            print("[acq] trigger board does not speak RDY; its contents are "
-                  "known only from what this machine last flashed", flush=True)
+        if heard is None:
+            # Firmware that prints no identity: what this machine last flashed
+            # is all there is, and it was already acted on.
+            print("[acq] trigger board reported no sketch identity; its "
+                  "contents are known only from what this machine last "
+                  "flashed", flush=True)
             return
         want, _label = self._sketch_for("calibration")
         want_id = stim_compiler.sketch_id(want)
-        heard = teensy.board_id
         self._board_id_stale = False
         if heard and want_id and heard == want_id:
             print(f"[acq] trigger board reports sketch {heard}: the "
@@ -1378,7 +1625,55 @@ class MainWindow(QMainWindow):
         self._board_identity_reflashed = True
         # Forget the hint first: it is what claimed the board was clean.
         settings.set_board_sketch_hint("")
+        # arduino-cli drives avrdude, which cannot open a COM port this
+        # process holds, and the port IS held here - this method is only
+        # reached from _warm_serial, which has just opened it.
+        # _on_clean_firmware_done reclaims it through _warm_serial in both
+        # branches; _board_identity_reflashed is what stops that second
+        # _warm_serial from starting a third flash.
+        self.release_serial_port()
         self._ensure_clean_firmware()
+
+    def _read_board_identity(self, teensy) -> str | None:
+        """The sketch identity the board prints in answer to a stand-down.
+
+        RULE: the identity comes from a read that does not depend on the
+        controller having already heard an RDY line. REASON: stop_triggers
+        skips the ack entirely while the controller has never seen one, and
+        that is precisely the state at launch - a freshly constructed
+        controller, before any start - so firmware that DOES speak RDY is
+        mislabelled pre-RDY, no identity is ever read, and the launch-time
+        decision falls back to the per-machine hint. A board flashed from the
+        Arduino IDE, swapped, or shared with a second rig is exactly what the
+        hint cannot see, and exactly what this check exists for.
+
+        A stop is the one config that is always safe to send: it drives the
+        camera pins and every stim pin LOW, which is also the right state for
+        a board found carrying a previous session's paradigm.
+
+        The waiting read belongs to the serial controller, which owns the
+        port and the ack grammar; until it offers one (`identify()`), the ack
+        this stop provokes is collected here. Pre-RDY firmware answers
+        nothing and costs one stop-ack timeout, once per launch.
+        """
+        pins = self._profile.trigger_pins
+        identify = getattr(teensy, "identify", None)
+        if callable(identify):
+            identify()
+            return getattr(teensy, "board_id", None)
+        teensy.stop_triggers(pins)
+        if not getattr(teensy, "_speaks_rdy", False):
+            await_ack = getattr(teensy, "_await_ack", None)
+            if callable(await_ack):
+                try:
+                    # readFPS() clamps the stop's -1 to 0, so the board acks
+                    # it as `RDY <n> 0` and the identity rides on that line.
+                    await_ack(len(pins), 0,
+                              timeout=getattr(teensy, "STOP_ACK_TIMEOUT", 3.0))
+                except Exception as e:
+                    print(f"[acq] could not read the board's identity: {e}",
+                          flush=True)
+        return getattr(teensy, "board_id", None)
 
     def _ensure_sketch_for(self, acq_type: str) -> bool:
         """Make the board carry the firmware this acquisition needs.
@@ -1426,6 +1721,14 @@ class MainWindow(QMainWindow):
             self._sidebar.set_status("IDLE", "#888")
             ok, msg = result if isinstance(result, tuple) else (False, str(result))
             if not ok:
+                # Retake the port before anything else, exactly as the success
+                # branch does. RULE: whoever calls release_serial_port()
+                # reclaims it on EVERY path out. REASON: left released, the
+                # next Record is what reopens it - and the open pulses DTR,
+                # resets the board and floats every pin, so the laser flash
+                # the eager open exists to keep out of the experiment happens
+                # inside one.
+                self._teensy_connection()
                 # Refusing is correct. The flash is what makes the board's
                 # contents known, so a failed flash means they are not.
                 print(f"[acq] firmware flash failed: {msg}", flush=True)
@@ -1496,6 +1799,16 @@ class MainWindow(QMainWindow):
             print("[acq] busy; deferring the launch firmware check", flush=True)
             QTimer.singleShot(1000, self._ensure_clean_firmware)
             return
+        # No profile is no rig: there is no serial port to flash and no pin
+        # list to drive low, so the upload would fail against an empty port
+        # name and raise a third dialog telling the operator to key off a
+        # laser on a rig that has no board configured. The no-profile dialog
+        # says this instead.
+        if not self._profile.name or not self._profile.serial_port:
+            print("[acq] no profile with a serial port; the launch firmware "
+                  "check cannot run and the board is left as it is",
+                  flush=True)
+            return
         try:
             blank = stim_compiler.recording_only_sketch(
                 self._profile.stim_safe_pins, self._profile.trigger_pins)
@@ -1534,8 +1847,9 @@ class MainWindow(QMainWindow):
             print("[acq] board flashed with the recording-only sketch; stim is "
                   "off until you Apply one", flush=True)
         else:
-            # Do NOT record the SHA — we do not know what the board holds, and
-            # claiming it is clean would be worse than saying nothing.
+            # Do NOT record the SHA: the board's contents are unknown here,
+            # and recording it would claim the board is clean when nothing
+            # said so.
             print(f"[acq] could not clear stim firmware: {msg}", flush=True)
             QMessageBox.warning(
                 self, "Could not clear stim firmware",
@@ -1712,6 +2026,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _join_retired_workers(self):
+        """Wait for every worker that outlived its join.
+
+        RULE: no QThread is still running when this process exits. REASON: a
+        worker parked here missed its bounded join mid-session and nothing
+        else waits for it, so at interpreter exit its last reference is
+        dropped while it runs - the qFatal "QThread: Destroyed while thread is
+        still running", which no excepthook can intercept. The wait is bounded
+        by one detection pass, and the reference is kept either way.
+        """
+        for worker in list(self._retired_workers):
+            try:
+                worker.wait(5000)
+            except Exception as e:
+                print(f"[quit] could not join a retired worker: {e}",
+                      flush=True)
+
     def _retire_worker(self, worker):
         """Let go of a worker that outlived its join, once Qt reports it done."""
         try:
@@ -1734,7 +2065,8 @@ class MainWindow(QMainWindow):
         # This is the everyday stop — the one taken every session — so it is the
         # path where a swallowed failure matters most, not least.
         self._warn_if_not_stood_down(
-            self._teensy.stop_triggers(self._profile.trigger_pins))
+            self._teensy is not None
+            and self._teensy.stop_triggers(self._profile.trigger_pins))
 
         self._stop_coverage_hud()
         self._detector = None
@@ -1817,13 +2149,14 @@ class MainWindow(QMainWindow):
 
     def _on_acquisition_finalized(self, _result):
         self._end_busy()
-        # This slot MUST inspect its argument: CallableWorker delivers a
-        # raised exception AS the result, and if _finalize raised (a full disk
-        # at np.save, anything inside _router.stop()) and the exception is
-        # ignored, camera_manager never reached `self._router = None`, the
-        # encoder threads never got their sentinel and blocked forever holding
-        # NVENC sessions, and the GUI marched on to ENCODING and remuxed an
-        # unflushed stream.h264, then deleted the source. Silently.
+        # This slot MUST inspect its argument. CallableWorker delivers a
+        # raised exception AS the result, and a _finalize that raises (a full
+        # disk at np.save, anything inside _router.stop()) leaves
+        # camera_manager short of `self._router = None`: the encoder threads
+        # never get their sentinel and block forever holding NVENC sessions.
+        # An exception ignored here then marches the window on to ENCODING,
+        # which remuxes an unflushed stream.h264 and deletes the source,
+        # silently.
         # Capture-side problems (a retired camera, block-ID truncation) reach
         # the operator here or not at all: camera_manager drops the router right
         # after reading them.
@@ -1867,18 +2200,19 @@ class MainWindow(QMainWindow):
         self._sidebar.set_status("ENCODING", "#ffaa00")
         self._sidebar.set_toggles_enabled(False)
 
+        rig = self._session_rig()
         self._encode_worker = EncodeWorker(
             self._video_dir,
             self._camera_names,
             self._acq_type,
-            self._config.frame_width,
-            self._config.frame_height,
+            rig.frame_width,
+            rig.frame_height,
             self._acq_fps,
-            self._config.quality,
+            rig.quality,
             self._config.date,
             self._config.session_id,
-            max_parallel=self._config.encode_parallel,
-            realtime=self._config.realtime_encode,
+            max_parallel=rig.encode_parallel,
+            realtime=rig.realtime_encode,
         )
         self._encode_worker.progress.connect(self._sidebar.show_progress)
         self._encode_worker.finished_all.connect(self._on_encoding_done)
@@ -1910,7 +2244,8 @@ class MainWindow(QMainWindow):
         if not counts:
             return
         min_frames = min(counts)
-        realtime = self._config.realtime_encode
+        rig = self._session_rig()
+        realtime = rig.realtime_encode
 
         for i, (count, timestamps, block_ids) in enumerate(cam_results):
             if not timestamps:
@@ -1936,7 +2271,7 @@ class MainWindow(QMainWindow):
 
             raw_path = cam_dir / "raw.bin"
             if raw_path.exists():
-                frame_size = self._config.frame_width * self._config.frame_height
+                frame_size = rig.frame_width * rig.frame_height
                 expected_size = min_frames * frame_size
                 actual_size = raw_path.stat().st_size
                 if actual_size > expected_size:
@@ -2009,8 +2344,9 @@ class MainWindow(QMainWindow):
         # skipping the one pass that would trim them to the common set leaves
         # them permanently disjoint. _start_alignment() no-ops when the videos
         # already agree, so running it here costs nothing in the normal case.
-        needs_align = (not self._config.realtime_kick) or bool(problems)
-        if self._config.realtime_encode and needs_align and self._start_alignment():
+        rig = self._session_rig()
+        needs_align = (not rig.realtime_kick) or bool(problems)
+        if rig.realtime_encode and needs_align and self._start_alignment():
             return
         self._finish_to_idle()
 
@@ -2033,9 +2369,10 @@ class MainWindow(QMainWindow):
         self._sidebar.set_status("ALIGNING", "#ffaa00")
         self._sidebar.set_toggles_enabled(False)
         self.statusBar().showMessage("Aligning videos by trigger (re-encode)...")
+        rig = self._session_rig()
         self._align_worker = AlignWorker(
-            self._video_dir, self._acq_fps, self._config.quality,
-            parallel=self._config.encode_parallel)
+            self._video_dir, self._acq_fps, rig.quality,
+            parallel=rig.encode_parallel)
         self._align_worker.progress.connect(self._on_align_progress)
         self._align_worker.finished_align.connect(self._on_align_done)
         self._align_worker.start()
@@ -2338,8 +2675,17 @@ class MainWindow(QMainWindow):
         self._stim_window.raise_()
 
     def _on_stim_upload_state(self, uploading: bool):
-        """Grey the acquisition toggles for the duration of an editor flash."""
-        self._sidebar.set_toggles_enabled(not uploading)
+        """Grey the acquisition toggles for the duration of an editor flash.
+
+        RULE: the gate is recomputed from every owner, never written from this
+        one's state. REASON: the gate is shared, so answering "the upload
+        finished" with set_toggles_enabled(True) also reopens the toggles a
+        solve, an encode, an alignment or a missing profile had closed - and
+        during a solve the start path's own guards pass, because the state
+        machine reads IDLE for the whole four to five minutes.
+        """
+        self._sidebar.set_toggles_enabled(
+            self._toggles_permitted() and not uploading)
 
     def _workers_running(self) -> bool:
         # _cam_op and _coverage_worker are usually masked by self._busy, but the
@@ -2359,8 +2705,9 @@ class MainWindow(QMainWindow):
             return True
         return any(w is not None and w.isRunning() for w in
                    (self._encode_worker, self._align_worker, self._calib_worker,
-                    self._cam_op, self._coverage_worker, self._fw_op,
-                    self._hw_check_thread, self._snap_op))
+                    self._cam_op, self._cap_op, self._coverage_worker,
+                    self._fw_op, self._hw_check_thread, self._snap_op,
+                    *self._retired_workers))
 
     def _delete_on_quit(self) -> bool:
         """Whether quitting right now should remove the session directory.
@@ -2397,6 +2744,16 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
+        # Stop the temperature poll before any dialog on this path. RULE: the
+        # thermal timer stops wherever the cameras are about to be abandoned.
+        # REASON: its slot is a GVCP register read per camera, it only
+        # self-stops on a state change, and the quit path never moves the
+        # state to IDLE - so from RECORDING or CALIBRATING it keeps firing,
+        # including inside the nested event loops of the two modal dialogs
+        # below, against cameras _abandon_and_cleanup is closing. Two threads
+        # in pylon on one device is an access violation, not an exception.
+        self._thermal_timer.stop()
+
         # Quitting mid-session can't be finalized — confirm, then ABANDON the
         # half-baked data rather than blocking the close on encode/align/solve
         # workers (which is what made it freeze on "quit anyway").
@@ -2419,10 +2776,17 @@ class MainWindow(QMainWindow):
                 self, "Work in progress", text,
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.No:
+                # The session goes on, so the temperature watch has to as
+                # well: stopped above and not restarted, an overheating
+                # camera would go unreported for the rest of a recording
+                # because the operator thought about quitting and did not.
+                if self._state in (State.RECORDING, State.CALIBRATING):
+                    self._start_thermal_watch()
                 event.ignore()
                 return
 
         self._display_timer.stop()
+        self._thermal_timer.stop()
         # No bound at close: the loop exits after at most one detection pass,
         # and there is no later moment at which a straggler could be joined.
         self._stop_coverage_hud(timeout_ms=0)
@@ -2445,6 +2809,7 @@ class MainWindow(QMainWindow):
         if busy:
             self._abandon_and_cleanup()
         else:
+            self._join_retired_workers()
             self._camera_mgr.close_all()
         event.accept()
 
@@ -2498,13 +2863,17 @@ class MainWindow(QMainWindow):
         # while _cam_op is the thread running _finalize — possibly inside
         # _router.stop() or resume_preview(). Two threads making native pylon
         # calls on the same device is an access violation, not an exception, so
-        # excepthook cannot save us. Killing the child processes above is what
+        # no excepthook can intercept it. Killing the child processes above is what
         # lets these waits actually return.
-        for w in (self._cam_op, self._encode_worker, self._align_worker,
-                  self._calib_worker, self._coverage_worker,
-                  self._hw_check_thread, self._snap_op):
+        for w in (self._cam_op, self._cap_op, self._encode_worker,
+                  self._align_worker, self._calib_worker,
+                  self._coverage_worker, self._hw_check_thread,
+                  self._snap_op):
             if w is not None and w.isRunning():
                 w.wait(3000)
+        # _stop_coverage_hud parks a coverage worker that missed its join
+        # here and clears _coverage_worker, so the tuple above cannot see it.
+        self._join_retired_workers()
         # A flash is not killed above and must not be abandoned under a live
         # avrdude, so closeEvent refuses to close while one is running. This
         # is the backstop for a flash that started between that check and

@@ -18,6 +18,7 @@ prove the profile's camera_backend really reaches open_all.
 
     set QT_QPA_PLATFORM=offscreen && uv run python test_main_window_start.py
 """
+import contextlib
 import os
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt5.QtCore import QSettings
 from PyQt5.QtWidgets import QApplication, QMessageBox as _RealMsgBox
 
 _APP = QApplication.instance() or QApplication([])
@@ -221,6 +223,7 @@ class _Mgr:
         self._start_error = start_error
         self._stop_error = stop_error
         self.calls = []
+        self.start_kwargs = {}
         self.last_warnings = []
         self.last_stream_stats = []
         self.frontier_lags = []
@@ -231,6 +234,7 @@ class _Mgr:
 
     def start_acquisition(self, *a, **k):
         self.calls.append("start_acquisition")
+        self.start_kwargs = dict(k)
         if self._start_error is not None:
             raise self._start_error
 
@@ -282,9 +286,15 @@ class _Teensy:
         self.calls.append("stop_triggers")
         return self._stop_ack
 
+    def close(self):
+        self.calls.append("close")
+        self.is_open = False
+
 
 class _Stim:
-    def __init__(self, testing=False, blocker=None, blocks=(), source=""):
+    def __init__(self, testing=False, blocker=None, blocks=(), source="",
+                 uploading=False):
+        self._uploading = uploading
         self._testing = testing
         self._blocker = blocker
         self._blocks = list(blocks)
@@ -294,7 +304,7 @@ class _Stim:
         return self._testing
 
     def is_uploading(self):
-        return False
+        return self._uploading
 
     def record_blocker(self):
         return self._blocker
@@ -309,6 +319,39 @@ class _Stim:
 SIM_PROFILE = RigProfile.load(Path(__file__).parent / "profiles" / "sim.yaml")
 
 
+@contextlib.contextmanager
+def temp_settings(tmp):
+    """Point gui_app.settings at a throwaway INI for the duration.
+
+    The board-sketch key is the operator's real one: it decides whether the
+    launch reflashes the trigger board to the recording-only sketch. A test
+    that writes it and is then killed leaves the machine claiming the board
+    carries a sketch nothing said it carries, and the next launch skips the
+    stim-clearing flash. Nothing here may touch the real store.
+    """
+    path = str(Path(tmp) / "settings.ini")
+    real = settings.app_settings
+    settings.app_settings = lambda: QSettings(path, QSettings.IniFormat)
+    try:
+        yield
+    finally:
+        settings.app_settings = real
+
+
+class _Running:
+    """A worker slot that reports a live thread."""
+
+    def __init__(self):
+        self.waits = []
+
+    def isRunning(self):
+        return True
+
+    def wait(self, ms=None):
+        self.waits.append(ms)
+        return True
+
+
 def make(tmp, *, mgr=None, teensy=None, stim=None, flash_needed=False,
          profile=None):
     """A window with everything the start path touches stubbed out."""
@@ -319,6 +362,7 @@ def make(tmp, *, mgr=None, teensy=None, stim=None, flash_needed=False,
     w._acq_fps = 0
     w._finalized = True
     w._created_dirs = []
+    w._moved_aside = None
     w._board_id_stale = True
     w._board_identity_reflashed = False
     w._session_stim_ino = None
@@ -332,6 +376,7 @@ def make(tmp, *, mgr=None, teensy=None, stim=None, flash_needed=False,
     w._calib_worker = None
     w._calib_config = None
     w._cam_op = None
+    w._cap_op = None
     w._fw_op = None
     w._snap_op = None
     w._hw_check_thread = None
@@ -358,13 +403,27 @@ def make(tmp, *, mgr=None, teensy=None, stim=None, flash_needed=False,
         base_data_dir=Path(tmp), camera_names=list(w._camera_names))
     cfg = w._config
     w._build_config = lambda: cfg
-    w._teensy_connection = lambda retries=10: w._teensy
+
+    def _claim(retries=10):
+        w._teensy.calls.append("reclaim")
+        w._teensy.is_open = True
+        return w._teensy
+
+    w._teensy_connection = _claim
     w._ensure_sketch_for = lambda acq: not flash_needed
     w._start_thermal_watch = lambda: None
     w._start_coverage_hud = lambda: None
     w._save_stim_paradigm = lambda: None
     w._arm_stim_autostop = lambda: None
     return w
+
+
+def _body(path):
+    """The file's bytes, or b"" when a failing case removed it."""
+    try:
+        return path.read_bytes()
+    except OSError:
+        return b""
 
 
 def touch(path: Path, body=b"x"):
@@ -377,6 +436,10 @@ mw.QMessageBox = _MsgBox
 mw.CallableWorker = _Worker
 SOURCE = (Path(__file__).parent / "gui_app" / "main_window.py").read_text(
     encoding="utf-8")
+SOURCE_TEST = Path(__file__).read_text(encoding="utf-8")
+#: What the machine's REAL board-sketch hint says before any case runs. Read
+#: once, never written: case 50 proves this suite gave it back untouched.
+REAL_HINT_AT_START = settings.board_sketch_hint()
 
 
 # 1-3 ── the firmware check runs before any camera or file side effect ───────
@@ -424,8 +487,7 @@ with tempfile.TemporaryDirectory() as td:
     moved = [p for p in (tmp / "20260101" / "m1_m2").iterdir()
              if p.name.startswith("recording.previous-")]
     check(7, "existing data is moved to a suffixed folder, not deleted",
-          len(moved) == 1 and (moved[0] / "cam1"
-                               / old_mp4.name).read_bytes() == b"old",
+          len(moved) == 1 and _body(moved[0] / "cam1" / old_mp4.name) == b"old",
           str([p.name for p in (tmp / '20260101' / 'm1_m2').iterdir()]))
     check(8, "the new acquisition keeps the canonical folder name",
           rec.exists() and (rec / "cam1").is_dir() and not (rec / "cam1"
@@ -450,7 +512,7 @@ with tempfile.TemporaryDirectory() as td:
     w = make(tmp)
     w._start_acquisition("recording")
     check(12, "Cancel leaves the existing data exactly where it was",
-          (rec / "cam1" / "stream.h264").read_bytes() == b"stream"
+          _body(rec / "cam1" / "stream.h264") == b"stream"
           and not any(p.name.startswith("recording.previous-")
                       for p in (tmp / "20260101" / "m1_m2").iterdir()))
     check(13, "Cancel starts nothing and resets the toggles",
@@ -617,11 +679,6 @@ with tempfile.TemporaryDirectory() as td:
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td)
     w = make(tmp)
-
-    class _Running:
-        def isRunning(self):
-            return True
-
     w._hw_check_thread = _Running()
     check(37, "a running hardware check keeps the window from closing silently",
           w._workers_running() is True)
@@ -720,8 +777,8 @@ with tempfile.TemporaryDirectory() as td:
     from gui_app import stim_compiler
     sketch = stim_compiler.recording_only_sketch([53], [2, 4])
     want_id = stim_compiler.sketch_id(sketch)
-    hint = settings.board_sketch_hint()
-    try:
+    # The real store is never touched: see temp_settings.
+    with temp_settings(tmp):
         settings.set_board_sketch_hint(stim_compiler.sketch_sha(sketch))
         w = make(tmp, teensy=_Teensy(board_id="deadbeef"))
         w._board_id_stale = False
@@ -734,14 +791,16 @@ with tempfile.TemporaryDirectory() as td:
         w._board_id_stale = True
         check(49, "a board that has not spoken since the flash is not re-flashed",
               w._board_needs_flash(sketch) is False)
-    finally:
-        settings.set_board_sketch_hint(hint)
+check(50, "the machine's real board-sketch hint is left exactly as found",
+      settings.app_settings().value(settings.KEY_BOARD_SKETCH, "", type=str)
+      == REAL_HINT_AT_START,
+      f"{REAL_HINT_AT_START!r} -> {settings.board_sketch_hint()!r}")
 
 # 50-52 ── the profile really selects the backend ───────────────────────────
 kwargs = rig_setup.open_kwargs(mw.CameraManager, SIM_PROFILE)
-check(50, "open_kwargs carries the profile's camera_backend",
+check(51, "open_kwargs carries the profile's camera_backend",
       kwargs.get("backend") == "sim", str(sorted(kwargs)))
-check(51, "and the expected geometry and pool depth",
+check(52, "and the expected geometry and pool depth",
       kwargs.get("expect_geometry") == (SIM_PROFILE.frame_width,
                                         SIM_PROFILE.frame_height)
       and kwargs.get("max_num_buffer") == SIM_PROFILE.max_num_buffer)
@@ -750,7 +809,7 @@ _mgr = mw.CameraManager()
 rig_setup.apply_profile_to_manager(_mgr, SIM_PROFILE, log=lambda *_a: None)
 opened = _mgr.open_all(**kwargs)
 try:
-    check(52, "the simulated cameras open through that same path",
+    check(53, "the simulated cameras open through that same path",
           opened is True and _mgr.num_cameras == SIM_PROFILE.n_cameras
           and _mgr.geometry == (SIM_PROFILE.frame_width,
                                 SIM_PROFILE.frame_height),
@@ -764,8 +823,393 @@ with tempfile.TemporaryDirectory() as td:
     w = make(tmp)
     out = MainWindow._write_snapshots(tmp / "snaps", [None, None],
                                       ["cam1", "cam2"])
-    check(53, "a camera with no frame is named, not silently counted out",
+    check(54, "a camera with no frame is named, not silently counted out",
           out["missing"] == ["cam1", "cam2"] and out["saved"] == 0)
+
+
+# 55-59 ── a start refused after the move-aside puts the data back ──────────
+# The dialog promises "this acquisition records into the original folder name
+# so the solve and the alignment scripts still find it". 1_calibrate,
+# alignment.video_for, 2_align and the Solve button all resolve a session BY
+# that name, so a start refused after the rename must restore it.
+def _with_previous_data(tmp):
+    rec = tmp / "20260101" / "m1_m2" / "recording"
+    touch(rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4", b"old")
+    return rec
+
+
+def _moved_dirs(tmp):
+    return [p for p in (tmp / "20260101" / "m1_m2").iterdir()
+            if p.name.startswith("recording.previous-")]
+
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    rec = _with_previous_data(tmp)
+    _MsgBox.reset(answer=_MsgBox.Ok)
+    w = make(tmp)
+    w._teensy.last_error = "PermissionError: COM3 is held"
+    w._teensy_connection = lambda retries=10: None
+    w._start_acquisition("recording")
+    check(55, "a start the port refuses leaves the canonical folder in place",
+          rec.is_dir(),
+          str([p.name for p in (tmp / "20260101" / "m1_m2").iterdir()]))
+    check(56, "with the previous acquisition's data still in it, not aside",
+          _body(rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4") == b"old"
+          and not _moved_dirs(tmp))
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    rec = _with_previous_data(tmp)
+    _MsgBox.reset(answer=_MsgBox.Ok)
+    refused = AcquisitionStartRefused("Could not put every camera into "
+                                      "trigger mode")
+    w = make(tmp, mgr=_Mgr(start_error=refused))
+    w._start_acquisition("recording")
+    check(57, "a camera that refuses trigger mode restores it too",
+          rec.is_dir() and not _moved_dirs(tmp)
+          and (rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4").exists())
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    rec = _with_previous_data(tmp)
+    _MsgBox.reset(answer=_MsgBox.Ok)
+    w = make(tmp, teensy=_Teensy(ack=False))
+    w._start_acquisition("recording")
+    check(58, "and so does a board that never acks the start",
+          rec.is_dir() and not _moved_dirs(tmp)
+          and (rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4").exists())
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    rec = _with_previous_data(tmp)
+    _MsgBox.reset(answer=_MsgBox.Ok)
+    w = make(tmp)
+    w._start_acquisition("recording")
+    moved = _moved_dirs(tmp)
+    check(59, "a start that DID run leaves the old data aside, as promised",
+          w._state is State.RECORDING and len(moved) == 1
+          and _body(moved[0] / "cam1"
+                    / "20260101-m1_m2-cam1-recording.mp4") == b"old"
+          and rec.is_dir())
+
+# 60-62 ── the sweep waits for the board, and the port comes first ──────────
+# WARNINGS.txt, encode_error.log, codet_frames.json, tail.h264 and
+# raw_tail.bin are what the failed-camera dialog sends the operator to read.
+# None of them is in DATA_PATTERNS, so no move-aside protects them.
+def _with_reports(tmp):
+    rec = tmp / "20260101" / "m1_m2" / "recording"
+    touch(rec / "WARNINGS.txt", b"session warning")
+    touch(rec / "codet_frames.json", b"{}")
+    touch(rec / "cam1" / "WARNINGS.txt", b"cam warning")
+    touch(rec / "cam1" / "encode_error.log", b"why cam1 failed")
+    touch(rec / "cam1" / "raw_tail.bin", b"tail")
+    return rec
+
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    rec = _with_reports(tmp)
+    _MsgBox.reset()
+    w = make(tmp)
+    w._teensy.last_error = "PermissionError: COM3 is held"
+    w._teensy_connection = lambda retries=10: None
+    w._start_acquisition("recording")
+    check(60, "a start the port refuses destroys no previous run's reports",
+          _body(rec / "WARNINGS.txt") == b"session warning"
+          and (rec / "codet_frames.json").exists()
+          and _body(rec / "cam1" / "WARNINGS.txt") == b"cam warning"
+          and (rec / "cam1" / "encode_error.log").exists()
+          and (rec / "cam1" / "raw_tail.bin").exists())
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    rec = _with_reports(tmp)
+    _MsgBox.reset()
+    w = make(tmp, mgr=_Mgr(start_error=AcquisitionStartRefused("no cameras")))
+    w._start_acquisition("recording")
+    check(61, "nor does a camera start that refuses",
+          (rec / "WARNINGS.txt").exists()
+          and (rec / "cam1" / "encode_error.log").exists())
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    rec = _with_reports(tmp)
+    _MsgBox.reset()
+    w = make(tmp)
+    w._start_acquisition("recording")
+    check(62, "a start that the board acked does sweep them",
+          w._state is State.RECORDING
+          and not (rec / "WARNINGS.txt").exists()
+          and not (rec / "codet_frames.json").exists()
+          and not (rec / "cam1" / "WARNINGS.txt").exists()
+          and not (rec / "cam1" / "encode_error.log").exists()
+          and not (rec / "cam1" / "raw_tail.bin").exists())
+
+# 63 ── the NVENC session probe never runs on the UI thread ────────────────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    seen = {}
+
+    def fake_capacity(**kw):
+        seen["busy"] = w._busy
+        seen["workers"] = len(_Worker.made)
+        return [], []
+
+    real_capacity = mw.check_capacity
+    mw.check_capacity = fake_capacity
+    try:
+        _MsgBox.reset()
+        _Worker.made = []
+        w = make(tmp)
+        w._start_acquisition("recording")
+        check(63, "the capacity preflight runs in a worker, under the busy "
+                  "overlay",
+              seen.get("busy") is True and seen.get("workers") == 1
+              and w._state is State.RECORDING,
+              f"{seen} state={w._state}")
+    finally:
+        mw.check_capacity = real_capacity
+
+# 64-66 ── a solve owns the toggles, the fields and the start path ─────────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    _MsgBox.reset()
+    w = make(tmp)
+    w._calib_worker = _Running()
+    w._start_acquisition("recording")
+    check(64, "a Record during a solve is refused, not started on top of it",
+          "start_acquisition" not in w._camera_mgr.calls
+          and w._state is State.IDLE and w._sidebar.reset_calls == 1
+          and "solve" in _MsgBox.texts().lower(), _MsgBox.texts()[:120])
+
+    w._sidebar.toggles_enabled = False
+    w._stim_window = _Stim(uploading=False)
+    w._on_stim_upload_state(False)
+    check(65, "an editor upload finishing does not reopen the toggles a solve "
+              "closed",
+          w._sidebar.toggles_enabled is False)
+
+    w._state = State.IDLE
+    w._begin_busy("Updating the stimulus trace...")
+    w._end_busy()
+    check(66, "nor does a busy cycle hand back the fields the solve locked",
+          w._sidebar.fields_editable is False)
+
+    w._calib_worker = None
+    w._on_stim_upload_state(False)
+    check(67, "and with the solve gone the toggles come back",
+          w._sidebar.toggles_enabled is True)
+
+# 68 ── a canvas edited during the ~30 s flash is caught at the re-entry ────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    _MsgBox.reset()
+    w = make(tmp, stim=_Stim(blocks=[{"id": 1}], source="EDITED"))
+    w._session_stim_ino = "FLASHED"
+    w._arm_acquisition("recording")
+    check(68, "a paradigm edited during the flash refuses at the re-entry",
+          "start_acquisition" not in w._camera_mgr.calls
+          and not (tmp / "20260101").exists()
+          and "Apply" in _MsgBox.texts(), _MsgBox.texts()[:120])
+
+# 69 ── a failed per-acquisition flash hands the port back ──────────────────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    _MsgBox.reset()
+    from gui_app import stim_compiler as _sc
+    real_upload = _sc.upload
+    _sc.upload = lambda ino, port: (False, "avrdude: verification error")
+    try:
+        with temp_settings(tmp):
+            w = make(tmp)
+            del w._ensure_sketch_for       # exercise the real one
+            ok = MainWindow._ensure_sketch_for(w, "recording")
+    finally:
+        _sc.upload = real_upload
+    check(69, "a flash that fails reclaims the serial port before it reports",
+          ok is False and w._teensy.calls[:2] == ["close", "reclaim"]
+          and w._teensy.is_open is True
+          and "could not be flashed" in _MsgBox.texts(),
+          f"{w._teensy.calls} {_MsgBox.texts()[:80]}")
+
+# 70-72 ── the launch identity probe, against the simulated board ──────────
+# stop_triggers skips the ack while the controller has never heard an RDY
+# line, and at launch it never has: the identity has to be read anyway, or
+# every launch decides from the per-machine hint alone.
+from gui_app.backends import sim_board
+from gui_app.serial_controller import TeensyController
+from gui_app import stim_compiler as _sc
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    blank = _sc.recording_only_sketch(SIM_PROFILE.stim_safe_pins,
+                                      SIM_PROFILE.trigger_pins)
+    sim_board.reset_board()
+    sim_board.accept_upload(blank)
+    board = TeensyController(port=SIM_PROFILE.serial_port)
+    opened = board.open(retries=1)
+    _MsgBox.reset()
+    w = make(tmp, teensy=board)
+    flashed = []
+    w._ensure_clean_firmware = lambda: flashed.append(w._teensy.is_open)
+    with temp_settings(tmp):
+        w._confirm_board_identity()
+        hint_after = settings.board_sketch_hint()
+    check(70, "the board's own identity is read although it has never acked",
+          opened and board.board_id == _sc.sketch_id(blank)
+          and board._speaks_rdy is True,
+          f"id={board.board_id} speaks={board._speaks_rdy}")
+    check(71, "a board carrying the recording-only sketch is not reflashed",
+          flashed == [] and hint_after == _sc.sketch_sha(blank))
+    board.close()
+
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    sim_board.reset_board()
+    sim_board.shared_board().sketch_id = "deadbeef"
+    board = TeensyController(port=SIM_PROFILE.serial_port)
+    board.open(retries=1)
+    w = make(tmp, teensy=board)
+    flashed = []
+    w._ensure_clean_firmware = lambda: flashed.append(w._teensy.is_open)
+    with temp_settings(tmp):
+        settings.set_board_sketch_hint("whatever this machine last flashed")
+        w._confirm_board_identity()
+        hint_after = settings.board_sketch_hint()
+    check(72, "a board carrying a foreign sketch is reflashed with the port "
+              "RELEASED, and the hint forgotten",
+          board.board_id == "deadbeef" and flashed == [False]
+          and hint_after == "" and w._board_identity_reflashed is True,
+          f"id={board.board_id} flashed={flashed} hint={hint_after!r}")
+    board.close()
+
+# 73 ── no profile, no flash ────────────────────────────────────────────────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    _MsgBox.reset()
+    _Worker.made = []
+    w = make(tmp, profile=RigProfile())
+    MainWindow._ensure_clean_firmware(w)
+    check(73, "with no profile the launch flash does not run against an empty "
+              "port",
+          _Worker.made == [] and w._fw_op is None and not _MsgBox.shown,
+          _MsgBox.texts()[:120])
+
+# 74 ── the controller is built with the profile's port, not a placeholder ──
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+
+    class _FakeTeensy:
+        def __init__(self, port="COM3", baudrate=115200):
+            self.port = port
+            self.is_open = False
+            self.board_id = None
+
+        def open(self, retries=10):
+            self.is_open = True
+            return True
+
+        def close(self):
+            self.is_open = False
+
+    real_ctor = mw.TeensyController
+    mw.TeensyController = _FakeTeensy
+    try:
+        with temp_settings(tmp):
+            settings.set_board_sketch_hint("a hint worth keeping")
+            w = make(tmp)
+            w._teensy = None
+            del w._teensy_connection
+            got = MainWindow._teensy_connection(w, retries=1)
+            kept = settings.board_sketch_hint()
+    finally:
+        mw.TeensyController = real_ctor
+    check(74, "the first connection builds the controller on the profile's "
+              "port and keeps the hint",
+          got is not None and got.port == SIM_PROFILE.serial_port
+          and kept == "a hint worth keeping"
+          and "self._teensy = TeensyController()" not in SOURCE,
+          f"port={getattr(got, 'port', None)} hint={kept!r}")
+
+# 75 ── a worker parked by the coverage HUD is still joined at quit ─────────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    w = make(tmp)
+    parked = _Running()
+    w._retired_workers = [parked]
+    check(75, "a parked worker keeps the window from closing silently",
+          w._workers_running() is True)
+    w._join_retired_workers()
+    check(76, "and the quit path joins it rather than destroying it running",
+          parked.waits == [5000])
+
+# 77 ── rig facts come from the profile, not SessionConfig's mirror ─────────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    _MsgBox.reset()
+    w = make(tmp)
+    # A config whose mirrored scalars disagree with the rig it was built from:
+    # the mirror is a copy, and the cameras were configured from the profile.
+    w._config.frame_width = 1
+    w._config.frame_height = 2
+    w._config.quality = 99
+    w._config.kick_max_lag = 7
+    w._start_acquisition("recording")
+    k = w._camera_mgr.start_kwargs
+    check(77, "the start is configured from the profile, not the mirror",
+          k.get("width") == SIM_PROFILE.frame_width
+          and k.get("height") == SIM_PROFILE.frame_height
+          and k.get("quality") == SIM_PROFILE.quality
+          and k.get("kick_max_lag") == SIM_PROFILE.kick_max_lag, str(k))
+
+# 78 ── a refused profile switch never leaves the window busy ───────────────
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    _MsgBox.reset()
+    w = make(tmp)
+    other = RigProfile(name="other-rig")
+    w._cam_op = _Running()
+    w._on_profile_changed(other)
+    check(78, "a switch refused by a running camera op leaves no busy state "
+              "and no half-adopted profile",
+          w._busy is False and w._sidebar.busy is not True
+          and w._profile is SIM_PROFILE, f"busy={w._busy}")
+
+    w._cam_op = None
+    w._calib_worker = _Running()
+    w._on_profile_changed(other)
+    check(79, "and a switch during a solve is refused the same way",
+          w._busy is False and w._profile is SIM_PROFILE
+          and "solve" in _MsgBox.texts().lower(), _MsgBox.texts()[:120])
+
+
+# 80 ── the whole launch serial sequence, on the simulated rig ─────────────
+# No controller exists before the profile is resolved, so this is also what
+# proves the launch can still reach the board at all.
+with tempfile.TemporaryDirectory() as td:
+    tmp = Path(td)
+    sim_board.reset_board()
+    sim_board.shared_board().sketch_id = "deadbeef"
+    w = make(tmp)
+    w._teensy = None
+    del w._teensy_connection            # exercise the real one
+    flashed = []
+    w._ensure_clean_firmware = lambda: flashed.append(
+        w._teensy is not None and w._teensy.is_open)
+    with temp_settings(tmp):
+        settings.set_board_sketch_hint("what this machine last flashed")
+        MainWindow._warm_serial(w)
+        hint_after = settings.board_sketch_hint()
+    check(80, "a launch with no controller yet opens the profile's port, "
+              "reads the board and releases it for the flash",
+          w._teensy is not None and w._teensy.port == SIM_PROFILE.serial_port
+          and w._teensy.board_id == "deadbeef" and flashed == [False]
+          and hint_after == "",
+          f"id={getattr(w._teensy, 'board_id', None)} flashed={flashed} "
+          f"hint={hint_after!r}")
+    if w._teensy is not None:
+        w._teensy.close()
 
 
 print()

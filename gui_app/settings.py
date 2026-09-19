@@ -1,10 +1,17 @@
 """One owner for the settings Panopticon persists between launches.
 
-RULE: nothing else constructs a ``QSettings`` or spells one of these keys.
-REASON: the board-sketch key carries a safety meaning — whether the trigger
-board is believed to be free of a stimulation paradigm — and a key spelled in
-five places is a key that gets written under one spelling and read under
-another, which here reads as "the board is clean" when nothing said so.
+RULE: the board-sketch key is spelled and reached ONLY here. REASON: it
+carries a safety meaning — whether the trigger board is believed to be free of
+a stimulation paradigm — and a key spelled in five places is a key that gets
+written under one spelling and read under another, which here reads as "the
+board is clean" when nothing said so.
+
+The rule is not yet true of the whole tree: ``gui_app/widgets/sidebar.py``
+still constructs its own ``QSettings("Salk", "Panopticon")`` and spells
+``profile_name`` itself, so ``KEY_PROFILE`` below records the spelling rather
+than owning it. Adopting this module is the sidebar's half of the same
+finding, and until it lands the two spellings have to be kept identical by
+hand.
 
 The store is per machine and per user, so nothing in it describes the rig or
 the hardware attached to it: every value here is a HINT about what this
@@ -24,7 +31,10 @@ APP = "Panopticon"
 KEY_BOARD_SKETCH = "board_sketch_sha"
 
 #: Name of the rig profile last selected on this machine. The profile list is
-#: shared between rigs, so alphabetical order picks the wrong one.
+#: shared between rigs, so alphabetical order picks the wrong one. Declared
+#: here as the canonical spelling; the sidebar still reads and writes this key
+#: through its own QSettings, so this constant has no reader in the tree until
+#: the sidebar adopts this module.
 KEY_PROFILE = "profile_name"
 
 
