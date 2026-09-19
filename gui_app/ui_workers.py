@@ -2,8 +2,15 @@
 
 Used for the operations that otherwise freeze the UI (the window goes "not
 responding"): camera open/close/reconfigure, which make many synchronous GigE
-round-trips, and the ~30 s arduino-cli firmware flash in main_window's
-``_ensure_clean_firmware`` / ``_ensure_sketch_for``.
+round-trips; the whole acquisition start and its rollback, which add the
+serial claim, the readiness barrier and, on a failure, the full stop budget;
+the finalize and the stimulus-trace rebuild; the snapshot save; and the ~30 s
+arduino-cli firmware flash in main_window's ``_ensure_clean_firmware`` /
+``_ensure_sketch_for``.
+
+One worker per attribute at a time: assigning a new worker over a running one
+drops the last reference to a live QThread, which Qt answers with qFatal
+rather than an exception, so every assignment checks isRunning() first.
 
 The callable runs in this QThread; its return value (or the raised exception) is
 delivered back on the main thread via the ``done`` signal. Callers MUST check

@@ -23,7 +23,9 @@ import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from gui_app import main_window as mw
 from gui_app.main_window import MainWindow, State
+from gui_app.session_config import RigProfile
 
 
 class _StubTimer:
@@ -222,6 +224,95 @@ w._poll_thermals()
 check(18, "any non-Ok status counts, not only 'Critical'",
       w._thermal_alert is not None and "Error" in w._thermal_alert,
       w._thermal_alert)
+
+
+# 19-21 ----------------------------------------------------------------------
+# Quitting out of a recording. The poll is a GVCP register read per camera and
+# it only self-stops on a state change, which the quit path never makes, so a
+# timer left running fires inside the nested event loops of the quit dialogs -
+# against cameras the quit is closing. Two threads inside pylon on one device
+# is an access violation, not an exception.
+class _Event:
+    def __init__(self):
+        self.accepted = None
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.accepted = False
+
+
+class _QuitBox:
+    """QMessageBox stand-in that records the window state when it is asked."""
+    Yes, No = 1, 0
+    asked_at = []
+    answer = Yes
+
+    @classmethod
+    def question(cls, parent, title, text, *a, **k):
+        cls.asked_at.append(parent._thermal_timer.stopped)
+        return cls.answer
+
+    @classmethod
+    def critical(cls, *a, **k):
+        return cls.No
+
+    @classmethod
+    def information(cls, *a, **k):
+        return cls.No
+
+    @classmethod
+    def warning(cls, *a, **k):
+        return cls.No
+
+
+def quitting(state=State.RECORDING, answer=_QuitBox.Yes):
+    w = make([ok()], state=state)
+    w._busy = False
+    w._finalized = False
+    w._fw_op = None
+    w._stim_window = None
+    w._teensy = None
+    w._video_dir = None
+    w._display_timer = _StubTimer()
+    w._profile = RigProfile(thermal_poll_s=5.0)
+    w._workers_running = lambda: False
+    w._stop_coverage_hud = lambda timeout_ms=5000: None
+    w._abandon_and_cleanup = lambda: None
+    w._join_retired_workers = lambda: None
+    w._camera_mgr.close_all = lambda: None
+    _QuitBox.asked_at = []
+    _QuitBox.answer = answer
+    return w
+
+
+real_box = mw.QMessageBox
+mw.QMessageBox = _QuitBox
+try:
+    w = quitting()
+    event = _Event()
+    MainWindow.closeEvent(w, event)
+    check(19, "the thermal poll is stopped BEFORE the quit dialog runs",
+          _QuitBox.asked_at == [1] and event.accepted is True,
+          f"stopped-at-dialog={_QuitBox.asked_at}")
+
+    w = quitting(answer=_QuitBox.No)
+    event = _Event()
+    MainWindow.closeEvent(w, event)
+    check(20, "a quit the operator cancels puts the watch back",
+          event.accepted is False and w._thermal_timer.started_ms == 5000,
+          f"started={w._thermal_timer.started_ms}")
+
+    w = quitting(state=State.IDLE)
+    w._finalized = True
+    event = _Event()
+    MainWindow.closeEvent(w, event)
+    check(21, "quitting from IDLE stops it too, with no dialog at all",
+          w._thermal_timer.stopped >= 1 and _QuitBox.asked_at == []
+          and event.accepted is True)
+finally:
+    mw.QMessageBox = real_box
 
 print()
 if failures:
