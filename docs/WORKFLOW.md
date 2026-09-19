@@ -343,8 +343,11 @@ camera, which is why it can sit still while one camera catches up.
 **Every camera has at least `calibration_min_per_cam_shared` paired detections**,
 120 on the reference profile. A tick counts for a camera
 only when that camera *and at least one other* saw the board in the same tick,
-since a view no one else shares cannot help place that camera. Detection runs at
-up to about 30 ticks per second.
+since a view no one else shares cannot help place that camera. Ticks are best
+effort rather than a fixed rate: detection runs over the cameras one at a time
+and costs more on a cluttered scene, so nine cameras typically manage 10-20 a
+second and fewer when the arena is busy. The log line `[hud] coverage ticks/s:`
+reports what the rig is achieving.
 
 **The pair graph is connected**, counting only pairs with at least
 `calibration_min_edge` shared

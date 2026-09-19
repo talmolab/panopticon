@@ -437,9 +437,11 @@ in all of them.
 | **Stage 3.** Nearly there. Camera 5 is lit, most edges are bright and thick, and the 1-4 edge is still thin — that pair has barely seen the board together. `paired 200/250  grid 3/3`. | **Stage 4.** Every condition met. The whole graph freezes solid white and the caption reads `READY — m:ss`, with the elapsed time stopped at the moment it got there. |
 
 Everything on the graph is counted in *detection ticks*. One tick is a single
-pass of the board detector across the current frame from every camera, repeated
-about 30 times a second, so a tick is a moment in time rather than a recorded
-frame.
+pass of the board detector across the current frame from every camera, so a tick
+is a moment in time rather than a recorded frame. The pass is sequential over
+the cameras and costs more the more texture a scene has, so the rate is best
+effort: typically 10-20 a second at nine cameras, and fewer when the arena is
+cluttered.
 
 - **A node lights up** (cyan, brighter rim) when that camera sees at least 4
   board markers in the current tick. The glow decays over about 0.4 s, so it

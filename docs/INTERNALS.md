@@ -1098,11 +1098,21 @@ are triggered, encoded and aligned by the same path as a recording.
 
 ### Live coverage
 
-`board_detector.BoardDetector` runs on full-resolution frames at ~30 Hz from
+`board_detector.BoardDetector` runs on full-resolution frames from
 `coverage_worker.CoverageWorker`, off the UI thread (`GrabThread.set_keep_full`
 enables the full-res copy; six ChArUco detections per UI tick would stutter the
 preview). Full resolution matters for obliquely mounted cameras, the same
 requirement the solve has.
+
+The tick rate is **best effort**, not a fixed 30 Hz. The worker's 33 ms interval
+is a floor on the period, and detection runs sequentially over the cameras at
+6-250 ms each depending on how much texture the scene offers a marker detector,
+so nine cameras land at typically 10-20 Hz and near 1 Hz when several cameras
+see clutter. Every threshold below is therefore a count of ticks whose wall-clock
+worth varies with camera count and scene: the error is in the safe direction,
+since a slower tick means more frames behind each count, but do not read a
+threshold as a number of seconds. The measured rate is published as
+`ticks_per_s` and logged as `[hud] coverage ticks/s:` every 30 seconds.
 
 Per detection tick, per camera, it counts **ArUco markers**, not interpolated
 ChArUco corners:
