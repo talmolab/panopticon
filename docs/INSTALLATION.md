@@ -282,6 +282,22 @@ per thread per frame is safe even at 17 threads, while ~1000 µs breaks the 10 m
 budget at 11. Cores beyond the grab and encode threads mostly help the network
 stack.
 
+**Hybrid CPUs.** On a processor with both performance and efficiency cores the
+scheduler has to put most of those threads on efficiency cores, and it chooses
+differently every launch. A grab thread there is not given more work; it
+executes the same work more slowly, and the loop can never make that up, because
+it retrieves at exactly the rate frames arrive. The symptom is one camera per
+session falling behind, a different camera each time. Four profile fields decide
+placement, all read by `gui_app/cpu_affinity.py`, all Windows-only and all
+no-ops on a CPU with one kind of core: `pin_capture_threads` pins one grab
+thread per performance core and raises its priority, `capture_core_exclude`
+keeps those threads off the cores carrying the network stack's deferred
+procedure calls, and `encoder_pcores` and `pin_encoder_threads` do the
+equivalent for the encoder threads. The two encoder fields ship off because they
+measured worse on the reference rig; they are kept because the efficiency-core
+failure mode they address is real on a rig with more cameras than performance
+cores. Step 7 gives the shipped values.
+
 The startup check asks one question about the CPU: it warns below 4 physical
 cores, a floor for running the application rather than a verdict on the rig you
 are sizing.
@@ -950,6 +966,8 @@ realtime_kick: true          # release a trigger to the encoders only once every
                              # camera has caught it, so videos come out aligned
 kick_max_lag: 480            # frames of cross-camera lag tolerated; the NV12
                              # ring scales with this
+max_num_buffer: 600          # driver-side buffers per camera; keep it at or
+                             # above kick_max_lag
 gige_driver: socket          # socket | filter | auto
 trigger_rate_limit: 165      # AcquisitionFrameRate applied in trigger mode
 
@@ -965,6 +983,16 @@ stim_safe_pins: [53]                 # YOUR stim pins, forced LOW from the
                                      # instant the sketch boots; [] if none
 calibration_exposure_us: 15000       # calibration-only exposure; 0 = keep .pfs
 calibration_gain_db: -1              # calibration-only gain; -1 = keep .pfs
+
+calibration_min_per_cam_shared: 120  # coverage HUD: co-detection ticks per cam
+calibration_min_edge: 20             # ...that connect a camera PAIR
+calibration_min_grid_cells: 3        # ...FOV quadrants each camera must cover
+
+pin_capture_threads: true            # hybrid CPU: one grab thread per P-core
+capture_core_exclude: [0, 1]         # keep those threads off the NIC's DPC cores
+encoder_pcores: false                # confine encoders to the P-core set
+pin_encoder_threads: false           # one encoder per E-core; measured worse
+thermal_poll_s: 0                    # seconds between temperature polls; 0 = off
 ```
 
 Field by field. The middle column is what the application uses when the field is
@@ -974,6 +1002,9 @@ the table sort out where those two part company.
 | Field | If the field is omitted | What it does |
 |---|---|---|
 | `name` | file stem | Label in the profile dropdown. |
+| `camera_backend` | `basler` | Which module in `gui_app/backends/` drives the cameras. `basler` is the only backend for real hardware; `sim` runs the application against simulated cameras and a simulated trigger board, which is what `profiles/sim.yaml` selects. An unknown name is refused when the profile loads. |
+| `encoder` | `auto` | Which H.264 encoder a recording asks for: `auto`, `nvenc`, `x264` or `raw`. The value is validated at load, but no caller runs the selection yet, so a recording encodes on NVENC whatever this says; [CPU_ENCODE.md](CPU_ENCODE.md) tracks that. |
+| `metadata_defaults` | `experimenter` and `assay` blank | Sidebar pre-fill for a new session, written into every `session_metadata.json`. The shipped `3dpose` profile fills in the reference rig's own operator and assay, so **set your own values** rather than copying them. Accepted keys: `experimenter`, `assay`, `cohort`, `cage`, `notes`. |
 | `frame_width`, `frame_height` | 1920, 1200 | Frame geometry. Must match what the cameras report after the `.pfs` loads. |
 | `frame_rate` | 100 | Trigger rate for recordings. Sets the frame period the grab loop must keep up with, and the H.264 GOP length: the spacing of keyframes a player can start decoding from, one per second here. |
 | `calibration_frame_rate` | 30 | Trigger rate for calibration captures. A slowly waved board gains nothing from 100 fps, and the longer period raises the exposure ceiling from about 3.94 ms to about 27 ms (3.5 ms and 24.5 ms after the 90% clamp), which is why `calibration_exposure_us: 15000` is safe. |
@@ -982,6 +1013,7 @@ the table sort out where those two part company.
 | `realtime_encode` | `true` | GPU H.264 during capture. `false` writes raw frames and encodes afterwards, at the raw disk rate from section 1 (1.38 GB/s for six cameras at 100 fps, against 2.8 MB/s encoded). |
 | `realtime_kick` | `false`, selecting post-hoc alignment instead | Gate frames through the cross-camera coordinator during capture, so the videos are trigger-aligned with no post-hoc re-encode. With it off, alignment runs after encoding and re-encodes each video. The shipped `3dpose` profile sets `true`; kick-out is the mode the rest of this documentation describes. |
 | `kick_max_lag` | 240; the shipped `3dpose` profile sets 480 | How many frames one camera may lag the others before its missing triggers are force-dropped. Drives the NV12 ring size, so it is the main RAM lever; see *Choosing `kick_max_lag`* below. |
+| `max_num_buffer` | 1000; the shipped `3dpose` profile sets 600 | Driver-side buffers queued per camera, and usually the larger half of the RAM bill: `n_cams x max_num_buffer x frame_bytes`, so 1000 is 19.3 GiB at nine 1920x1200 cameras against 11.6 GiB at 600. Keep it at or above `kick_max_lag`. See *RAM* in section 1. |
 | `gige_driver` | `socket` | `socket` is user-space with reliable packet resends. `filter` is the in-kernel driver: less CPU, but with default resend settings it discards a frame rather than asking for the lost packet again, measured dropping about 23% of frames under six cameras at 100 fps on 2026-06-12. `auto` leaves pylon's default. |
 | `trigger_rate_limit` | 165, the reference camera's own maximum frame rate rather than a property of Panopticon | `AcquisitionFrameRate` written in trigger mode. Set it to *your* camera's maximum frame rate; 165 is that number for the reference a2A1920-165g5m. Keep it above the trigger rate, and never set it to `0`. See *Setting `trigger_rate_limit`* below. |
 | `thermal_poll_s` | 20.0; `0` disables | Seconds between camera temperature checks while acquiring. A camera that reaches its shutdown temperature stops delivering mid-session, so the GUI warns in the status bar and in `WARNINGS.txt` while there is still time to act. Every threshold is read from the camera itself (`BslTemperatureStatus`, `BsliOverTemperature`), so nothing here assumes a particular model. The read is a GVCP register access per camera — cheap at this interval, never put it on a per-frame path. |
@@ -994,6 +1026,13 @@ the table sort out where those two part company.
 | `stim_safe_pins` | `[53]`, the reference rig's laser pin, which is no protection at all on a rig wired differently | **Set this to the pin or pins your own stimulus hardware is wired to**; `[]` if you have none. They go LOW in the first statement of the sketch's `setup()`, before the serial handshake. `setup()` blocks on that handshake until the GUI connects, so a pin not listed here floats for the whole wait, and a powered laser driver reads floating as ON. Pins a loaded paradigm uses are added automatically, so this list is the floor protecting the recording-only sketch, the one flashed at launch when no paradigm is loaded. |
 | `calibration_exposure_us` | 0.0 | Exposure for calibration captures only; the `.pfs` values return for recordings. `0` keeps the `.pfs` value. The binding limit here is motion blur rather than the ceiling: at 15 ms a briskly waved board smears and its corners stop resolving, so move it slowly and pause at each pose. |
 | `calibration_gain_db` | -1.0 | Same for gain. `-1` keeps the `.pfs` value. |
+| `calibration_min_per_cam_shared` | 120; the shipped `3dpose` profile also sets 120 | Co-detection ticks every camera needs before the calibration coverage HUD reports READY. Set it against what the solve consumes: intrinsics are capped at 60 pose-diverse frames per camera and stereo at 30 shared frames per pair, and everything past those caps is discarded. |
+| `calibration_min_edge` | 40; the shipped `3dpose` profile sets 20 | Co-detections that make a camera *pair* count as connected. READY needs the graph to be one connected component, not every pair connected, so this is the number that decides whether two groups of cameras merge — and connectivity, not the per-camera count, is what dominates the time spent waving. |
+| `calibration_min_grid_cells` | 3 | Quadrants of its own field of view, out of 4, each camera must see the board in. The criterion that stops a board being waved in one spot; relax it last. |
+| `pin_capture_threads` | `false`; the shipped `3dpose` profile sets `true` | Pin one grab thread per performance core and raise its priority. Windows and a hybrid CPU only, a no-op elsewhere. See *Hybrid CPUs* in section 1. |
+| `capture_core_exclude` | `[0]`; the shipped `3dpose` profile sets `[0, 1]` | Logical CPUs the pinned capture threads are kept off, because a grab thread on a core carrying the NIC's deferred-procedure-call work is descheduled by the traffic it is receiving. |
+| `encoder_pcores` | `false` | Confine the encoder threads to the performance-core set. Off because it measured a regression on the reference rig; kept for a rig with more cameras than performance cores. |
+| `pin_encoder_threads` | `false` | Pin one encoder thread per efficiency core. Off because it measured much worse: one efficiency core cannot sustain encode submission for a 1920x1200 stream at 100 fps. |
 
 Paths may be relative to the repository root or absolute.
 

@@ -642,6 +642,32 @@ a first-touch page fault (~0.4 ms) back on the hot path.
 `MemoryError` at allocation is caught and retires the camera rather than escaping
 `run()` and taking the GUI with it.
 
+### Thread placement
+
+On a hybrid CPU the loop's deadline is decided partly by which core it runs on.
+Nine cameras is about nineteen busy threads against eight performance cores, so
+the scheduler must place most of them on efficiency cores and it chooses
+differently every launch. A grab thread there executes the same work more
+slowly, and the loop cannot make that up, because it retrieves at exactly the
+rate frames arrive: the result is one camera per session behind the others, a
+different camera each time.
+
+`gui_app/cpu_affinity.py` holds the placement calls, driven by four profile
+fields. `pin_capture_threads` gives each grab thread one performance core and
+raises its priority — fixed placement, rather than handing the scheduler a set,
+because migration costs cache locality. `capture_core_exclude` removes cores
+from that pool, for the cores carrying the NIC's deferred-procedure-call work.
+`encoder_pcores` and `pin_encoder_threads` place the encoder threads and ship
+off, because both measured worse than leaving the encoders where Windows puts
+them.
+
+The performance cores are not the first N logical CPUs — they interleave with
+the efficiency cores — so the set is read from the OS rather than assumed, with
+`GetSystemCpuSetInformation`. Every entry point is guarded by a Windows check
+and returns without raising elsewhere: failing to pin is a performance
+regression, and must never take a recording down. On a non-hybrid CPU, or off
+Windows, all four fields do nothing.
+
 ### Instrumentation
 
 A loop slightly over budget produces no error for minutes, so measure it as it
@@ -1086,9 +1112,14 @@ ChArUco corners:
 | `glow_threshold` | 4 markers | Camera node pulses in the HUD |
 | `edge_threshold` | 5 markers | Counts as "this camera saw the board this tick" |
 | `optimal_shared` | 200 | Edge-thickness scale in the HUD |
-| `min_edge` | 80 co-detection ticks | A pair counts as connected |
-| `min_per_cam_shared` | 250 co-detection ticks | Per-camera floor |
-| `MIN_GRID_CELLS` | 3 of 4 | Spatial spread, see below |
+| `min_edge` | profile field `calibration_min_edge`, default 40, shipped 20 | A pair counts as connected |
+| `min_per_cam_shared` | profile field `calibration_min_per_cam_shared`, default 120, shipped 120 | Per-camera floor |
+| `MIN_GRID_CELLS` | profile field `calibration_min_grid_cells`, default 3, shipped 3, out of 4 | Spatial spread, see below |
+
+The bottom three are constructor arguments `main_window` fills from the profile,
+so a rig tunes how long the board is waved for by editing its own YAML; the two
+above them are code constants. The caption under the graph shows the target it
+is actually testing against, so it reads `paired N/120` on a rig that ships 120.
 
 A tick with two or more cameras above `edge_threshold` increments each
 participating camera's `per_cam_covis`, increments every participating pair's
@@ -1562,6 +1593,9 @@ rigs, so nothing rig-specific belongs in code (notably not stim pin numbers).
 
 | Field | Effect |
 |---|---|
+| `camera_backend` | Which module in `gui_app/backends/` is loaded. `sim` is a full hardware-free rig |
+| `encoder` | Which H.264 encoder a recording asks for. Validated here, not yet consumed by a recording |
+| `metadata_defaults` | Sidebar pre-fill written into `session_metadata.json`; the one home for a lab's own operator and assay strings |
 | `frame_width`, `frame_height`, `frame_rate` | Must match the `.pfs`; drive every capacity calculation |
 | `calibration_frame_rate` | Trigger rate for the calibration acquisition, and its exposure budget |
 | `quality` | NVENC constant quantiser (`-qp`) |
@@ -1578,6 +1612,10 @@ rigs, so nothing rig-specific belongs in code (notably not stim pin numbers).
 | `serial_port`, `trigger_pins` | Trigger board location and pin map |
 | `stim_safe_pins` | Pins driven LOW before the serial handshake |
 | `calibration_exposure_us`, `calibration_gain_db` | Calibration-only overrides; `0` / `-1` mean "leave the `.pfs` value alone" |
+| `calibration_min_per_cam_shared`, `calibration_min_edge`, `calibration_min_grid_cells` | The three coverage-HUD READY thresholds. Profile fields, not code constants |
+| `pin_capture_threads`, `capture_core_exclude` | Grab-thread placement on a hybrid CPU, and the cores to keep them off |
+| `encoder_pcores`, `pin_encoder_threads` | Encoder-thread placement. Both off: measured regressions, kept for a rig with more cameras than performance cores |
+| `thermal_poll_s` | Seconds between camera temperature polls while acquiring; `0` disables |
 
 ### Preflight arithmetic
 

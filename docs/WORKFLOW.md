@@ -277,14 +277,18 @@ movement matters more than more exposure.
 Then the part you do: **move the board slowly through the arena and pause at
 each pose.** The coverage HUD in the sidebar keeps score and tells you when
 to stop. The four figures below are rendered illustrations of particular
-moments, not frames from one session.
+moments, not frames from one session, and the target in each caption is the one
+the profile they were drawn against set. Your own rig's caption shows your own
+`calibration_min_per_cam_shared`.
 
 ### Stage 1 — nothing detected yet
 
 ![Coverage graph, nothing detected](images/calib_stage_1_start.png)
 
 Each numbered circle is a camera. Each line is a *pair* of cameras. Everything
-is dim, the caption reads `paired 0/250  grid 0/3`, and the timer has started.
+is dim, the caption reads `paired 0/120  grid 0/3  groups N/1` with one group
+per camera, and the timer has started. The `120` is the reference profile's
+`calibration_min_per_cam_shared`.
 
 **What to do:** hold the board up where at least two cameras can see it. A node
 brightens when that camera can see the board right now. If no node ever
@@ -299,7 +303,7 @@ Cameras 1 and 3 are glowing: they see the board at this instant. Lines that have
 begun to brighten and thicken are pairs accumulating shared detections. The
 four-cell badge on each node is that camera's field of view in quadrants; a cell
 turns green once the board's centre has been seen in it. The caption
-`paired 60/250  grid 2/3` reports the **worst** camera on each count.
+`paired 60/120  grid 2/3` reports the **worst** camera on each count.
 
 **What to do:** carry the board into the regions where two cameras overlap, so
 the lines fill in, and into the corners of each view, so the badges fill in. A
@@ -310,7 +314,7 @@ board waved in the middle of the arena grows neither.
 ![Coverage graph, nearly ready](images/calib_stage_3_nearly.png)
 
 Most lines are now thick and bright, `grid 3/3` says every camera has hit its
-quadrant minimum, and `paired 200/250` says the weakest camera is close. One
+quadrant minimum, and `paired 110/120` says the weakest camera is close. One
 pair, the vertical line between 1 and 4, is still thin and dark.
 
 **What to do:** work that pair. Hold the board where both cameras see it at
@@ -336,12 +340,14 @@ READY is three conditions holding at once, not a time or a frame count. Each is
 measured per camera on every detection tick, and the caption reports the *worst*
 camera, which is why it can sit still while one camera catches up.
 
-**Every camera has at least 250 paired detections.** A tick counts for a camera
+**Every camera has at least `calibration_min_per_cam_shared` paired detections**,
+120 on the reference profile. A tick counts for a camera
 only when that camera *and at least one other* saw the board in the same tick,
 since a view no one else shares cannot help place that camera. Detection runs at
 up to about 30 ticks per second.
 
-**The pair graph is connected**, counting only pairs with at least 80 shared
+**The pair graph is connected**, counting only pairs with at least
+`calibration_min_edge` shared
 detections. The geometry is built by chaining pairs, so two well-covered
 clusters that never once see the board at the same time cannot be expressed in a
 single coordinate frame.
@@ -359,7 +365,7 @@ It usually will not, on a first attempt. **READY is a coverage target, not a
 gate.** Flip Calibrate off at any moment and you have a perfectly ordinary
 calibration recording; the solve decides whether what you captured is usable.
 
-So when the caption sits at something like `paired 210/250`: **if the numbers
+So when the caption sits at something like `paired 110/120`: **if the numbers
 are still climbing, keep going.** If they have stopped, the question is *which*
 condition is stuck. Grid badge short of 3/3? Carry the board into the corners of
 that camera's view. One edge still thin and dark? Work that pair, edge-on
