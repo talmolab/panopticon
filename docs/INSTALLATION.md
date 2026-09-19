@@ -460,7 +460,8 @@ speed (it writes and deletes a 16 MB file to find out).
 Windows, today, but the dependency is shallow. The Windows-specific pieces are
 `PylonGigEConfigurator` and the inbound firewall rule, the `configure_nic.ps1`
 and `make_shortcut.ps1` scripts, and the two performance probes
-`probe_gil_wait.py` and `probe_native_cpu.py`. The capture path does not depend
+`tools/experiments/probe_gil_wait.py` and
+`tools/experiments/probe_native_cpu.py`. The capture path does not depend
 on them: the binary-file flag is resolved with `getattr(os, "O_BINARY", 0)`, the
 `subprocess.STARTUPINFO` use in `encode_worker.py` is guarded by `sys.platform`,
 the serial port is a profile field, and `arduino-cli` is found via PATH or an
@@ -1293,16 +1294,21 @@ running is the only thing that tells you whether *this* machine keeps up.
 
 ### Without any cameras
 
-Four test suites run on the code alone. They are plain scripts, not pytest.
+Every `test_*.py` in the repository root except `test_sync_router.py` runs on
+the code alone: no cameras, no trigger board, no GPU. They are plain scripts,
+not pytest, so run the lot rather than picking:
 
 ```powershell
-uv run python test_frame_sync.py
-uv run python test_grab_failure.py
-uv run python test_stim_compiler.py
-uv run python test_serial_handshake.py
+$env:QT_QPA_PLATFORM = "offscreen"
+Get-ChildItem test_*.py | ForEach-Object { uv run python $_ }
 ```
 
-Each ends with one summary line:
+The offscreen platform is what lets the suites that build Qt widgets run on a
+machine with no display; on a desktop session it is optional.
+[INTERNALS.md](INTERNALS.md#tests-and-probes) has the canonical table of what
+each suite covers and what it needs.
+
+Each ends with one summary line, for example:
 
 ```
 ALL FRAMESYNC EQUIVALENCE TESTS PASS
@@ -1320,23 +1326,22 @@ alarming output on the way through is expected:
 [teensy] no ack — reopening port to force a board reset
 ```
 
-What each one covers:
+Run them through `uv run`, not a bare `python`: several need numpy, OpenCV or
+PyQt5 from the project environment, and a few skip cases silently without them.
 
-| Suite | Covers |
-|---|---|
-| `test_frame_sync.py` | The kick-out coordinator matches a post-hoc block-ID intersection: exact equivalence, bounded skew, forced drops, freeze recovery, the 16-bit block-ID wrap, retiring a stalled camera. |
-| `test_grab_failure.py` | Camera-failure paths against a stub camera and router: a camera that cannot start grabbing, a failed ring allocation, a grab thread that exits quietly, repeated grab errors, re-arm exhaustion. Each must retire that camera so the others keep recording aligned. |
-| `test_stim_compiler.py` | Stimulation graph to firmware: start resolution, cycle-safe chain extraction, integer-microsecond encoding, safe-pin boot order, pin conflicts, forbidden pins, the RDY ack, the per-frame stimulus trace. |
-| `test_serial_handshake.py` | The four trigger-board handshake outcomes: confirmed, retry after reset, legacy firmware, and a board that has acknowledged before going silent (which must refuse to record). pyserial is stubbed, so no COM port is needed. |
-
-Run them through `uv run`, not a bare `python`: tests 10-13 of the stimulation
-suite need numpy and skip silently without it.
-
-A fifth suite needs an NVENC GPU but still no cameras:
+One more suite needs an NVENC GPU, but still no cameras:
 
 ```powershell
 uv run python test_sync_router.py
 ```
+
+This is also the acceptance run for a machine with **no rig hardware at all**.
+Install without the vendor SDKs (`uv sync --no-group rig`, see
+[CONTRIBUTING.md](../CONTRIBUTING.md)) and every suite above still passes.
+Beyond the suites, `profiles/sim.yaml` selects a simulated camera backend and a
+simulated trigger board, so the application itself — preview, Calibrate,
+Record, Stop, the stimulation editor's Apply — runs end to end with nothing
+plugged in. Pick `sim` from the profile dropdown.
 
 ### With real cameras
 

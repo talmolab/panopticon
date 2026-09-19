@@ -598,8 +598,9 @@ it collapses. Hence the criterion:
 
 **Acceptance criterion for any hot-path change: ≤300 µs of GIL-held work per
 thread per frame is safe even at 17 threads; ~1000 µs blows a 10 ms budget at
-11.** Reproduce the boundary with `probe_gil_wait.py`, and A/B a specific access
-route on a live camera with `probe_zerocopy.py`.
+11.** Reproduce the boundary with `tools/experiments/probe_gil_wait.py`, and A/B
+a specific access route on a live camera with
+`tools/experiments/probe_zerocopy.py`.
 
 Moving the six-camera reference rig onto the zero-copy view on 2026-09-03 took
 mean loop `cycle` from 12.0 ms to exactly 10.00 ms, the trigger period. It took
@@ -1591,7 +1592,7 @@ what each becomes on Linux:
 | Serial port names | Profiles carry `COM3` | A device path works as well; the code passes the string through |
 | `configure_nic.ps1` | RSS receive queues via `Set-NetAdapterRss` | Linux equivalents are `ethtool -L`/`-X` and IRQ affinity |
 | `make_shortcut.ps1` | Desktop shortcut creation | Cosmetic |
-| `QueryThreadCycleTime` | Used by `probe_gil_wait.py` to separate executing from waiting | Linux equivalent is per-thread CPU clock via `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` |
+| `QueryThreadCycleTime` | Used by `tools/experiments/probe_gil_wait.py` to separate executing from waiting | Linux equivalent is per-thread CPU clock via `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` |
 | `arduino-cli` upload | Invoked for firmware upload | Cross-platform, but the port name and reset behaviour differ |
 
 pypylon, PyQt5, numpy, OpenCV, PyNvVideoCodec and the trigger firmware toolchain
@@ -1651,19 +1652,48 @@ here.
 
 ### Tests and probes
 
-Plain scripts, no pytest. Run them directly.
+Plain scripts, no pytest: each prints a `PASS` line per case, ends with one
+`ALL ... PASS` line and exits non-zero on the first failure. Run them directly.
+This table is the canonical inventory; the other pages point here rather than
+listing a subset.
+
+**Hardware-free suites.** Every one of these runs on a machine with no cameras,
+no trigger board and no GPU, which is what makes them the acceptance run for a
+fresh install. The whole set is
+`Get-ChildItem test_*.py | ForEach-Object { uv run python $_ }`, with
+`$env:QT_QPA_PLATFORM = "offscreen"` set first for the Qt ones.
+
+| Suite | Covers | Needs beyond the project environment |
+|---|---|---|
+| `test_frame_sync.py` | Coordinator equals post-hoc intersection; group integrity; wrap; retirement; drop attribution; the block-ID rate check | Nothing |
+| `test_grab_failure.py` | Every path out of `GrabThread.run()` retires the camera, with the SDK absent from `sys.modules` | Qt, offscreen |
+| `test_serial_handshake.py` | The four handshake outcomes, and the stop ack | Nothing; pyserial is stubbed |
+| `test_stim_compiler.py` | Graph to sketch: start resolution, cycle-safe chains, integer µs, safe-pin boot order, pin conflicts, sketch structure, the RDY ack, the per-frame trace | numpy for the later cases |
+| `test_stim_guard.py` | A failed or unapplied Apply must block Record, and the editor's test lifecycle | Qt, offscreen |
+| `test_board_coverage.py` | Calibration coverage: partner-weighted co-visibility, connected components, the three READY conditions, `bridge_hint`, plus a regression from a real session that split into three groups | numpy |
+| `test_calibrate.py` | The solve: largest-component choice, edge weights, quality metadata, failure codes, the GUI workers, an end-to-end synthetic solve | numpy, OpenCV, Qt |
+| `test_alignment.py` | The post-hoc pipeline: alignment, `encode_worker`, `ffmpeg_cmd`, `stim_trace` and the two CLIs, against a stub ffmpeg | numpy, Qt |
+| `test_camera_manager.py` | The cold path: geometry agreement, naming by serial, exposure logging per camera | Nothing |
+| `test_session_config.py` | Every way a profile or a session field can be wrong must raise `ProfileError` rather than take a default | Nothing |
+| `test_hardware_check.py` | The preflight's branches with every hardware probe stubbed | Nothing |
+| `test_cpu_encode.py` | The libx264 fallback: command invariants, a router round trip, teardown | numpy, the bundled ffmpeg |
+| `test_cpu_affinity.py` | Hybrid-CPU class detection and the Basler backend's node handling, both fed recorded data | Nothing |
+| `test_sim_backend.py` | The simulated rig reproduces the loss modes the capture path guards for | Qt, offscreen |
+| `test_main_window_start.py` | Start, refuse, roll back and quit, driven against the simulated rig | Qt, offscreen |
+| `test_sync_router_offline.py` | `blockids.npy` claims only persisted frames, without a GPU | numpy, Qt |
+| `test_thermal_watch.py` | The temperature poll, its thresholds read from the camera, and the warning path | Nothing |
+| `test_mp_framesync.py` | The multi-process coordinator, which is not wired into the application | numpy |
+| `test_probe_guard.py` | The probe guard fails closed when the process table cannot be read | Nothing |
+| `test_widgets.py` | Sidebar and camera-grid behaviour: toggle exclusion, grid layout, preview painting | numpy, Qt |
+
+**Needing hardware.**
 
 | Command | Covers | Needs |
 |---|---|---|
-| `uv run python test_frame_sync.py` | Coordinator equals post-hoc intersection; group integrity; wrap; retirement; drop attribution; the block-ID rate check | Nothing |
-| `uv run python test_grab_failure.py` | Every path out of `GrabThread.run()` retires the camera | Qt only, offscreen |
-| `uv run python test_serial_handshake.py` | The four handshake outcomes | Nothing; pyserial is stubbed |
-| `uv run python test_stim_compiler.py` | Graph to sketch: start resolution, cycle-safe chains, integer µs, safe-pin boot order, pin conflicts, sketch structure, the RDY ack, the per-frame trace | numpy for the later cases |
-| `uv run python test_board_coverage.py` | Calibration coverage: partner-weighted co-visibility, connected components, the three READY conditions, `bridge_hint`, plus a regression from a real session that split into three groups | numpy |
 | `uv run python test_sync_router.py` | Router smoke test | NVENC |
-| `uv run probe_lag.py --seconds 120` | The real capture path headlessly, with a per-camera lag trace | Cameras |
-| `uv run python probe_zerocopy.py` | A/B of frame-access routes on a live camera | A camera |
-| `uv run python probe_gil_wait.py` | GIL-held work versus thread count, executing separated from waiting | Nothing |
+| `uv run probe_lag.py --seconds 120` | The real capture path headlessly, with a per-camera lag trace | Cameras and the trigger board |
+| `uv run python tools/experiments/probe_zerocopy.py` | A/B of frame-access routes on a live camera | A camera |
+| `uv run python tools/experiments/probe_gil_wait.py` | GIL-held work versus thread count, executing separated from waiting | Windows (`QueryThreadCycleTime`) |
 | `uv run probe_network.py [--sweep]` | Which switch each camera is on (GVCP discovery, so it sees cameras pylon hides for being out-of-subnet), and whether each path carries 9000-byte packets | Cameras; `--sweep` opens them |
 
 Run `test_serial_handshake.py` after touching `serial_controller.py`; it is the
