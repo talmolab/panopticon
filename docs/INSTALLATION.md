@@ -983,8 +983,8 @@ sidebar dropdown under its `name`. Copy `profiles/3dpose.yaml` to
 
 ```yaml
 name: my_rig                 # what the dropdown shows
-frame_width: 1920            # must match the .pfs Width
-frame_height: 1200           # must match the .pfs Height
+frame_width: 1920            # must match the .pfs Width; checked at Record
+frame_height: 1200           # must match the .pfs Height; checked at Record
 frame_rate: 100              # trigger rate for recordings, Hz
 calibration_frame_rate: 30   # trigger rate for calibration captures
 quality: 21                  # NVENC constant quantizer; lower = better, bigger
@@ -1035,7 +1035,7 @@ the table sort out where those two part company.
 | `camera_backend` | `basler` | Which module in `gui_app/backends/` drives the cameras. `basler` is the only backend for real hardware; `sim` runs the application against simulated cameras and a simulated trigger board, which is what `profiles/sim.yaml` selects. An unknown name is refused when the profile loads. |
 | `encoder` | `auto` | Which H.264 encoder a recording asks for: `auto`, `nvenc`, `x264` or `raw`. The value is validated at load, but no caller runs the selection yet, so a recording encodes on NVENC whatever this says; [CPU_ENCODE.md](CPU_ENCODE.md) tracks that. |
 | `metadata_defaults` | `experimenter` and `assay` blank | Sidebar pre-fill for a new session, written into every `session_metadata.json`. The shipped `3dpose` profile fills in the reference rig's own operator and assay, so **set your own values** rather than copying them. Accepted keys: `experimenter`, `assay`, `cohort`, `cage`, `notes`. |
-| `frame_width`, `frame_height` | 1920, 1200 | Frame geometry. Must match what the cameras report after the `.pfs` loads. |
+| `frame_width`, `frame_height` | 1920, 1200 | Frame geometry. Must match what the cameras report after the `.pfs` loads, and it is checked: Calibrate and Record compare the two before anything is started and refuse with `The profile records 1920x1200 but the cameras are configured for 1280x1024: fix the .pfs (or the profile) so they agree.` These two numbers size the NV12 ring and the raw decode, so a disagreement would retire every camera in real-time mode and shear a full-length recording in raw mode. |
 | `frame_rate` | 100 | Trigger rate for recordings. Sets the frame period the grab loop must keep up with, and the H.264 GOP length: the spacing of keyframes a player can start decoding from, one per second here. |
 | `calibration_frame_rate` | 30 | Trigger rate for calibration captures. A slowly waved board gains nothing from 100 fps, and the longer period raises the exposure ceiling from about 3.94 ms to about 27 ms (3.5 ms and 24.5 ms after the 90% clamp), which is why `calibration_exposure_us: 15000` is safe. |
 | `quality` | 21 | NVENC constant quantiser. |
@@ -1483,6 +1483,7 @@ of your message.
 | Message | Cause and fix |
 |---|---|
 | `No cameras are open. Recording would run the trigger protocol — and any baked-in stim paradigm — while saving nothing.` | Open the cameras first: pick a profile whose `pfs_path` resolves and whose cameras enumerate. |
+| `The profile records 1920x1200 but the cameras are configured for ...` | The profile's `frame_width`/`frame_height` disagree with the ROI the cameras report. Refused before anything is started, so the cameras stay in preview and the session directory is untouched. Fix whichever is wrong — the `.pfs` or the profile — and start again. |
 | `Not enough RAM for N cameras: ...` | The buffers do not fit in available memory. The message breaks it into pool and ring. Lower `max_num_buffer` or `kick_max_lag` in the rig profile, or close other applications. Both are profile fields: neither `MAX_NUM_BUFFER` nor `MaxNumBuffer` appears in the YAML you edit. |
 | `RAM is tight for N cameras: ...` | Over 75% of available memory. It asks before proceeding. |
 | `NVENC granted only N concurrent sessions but M cameras need one each.` | The driver's session cap is below the camera count, often because another process holds sessions (a browser's hardware encode, an orphaned ffmpeg). Close them, record fewer cameras, or set `realtime_encode: false` in the profile to put every camera on the raw path deliberately. Both shipped profiles carry that field set to `true`, so it is a value you change rather than a line you add. Read the *Disk* part of section 1 first: raw needs roughly 500x the space. |
