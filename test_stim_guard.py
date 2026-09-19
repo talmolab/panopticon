@@ -760,6 +760,35 @@ check(77, "the editor carries the standalone safe-pin fallback and the shared "
       str(getattr(stim_compiler, "DEFAULT_SAFE_LOW_PINS", "gone")))
 
 
+# -- a pin conflict is never blamed on a merge --------------------------------
+# RULE: the pin-conflict message names chains, never a merged block. REASON: a
+# block two chains really reach is caught earlier by structural_problems(), so
+# the only shape that gets this far with several incoming arrows is a chain
+# looping back onto its own lead-in -- one chain, two arrows. Counting arrows
+# would call that a merge and send the operator after the wrong graph.
+w = make()
+loop_blocks = [
+    {"id": "A", "x": 0, "y": 0, "pin": 51, "freq": 10, "pw": 5, "dur": 1},
+    {"id": "B", "x": 200, "y": 0, "pin": 52, "freq": 10, "pw": 5, "dur": 1},
+    {"id": "C", "x": 400, "y": 0, "pin": 52, "freq": 10, "pw": 5, "dur": 1},
+    {"id": "D", "x": 0, "y": 200, "pin": 52, "freq": 10, "pw": 5, "dur": 1},
+]
+# A -> B -> C -> B: B has two incoming arrows from ONE chain. D is a separate
+# chain on the same pin, so pin 52 really is driven by two chains.
+loop_edges = [{"src": "A", "dst": "B"}, {"src": "B", "dst": "C"},
+              {"src": "C", "dst": "B"}]
+w._canvas.load_workflow(loop_blocks, loop_edges)
+lb, le = w._canvas.get_workflow()
+problem = w._blocking_problem() or ""
+check(78, "a chain looping back onto its lead-in beside a second chain on the "
+          "same pin is a plain conflict, not a merge",
+      stim_compiler.structural_problems(lb, le) == []
+      and stim_compiler.pin_conflicts(lb, le) == [52]
+      and "driven by more than one chain" in problem
+      and "merge" not in problem,
+      f"{stim_compiler.structural_problems(lb, le)} | {problem.splitlines()[0]}")
+
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): " + ", ".join(failures))

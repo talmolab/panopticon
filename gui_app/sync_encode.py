@@ -41,8 +41,13 @@ def _release_loose_encoder(enc, timeout_s=None) -> None:
 
     The session is freed by the object's destructor, so the last reference
     must go here, after EndEncode() and Close() where the encoder has one.
-    `timeout_s` is the caller's remaining teardown budget for the flush; None
-    means the encoder's own default.
+
+    `timeout_s` bounds the flush; None means the encoder's own default. RULE:
+    every caller passes a bound. REASON: this runs on a failure path with no
+    recording to save, and a CPU encoder's EndEncode waits on a child process
+    that may already be the reason the failure happened — an unbounded flush
+    would hang the constructor that is trying to report the encoders
+    unavailable.
     """
     try:
         _end_encode(enc, timeout_s)
@@ -123,7 +128,9 @@ class SyncEncodeRouter:
             self.unavailable_reason = f"{type(e).__name__}: {e}"
             print(f"[sync] encoder init failed, kick-out unavailable: {e}", flush=True)
             if pending is not None:
-                _release_loose_encoder(pending)
+                # Bounded by the same budget abandon() uses: this path has no
+                # deadline of its own, and it must not become one.
+                _release_loose_encoder(pending, timeout_s=ABANDON_TIMEOUT_S)
                 pending = None
             for fd in self._fds:
                 try:
@@ -232,12 +239,21 @@ class SyncEncodeRouter:
         the process does not always exit here (the failed-finalize path returns
         to IDLE), so a leaked session is reported rather than assumed harmless.
 
-        `timeout_s` bounds the WHOLE call, not each thread: the threads are
-        wedged concurrently if at all, and a per-thread bound would make the
-        caller wait n times longer at nine cameras than at one. The remaining
-        budget is passed down into release_encoder() too, because the flush
-        inside EndEncode() waits as long as the join does — bounding only the
-        join leaves the per-camera multiple in place.
+        `timeout_s` is a BEST-EFFORT bound on the whole call, not a bound per
+        thread: the threads are wedged concurrently if at all, and a per-thread
+        bound would make the caller wait n times longer at nine cameras than at
+        one. The remaining budget is passed down into release_encoder() too,
+        because the flush inside EndEncode() waits as long as the join does —
+        bounding only the join leaves the per-camera multiple in place.
+
+        Best effort, because the deadline does not reach every wait. Once
+        CpuEncoder.EndEncode's deadline expires it calls kill(), whose waits
+        are fixed (proc.wait 5 s plus two reader joins of 1 s), and EndEncode
+        then joins its stderr reader for another 1 s. A child wedged hard
+        enough to need killing can therefore overrun the shared deadline by
+        several seconds, once per such camera — so at nine cameras the
+        per-camera multiple is reduced, not eliminated. Removing the residual
+        needs kill()'s waits to share EndEncode's deadline, in cpu_encode.
 
         A stream.h264 left at zero bytes is removed once its fd is closed. An
         abandoned session never recorded a frame into it, and an empty stream
@@ -359,11 +375,22 @@ class SyncEncodeRouter:
         # videos disagree.
         #
         # coded + spilled is the true persisted count, and both are in arrival
-        # order (FIFO queue, appended in the same order), so truncating to it is
-        # the correct repair rather than a guess. Coded, not fed: Encode()
+        # order (FIFO queue, appended in the same order), so reconciling against
+        # it is the correct repair rather than a guess. Coded, not fed: Encode()
         # accepting a frame is not the encoder emitting it, and where the
         # encoder died the flush that would have emitted the last frame never
         # arrives, so the fed count over-claims by one frame permanently.
+        #
+        # RULE: the (encoded - coded) frames the encoder never emitted are
+        # SPLICED OUT at index `coded`, not truncated from the end. REASON:
+        # stream.h264 holds fed frames [0, coded) and raw_tail.bin holds
+        # [encoded, encoded + spilled), and encode_worker concatenates the tail
+        # onto the stream — so the frames that reached neither file sit in the
+        # MIDDLE of the arrival order. Deleting from the end instead would leave
+        # a contiguous run of block IDs whose count matches the mp4 exactly
+        # while every frame from index `coded` onward carried a trigger
+        # (encoded - coded) too small: a misaligned recording that presents as a
+        # perfect one, which is the block-ID-axiom failure class.
         for i, et in enumerate(self._encoders):
             if alive[i]:
                 # Counters are still moving; any repair would be based on a
@@ -377,14 +404,19 @@ class SyncEncodeRouter:
                 continue
             persisted = coded[i] + et.spilled
             claimed = len(self.block_ids[i])
+            lost = max(0, et.encoded - coded[i])
             if persisted != claimed:
                 msg = (f"cam{i+1}: block-ID bookkeeping claimed {claimed} frames but "
                        f"only {persisted} were persisted (coded={coded[i]} of "
                        f"{et.encoded} fed, spilled={et.spilled}, "
                        f"encoder_failed={et.failed}); "
-                       f"truncated to {persisted} so frame indices still map to the "
-                       f"correct triggers")
+                       f"{lost} uncoded frame(s) spliced out at index {coded[i]} "
+                       f"and the rest truncated to {persisted}, so frame indices "
+                       f"still map to the correct triggers")
                 self._warn(i, msg)
+                if lost:
+                    del self.block_ids[i][coded[i]:coded[i] + lost]
+                    del self.timestamps[i][coded[i]:coded[i] + lost]
                 del self.block_ids[i][persisted:]
                 del self.timestamps[i][persisted:]
             if et.spilled > 0:

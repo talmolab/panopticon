@@ -2,8 +2,9 @@
 
 `SyncEncodeRouter.stop()` and the decoupled `GrabThread` path are the only
 guards for that invariant: they reconcile the recorded block IDs against
-encoded + spilled, write WARNINGS.txt, fold in retirements and queue-full
-drops, and persist the encoded/spilled split point. A regression in any of it
+coded + spilled (splicing the uncoded junction frames out of the middle rather
+than off the end), write WARNINGS.txt, fold in retirements and queue-full
+drops, and persist the coded/spilled split point. A regression in any of it
 produces recordings that look perfect and map frame i to the wrong trigger,
 and until this file nothing exercised those paths without a GPU.
 
@@ -731,6 +732,10 @@ with tempfile.TemporaryDirectory() as d:
 # Same invariant as case 4, one layer deeper: a frame Encode() accepted but the
 # child never coded is not persisted, and counting it would map every later
 # frame of this camera to the wrong trigger with no gap in blockids.npy.
+# It is also not at the END: stream.h264 holds triggers 1-9 and raw_tail.bin
+# holds 11-100, so trigger 10 comes out of the MIDDLE. A tail truncation to
+# 1-99 would have the right COUNT and the wrong trigger on every frame from
+# index 9 on -- a misaligned recording that looks perfect.
 with tempfile.TemporaryDirectory() as d:
     tmp = Path(d)
     paths = _dirs(tmp, 2)
@@ -742,13 +747,18 @@ with tempfile.TemporaryDirectory() as d:
     _submit_all(r, 2, range(1, 101))
     res = r.stop()
     js = json.loads((tmp / "cam2" / "encoded.json").read_text())
+    expect = list(range(1, 10)) + list(range(11, 101))
     ok = (res[0][0] == 100 and not _warn_text(tmp / "cam1")
-          and res[1][0] == 99 and res[1][2] == list(range(1, 100))
+          and res[1][0] == 99 and res[1][2] == expect
+          and len(res[1][1]) == 99
           and js == {"encoded": 9, "spilled": 90, "persisted": 99}
-          and "coded=9 of 10 fed" in _warn_text(tmp / "cam2"))
-    check(19, "kick mode: the frame the dead encoder never coded is not "
-              "persisted, and the split point is the coded count", ok,
-          f"cam2={res[1][0]} json={js} warn={_warn_text(tmp / 'cam2')!r}")
+          and "coded=9 of 10 fed" in _warn_text(tmp / "cam2")
+          and "spliced out at index 9" in _warn_text(tmp / "cam2"))
+    check(19, "kick mode: the frame the dead encoder never coded is spliced out "
+              "at the stream/tail junction, and the split point is the coded "
+              "count", ok,
+          f"cam2={res[1][0]} ids={res[1][2][:12]}... json={js} "
+          f"warn={_warn_text(tmp / 'cam2')!r}")
 
 # 20 -- abandon()'s deadline bounds the flush as well as the join -------------
 with tempfile.TemporaryDirectory() as d:
@@ -772,6 +782,50 @@ with tempfile.TemporaryDirectory() as d:
           and seen == sorted(seen, reverse=True))
     check(20, "abandon() hands each EndEncode the budget left in the WHOLE "
               "call, not a fresh one per camera", ok, f"timeouts={seen}")
+
+# 21 -- the constructor's failure path bounds its loose-encoder flush ---------
+# An encoder created but never handed to an _EncoderThread is released by
+# _release_loose_encoder. That flush must carry a deadline: the failure path
+# has no recording left to save, and a CPU encoder's EndEncode waits on a child
+# that may be the reason the constructor failed, so an unbounded wait would
+# hang the very call that is trying to report kick-out unavailable.
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    seen = []
+
+    class _TimedEncoder(FakeEncoder):
+        def EndEncode(self, timeout_s=None):
+            seen.append(timeout_s)
+            return super().EndEncode()
+
+    real_thread_cls = se._EncoderThread
+
+    class _ThreadThatRefusesCam2:
+        """Fails where `pending` holds a live encoder no thread owns yet."""
+
+        def __new__(cls, cam_index, *a, **kw):
+            if cam_index == 1:
+                raise RuntimeError("simulated _EncoderThread construction failure")
+            return real_thread_cls(cam_index, *a, **kw)
+
+    paths = _dirs(tmp, 3)
+    fac = FakeFactory()
+    for i in range(3):
+        fac.per_cam[i] = dict(cls=_TimedEncoder)
+    se._EncoderThread = _ThreadThatRefusesCam2
+    try:
+        r = SyncEncodeRouter(paths, W, H, 21, fps=100, max_lag=50,
+                             encoder_factory=fac)
+    finally:
+        se._EncoderThread = real_thread_cls
+    # cam1's encoder is released through its thread (no deadline to hand down);
+    # cam2's is the loose one, and it is the only EndEncode that must be bounded.
+    ok = (not r.available and len(fac.created) == 2
+          and seen.count(se.ABANDON_TIMEOUT_S) == 1
+          and all(t is None or t == se.ABANDON_TIMEOUT_S for t in seen))
+    check(21, "the constructor's failure path releases the loose encoder under "
+              "an explicit deadline", ok,
+          f"available={r.available} created={len(fac.created)} timeouts={seen}")
 
 
 print()

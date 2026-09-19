@@ -1186,9 +1186,21 @@ class GrabThread(QThread):
         blockids.npy must only record frames that were actually persisted. The
         list here grew by successful queue.put, which means the queue accepted
         the frame, not that it was encoded: a dead encoder whose spill also died
-        accepts and discards, so the list is truncated to encoded + spilled
+        accepts and discards, so the list is reconciled against coded + spilled
         (both in arrival order) and the repair is written to WARNINGS.txt. The
         same rule SyncEncodeRouter.stop() enforces for kick mode.
+
+        RULE: the frames the encoder was fed but never coded are SPLICED OUT at
+        the junction, not truncated from the end. REASON: on the encoder-death
+        path stream.h264 holds fed frames [0, coded) and raw_tail.bin holds
+        [encoded, encoded + spilled); the (encoded - coded) frames between them
+        reached neither file, yet they sit in the MIDDLE of the arrival order.
+        encode_worker concatenates the tail onto the stream, so deleting from
+        the end would leave a contiguous run of block IDs against a video whose
+        frames jump the gap, labelling every frame from index `coded` onward
+        with a trigger that is (encoded - coded) too small — and the counts
+        would agree exactly, so the misalignment would present as a perfect
+        recording, the block-ID-axiom failure class.
 
         An abandoned session skips the drain entirely: the encoder is aborted,
         released if it exits, and nothing is reconciled because nothing will be
@@ -1240,15 +1252,23 @@ class GrabThread(QThread):
             print(f"[grab{self._cam_index}] encoder release failed: {e}", flush=True)
         persisted = coded + enc_thread.spilled
         claimed = len(self.block_ids)
+        # Frames Encode() accepted that the encoder never emitted. They are the
+        # junction between stream.h264 and raw_tail.bin, so they come out of the
+        # MIDDLE of the list; see this method's docstring.
+        lost = max(0, enc_thread.encoded - coded)
         if persisted != claimed:
             msg = (f"{cam}: block-ID bookkeeping claimed {claimed} frames but "
                    f"only {persisted} were persisted (coded={coded} of "
                    f"{enc_thread.encoded} fed, spilled={enc_thread.spilled}, "
                    f"encoder_failed={enc_thread.failed}); "
-                   f"truncated to {persisted} so frame indices still map to the "
-                   f"correct triggers")
+                   f"{lost} uncoded frame(s) spliced out at index {coded} and "
+                   f"the rest truncated to {persisted}, so frame indices still "
+                   f"map to the correct triggers")
             print(f"[grab{self._cam_index}] WARNING: {msg}", flush=True)
             self.warnings.append(msg)
+            if lost:
+                del self.block_ids[coded:coded + lost]
+                del self.timestamps[coded:coded + lost]
             del self.block_ids[persisted:]
             del self.timestamps[persisted:]
             self.frame_count = min(self.frame_count, persisted)
@@ -1322,19 +1342,25 @@ class GrabThread(QThread):
         self._running = False
 
 
-def write_split_point(cam_dir: Path, encoded: int, spilled: int) -> None:
+def write_split_point(cam_dir: Path, coded: int, spilled: int) -> None:
     """Persist how many frames stream.h264 holds before raw_tail.bin begins.
+
+    `coded` is the encoder's CODED-picture count — the pictures it emitted into
+    stream.h264 — and deliberately NOT `_EncoderThread.encoded`, which counts
+    the frames Encode() accepted and over-claims by the frames still in flight
+    when the encoder died. The JSON key stays spelled "encoded" because the
+    post-hoc encoder already reads that name; the value is the coded count.
 
     Written as encoded.json beside the stream whenever frames were spilled.
     The post-hoc encoder reads it: if merging the raw tail fails, it truncates
-    blockids.npy and frametimes.npy to `encoded` and keeps stream.h264 rather
+    blockids.npy and frametimes.npy to `coded` and keeps stream.h264 rather
     than claiming frames the mp4 does not contain.
     """
     try:
         (Path(cam_dir) / "encoded.json").write_text(json.dumps({
-            "encoded": int(encoded),
+            "encoded": int(coded),
             "spilled": int(spilled),
-            "persisted": int(encoded) + int(spilled),
+            "persisted": int(coded) + int(spilled),
         }))
     except Exception as e:
         print(f"[grab] could not write encoded.json in {cam_dir}: {e}",

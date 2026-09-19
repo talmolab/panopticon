@@ -900,13 +900,19 @@ def test_split_point_is_the_coded_count(tmp):
     enc = _CodingEncoder(dies_after=5)
     t = _make(FakeRouter(), DeadCamera(), tmp, raw_path=tmp / "dying" / "raw.bin")
     d = _drain(t, enc, tmp, "dying", 8)
-    assert enc.frames_out == 4 and t.block_ids == list(range(1, 8)),         (enc.frames_out, t.block_ids)
+    # Fed frames 1-5 were accepted, 1-4 coded; 6-8 spilled. Trigger 5 reached
+    # NEITHER file, and it sits between the stream and the tail — so it comes
+    # out of the middle of the list, leaving a GAP that says so. Truncating the
+    # end instead would leave 1-7 against a video holding 1,2,3,4,6,7,8.
+    assert enc.frames_out == 4 and t.block_ids == [1, 2, 3, 4, 6, 7, 8],         (enc.frames_out, t.block_ids)
+    assert t.timestamps == [i / FPS for i in (0, 1, 2, 3, 5, 6, 7)], t.timestamps
     assert t.frame_count == 7, t.frame_count
     info = json.loads((d / "encoded.json").read_text())
     assert info == {"encoded": 4, "spilled": 3, "persisted": 7}, info
     assert any("coded=4 of 5 fed" in w for w in t.warnings), t.warnings
-    print("23) an encoder that dies mid-stream splits at the coded count, not "
-          "the fed count: PASS")
+    assert any("spliced out at index 4" in w for w in t.warnings), t.warnings
+    print("23) an encoder that dies mid-stream splits at the coded count and "
+          "splices the uncoded junction frame out of the middle: PASS")
 
 
 def test_healthy_encoder_keeps_every_frame(tmp):
