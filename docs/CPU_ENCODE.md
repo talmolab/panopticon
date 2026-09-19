@@ -4,6 +4,19 @@ Panopticon's real-time encode path is NVENC. This document covers the other
 path: `gui_app/cpu_encode.py`, which encodes with `libx264` inside one `ffmpeg`
 child process per camera when the GPU cannot serve every camera.
 
+## Status: the encoder is here, the operator cannot choose it yet
+
+The encoder, the seam and the preflight arithmetic are in place and tested, but
+**no caller runs the selection**: `main_window` constructs `HardwareCheckThread`
+without a profile and calls `check_capacity` without `encoder=`, so
+`select_encoder` never runs and `encoder: x264` in the rig profile has no
+effect. Until that consumer half lands, a recording on this branch uses the
+built-in NVENC factory whatever the profile says, and the preflight says so
+rather than advising an edit that would do nothing: with no selection the
+report prints `Using: the encoder selection did not run for this session`, and
+the refusals leave out "set `encoder: x264`" — `hardware_check.encoder_selection_live()`
+is what they ask.
+
 ## Why it exists
 
 Before it, a machine with no NVIDIA GPU — or one whose driver session cap was
@@ -44,9 +57,46 @@ ffmpeg -y -nostdin -hide_banner -loglevel error \
 and returns whatever a dedicated reader thread has drained from stdout since
 the previous call — possibly nothing, because libx264 answers a frame a frame
 or two later. The bytes are appended to `stream.h264` in order, so nothing is
-lost by arriving late. `EndEncode()` closes stdin, waits for the child and
-returns the remainder; `Close()` / `kill()` is the abandon path, and killing
-the child is what releases an encoder thread blocked in a pipe write.
+lost by arriving late. `EndEncode(timeout_s=2.0)` closes stdin, waits for the
+child and returns the remainder; `Close()` / `kill()` is the abandon path, and
+killing the child is what releases an encoder thread blocked in a pipe write.
+
+### `frames_out`: frames fed are not frames coded
+
+`Encode()` returns as soon as the Y plane is in the child's stdin, so the
+number of calls leads the number of coded pictures by one or two (measured: 50
+fed, 49 coded, at both 640x400 and 1920x1200 — the flush at `EndEncode()` makes
+up the difference). NVENC has no such gap, because its `Encode()` returns that
+frame's bytes.
+
+`X264Encoder.frames_out` is the count of coded pictures the child has actually
+emitted, taken by counting Annex-B NAL types 1 and 5 in the drained bytes.
+**Any bookkeeping that maps a recorded frame to a trigger must use it**, because
+CLAUDE.md's grab-loop invariant is that `blockids.npy` records only frames that
+were actually persisted. On the encoder-death path the flush never arrives, so
+the lead never closes: a `block_ids` list truncated to frames fed claims a frame
+`stream.h264` does not contain, and `write_split_point()` puts the raw-tail
+boundary one frame late — after the tail merge every frame from the failure
+point on maps to the wrong trigger for that camera, with no gap in
+`blockids.npy` to show for it.
+
+`_EncoderThread` (`gui_app/grab_thread.py`) still counts its own `Encode()`
+calls in `encoded`; the encoder-agnostic reconciliation is
+`min(self.encoded, getattr(enc, "frames_out", self.encoded))`, for both the
+`encoded + spilled` reconciliation and the `write_split_point()` call. That
+file is outside this package.
+
+### Why `EndEncode()` is bounded
+
+`SyncEncodeRouter.abandon()` documents its `timeout_s` as the bound on the
+whole teardown and runs on the Qt main thread, and it reaches `EndEncode()` for
+each camera through `_EncoderThread.release_encoder()`. So `EndEncode()` takes
+a `timeout_s` that bounds the WHOLE call — the reader join and the child's exit
+share one deadline — defaulting to 2 s, past which the child is killed (`kill()`
+is bounded in turn). A clean flush is nowhere near that: measured 5–7 ms, since
+`-tune zerolatency` with `-bf 0` leaves no lookahead to drain. The bound is per
+camera, so a caller that is itself under a deadline should pass its remaining
+time rather than take the default.
 
 Invariants that are not negotiable and are asserted in `test_cpu_encode.py`:
 
@@ -75,8 +125,11 @@ python -m gui_app.cpu_encode --bench 1920 1200 100
 It runs one single-threaded `libx264` encode of 2 s of synthetic `testsrc2`
 video at the target geometry and divides frames by wall time. The source
 synthesis is inside the timed region, which makes the answer conservative.
-`HardwareCheckThread` runs the same bench at launch, for `ultrafast` and
-`veryfast`, so Record never pays for it.
+`HardwareCheckThread` runs the same bench at launch, but for `ultrafast` only
+(`hardware_check.BENCH_PRESETS`), so Record never pays for it. The `veryfast`
+row below comes from the command above: the factory builds `ultrafast` and the
+rig profile has no field for the preset, so benching a second one at launch
+would cost a real encode for a number nobody can act on.
 
 | preset      | fps per core (1920x1200) | cameras at 100 fps |
 |-------------|--------------------------|--------------------|
@@ -122,9 +175,35 @@ when it does not.
 - **`x264`** — force the CPU path. Also switches the post-hoc writers
   (`gui_app/ffmpeg_cmd.py`) to `libx264`, so a machine with no NVIDIA GPU can
   run the tail merge and the alignment re-encode too.
-- **`raw`** — `raw.bin` plus a post-hoc encode. Budget the disk accordingly:
-  the preflight now budgets the full frame every frame in this mode rather
-  than the 4.6 KB/frame the H.264 path uses.
+- **`raw`** — `raw.bin` plus a post-hoc encode. **Only meaningful together with
+  `realtime_encode: false`**, see below.
+
+Whichever real-time path is chosen, the post-hoc writers follow the launch-time
+`h264_nvenc` test encode rather than the choice: the two NVENC libraries fail
+independently, so a host where PyNvVideoCodec works and ffmpeg's `h264_nvenc`
+does not records on the GPU and runs the tail merge and the alignment re-encode
+on libx264.
+
+### `encoder: raw` needs `realtime_encode: false`
+
+**`realtime_encode` is the only field that switches the capture path**; nothing
+outside the preflight reads `encoder`. So `encoder: raw` with
+`realtime_encode: true` really does encode in real time, and believing it would
+skip the NVENC session check and leave the GPU factory installed — every camera
+that could not get a session would fall to `raw.bin` one at a time, at a rate
+(1.29 GiB/s at six cameras) below the sustained-write warning, with a preflight
+that said nothing. `select_encoder` and `check_capacity` therefore **refuse**
+that combination and name `realtime_encode: false` as the field to set. Budget
+the disk accordingly when it is set: the preflight budgets the full frame every
+frame in raw mode rather than the 4.6 KB/frame the H.264 path uses.
+
+### The disk estimate on the CPU path is a lower bound
+
+`hardware_check.H264_BYTES_PER_FRAME = 4600` was measured on real recordings,
+which are NVENC recordings at the rig's qp. libx264 at `ultrafast` and the same
+`-qp` writes materially more, and no measurement of the CPU path on rig content
+exists to replace it, so the disk warnings label the estimate a lower bound
+wherever the CPU factory is the one installed.
 
 ## When to prefer which
 
@@ -135,10 +214,14 @@ when it does not.
   the queue-full count in the recording's `WARNINGS.txt`, which is how a
   too-slow encoder announces itself (frames dropped from that camera only, so
   its video ends up shorter than the others).
-- **`veryfast`** only if disk is tight and the bench leaves plenty of headroom:
-  it is ~3x slower than `ultrafast` here for a modest bitrate saving at the
-  same `qp`.
-- **`raw`** only deliberately, with the disk checked first.
+- **`raw`** only deliberately, with `realtime_encode: false` and the disk
+  checked first.
+
+There is no preset knob. `cpu_encode.set_factory_options()` exists and works,
+but no production caller sets it and the rig profile has no field for it, so
+every recording runs `ultrafast` with one thread. `veryfast` is ~3x slower here
+for a modest bitrate saving at the same `qp`; the `--bench` numbers above are
+what an evaluation of adding that field would start from.
 
 ## Testing
 
@@ -151,8 +234,15 @@ python test_hardware_check.py  # the preflight branches, stubbed
 cameras through `SyncEncodeRouter` with the x264 factory and asserts the
 stream's coded-picture count equals the recorded block IDs, that there is one
 IDR per second, that the stream remuxes with `-c copy` and decodes back to the
-same frame count, and that `EndEncode`, `Close` and `kill` behave. It needs
-ffmpeg and nothing else; it skips cleanly when the binary is missing.
+same frame count, that `frames_out` equals the coded pictures in the stream and
+does not catch up when the child is killed, that `EndEncode` kills a wedged
+child inside its deadline, and that `Close` and `kill` behave. It needs ffmpeg
+and nothing else; it skips cleanly when the binary is missing.
+
+`test_hardware_check.py` starts no process at all: the NVENC session probe, the
+`h264_nvenc` test encode, `PyNvVideoCodec` and the libx264 bench are stubbed in
+every case, so it neither allocates a GPU session nor depends on the order the
+cases run in.
 
 ## Related measurement: NVENC monochrome support
 

@@ -48,17 +48,30 @@ def restore(monkey: dict):
 
 
 def capacity(got: int, bench: float = -1.0, encoder: str = "auto",
-             realtime: bool = True, n_cams: int = N_CAMS):
+             realtime: bool = True, n_cams: int = N_CAMS,
+             cpu_installed: bool = False, selection_ran: bool = True):
+    """check_capacity with every probe stubbed.
+
+    `cpu_installed` is the seam `select_encoder` would have moved, and
+    `selection_ran` is whether that selection ran at all: both are read by
+    check_capacity, so both are part of the case, not of the fixture.
+    """
     monkey: dict = {}
     stub_sessions(monkey, got)
     stub_bench(bench)
     hw._nvenc_probe_error = ""
+    previous_factory = encoders.set_default_factory(
+        cpu_encode.x264_factory if cpu_installed else None)
+    previous_selected = hw._selected_encoder
+    hw._selected_encoder = "x264" if selection_ran else ""
     try:
         return hw.check_capacity(
             n_cams=n_cams, width=W, height=H, ring_n=RING_N,
             max_num_buffer=MAX_NUM_BUFFER, realtime=realtime,
             output_dir="", fps=FPS, encoder=encoder)
     finally:
+        hw._selected_encoder = previous_selected
+        encoders.set_default_factory(previous_factory)
         restore(monkey)
 
 
@@ -99,15 +112,133 @@ def test_disk_budget_follows_the_real_write_rate():
 
 
 def test_cpu_fallback_covers_a_short_gpu():
-    # Enough CPU for six cameras at 100 fps: 24 cores, 400 fps per core.
-    blocking, warnings = capacity(got=1, bench=400.0, encoder="auto")
+    # Enough CPU for six cameras at 100 fps: 24 cores, 400 fps per core, and
+    # the selection installed the CPU factory.
+    blocking, warnings = capacity(got=1, bench=400.0, encoder="auto",
+                                  cpu_installed=True)
     assert not blocking, blocking
     assert any("libx264" in w for w in warnings), warnings
     # Not enough CPU: the refusal comes back.
-    blocking, _ = capacity(got=1, bench=20.0, encoder="auto")
+    blocking, _ = capacity(got=1, bench=20.0, encoder="auto",
+                           cpu_installed=True)
     assert blocking, "a short GPU and a short CPU must refuse"
     print("4) auto falls to libx264 with a warning when the CPU covers the "
           "cameras, and still refuses when it does not: PASS")
+
+
+def test_cpu_claim_is_gated_on_the_installed_seam():
+    """A bench result alone must not pass a start onto a GPU factory.
+
+    The bench and the selection are separate calls and the preflight thread
+    swallows an exception from the second, so "recording on the CPU instead"
+    has to be read off the seam.
+    """
+    blocking, warnings = capacity(got=1, bench=400.0, encoder="auto",
+                                  cpu_installed=False)
+    assert blocking, ("a bench that covers the cameras must not pass the start "
+                      "while the GPU factory is still installed")
+    assert not any("Recording on the CPU" in w for w in warnings), warnings
+    print("16) the CPU-fallback warning is gated on the installed factory, not "
+          "on the bench cache: PASS")
+
+
+def test_preflight_failure_drops_the_bench_result():
+    """A selection that raises must not leave a bench that reads as live."""
+    real_select, real_bench = hw.select_encoder, hw.run_x264_bench
+
+    def boom(*a, **k):
+        raise RuntimeError("selection exploded")
+
+    def fake_bench(w, h, fps, presets=hw.BENCH_PRESETS):
+        for preset in presets:
+            hw._x264_bench[preset] = 400.0
+        return dict(hw._x264_bench)
+
+    real_check = hw.run_hardware_check
+    report = hw.HardwareReport()
+    hw.select_encoder, hw.run_x264_bench = boom, fake_bench
+    hw.run_hardware_check = lambda output_dir="": report
+    try:
+        thread = hw.HardwareCheckThread("", profile=FakeProfile(), n_cams=N_CAMS)
+        thread.run()
+    finally:
+        hw.select_encoder, hw.run_x264_bench = real_select, real_bench
+        hw.run_hardware_check = real_check
+    try:
+        assert hw.x264_bench_fps("ultrafast") == -1.0, hw._x264_bench
+        assert not report.x264_fps_per_core, report.x264_fps_per_core
+        # And the branch check_capacity would take off that cache.
+        blocking, warnings = capacity(got=0, encoder="auto",
+                                      bench=hw.x264_bench_fps("ultrafast"))
+        assert blocking, "a cleared bench must not pass the start"
+    finally:
+        hw._x264_bench.clear()
+    print("17) a preflight whose selection raises clears the bench cache, so "
+          "check_capacity cannot read it as a live CPU path: PASS")
+
+
+def test_encoder_raw_without_realtime_encode_is_refused():
+    """`encoder: raw` does not switch the capture path; only `realtime_encode`.
+
+    With the two disagreeing the run really encodes in real time, so budgeting
+    raw bytes and skipping the session check is how every camera ends up on
+    raw.bin with a preflight that said nothing.
+    """
+    for got in (-1, 0, N_CAMS + 2):
+        blocking, _warnings = capacity(got=got, encoder="raw", realtime=True)
+        assert blocking, (got, "encoder: raw with realtime_encode: true must "
+                               "not pass silently")
+        assert "realtime_encode" in blocking[0], blocking[0]
+    # The honest combination still passes.
+    blocking, _warnings = capacity(got=-1, encoder="raw", realtime=False)
+    assert not blocking, blocking
+
+    previous = encoders.get_default_factory()
+    previous_backend = ffmpeg_cmd.get_default_backend()
+    monkey: dict = {}
+    try:
+        stub_sessions(monkey, -1)
+        stub_bench(-1.0)
+        choice = hw.select_encoder(FakeProfile("raw"), N_CAMS, FPS, W, H)
+        assert choice.encoder == "raw" and choice.blocking, choice
+        assert "realtime_encode: false" in choice.blocking, choice.blocking
+        choice = hw.select_encoder(FakeProfile("raw", realtime_encode=False),
+                                   N_CAMS, FPS, W, H)
+        assert choice.encoder == "raw" and not choice.blocking, choice
+    finally:
+        restore(monkey)
+        encoders.set_default_factory(previous)
+        ffmpeg_cmd.set_default_backend(previous_backend)
+    print("18) `encoder: raw` with `realtime_encode: true` is refused by both "
+          "select_encoder and check_capacity, naming the field that acts: PASS")
+
+
+def test_advice_names_a_field_that_does_something():
+    """The refusal must not tell the operator to set a field nothing reads."""
+    blocking, _ = capacity(got=0, bench=20.0, encoder="auto",
+                           selection_ran=False)
+    assert blocking, blocking
+    assert "encoder: x264" not in blocking[0], blocking[0]
+    assert "cannot be selected from the rig profile" in blocking[0], blocking[0]
+    blocking, _ = capacity(got=0, bench=20.0, encoder="auto",
+                           selection_ran=True)
+    assert blocking and "`encoder: x264`" in blocking[0], blocking[0]
+    print("19) the CPU-path advice appears only where the encoder selection "
+          "actually runs: PASS")
+
+
+def test_disk_estimate_on_the_cpu_path_is_a_lower_bound():
+    real_free = hw._get_disk_free
+    hw._get_disk_free = lambda p: 1.0          # 1 GiB free forces the warning
+    try:
+        _b, warnings = capacity(got=0, bench=400.0, encoder="x264")
+        assert any("lower bound" in w for w in warnings), warnings
+        _b, warnings = capacity(got=N_CAMS + 2, bench=-1.0, encoder="nvenc")
+        assert not any("lower bound" in w for w in warnings), warnings
+    finally:
+        hw._get_disk_free = real_free
+    print("20) the disk estimate is labelled a lower bound on the CPU path, "
+          "where the measured bytes-per-frame came from NVENC: PASS")
 
 
 def test_forced_x264_is_checked_against_the_bench():
@@ -251,10 +382,22 @@ def test_select_encoder_installs_the_factory():
         # Plenty of sessions -> NVENC, and the post-hoc backend follows.
         stub_sessions(monkey, N_CAMS + 2)
         stub_bench(400.0)
+        real_ffmpeg_ok = hw._ffmpeg_nvenc_ok
+        hw._ffmpeg_nvenc_ok = True
         choice = hw.select_encoder(FakeProfile("auto"), N_CAMS, FPS, W, H)
         assert choice.encoder == "nvenc" and not choice.blocking, choice
         assert encoders.get_default_factory() is encoders.nvenc_factory
         assert ffmpeg_cmd.get_default_backend() == "nvenc"
+
+        # The real-time path can be NVENC while ffmpeg's h264_nvenc is broken;
+        # the post-hoc writers must follow the measurement, not the choice.
+        hw._ffmpeg_nvenc_ok = False
+        choice = hw.select_encoder(FakeProfile("nvenc"), N_CAMS, FPS, W, H)
+        assert choice.encoder == "nvenc" and not choice.blocking, choice
+        assert encoders.get_default_factory() is encoders.nvenc_factory
+        assert ffmpeg_cmd.get_default_backend() == "x264", (
+            "the post-hoc backend must not point at a proven-broken h264_nvenc")
+        hw._ffmpeg_nvenc_ok = real_ffmpeg_ok
 
         # No sessions, a fast CPU -> libx264 on both sides.
         restore(monkey)
@@ -275,8 +418,6 @@ def test_select_encoder_installs_the_factory():
         choice = hw.select_encoder(FakeProfile("x264"), N_CAMS, FPS, W, H)
         assert choice.encoder == "x264" and choice.blocking, choice
         assert encoders.get_default_factory() is cpu_encode.x264_factory
-        choice = hw.select_encoder(FakeProfile("raw"), N_CAMS, FPS, W, H)
-        assert choice.encoder == "raw" and not choice.blocking, choice
         choice = hw.select_encoder(FakeProfile("auto", realtime_encode=False),
                                    N_CAMS, FPS, W, H)
         assert choice.encoder == "raw" and not choice.blocking, choice
@@ -301,8 +442,14 @@ def test_report_text_states_the_measured_limits():
     for needle in ("370 fps per core", "up to 48 cameras", "110 fps per core",
                    "up to 20 cameras", "Using: x264", "NOT available"):
         assert needle in text, (needle, text)
+    # A report with no selection must say so: a missing `Using:` line reads as
+    # "NVENC, as configured" while it means the profile was never consulted.
+    report.encoder, report.encoder_reason = "", ""
+    text = hw.format_report(report)
+    assert "the encoder selection did not run" in text, text
     print("11) the preflight text states the measured fps per core and the "
-          "camera count for both presets: PASS")
+          "camera count for every benched preset, and says when no encoder "
+          "was selected: PASS")
 
 
 def test_thread_exposes_a_non_shadowing_signal():
@@ -327,7 +474,22 @@ def test_disk_test_is_real_and_optional():
     finally:
         import shutil as _shutil
         _shutil.rmtree(tmp, ignore_errors=True)
-    assert hw.run_hardware_check("").disk_write_mb_s == -1.0
+    # Stubbed, because this suite starts no ffmpeg and allocates no GPU
+    # session: run_hardware_check would otherwise run a real h264_nvenc test
+    # encode, load PyNvVideoCodec, and leave `_ffmpeg_nvenc_ok` set for every
+    # later case.
+    monkey: dict = {"check_nvenc": hw.check_nvenc,
+                    "check_nvenc_runtime": hw.check_nvenc_runtime}
+    previous_ok = hw._ffmpeg_nvenc_ok
+    hw.check_nvenc = lambda: False
+    hw.check_nvenc_runtime = lambda: False
+    try:
+        assert hw.run_hardware_check("").disk_write_mb_s == -1.0
+    finally:
+        restore(monkey)
+        hw._ffmpeg_nvenc_ok = previous_ok
+    assert hw._ffmpeg_nvenc_ok is previous_ok, (
+        "the survey's module state must not leak into the later cases")
     print("13) the disk test fsyncs, cleans up, and is skipped when no output "
           "directory is configured: PASS")
 
@@ -398,6 +560,11 @@ def main():
     test_disk_test_is_real_and_optional()
     test_raw_warning_states_a_rule_not_this_rig()
     test_monochrome_capability_is_read_not_assumed()
+    test_cpu_claim_is_gated_on_the_installed_seam()
+    test_preflight_failure_drops_the_bench_result()
+    test_encoder_raw_without_realtime_encode_is_refused()
+    test_advice_names_a_field_that_does_something()
+    test_disk_estimate_on_the_cpu_path_is_a_lower_bound()
     print("\nALL HARDWARE CHECK TESTS PASS")
 
 

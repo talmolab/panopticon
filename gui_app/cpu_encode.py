@@ -9,6 +9,14 @@ NV12 frame over a pipe, producing the same Annex-B elementary stream that
 `stream.h264` already holds. Nothing downstream changes -- the remux, the
 block-ID bookkeeping and the labeler see the same bytes.
 
+RULE: bookkeeping that pairs a recorded frame with a trigger counts
+`frames_out`, the coded pictures this encoder has emitted, never the calls to
+`Encode()`. REASON: `Encode()` returns once the plane is in the child's stdin,
+so frames FED lead frames CODED, and where the child dies the flush never
+arrives and the lead is permanent. `blockids.npy` must only record frames that
+were actually persisted, and a raw-tail split point one frame late maps every
+later frame to the wrong trigger with no gap in `blockids.npy` to show for it.
+
 RULE: libx264 is a fallback, never the default. REASON: it costs a CPU core
 per camera at a rate the launch bench measures, and those cores are the same
 ones the grab threads need; `hardware_check.select_encoder` only reaches for it
@@ -41,10 +49,17 @@ _READ_CHUNK = 1 << 16
 #: process.
 _STDERR_TAIL_LINES = 20
 
-#: How long `EndEncode()` waits for the child to flush and exit before the
-#: stream is declared lost and the process killed. Generous: the child may
-#: still hold a few frames of lookahead when stdin closes.
-_END_TIMEOUT_S = 30.0
+#: Bound on the WHOLE of `EndEncode()` -- the reader join and the child's exit
+#: share it -- before the stream is declared lost and the process killed.
+#:
+#: RULE: this bounds the call rather than each wait inside it, and it stays
+#: small. REASON: `EndEncode()` is reached from `SyncEncodeRouter.abandon()`,
+#: which documents its own timeout as the bound on the whole teardown and runs
+#: on the Qt main thread; two 30 s waits per camera turn the one path that
+#: exists for "something is already wrong" into a window frozen for a minute
+#: per camera. A clean flush needs nothing like this long: `-tune zerolatency`
+#: with `-bf 0` leaves the child no lookahead to drain.
+_END_TIMEOUT_S = 2.0
 
 #: Presets the preflight benches and the profile may name, fastest first.
 PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium")
@@ -119,6 +134,8 @@ class X264Encoder:
         self._lock = threading.Lock()
         self._stderr: list = []
         self._closed = False
+        self._frames_out = 0
+        self._nal_tail = b""
         self._proc = subprocess.Popen(
             self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, **ffmpeg_cmd.quiet_popen_kwargs())
@@ -130,6 +147,31 @@ class X264Encoder:
         self._errreader.start()
 
     # -- child plumbing ----------------------------------------------------
+    def _count_pictures(self, data: bytes) -> None:
+        """Add the coded pictures in `data` to `frames_out`. Call under lock.
+
+        Counts Annex-B NAL types 1 (non-IDR slice) and 5 (IDR slice), which is
+        one per coded picture here because the command line sets `-bf 0` and
+        libx264 emits one slice per picture. `_nal_tail` carries the bytes a
+        start code could still span, so a picture is neither counted twice nor
+        missed at a read boundary.
+        """
+        buf = self._nal_tail + data
+        i = 0
+        while True:
+            j = buf.find(b"\x00\x00\x01", i)
+            if j < 0:
+                # Only a partial start code can survive into the next read.
+                self._nal_tail = buf[-2:]
+                return
+            if j + 3 >= len(buf):
+                # The header byte that names the NAL type has not arrived.
+                self._nal_tail = buf[j:]
+                return
+            if (buf[j + 3] & 0x1F) in (1, 5):
+                self._frames_out += 1
+            i = j + 4
+
     def _drain_stdout(self):
         stream = self._proc.stdout
         read = getattr(stream, "read1", None) or stream.read
@@ -140,6 +182,7 @@ class X264Encoder:
                     return
                 with self._lock:
                     self._chunks.append(data)
+                    self._count_pictures(data)
         except Exception:
             # The pipe was closed under the reader (kill path). There is
             # nothing to report: the caller already knows it killed the child.
@@ -175,7 +218,8 @@ class X264Encoder:
         The return may be empty: libx264 answers a frame's worth of bytes a
         frame or two later even at `-tune zerolatency`, and the router appends
         whatever it gets to `stream.h264` in order, so bytes are never lost by
-        arriving late.
+        arriving late. A caller whose bookkeeping must match the stream counts
+        `frames_out`, not its own calls to this method.
         """
         if self._closed:
             raise RuntimeError("libx264 encoder is closed")
@@ -193,8 +237,14 @@ class X264Encoder:
             raise RuntimeError(f"libx264 encoder died: {self._why()}") from e
         return self._take()
 
-    def EndEncode(self) -> bytes:
+    def EndEncode(self, timeout_s: float = _END_TIMEOUT_S) -> bytes:
         """Close stdin, let the child flush, and return the remaining bytes.
+
+        `timeout_s` bounds the WHOLE call, not each wait inside it: the reader
+        join and the child's exit share one deadline, so a caller that is
+        itself under a deadline -- `SyncEncodeRouter.abandon()` is one -- waits
+        what it asked for rather than a multiple of it. Past the deadline the
+        child is killed, which `kill()` bounds in turn.
 
         Idempotent: the encoder threads call this and then `Close()`, and the
         router's failure paths may call it again on an object it already
@@ -202,13 +252,14 @@ class X264Encoder:
         """
         if self._closed:
             return b""
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
         try:
             self._proc.stdin.close()
         except Exception:
             pass
-        self._reader.join(timeout=_END_TIMEOUT_S)
+        self._reader.join(timeout=max(0.0, deadline - time.monotonic()))
         try:
-            self._proc.wait(timeout=_END_TIMEOUT_S)
+            self._proc.wait(timeout=max(0.05, deadline - time.monotonic()))
         except Exception:
             # A child that has not exited after its stdin closed is wedged in
             # the encoder. Killing it loses the tail of the stream, which the
@@ -262,6 +313,20 @@ class X264Encoder:
     def returncode(self):
         return self._proc.poll()
 
+    @property
+    def frames_out(self) -> int:
+        """Coded pictures this encoder has actually emitted so far.
+
+        RULE: bookkeeping that decides which frame maps to which trigger reads
+        THIS, not the number of frames fed in. REASON: `Encode()` returns as
+        soon as the Y plane is in the child's stdin, so a caller counting its
+        own calls over-claims by whatever the child has not coded yet -- and
+        where the child dies the flush never arrives, so the over-claim is
+        permanent and the raw-tail split point lands one frame late.
+        """
+        with self._lock:
+            return self._frames_out
+
     def __del__(self):
         try:
             self.Close()
@@ -277,15 +342,25 @@ def create_x264_encoder(width: int, height: int, fps: int, quality: int,
                        threads=threads)
 
 
-#: Preset the factory uses unless `set_factory_preset` changes it. `ultrafast`
-#: because the preflight bench is what decides whether the machine can encode
-#: at all, and a slower preset only lowers the camera count it allows.
+#: Preset the factory uses unless `set_factory_options` changes it.
+#: `ultrafast` because the preflight bench is what decides whether the machine
+#: can encode at all, and a slower preset only lowers the camera count it
+#: allows.
 _factory_preset = "ultrafast"
 _factory_threads = 1
 
 
 def set_factory_options(preset: str = "ultrafast", threads: int = 1) -> None:
-    """Choose what `x264_factory` builds. Called by the encoder selection."""
+    """Choose what `x264_factory` builds.
+
+    RULE: no production caller sets this, and nothing the operator reads
+    benches or recommends a preset other than the one it builds. REASON: the
+    rig profile has no field for the preset or the thread count, so every
+    recording runs `ultrafast` with one thread; a benched or documented
+    alternative advertises a choice the operator cannot make. The seam stays
+    because the `--bench` entry point measures presets for whoever evaluates
+    adding that field, which is the only step between here and using it.
+    """
     if preset not in PRESETS:
         raise ValueError(f"unknown libx264 preset {preset!r}; "
                          f"choose one of {PRESETS}")

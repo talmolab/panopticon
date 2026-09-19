@@ -13,13 +13,18 @@ What is proved here:
        block IDs, with one IDR per second, remuxable with `-c copy`;
   6-8) EndEncode is clean, kill() is the abandon path, and a dead child makes
        Encode raise instead of silently dropping frames;
-  9)   the bench and the camera-count arithmetic.
+  9)   the bench and the camera-count arithmetic;
+  10)  frames_out counts coded pictures, so the bookkeeping that maps a frame
+       to a trigger cannot over-claim what the child never coded;
+  11)  EndEncode is bounded, because it runs on the abandon path.
 """
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -224,6 +229,113 @@ def test_dead_child_raises():
           "thread spills raw instead of losing frames: PASS")
 
 
+def test_frames_out_counts_coded_pictures():
+    """`frames_out` is the persisted count; the calls to Encode() are not.
+
+    Encode() returns once the plane is in the child's stdin, so a caller that
+    counts its own calls claims frames libx264 has not coded. That is the
+    CLAUDE.md grab-loop invariant "blockids.npy must only record frames that
+    were actually persisted": on the encoder-death path the flush never
+    arrives, so the over-claim is permanent and the raw-tail split point lands
+    late, silently mapping every later frame to the wrong trigger.
+    """
+    fed = 50
+    enc = cpu_encode.create_x264_encoder(W, H, FPS, QP)
+    got = b""
+    try:
+        for i in range(fed):
+            got += enc.Encode(make_frame(W, H, i))
+        mid = enc.frames_out
+        assert mid == len([t for t in nal_types(got) if t in (1, 5)]), mid
+        assert mid <= fed, (mid, fed)
+        got += enc.EndEncode()
+        assert enc.frames_out == fed, (enc.frames_out, fed)
+        assert enc.frames_out == len([t for t in nal_types(got) if t in (1, 5)])
+    finally:
+        enc.Close()
+
+    # The death path: what the child never coded must not be counted.
+    enc = cpu_encode.create_x264_encoder(W, H, FPS, QP)
+    try:
+        for i in range(fed):
+            enc.Encode(make_frame(W, H, i))
+        enc._proc.kill()
+        enc._proc.wait(timeout=10)
+        tail = enc.EndEncode()
+        assert enc.frames_out < fed, (
+            "a killed child cannot have coded every frame that was fed",
+            enc.frames_out, fed)
+        assert isinstance(tail, bytes)
+    finally:
+        enc.Close()
+    print("10) frames_out equals the coded pictures in the stream, trails the "
+          "frames fed, and does not catch up when the child dies: PASS")
+
+
+class _WedgedChild:
+    """A child that accepts stdin, emits nothing and never exits on its own.
+
+    The state EndEncode's bound exists for: ffmpeg wedged inside the encoder
+    with its stdin already closed. Real ffmpeg cannot be asked to do this on
+    demand, and the deadline arithmetic is the thing under test.
+    """
+
+    def __init__(self, released):
+        # Killing the child is what releases the reader threads, in the fake
+        # exactly as in life: the drain returns as soon as the pipe closes.
+        self.stdin, self.stdout, self.stderr = None, None, None
+        self.killed = False
+        self._rc = None
+        self._released = released
+
+    def poll(self):
+        return self._rc
+
+    def wait(self, timeout=None):
+        if self._rc is not None:
+            return self._rc
+        time.sleep(max(0.0, timeout or 0.0))
+        raise subprocess.TimeoutExpired("ffmpeg", timeout or 0.0)
+
+    def kill(self):
+        self.killed, self._rc = True, -9
+        self._released.set()
+
+
+def test_end_encode_is_bounded_on_the_abandon_path():
+    """EndEncode must not outlast the teardown budget of the caller.
+
+    `SyncEncodeRouter.abandon()` documents its timeout as the bound on the
+    WHOLE teardown and runs on the Qt main thread, so a wedged child here
+    freezes the window for as long as this call takes.
+    """
+    enc = object.__new__(cpu_encode.X264Encoder)
+    enc._width, enc._height, enc._fps = H, H, FPS
+    enc._chunks, enc._stderr = [], []
+    enc._lock = threading.Lock()
+    enc._closed = False
+    enc._frames_out, enc._nal_tail = 0, b""
+    stop = threading.Event()
+    enc._proc = _WedgedChild(stop)
+    enc._reader = threading.Thread(target=stop.wait, daemon=True)
+    enc._errreader = threading.Thread(target=stop.wait, daemon=True)
+    enc._reader.start()
+    enc._errreader.start()
+    try:
+        t0 = time.perf_counter()
+        assert enc.EndEncode(timeout_s=0.5) == b""
+        elapsed = time.perf_counter() - t0
+        assert enc._proc.killed, "a child past the deadline must be killed"
+        assert elapsed < 2.0, (
+            "EndEncode must bound the whole call, not each wait in it", elapsed)
+        assert cpu_encode._END_TIMEOUT_S <= 5.0, cpu_encode._END_TIMEOUT_S
+    finally:
+        stop.set()
+    print(f"11) a wedged child is killed inside the EndEncode deadline "
+          f"({elapsed*1000:.0f} ms for a 500 ms bound), and the default bound "
+          f"fits a teardown budget: PASS")
+
+
 def test_bench_and_camera_count():
     rate = cpu_encode.x264_bench(256, 256, 50, preset="ultrafast", seconds=0.5)
     assert rate > 0, rate
@@ -254,6 +366,8 @@ def main():
     test_kill_path()
     test_dead_child_raises()
     test_bench_and_camera_count()
+    test_frames_out_counts_coded_pictures()
+    test_end_encode_is_bounded_on_the_abandon_path()
     print("\nALL CPU ENCODE TESTS PASS")
 
 
