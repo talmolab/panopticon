@@ -1211,7 +1211,10 @@ A splash panel reads *Panopticon / Loading cameras...*, then the main window
 opens with one live preview pane per camera, free-running at about 30 fps.
 [OVERVIEW.md](OVERVIEW.md) names the controls.
 
-![The main window at idle, six live preview panes and the sidebar](images/main_idle.png)
+![The main window at idle: one live preview pane per camera, with the sidebar on the right](images/main_idle.png)
+
+The figure shows six panes because that is how many cameras the rig it was
+captured on had open; yours has one per camera that enumerated.
 
 The console shows one block per camera:
 
