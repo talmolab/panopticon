@@ -655,9 +655,12 @@ METADATA_FILENAME = "session_metadata.json"
 class SessionConfig:
     """One acquisition session: who, what, where, on which rig.
 
-    Rig facts are read through ``profile``; the scalars mirrored below exist
-    so callers written against them keep working and are filled from the
-    profile by ``from_profile``. Nothing rig-specific is defaulted here.
+    RULE: rig facts live on ``profile`` and are read from there; this class
+    mirrors none of them except the two frame rates ``rate_for`` resolves.
+    REASON: two sources for one fact is how a session comes to be encoded at a
+    geometry the cameras were never configured for, and a mirror drifts
+    silently because nothing compares the copies. Nothing rig-specific is
+    defaulted here.
     """
     date: str = ""
     mouse_1: str = ""
@@ -671,21 +674,15 @@ class SessionConfig:
     base_data_dir: Path = Path("")
     #: The rig this session runs on. None only for a config built by hand.
     profile: RigProfile | None = None
+    #: The two rates stay here because ``rate_for`` is a config method: an
+    #: acquisition's fps is a property of what is being recorded, not only of
+    #: the rig. Every other rig fact is read from ``profile``.
     frame_rate: int = 100
     calibration_frame_rate: int = 30
-    frame_width: int = 1920
-    frame_height: int = 1200
     #: Operator-facing camera names, cam1..camN, set from the OPENED camera
     #: set. Empty until then: a fixed count here would be a rig assumption
     #: outside the backend layer.
     camera_names: list = field(default_factory=list)
-    quality: int = 21
-    encode_parallel: int = 3
-    realtime_encode: bool = True
-    realtime_kick: bool = False
-    kick_max_lag: int = 240
-    calibration_exposure_us: float = 0.0
-    calibration_gain_db: float = -1.0
     #: Per-camera temperature readings taken at stop, or None if never read.
     #: Declared so save_metadata has a field to write, not a guessed attribute.
     camera_thermals: list | None = None
@@ -734,15 +731,6 @@ class SessionConfig:
             base_data_dir=Path(profile.output_dir) if profile.output_dir else Path(""),
             frame_rate=profile.frame_rate,
             calibration_frame_rate=profile.calibration_frame_rate,
-            frame_width=profile.frame_width,
-            frame_height=profile.frame_height,
-            quality=profile.quality,
-            encode_parallel=profile.encode_parallel,
-            realtime_encode=profile.realtime_encode,
-            realtime_kick=profile.realtime_kick,
-            kick_max_lag=profile.kick_max_lag,
-            calibration_exposure_us=profile.calibration_exposure_us,
-            calibration_gain_db=profile.calibration_gain_db,
         )
         for key in METADATA_DEFAULT_KEYS:
             if key in profile.metadata_defaults:
@@ -782,7 +770,10 @@ class SessionConfig:
             rig=self.profile.name if self.profile else None,
             num_cameras=len(self.camera_names), camera_names=self.camera_names,
             frame_rate=self.frame_rate, calibration_frame_rate=self.calibration_frame_rate,
-            resolution=[self.frame_width, self.frame_height],
+            # Read from the profile, which is what the cameras were actually
+            # configured from. None for a config built without one.
+            resolution=([self.profile.frame_width, self.profile.frame_height]
+                        if self.profile else None),
             time_of_day=now.strftime("%H:%M:%S"),
             timestamp_iso=now.isoformat(),
             # Per-camera thermals, read at stop. Same rationale as the GPU

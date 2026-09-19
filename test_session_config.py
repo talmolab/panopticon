@@ -274,12 +274,20 @@ check("from_profile fills experimenter/assay from metadata_defaults",
 check("an override wins over metadata_defaults",
       SessionConfig.from_profile(pose, experimenter="ZZ").experimenter == "ZZ")
 check("SessionConfig keeps a reference to its profile", cfg.profile is pose)
-check("mirrored scalars main_window reads are still filled",
-      cfg.kick_max_lag == 480 and cfg.realtime_kick is True
-      and cfg.frame_width == 1920 and cfg.rate_for("calibration") == 30
-      and cfg.rate_for("recording") == 100)
-for gone in ("serial_port", "trigger_pins", "n_cameras", "pfs_path"):
+check("the two rates rate_for resolves are still filled from the profile",
+      cfg.rate_for("calibration") == 30 and cfg.rate_for("recording") == 100)
+# Every other rig fact has one source, the profile: a mirror drifts silently
+# because nothing compares the copies.
+for gone in ("serial_port", "trigger_pins", "n_cameras", "pfs_path",
+             "frame_width", "frame_height", "quality", "encode_parallel",
+             "realtime_encode", "realtime_kick", "kick_max_lag",
+             "calibration_exposure_us", "calibration_gain_db"):
     check(f"SessionConfig no longer mirrors {gone}", not hasattr(cfg, gone))
+check("the geometry in the metadata comes from the profile the cameras were "
+      "configured from",
+      cfg.metadata()["resolution"] == [pose.frame_width, pose.frame_height]
+      and SessionConfig().metadata()["resolution"] is None,
+      str(cfg.metadata()["resolution"]))
 check("camera_names defaults to an empty list, not six cameras",
       SessionConfig().camera_names == [])
 check("camera_thermals is a declared field defaulting to None",
