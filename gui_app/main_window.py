@@ -148,6 +148,14 @@ class MainWindow(QMainWindow):
         #: firmware can never identify itself is not flashed in a loop.
         self._board_identity_reflashed = False
 
+        # Constructed before the profile is resolved, which is safe only
+        # because the manager LOADS no backend until it opens cameras: the
+        # profile's camera_backend reaches it through rig_setup.open_kwargs
+        # into open_all(backend=...), and that is the call that decides which
+        # vendor SDK is imported. RULE: nothing here may ask the manager for
+        # its backend object. REASON: the ask alone would load the class
+        # default and import pypylon, so the window would refuse to build on
+        # a host with no vendor SDK whatever the profile names.
         self._camera_mgr = CameraManager()
         #: Built by _teensy_connection, not here. RULE: the controller is
         #: never constructed before the profile is resolved. REASON: the
@@ -254,8 +262,23 @@ class MainWindow(QMainWindow):
         return list(profiles)
 
     def _open_cameras(self):
-        """Open cameras for the current profile (synchronous — startup only)."""
-        ok = self._open_cameras_bg()
+        """Open cameras for the current profile (synchronous — startup only).
+
+        RULE: a raised exception is turned into the same value
+        `_apply_camera_open_result` already accepts, never allowed out of
+        here. REASON: this runs inside `__init__`, so anything that escapes
+        destroys the window before it exists — and the vendor SDK is loaded
+        for the first time under this call, on the profile the machine
+        happens to remember. A host with no `pypylon` would then have no
+        window at all, hence no profile dropdown, hence no way to select a
+        backend that needs no SDK. The live profile-switch path gets this for
+        free: CallableWorker delivers the exception as its result.
+        """
+        try:
+            ok = self._open_cameras_bg()
+        except Exception as exc:
+            traceback.print_exc()
+            ok = exc
         self._apply_camera_open_result(ok)
 
     def _open_cameras_bg(self):

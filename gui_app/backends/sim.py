@@ -356,6 +356,9 @@ class SimCamera:
         self._freerun_epoch_v = 0.0
         self._freerun_i = 0
         self._next = 1            # next trigger ordinal to consider
+        #: Epoch of the pulse train `_next` is counted in, so a camera that is
+        #: already armed when the board starts a NEW train re-anchors to it.
+        self._train_epoch_v: float | None = None
         self._consumed = 0        # block IDs consumed since StartGrabbing
         self._delivered = 0       # frames handed over since StartGrabbing
         #: Results handed over since the camera was opened, failed grabs
@@ -391,7 +394,12 @@ class SimCamera:
         self._consumed = 0
         self._delivered = 0
         st = self.board.state()
+        # Anchored to the train that is running NOW: a camera cannot deliver a
+        # trigger that has already passed. The train it is anchored IN is
+        # recorded with it, because `retrieve` must re-anchor if the board
+        # starts another one - see `_retrigger_anchor`.
         self._next = self.board.ordinal_now(st) + 1
+        self._train_epoch_v = st.epoch_v
         self._freerun_epoch_v = self.board.virtual_now()
         self._freerun_i = 0
 
@@ -427,6 +435,27 @@ class SimCamera:
         if self.rate_limit and self.rate_limit > 0:
             interval += 1.0 / float(self.rate_limit)
         return interval
+
+    def _retrigger_anchor(self, st) -> None:
+        """Re-anchor to trigger 1 when the board has started a NEW pulse train.
+
+        RULE: an armed camera counts triggers in the train the board is
+        running now, not the one it was armed in. REASON: the application arms
+        every camera BEFORE it tells the board to start, and `SimBoard.start`
+        restarts ordinals at 1 - so a camera holding the ordinal it computed
+        against the train that has just ended ignores every trigger of the new
+        one until that stale number comes round. It is silent: the frames that
+        do arrive still carry block IDs from 1 and stay contiguous, so a
+        recording short at the front looks perfect.
+
+        Trigger 1, not `ordinal_now() + 1`: the camera was already armed when
+        this train began, so none of its triggers passed unwatched. A camera
+        armed mid-train keeps the anchor `StartGrabbing` gave it.
+        """
+        if self._train_epoch_v is None or st.epoch_v == self._train_epoch_v:
+            return
+        self._train_epoch_v = st.epoch_v
+        self._next = 1
 
     def _ignores(self, i: int, tv: float) -> bool:
         f = self.faults
@@ -521,6 +550,7 @@ class SimCamera:
             return self._retrieve_freerun(deadline)
         while True:
             st = self.board.state()
+            self._retrigger_anchor(st)
             i = self._next
             if st.fps <= 0 or self.board.exhausted(i, st):
                 # The triggers have stopped, so nothing is coming: wait out the

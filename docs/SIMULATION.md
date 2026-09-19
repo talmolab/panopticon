@@ -46,8 +46,15 @@ board acks with `RDY <n> <fps> <id>`, the videos and `blockids.npy`,
 `frametimes.npy`, `session_metadata.json`, `stim_paradigm.json` and
 `stim_trace.csv` land under the output directory you chose.
 
-Two things are worth knowing before the first run:
+Three things are worth knowing before the first run:
 
+- **The first launch comes up on another rig's profile.** The choice is
+  remembered per machine, and with nothing remembered the window falls back to
+  the first profile whose `.pfs` exists — a `basler` one. On a host with no
+  `pypylon` that open fails, and the launch reports it in a **Camera Error**
+  dialog naming `camera_backend` instead of taking the window down with it.
+  Dismiss it and pick **sim**; the dropdown is there because the startup open
+  is guarded.
 - **Set the output directory.** The profile's default is the repository's
   `data/`, the same tree a real session goes to. Point it somewhere scratch.
 - **Nothing is flashed.** `stim_compiler.upload(ino, "sim")` short-circuits
@@ -274,27 +281,45 @@ The two that are specifically about the simulated rig:
     and `stim_paradigm.json`/`.ino` under an applied paradigm, and the
     moved-aside folders on the second pass.
 
-### Known gaps
+### No known gaps
 
-`test_sim_gui.py` marks these XFAIL and names them, so the suite passes as a
-whole while they stand. Both are in files that package does not own.
+`test_sim_gui.py` carries no XFAIL cases: every one of its checks passes with
+`pypylon` un-importable, and the launch this document's own entry point
+describes — `uv run gui.py`, then pick `sim` — reaches the dropdown on such a
+host too, which together are what "the application runs with no hardware"
+means. Three defects found while this was being written are fixed and now
+guarded by cases of their own, and each is worth knowing about because a
+regression in any of them is quiet:
 
-- **M1-01** — `main_window.__init__` builds `CameraManager()` before the
-  profile is resolved, and `CameraManager.__init__` loads the default
-  `basler` backend eagerly, so `pypylon` is imported at construction whatever
-  the profile names. Until it is fixed, the GUI itself needs pypylon
-  installed even to run the simulated rig; the offline suites do not.
-- **M1-02** — a simulated camera arms (`StartGrabbing`) before the board is
-  told to start and anchors its next trigger ordinal to the pulse train that
-  has just ENDED, while `SimBoard.start` restarts ordinals at 1. So from the
-  second acquisition in one process on, the camera ignores every trigger
-  until that stale ordinal comes round. It is silent: the frames that do
-  arrive still carry block IDs from 1 and stay contiguous, so the recording
-  looks perfect and is merely short at the front.
+- `CameraManager` records the backend NAME at construction and loads the
+  backend on its first vendor call. An eager load imports the vendor SDK
+  whatever the profile says, because the window builds the manager before the
+  profile is resolved — so the GUI would not start at all on a host with no
+  `pypylon`, however loudly the profile asked for `sim`. Case 1 builds the
+  window with `pypylon` un-importable; case 45 proves nothing pulled it in.
+- A simulated camera re-anchors to trigger 1 when the board starts a new pulse
+  train. The application arms every camera BEFORE it tells the board to start,
+  and `SimBoard.start` restarts ordinals at 1, so a camera still holding the
+  ordinal it computed against the train that had just ended ignored every
+  trigger of the next one until that stale number came round. It is silent:
+  the frames that do arrive carry block IDs from 1 and stay contiguous, so a
+  recording short at the front looks perfect. Case 23 counts what the second
+  acquisition in a process recorded against the pulses the board fired, and
+  `test_sim_backend` case 16 pins the anchor itself — two pulse trains, no
+  GUI, no waiting out a recording.
+- The startup camera open is wrapped, so a backend that cannot be imported
+  becomes the Camera Error dialog rather than an exception out of
+  `MainWindow.__init__`. It runs synchronously, inside the constructor, and it
+  is where the profile's backend is loaded for the first time — so on a host
+  with no vendor SDK an unguarded open left no window, hence no profile
+  dropdown, hence no way to reach `sim` at all. `test_sim_gui` cannot see this
+  one: it pins `profile_name` to `sim` before the window is built.
+  `test_main_window_start` case 81 builds the real window with `pypylon`
+  un-importable and a `basler` profile remembered.
 
-`probe_seq.py`, the interactive GUI-driving probe, has no `--profile` switch
-yet, so it always runs the remembered profile. Select `sim` in the GUI once
-and `uv run probe_seq.py --steps c:20,r:40` then drives the simulated rig.
+`probe_seq.py`, the interactive GUI-driving probe, takes `--profile`, so
+`uv run probe_seq.py --profile sim --steps c:20,r:40` drives the simulated rig
+without changing which rig the GUI comes up on next time.
 
 ---
 

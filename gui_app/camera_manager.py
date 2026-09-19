@@ -83,11 +83,27 @@ MAX_NUM_BUFFER = 1000
 class CameraManager(QObject):
     error = pyqtSignal(str)
 
+    #: Backend name and instance, restated as class defaults because a manager
+    #: built with __new__ - which is how the offline tests skip the Qt parent -
+    #: assigns `_backend` without ever running __init__.
+    _backend_name = "basler"
+    _backend_obj = None
+
     def __init__(self, backend: str = "basler"):
         # The only vendor-specific object in this class. Everything below is
         # camera-agnostic orchestration; see gui_app/backends/__init__.py for
         # what a new backend has to provide.
-        self._backend = load_backend(backend)
+        #
+        # RULE: construction records the backend NAME and loads nothing; the
+        # instance is built on first use, by the `_backend` property below.
+        # REASON: load_backend imports the vendor SDK, and the manager is
+        # constructed before the profile that names the backend is known -
+        # so an eager load imports pypylon whatever `camera_backend` the
+        # profile says, and the application cannot be built at all on a host
+        # that has no pypylon, which is exactly the hardware-free run the
+        # simulated backend exists for.
+        self._backend_name = backend
+        self._backend_obj = None
         super().__init__()
         self._cameras: list = []
         self._geometry = None      # (w, h) agreed by every camera
@@ -123,6 +139,39 @@ class CameraManager(QObject):
         self._leaked_threads: list = []
         self._leaked_cameras: list = []
         self._router = None  # SyncEncodeRouter in real-time kick-out mode
+
+    @property
+    def _backend(self):
+        """The backend instance, loaded from `backend_name` on first use.
+
+        Every vendor call in this class goes through here, so the import of
+        the SDK happens on the first one - open_all's enumerate_devices in
+        practice - and never at construction. A caller that already holds a
+        backend object (a test with a stub, a profile switch) assigns it to
+        this name and no load happens at all.
+        """
+        if self._backend_obj is None:
+            self._backend_obj = load_backend(self._backend_name)
+        return self._backend_obj
+
+    @_backend.setter
+    def _backend(self, backend) -> None:
+        self._backend_obj = backend
+        self._backend_name = getattr(backend, "name", self._backend_name)
+
+    @property
+    def backend_name(self) -> str:
+        """Name of the backend this manager loads (or has loaded).
+
+        Readable without loading anything, so a caller can report which
+        vendor layer a profile selected on a host that could not import it.
+        """
+        return self._backend_name
+
+    @property
+    def backend_loaded(self) -> bool:
+        """Whether the backend instance has been built yet."""
+        return self._backend_obj is not None
 
     @property
     def num_cameras(self) -> int:
@@ -290,8 +339,15 @@ class CameraManager(QObject):
         # different-resolution rig fail against a rig that is no longer open,
         # and the message blames camera 1 of the rig being opened.
         self._geometry = None
-        if backend is not None and backend != getattr(self._backend, "name", None):
-            self._backend = load_backend(backend)
+        # RULE: a new name is recorded and the old instance dropped; the new
+        # one is built by the property, on the enumerate below. REASON: the
+        # comparison must not touch self._backend, because reading it to ask
+        # what the current backend is called would load the one being
+        # replaced - which is the vendor SDK this profile says it does not
+        # need.
+        if backend is not None and backend != self._backend_name:
+            self._backend_name = backend
+            self._backend_obj = None
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
             return self._open_failed("No cameras found")

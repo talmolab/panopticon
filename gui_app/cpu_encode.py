@@ -61,6 +61,12 @@ _STDERR_TAIL_LINES = 20
 #: with `-bf 0` leaves the child no lookahead to drain.
 _END_TIMEOUT_S = 2.0
 
+#: Bound on the WHOLE of `kill()` when it is called on its own rather than
+#: from inside `EndEncode()`. Short for the same reason: the child has just
+#: been sent a kill, so anything this waits for is an operating-system
+#: formality, not an encode.
+_KILL_TIMEOUT_S = 1.0
+
 #: Presets the preflight benches and the profile may name, fastest first.
 PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium")
 
@@ -244,7 +250,8 @@ class X264Encoder:
         join and the child's exit share one deadline, so a caller that is
         itself under a deadline -- `SyncEncodeRouter.abandon()` is one -- waits
         what it asked for rather than a multiple of it. Past the deadline the
-        child is killed, which `kill()` bounds in turn.
+        child is killed, and `kill()` is handed this same deadline so its own
+        waits are inside the bound rather than added to it.
 
         Idempotent: the encoder threads call this and then `Close()`, and the
         router's failure paths may call it again on an object it already
@@ -267,8 +274,8 @@ class X264Encoder:
             # finishes its join.
             print(f"[x264] child did not exit after stdin close; killing "
                   f"({self._why()})", flush=True)
-            self.kill()
-        self._errreader.join(timeout=1.0)
+            self.kill(deadline=deadline)
+        self._errreader.join(timeout=max(0.0, deadline - time.monotonic()))
         rest = self._take()
         self._closed = True
         self._close_pipes()
@@ -281,25 +288,41 @@ class X264Encoder:
         self._close_pipes()
         self._closed = True
 
-    def kill(self) -> None:
+    def kill(self, deadline: float | None = None) -> None:
         """Abandon path: end the child now, without waiting for its stream.
 
         Used when a recording is torn down rather than finished. An ffmpeg
         child holds no GPU session, but it does hold the pipe the encoder
         thread may be blocked writing into, so killing it is what lets that
         thread leave `Encode()`.
+
+        `deadline` is a `time.monotonic()` instant bounding the WHOLE call --
+        the child's exit and both reader joins share whatever is left of it.
+        RULE: a caller already under a deadline passes its own, and this call
+        never extends it. REASON: `EndEncode()` reaches here past its own
+        deadline, and waits of its own would make the bound it documents on
+        the whole call -- which `SyncEncodeRouter.abandon()` in turn documents
+        as its bound on the whole teardown, on the Qt main thread -- three
+        waits longer per camera than the number either of them states. The
+        threads are daemons reading a pipe that is closed behind them, so a
+        join that runs out of budget costs nothing but an unjoined thread.
         """
+        if deadline is None:
+            deadline = time.monotonic() + _KILL_TIMEOUT_S
         try:
             if self._proc.poll() is None:
                 self._proc.kill()
         except Exception:
             pass
         try:
-            self._proc.wait(timeout=5.0)
+            # A floor, not a budget: a process that has just been killed is
+            # reaped in milliseconds, and waiting 0 s for it would leave a
+            # zombie for every abandoned camera.
+            self._proc.wait(timeout=max(0.05, deadline - time.monotonic()))
         except Exception:
             pass
-        self._reader.join(timeout=1.0)
-        self._errreader.join(timeout=1.0)
+        self._reader.join(timeout=max(0.0, deadline - time.monotonic()))
+        self._errreader.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def _close_pipes(self) -> None:
         for stream in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
