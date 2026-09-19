@@ -274,27 +274,32 @@ The two that are specifically about the simulated rig:
     and `stim_paradigm.json`/`.ino` under an applied paradigm, and the
     moved-aside folders on the second pass.
 
-### Known gaps
+### No known gaps
 
-`test_sim_gui.py` marks these XFAIL and names them, so the suite passes as a
-whole while they stand. Both are in files that package does not own.
+`test_sim_gui.py` carries no XFAIL cases: every one of its checks passes with
+`pypylon` un-importable, which is what "the application runs with no hardware"
+means. Two defects it found while it was being written are fixed and now
+guarded by cases of their own, and both are worth knowing about because a
+regression in either is quiet:
 
-- **M1-01** — `main_window.__init__` builds `CameraManager()` before the
-  profile is resolved, and `CameraManager.__init__` loads the default
-  `basler` backend eagerly, so `pypylon` is imported at construction whatever
-  the profile names. Until it is fixed, the GUI itself needs pypylon
-  installed even to run the simulated rig; the offline suites do not.
-- **M1-02** — a simulated camera arms (`StartGrabbing`) before the board is
-  told to start and anchors its next trigger ordinal to the pulse train that
-  has just ENDED, while `SimBoard.start` restarts ordinals at 1. So from the
-  second acquisition in one process on, the camera ignores every trigger
-  until that stale ordinal comes round. It is silent: the frames that do
-  arrive still carry block IDs from 1 and stay contiguous, so the recording
-  looks perfect and is merely short at the front.
+- `CameraManager` records the backend NAME at construction and loads the
+  backend on its first vendor call. An eager load imports the vendor SDK
+  whatever the profile says, because the window builds the manager before the
+  profile is resolved — so the GUI would not start at all on a host with no
+  `pypylon`, however loudly the profile asked for `sim`. Case 1 builds the
+  window with `pypylon` un-importable; case 45 proves nothing pulled it in.
+- A simulated camera re-anchors to trigger 1 when the board starts a new pulse
+  train. The application arms every camera BEFORE it tells the board to start,
+  and `SimBoard.start` restarts ordinals at 1, so a camera still holding the
+  ordinal it computed against the train that had just ended ignored every
+  trigger of the next one until that stale number came round. It is silent:
+  the frames that do arrive carry block IDs from 1 and stay contiguous, so a
+  recording short at the front looks perfect. Case 23 counts what the second
+  acquisition in a process recorded against the pulses the board fired.
 
-`probe_seq.py`, the interactive GUI-driving probe, has no `--profile` switch
-yet, so it always runs the remembered profile. Select `sim` in the GUI once
-and `uv run probe_seq.py --steps c:20,r:40` then drives the simulated rig.
+`probe_seq.py`, the interactive GUI-driving probe, takes `--profile`, so
+`uv run probe_seq.py --profile sim --steps c:20,r:40` drives the simulated rig
+without changing which rig the GUI comes up on next time.
 
 ---
 

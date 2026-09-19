@@ -24,6 +24,7 @@ rather than two that drift.
     uv run probe_seq.py --steps r:300            # one unattended recording
     uv run probe_seq.py --steps r:300 --stim data/test_stim/stim_config.json
     uv run probe_seq.py --steps r:300 --display-hz 10
+    uv run probe_seq.py --profile sim --steps c:20,r:40   # the simulated rig
 
 `r:N` is a recording of N seconds, `c:N` a calibration. Calibration here runs
 with no board in front of the cameras, which is fine: the point is to exercise
@@ -34,6 +35,7 @@ Everything lands in probe_out/gui_scratch, which is cleared on startup.
 """
 import argparse
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -42,6 +44,7 @@ sys.path.insert(0, str(REPO))
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
 
+from gui_app import settings
 from gui_app.probe_guard import (add_force_argument,
                                  refuse_if_panopticon_running)
 
@@ -62,8 +65,54 @@ def parse_steps(spec: str):
     return out
 
 
+def select_profile(app, win, name: str, timeout_s: float = 180.0) -> None:
+    """Switch the window to the named rig profile and wait for the cameras.
+
+    Driven through the combo box rather than by writing the profile into the
+    settings store, so this takes exactly the path an operator's own selection
+    takes -- close the old cameras, open the new ones, adopt the new serial
+    port -- instead of a second, probe-only way of choosing a rig.
+
+    RULE: return only once the switch has finished. REASON: it runs on a
+    worker so the window stays responsive, and everything after this point
+    (the firmware upload, the first step's toggle) is refused while the window
+    is busy -- an unwaited switch turns into a probe that silently does
+    nothing.
+
+    RULE: the profile this machine REMEMBERS is put back afterwards. REASON:
+    selecting a profile records it as the one the GUI comes up on next
+    launch, and a probe run on `sim` must not leave the rig's own window
+    pointing at the simulated cameras.
+    """
+    combo = win._sidebar._profile_combo
+    names = [combo.itemText(i) for i in range(combo.count())]
+    if name not in names:
+        raise SystemExit(f"--profile {name!r}: not one of {names}")
+    if win._profile.name == name:
+        print(f"[probe] already on profile {name}", flush=True)
+        return
+    remembered = settings.app_settings().value(settings.KEY_PROFILE, "",
+                                               type=str)
+    print(f"[probe] switching to profile {name}", flush=True)
+    combo.setCurrentIndex(names.index(name))
+    deadline = time.monotonic() + timeout_s
+    while win._busy and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    settings.app_settings().setValue(settings.KEY_PROFILE, remembered)
+    if win._busy or win._profile.name != name:
+        raise SystemExit(f"--profile {name!r}: the switch did not finish "
+                         f"(now on {win._profile.name!r})")
+    print(f"[probe] profile {name}: {win._camera_mgr.num_cameras} camera(s) "
+          f"open", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--profile", default=None,
+                    help="rig profile to run on (default: whichever the GUI "
+                         "remembers). `--profile sim` drives the simulated "
+                         "rig, so this probe needs no hardware.")
     ap.add_argument("--steps", default="r:120,c:60,r:120",
                     help="comma list of r:SECONDS / c:SECONDS, in order")
     ap.add_argument("--warmup", type=float, default=8)
@@ -88,6 +137,12 @@ def main():
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
+
+    # Before anything else: the profile carries the cameras, the serial port
+    # and the encoder, so every setting below has to be applied to the rig the
+    # steps will actually run on.
+    if args.profile:
+        select_profile(app, win, args.profile)
 
     # Unique session id + scratch output dir: otherwise this reuses the default
     # m1_m2 path, and _start_acquisition would block forever on the "Overwrite?"
