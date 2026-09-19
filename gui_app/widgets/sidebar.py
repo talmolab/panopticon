@@ -4,18 +4,13 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QLabel,
     QProgressBar, QFrame, QPushButton, QFileDialog, QSlider, QComboBox,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QSettings
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 
 from gui_app.widgets.toggle_switch import ToggleSwitch
 from gui_app.widgets.coverage_graph import CoverageGraphWidget
-from gui_app import session_config
+from gui_app import session_config, settings
 from gui_app.session_config import RigProfile, ProfileError, REPO_ROOT
-
-# Per-machine UI state. The profiles themselves are shared with the 3dface rig
-# via git, so which one is "default" can't live in the repo — it's a property of
-# the machine, not the codebase.
-_SETTINGS = QSettings("Salk", "Panopticon")
 
 
 class SidebarWidget(QWidget):
@@ -389,7 +384,7 @@ class SidebarWidget(QWidget):
         if 0 <= index < len(self._profiles):
             profile = self._profiles[index]
             self._apply_profile(profile)
-            _SETTINGS.setValue("profile_name", profile.name)
+            settings.app_settings().setValue(settings.KEY_PROFILE, profile.name)
             self.profile_changed.emit(profile)
 
     def _apply_profile(self, profile: RigProfile):
@@ -448,8 +443,15 @@ class SidebarWidget(QWidget):
 
     @staticmethod
     def remembered_profile() -> str:
-        """Name of the profile last selected on this machine ("" if none)."""
-        return _SETTINGS.value("profile_name", "", type=str)
+        """Name of the profile last selected on this machine ("" if none).
+
+        Per-machine UI state: the profiles themselves are shared with the
+        3dface rig via git, so which one is "default" cannot live in the repo.
+        RULE: the store and the key spelling come from gui_app.settings.
+        REASON: a key spelled in two modules is a key that gets written under
+        one spelling and read under the other.
+        """
+        return settings.app_settings().value(settings.KEY_PROFILE, "", type=str)
 
     @property
     def current_profile(self) -> RigProfile:

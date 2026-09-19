@@ -38,6 +38,7 @@ from PyQt5.QtWidgets import QApplication
 app = QApplication.instance() or QApplication([])
 
 import gui_app.session_config as session_config
+from gui_app import settings as app_settings
 from gui_app.widgets import sidebar as sidebar_module
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.camera_grid import CameraGridWidget
@@ -45,8 +46,11 @@ from gui_app.widgets.coverage_graph import CoverageGraphWidget
 from gui_app.widgets.toggle_switch import ToggleSwitch
 
 _TMP = tempfile.mkdtemp(prefix="panopticon_widgets_")
-# Redirect the per-machine settings so no test touches the real registry.
-sidebar_module._SETTINGS = QSettings(str(Path(_TMP) / "ui.ini"), QSettings.IniFormat)
+# Redirect the per-machine settings so no test touches the real registry. The
+# sidebar reads the store through gui_app.settings, so patching the accessor
+# there is the one redirect that covers every reader and writer.
+_UI_INI = str(Path(_TMP) / "ui.ini")
+app_settings.app_settings = lambda: QSettings(_UI_INI, QSettings.IniFormat)
 
 _failures: list[str] = []
 
@@ -436,6 +440,32 @@ GOOD_PROFILE = (
 )
 
 
+
+def test_remembered_profile_uses_the_shared_settings_module():
+    """One owner for the store and for the key spelling.
+
+    A key spelled in two modules is a key that gets written under one spelling
+    and read under the other, which here loses the operator's rig on every
+    launch. The redirect at the top of this file is the proof: it patches only
+    gui_app.settings, so a sidebar that still built its own QSettings would
+    write into the real registry and this case would read back nothing.
+    """
+    check("the sidebar builds no settings store of its own",
+          not hasattr(sidebar_module, "_SETTINGS"))
+    with _profiles_dir({"one.yaml": GOOD_PROFILE, "two.yaml": "name: two\n"}):
+        sb = make_sidebar()
+        names = [sb._profile_combo.itemText(i)
+                 for i in range(sb._profile_combo.count())]
+        sb._profile_combo.setCurrentIndex(names.index("two"))
+        stored = app_settings.app_settings().value(app_settings.KEY_PROFILE,
+                                                   "", type=str)
+        check("choosing a profile records it under settings.KEY_PROFILE",
+              stored == "two", repr(stored))
+        check("and the sidebar reads back the same name",
+              sidebar_module.SidebarWidget.remembered_profile() == "two")
+        sb.close()
+
+
 def test_malformed_profile_is_skipped_with_warning():
     files = {
         "a_bad.yaml": "- this\n- is a list\n",
@@ -719,6 +749,7 @@ def main():
     test_zoomed_pane_keeps_sensor_aspect()
     test_disabled_toggle_is_visibly_dimmed()
     test_disabled_toggle_tooltip_names_the_gate()
+    test_remembered_profile_uses_the_shared_settings_module()
     test_malformed_profile_is_skipped_with_warning()
     test_no_loadable_profile_names_the_directory()
     test_all_good_profiles_give_no_warnings()
