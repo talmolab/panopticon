@@ -13,7 +13,8 @@ from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QPalette, QColor, QIcon, QCursor
 
 from gui_app.camera_manager import (AcquisitionStartRefused,
-                                    AcquisitionStopIncomplete, CameraManager)
+                                    AcquisitionStopIncomplete, CameraManager,
+                                    CameraOpenError)
 from gui_app.grab_thread import ring_slots
 from gui_app.serial_controller import TeensyController
 from gui_app.encode_worker import EncodeWorker
@@ -25,6 +26,7 @@ from gui_app.calibration_worker import CalibrationWorker
 from gui_app.hardware_check import (HardwareCheckThread, format_report,
                                     check_capacity)
 from gui_app.coverage_worker import CoverageWorker
+from gui_app import rig_setup
 from gui_app.session_config import SessionConfig, RigProfile
 from gui_app.widgets.camera_grid import CameraGridWidget
 from gui_app.widgets.sidebar import SidebarWidget
@@ -150,7 +152,6 @@ class MainWindow(QMainWindow):
         self._sidebar.snapshot_clicked.connect(self._on_snapshot)
         self._sidebar.stimulation_clicked.connect(self._on_stimulation)
         self._sidebar.profile_changed.connect(self._on_profile_changed)
-        self._camera_mgr.error.connect(self._on_camera_error)
 
         self._stim_window: StimulationWindow | None = None
         self._stim_end_timer: QTimer | None = None
@@ -202,47 +203,44 @@ class MainWindow(QMainWindow):
         # fires a connected laser. Doing it at launch keeps that flash out of
         # the experiment. arduino-cli needs the port to itself, hence the order.
         QTimer.singleShot(1500, self._ensure_clean_firmware)
+        # After the window is up, so the warning is a dialog over a live
+        # window rather than a message behind the splash screen.
+        QTimer.singleShot(0, self._show_profile_warnings)
 
     def _open_cameras(self):
         """Open cameras for the current profile (synchronous — startup only)."""
         ok = self._open_cameras_bg()
         self._apply_camera_open_result(ok)
 
-    def _open_cameras_bg(self) -> bool:
-        """Blocking open (run on a worker thread for live profile switches)."""
+    def _open_cameras_bg(self):
+        """Blocking open (run on a worker thread for live profile switches).
+
+        RULE: the thread-placement flags and the capture core pool are applied
+        BEFORE open_all, through rig_setup, which is also what the probes
+        call. REASON: open_all ends by starting the PREVIEW grab threads, and
+        each pins itself against the core pool as it starts, so a flag set
+        afterwards reaches only the recording threads a later start rebuilds —
+        and the preview threads are what a profile switch leaves running.
+        Applying the profile anywhere but rig_setup is how the GUI came to run
+        unpinned while every probe number looked right.
+        """
         pfs = self._profile.pfs_path
-        # These are read by start_acquisition, and setting them here covers a
-        # profile switch too (which re-enters this function). Forgetting them
-        # is invisible: every probe number would look right while the GUI --
-        # the thing that actually records -- ran unpinned. That happened
-        # between 6b08123 and this commit.
-        self._camera_mgr.pin_capture_threads = self._profile.pin_capture_threads
-        self._camera_mgr.encoder_pcores = getattr(
-            self._profile, 'encoder_pcores', False)
-        # Keep capture threads off the DPC-heavy cores. Without this the GUI
-        # is far worse than headless: a camera pinned to CPU 0 diverged to
-        # kick_max_lag and was force-dropped, while probe_lag.py looked clean.
-        try:
-            import gui_app.cpu_affinity as _ca
-            _pool = _ca.capture_core_pool(
-                getattr(self._profile, "capture_core_exclude", None))
-            _ca.set_core_order(_pool)
-            print(f"[acq] capture core pool {_pool} "
-                  f"(excluding {self._profile.capture_core_exclude})", flush=True)
-        except Exception as e:
-            print(f"[acq] could not set capture core pool: {e}", flush=True)
-        self._camera_mgr.pin_encoder_threads = self._profile.pin_encoder_threads
-        if pfs and Path(pfs).exists():
-            return self._camera_mgr.open_all(
-                pfs, gige_driver=self._profile.gige_driver,
-                trigger_rate_limit=self._profile.trigger_rate_limit,
-                expect_cameras=self._profile.n_cameras,
-                max_num_buffer=self._profile.max_num_buffer)
-        return False
+        if not pfs or not Path(pfs).exists():
+            return CameraOpenError(
+                f"The profile's camera settings file is missing:\n"
+                f"{pfs or '(not set)'}\n\nSet pfs_path in the profile YAML to "
+                f"a file in configs/.")
+        rig_setup.apply_profile_to_manager(self._camera_mgr, self._profile)
+        return self._camera_mgr.open_all(
+            **rig_setup.open_kwargs(self._camera_mgr, self._profile))
 
     def _apply_camera_open_result(self, ok):
         if ok is True:
             n = self._camera_mgr.num_cameras
+            # The panes letterbox to the cameras' real frame shape; without it
+            # a 1920x1200 rig is drawn at the widget's default aspect.
+            self._camera_grid.set_camera_aspect(self._profile.frame_width,
+                                                self._profile.frame_height)
             self._camera_grid.setup_grid(n)
             self._camera_names = [f"cam{i+1}" for i in range(n)]
             # The camera count is only known now, and the repaint period scales
@@ -255,12 +253,15 @@ class MainWindow(QMainWindow):
             return
         self._camera_grid.setup_grid(0)
         self._camera_names = []
-        # open_all already emits a specific error for a camera fault; only warn
-        # here for the plain "nothing opened" case (e.g. missing .pfs).
-        if not isinstance(ok, Exception):
-            QTimer.singleShot(100, lambda: QMessageBox.warning(
-                self, "Camera Error",
-                "No cameras found or .pfs missing. Check connections and profile."))
+        # ONE dialog, carrying the reason the manager gave. open_all returns
+        # its refusal as a value for exactly this: the error signal used to
+        # deliver a specific message that a generic "No cameras found or .pfs
+        # missing" then contradicted.
+        reason = (str(ok) if isinstance(ok, Exception)
+                  else (self._camera_mgr.last_open_error
+                        or "No cameras found. Check connections and profile."))
+        QTimer.singleShot(100, lambda: QMessageBox.warning(
+            self, "Camera Error", reason))
 
     def _begin_busy(self, text: str):
         self._busy = True
@@ -312,10 +313,42 @@ class MainWindow(QMainWindow):
         )
 
     def _run_hardware_check(self):
+        """Survey the host once, at launch, off the UI thread.
+
+        The profile and the camera count are what make the libx264 bench, the
+        NVENC session probe and the encoder selection run HERE. Without them
+        the profile's `encoder` field selects nothing at all and the session
+        probe lands on the UI thread at the first Record, freezing the window
+        with no busy indicator.
+        """
         output_dir = self._profile.output_dir if self._profile else ""
-        self._hw_check_thread = HardwareCheckThread(output_dir)
-        self._hw_check_thread.finished.connect(self._on_hardware_check_done)
+        n_cams = self._camera_mgr.num_cameras or (
+            self._profile.n_cameras if self._profile else 0)
+        self._hw_check_thread = HardwareCheckThread(
+            output_dir, profile=self._profile, n_cams=n_cams)
+        self._hw_check_thread.report_ready.connect(self._on_hardware_check_done)
         self._hw_check_thread.start()
+
+    def _show_profile_warnings(self):
+        """Report the profiles that would not load, once the window is up.
+
+        A skipped profile is otherwise silent: the dropdown simply does not
+        offer it, so a rig whose own profile failed to parse comes up running
+        another rig's settings, or none at all.
+        """
+        warnings = self._sidebar.profile_warnings
+        if not self._profile.name:
+            self._sidebar.set_toggles_enabled(False)
+            self._sidebar.set_solve_enabled(False)
+            QMessageBox.critical(
+                self, "No rig profile",
+                ("\n".join(warnings) or "No rig profile could be loaded.")
+                + "\n\nAcquisition is disabled until one loads: a profile is "
+                  "what says how many cameras there are, what rate they run "
+                  "at and which pins the trigger board drives.")
+            return
+        if warnings:
+            QMessageBox.warning(self, "Rig profiles", "\n".join(warnings))
 
     def _on_hardware_check_done(self, report):
         if report.warnings:
@@ -403,29 +436,66 @@ class MainWindow(QMainWindow):
         """
         if self._state != State.RECORDING:
             return
-        try:
-            lags = self._camera_mgr.delivery_lags
-        except Exception:
+        msg = self._frontier_health_text() or self._delivery_health_text()
+        if msg is None:
             return
-        if not lags:
-            return
-        worst = max(lags)
-        if worst < 0.25:
-            msg = (f"Capture healthy — keeping up with the trigger "
-                   f"(max lag {worst * 1000:.0f} ms)")
-        elif worst < 1.0:
-            msg = (f"CAPTURE FALLING BEHIND: cam{lags.index(worst) + 1} is "
-                   f"{worst:.2f} s behind real time and growing. Close other "
-                   f"applications.")
-        else:
-            msg = (f"CAPTURE {worst:.1f} s BEHIND REAL TIME (cam"
-                   f"{lags.index(worst) + 1}). Frames will be lost when the "
-                   f"buffer pool fills. Stop and investigate.")
         # An overheating camera outranks a lag report: lag costs alignment,
         # thermal shutdown costs that camera for the rest of the session.
         if self._thermal_alert:
             msg = f"{self._thermal_alert}  |  {msg}"
         self.statusBar().showMessage(msg)
+
+    def _frontier_health_text(self):
+        """Kick-mode verdict, or None when kick-out is not running.
+
+        RULE: in kick mode the verdict comes from the per-camera TRIGGER lag,
+        not from delivery_lag_s. REASON: the coordinator holds every camera to
+        the slowest one, so what decides whether frames are force-dropped is
+        how many triggers a camera is behind the leader; and that count is
+        made of block IDs, so it carries none of the clock drift a
+        seconds-behind-real-time figure accumulates.
+        """
+        try:
+            lags = self._camera_mgr.frontier_lags
+        except Exception:
+            return None
+        live = [(n, i) for i, n in enumerate(lags) if n >= 0]
+        if not live:
+            return None
+        retired = [self._camera_label(i + 1) for i, n in enumerate(lags) if n < 0]
+        tail = f"  |  RETIRED: {', '.join(retired)}" if retired else ""
+        worst, idx = max(live)
+        cap = max(1, int(self._config.kick_max_lag) if self._config else 1)
+        name = self._camera_label(idx + 1)
+        if worst < cap * 0.25:
+            return (f"Capture healthy — every camera within {worst} trigger(s) "
+                    f"of the leader{tail}")
+        if worst < cap * 0.75:
+            return (f"CAPTURE FALLING BEHIND: {name} is {worst} triggers "
+                    f"behind the leader (cap {cap}). Close other "
+                    f"applications.{tail}")
+        return (f"{name} IS {worst} TRIGGERS BEHIND THE LEADER (cap {cap}): "
+                f"frames every camera captured are being dropped. Stop and "
+                f"investigate.{tail}")
+
+    def _delivery_health_text(self):
+        """Wall-clock verdict: how far behind real time delivery is running."""
+        try:
+            lags = self._camera_mgr.delivery_lags
+        except Exception:
+            return None
+        if not lags:
+            return None
+        worst = max(lags)
+        name = self._camera_label(lags.index(worst) + 1)
+        if worst < 0.25:
+            return (f"Capture healthy — keeping up with the trigger "
+                    f"(max lag {worst * 1000:.0f} ms)")
+        if worst < 1.0:
+            return (f"CAPTURE FALLING BEHIND: {name} is {worst:.2f} s behind "
+                    f"real time and growing. Close other applications.")
+        return (f"CAPTURE {worst:.1f} s BEHIND REAL TIME ({name}). Frames will "
+                f"be lost when the buffer pool fills. Stop and investigate.")
 
     def _start_thermal_watch(self):
         """Begin polling temperatures for this acquisition, if enabled."""
@@ -2042,9 +2112,6 @@ class MainWindow(QMainWindow):
             )
         self._stim_window.show()
         self._stim_window.raise_()
-
-    def _on_camera_error(self, msg: str):
-        QMessageBox.critical(self, "Error", msg)
 
     def _workers_running(self) -> bool:
         # _cam_op and _coverage_worker are usually masked by self._busy, but the
