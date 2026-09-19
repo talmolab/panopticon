@@ -490,7 +490,17 @@ check(33, "the whole run imported no vendor camera SDK",
 # shutdown, which reads as a crash rather than as a failure.
 win.close()
 spin(1.0)
-shutil.rmtree(SCRATCH, ignore_errors=True)
+# RULE: retry the removal rather than accept the first failure. REASON: on
+# Windows a directory whose files have just been closed stays un-removable for
+# a moment, so one rmtree leaves an empty shell behind every run and the temp
+# tree fills up with them.
+for _ in range(20):
+    shutil.rmtree(SCRATCH, ignore_errors=True)
+    if not SCRATCH.exists():
+        break
+    spin(0.25)
+if SCRATCH.exists():
+    print(f"could not remove the scratch directory {SCRATCH}", flush=True)
 
 print()
 for known in expected_failures:
