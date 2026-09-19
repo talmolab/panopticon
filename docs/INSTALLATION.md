@@ -755,17 +755,31 @@ differently from another.
 Sweep the camera subnet and look for a live host that is neither the adapter nor
 a camera. No temporary address is needed, because you are already on that subnet:
 
-```bash
-for i in $(seq 1 254); do
-  ( ping -n 1 -w 250 "192.168.5.$i" | grep -qa "TTL=" && echo "ALIVE 192.168.5.$i" ) &
-  (( i % 64 == 0 )) && wait
-done; wait
+```powershell
+$subnet = "192.168.5"
+$probes = 1..254 | ForEach-Object {
+    [pscustomobject]@{
+        IP   = "$subnet.$_"
+        Ping = (New-Object System.Net.NetworkInformation.Ping).SendPingAsync("$subnet.$_", 250)
+    }
+}
+[System.Threading.Tasks.Task]::WaitAll($probes.Ping)
+$probes | Where-Object { $_.Ping.Result.Status -eq 'Success' } |
+          ForEach-Object { "ALIVE $($_.IP)" }
 ```
+
+All 254 pings go out at once and the whole sweep takes about a second. It works
+in Windows PowerShell 5.1, the version Windows ships with, so nothing extra is
+needed.
 
 Then tell switch from camera by MAC prefix — `arp -a` after the sweep. Basler
 cameras are `00-30-53-*`; your switch vendor has its own OUI. Confirm with
-`curl -s -o /dev/null -w '%{http_code}' http://<ip>/`, which answers `200` for a
-web UI.
+
+```powershell
+(Invoke-WebRequest -UseBasicParsing -Uri http://<ip>/ -TimeoutSec 3).StatusCode
+```
+
+which answers `200` for a web UI.
 
 Do **not** bother with vendor layer-2 discovery protocols. NETGEAR's NSDP (UDP
 63321/63322) is unimplemented on the Smart Managed Pro line: on the reference rig
