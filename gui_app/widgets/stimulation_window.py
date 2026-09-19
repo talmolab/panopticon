@@ -1210,6 +1210,21 @@ class StimulationWindow(QDialog):
             return "\n\n".join(
                 [f"Pin {p} cannot carry a stim waveform: {why}." for p, why in bad]
                 + ["Move the block to a free pin."])
+        # Numbers the firmware cannot execute as written, and graph shapes it
+        # cannot turn into chains. Asked here, between the pin check and the
+        # conflict check, because compile_ino refuses both with a ValueError:
+        # without this the refusal reaches the operator as the launcher's
+        # generic error box with a traceback in it, and every one of these is
+        # otherwise SILENT on the board — the sketch runs, the trace says the
+        # pin was driven, and the pin did something else.
+        params = stim_compiler.parameter_problems(blocks)
+        if params:
+            return "\n\n".join(
+                [f"Block {bid}: {why}." for bid, why in params]
+                + ["Correct the numbers, or delete the block."])
+        shape = stim_compiler.structural_problems(blocks, edges)
+        if shape:
+            return "\n\n".join(s[:1].upper() + s[1:] + "." for s in shape)
         clash = stim_compiler.pin_conflicts(blocks, edges)
         if clash:
             pins = ", ".join(str(p) for p in clash)

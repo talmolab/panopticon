@@ -607,8 +607,9 @@ blocks = [{"id": "A", "x": 0, "y": 0, "pin": 51, "freq": 10, "pw": 5, "dur": 1},
 edges = [{"src": "A", "dst": "C"}, {"src": "B", "dst": "C"}]
 w._canvas.load_workflow(blocks, edges)
 problem = w._blocking_problem() or ""
-check(60, "a join A->C, B->C is reported as a merge on the merged block's pin",
-      "merge" in problem and "53" in problem and "2 chains" in problem,
+check(60, "a join A->C, B->C is refused as a fan-in on the merged BLOCK, "
+          "naming the remedy, not as a pin that mysteriously fights",
+      "C is reached by two chains" in problem and "duplicate the block" in problem,
       problem.split("\n\n")[0])
 check(61, "and the status line shows the same first sentence",
       w._status_lbl.text() == problem.split("\n\n")[0])
@@ -709,6 +710,46 @@ check(71, "a refused Enter shows the diagnostic and the next accepted Enter "
           "clears it",
       had_error and a.dur == 7 and "Invalid" not in w._status_lbl.text(),
       w._status_lbl.text())
+
+# -- the compiler's own refusals reach the operator as sentences --------------
+# Every shape below makes compile_ino raise, so without the editor asking the
+# compiler first, Apply, Test and Record refuse through the launcher's generic
+# error box with a traceback in it. Each is otherwise SILENT on the board: the
+# sketch compiles, the trace says the pin was driven, the pin does something
+# else.
+w = make()
+blk = {"id": "A", "x": 0, "y": 0, "pin": 53, "freq": 10, "pw": 5, "dur": 0.0004}
+w._canvas.load_workflow([blk], [])
+problem = w._blocking_problem() or ""
+check(72, "a duration below the firmware's 1 ms resolution is refused by name",
+      "Block A" in problem and "1 ms" in problem, problem.split("\n\n")[0])
+blk["dur"], blk["freq"] = 1.0, 2e6
+w._canvas.load_workflow([blk], [])
+problem = w._blocking_problem() or ""
+check(73, "a frequency the firmware would hold LOW is refused by name",
+      "Block A" in problem and "1 MHz" in problem, problem.split("\n\n")[0])
+blk["freq"] = 10
+w._canvas.load_workflow([blk], [])
+check(74, "and a block the firmware can execute is not refused",
+      w._blocking_problem() is None, str(w._blocking_problem()))
+
+# Two out-edges from one block: the canvas cannot draw it, but a hand-edited
+# stim_paradigm.json can carry it, and the walker would drop one branch from
+# the firmware without a word.
+two_out = [{"id": "A", "x": 0, "y": 0, "pin": 51, "freq": 10, "pw": 5, "dur": 1},
+           {"id": "B", "x": 0, "y": 200, "pin": 52, "freq": 10, "pw": 5, "dur": 1},
+           {"id": "C", "x": 300, "y": 0, "pin": 53, "freq": 10, "pw": 5, "dur": 1}]
+two_edges = [{"src": "A", "dst": "B"}, {"src": "A", "dst": "C"}]
+dropped = w._canvas.load_workflow(two_out, two_edges)
+check(75, "the canvas repairs a two-out-edge file on load rather than drawing "
+          "an arrow the firmware would never run",
+      dropped == 1 and len(w._canvas.get_workflow()[1]) == 1, f"dropped={dropped}")
+check(76, "and the shape the repair removed is one the editor would have "
+          "refused as a sentence",
+      any("outgoing arrows" in line
+          for line in stim_compiler.structural_problems(two_out, two_edges)),
+      str(stim_compiler.structural_problems(two_out, two_edges)))
+
 
 print()
 if failures:
