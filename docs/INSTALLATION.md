@@ -274,9 +274,9 @@ only the first two are visible inside the application:
    Three 1920x1200 cameras at 100 fps is about 78,000 packets/s per port,
    measured at 46% of a single core against a 4% average across 24 cores.
 
-**How it scales.** Threads grow at two per camera plus the UI, about 13 busy
-threads at six cameras. All share the one GIL, so the binding constraint is
-GIL-held work per thread per frame rather than core count: up to about 300 µs
+**How it scales.** Threads grow at two per camera plus the UI: about 19 busy
+threads at nine cameras, 13 at six. All share the one GIL, so the binding
+constraint is GIL-held work per thread per frame rather than core count: up to about 300 µs
 per thread per frame is safe even at 17 threads, while ~1000 µs breaks the 10 ms
 budget at 11. Cores beyond the grab and encode threads mostly help the network
 stack.
@@ -459,11 +459,18 @@ speed (it writes and deletes a 16 MB file to find out).
 
 Windows, today, but the dependency is shallow. The Windows-specific pieces are
 `PylonGigEConfigurator` and the inbound firewall rule, the `configure_nic.ps1`
-and `make_shortcut.ps1` scripts, and the two performance probes
+and `make_shortcut.ps1` scripts, the two performance probes
 `tools/experiments/probe_gil_wait.py` and
-`tools/experiments/probe_native_cpu.py`. The capture path does not depend
-on them: the binary-file flag is resolved with `getattr(os, "O_BINARY", 0)`, the
-`subprocess.STARTUPINFO` use in `encode_worker.py` is guarded by `sys.platform`,
+`tools/experiments/probe_native_cpu.py`, and `gui_app/cpu_affinity.py`, whose
+every entry point — core classification, pinning, thread priority, timer
+resolution — is guarded by a Windows check and returns without raising
+elsewhere, so `pin_capture_threads` and its three companions silently do
+nothing off Windows (`os.sched_setaffinity` and `os.nice` are the Linux
+equivalents for pinning and priority, and the P-core/E-core split comes from
+sysfs rather than `GetSystemCpuSetInformation`). The capture path does not
+depend on any of them: the binary-file flag is resolved with
+`getattr(os, "O_BINARY", 0)`, the `subprocess.STARTUPINFO` use in
+`encode_worker.py` is guarded by `sys.platform`,
 the serial port is a profile field, and `arduino-cli` is found via PATH or an
 environment variable. NVENC and pypylon both support Linux.
 
@@ -1064,6 +1071,8 @@ the table sort out where those two part company.
 | `kick_max_lag` | 240; the shipped `3dpose` profile sets 480 | How many frames one camera may lag the others before its missing triggers are force-dropped. Drives the NV12 ring size, so it is the main RAM lever; see *Choosing `kick_max_lag`* below. |
 | `max_num_buffer` | 1000; the shipped `3dpose` profile sets 600 | Driver-side buffers queued per camera, and usually the larger half of the RAM bill: `n_cams x max_num_buffer x frame_bytes`, so 1000 is 19.3 GiB at nine 1920x1200 cameras against 11.6 GiB at 600. Keep it at or above `kick_max_lag`. See *RAM* in section 1. |
 | `gige_driver` | `socket` | `socket` is user-space with reliable packet resends. `filter` is the in-kernel driver: less CPU, but with default resend settings it discards a frame rather than asking for the lost packet again, measured dropping about 23% of frames under six cameras at 100 fps on 2026-06-12. `auto` leaves pylon's default. |
+| `gev_bandwidth_reserve_pct` | not set, so each camera keeps its `.pfs` value | `GevSCBWR`, written through the backend at open: the percentage of link bandwidth (0..100) held back for packet resends. Reserving bandwidth lowers the bandwidth every camera is assigned, so it trades throughput for resend headroom and is opt-in per rig rather than a default. Outside 0..100 is refused at load. |
+| `gev_bandwidth_reserve_accum` | not set, so each camera keeps its `.pfs` value | `GevSCBWRA`, written at open beside the percentage above: how many reserve slots may pool, so a burst of resends can draw on more than one interval's reserve. Negative is refused at load. Set it with the percentage, not alone. |
 | `trigger_rate_limit` | 165, the reference camera's own maximum frame rate rather than a property of Panopticon | `AcquisitionFrameRate` written in trigger mode. Set it to *your* camera's maximum frame rate; 165 is that number for the reference a2A1920-165g5m. Keep it above the trigger rate, and never set it to `0`. See *Setting `trigger_rate_limit`* below. |
 | `thermal_poll_s` | 20.0; `0` disables | Seconds between camera temperature checks while acquiring. A camera that reaches its shutdown temperature stops delivering mid-session, so the GUI warns in the status bar and in `WARNINGS.txt` while there is still time to act. Every threshold is read from the camera itself (`BslTemperatureStatus`, `BsliOverTemperature`), so nothing here assumes a particular model. The read is a GVCP register access per camera — cheap at this interval, never put it on a per-frame path. |
 | `pfs_path` | — | The camera settings file from step 6. |
@@ -1072,6 +1081,7 @@ the table sort out where those two part company.
 | `serial_port` | `COM3`, the reference rig's port rather than a sensible fallback | The trigger board's serial port. Step 8 shows how to find yours. |
 | `trigger_pins` | `[2, 4, 6, 8, 10, 12]`, the reference rig's wiring rather than a sensible fallback | Every pin driving a camera's `Line1`, which is **not** necessarily one pin per camera: the reference rig fans these six pins out across nine cameras. What matters is that no camera sits on a pin the list omits; see *Wiring the trigger line* in section 1. A pin here is refused as a stimulation pin, and a pin on the serial link or in `stim_safe_pins` is refused here, both when the profile loads. |
 | `n_cameras` | 0, a code fallback nobody should keep | Refuse to start unless exactly this many cameras enumerate. `0` disables the check. Camera names are positional by serial-number order, so a camera that fails to enumerate renames every camera after it and attaches the calibration extrinsics to the wrong physical cameras. Set it. |
+| `camera_serials` | not set, so every enumerated camera is opened and named by enumeration order | The serial numbers this rig is made of, quoted strings in ascending order. Set it and `open_all()` opens only these and refuses when one of them is missing, which is the actual cure for the renaming hazard in the row above: a camera that fails to enumerate stops the session instead of renaming the ones after it. Names stay positional over the serial-sorted subset, so the list is refused at load unless it is ascending, free of duplicates, and the same length as `n_cameras`. Quote each serial: YAML reads a bare leading-zero number as octal. |
 | `stim_safe_pins` | `[53]`, the reference rig's laser pin, which is no protection at all on a rig wired differently | **Set this to the pin or pins your own stimulus hardware is wired to**; `[]` if you have none. They go LOW in the first statement of the sketch's `setup()`, before the serial handshake. `setup()` blocks on that handshake until the GUI connects, so a pin not listed here floats for the whole wait, and a powered laser driver reads floating as ON. Pins a loaded paradigm uses are added automatically, so this list is the floor protecting the recording-only sketch, the one flashed at launch when no paradigm is loaded. |
 | `calibration_exposure_us` | 0.0 | Exposure for calibration captures only; the `.pfs` values return for recordings. `0` keeps the `.pfs` value. The binding limit here is motion blur rather than the ceiling: at 15 ms a briskly waved board smears and its corners stop resolving, so move it slowly and pause at each pose. |
 | `calibration_gain_db` | -1.0 | Same for gain. `-1` keeps the `.pfs` value. |
@@ -1347,7 +1357,8 @@ not pytest, so run the lot rather than picking:
 
 ```powershell
 $env:QT_QPA_PLATFORM = "offscreen"
-Get-ChildItem test_*.py | ForEach-Object { uv run python $_ }
+Get-ChildItem test_*.py -Exclude test_sync_router.py |
+    ForEach-Object { uv run python $_ }
 ```
 
 The offscreen platform is what lets the suites that build Qt widgets run on a
@@ -1376,15 +1387,19 @@ alarming output on the way through is expected:
 Run them through `uv run`, not a bare `python`: several need numpy, OpenCV or
 PyQt5 from the project environment, and a few skip cases silently without them.
 
-One more suite needs an NVENC GPU, but still no cameras:
+That set is also the acceptance run for a machine with **no rig hardware at
+all**: install without the vendor SDKs (`uv sync --no-group rig`, see
+[CONTRIBUTING.md](../CONTRIBUTING.md)) and every suite in the block above still
+passes, because none of them needs pypylon or PyNvVideoCodec.
+
+One more suite needs an NVENC GPU, though still no cameras, which is why the
+command above excludes it. `pynvvideocodec` is in the `rig` group, so this one
+is exactly the suite that cannot run after `uv sync --no-group rig`:
 
 ```powershell
 uv run python test_sync_router.py
 ```
 
-This is also the acceptance run for a machine with **no rig hardware at all**.
-Install without the vendor SDKs (`uv sync --no-group rig`, see
-[CONTRIBUTING.md](../CONTRIBUTING.md)) and every suite above still passes.
 Beyond the suites, `profiles/sim.yaml` selects a simulated camera backend and a
 simulated trigger board, so the application itself — preview, Calibrate,
 Record, Stop, the stimulation editor's Apply — runs end to end with nothing

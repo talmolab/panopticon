@@ -204,10 +204,15 @@ and refuses outright in four cases:
   pins, or a single pin driven by two chains at once.
 
 A tight disk is a warning, not a refusal, and every warning becomes a "Start
-anyway?" prompt. Existing data in the target folder prompts before it is
-overwritten; that check counts `blockids.npy`, `frametimes.npy` and
-`alignment.npz` as well as videos, so a folder whose mp4s were moved away for
-labelling is still recognised as holding data.
+anyway?" prompt. Existing data in the target folder is never overwritten and
+never deleted: a dialog headed *Existing data will be moved aside* names both
+paths, and on OK the whole folder is renamed `<name>.previous-<HHMMSS>` while
+this acquisition records into a fresh folder under the canonical name. Cancel
+leaves everything where it is and the acquisition does not start. The check
+counts `blockids.npy`, `frametimes.npy` and `alignment.npz` as well as videos,
+so a folder whose mp4s were moved away for labelling is still recognised as
+holding data; zero-length files are not counted, so a start refused after
+opening its streams leaves nothing to move.
 
 Past the preflight, the next thing may be a wait. A recording runs under
 whichever firmware matches the session: the recording-only sketch if no
@@ -433,16 +438,19 @@ met the graph freezes and the caption reads `READY`. That is your cue to stop.
 
 The four figures below are rendered illustrations of particular states, not
 captures of one continuous session, which is why the elapsed timer reads `0:00`
-in all of them. The target after the slash is whatever the profile they were
-drawn against set, so your own rig's caption shows your own
-`calibration_min_per_cam_shared`.
+in all of them. They were drawn on a six-camera rig whose profile set
+`calibration_min_per_cam_shared: 250` and `calibration_min_edge: 80`, and before
+the caption carried a `groups` segment at all, so read the shape of the graph
+from them and not their numerals. Your own rig prints
+`paired <worst>/<calibration_min_per_cam_shared>  grid <worst>/3  groups <n>/1`
+against your own profile's thresholds.
 
 | | |
 |---|---|
 | ![Coverage graph, nothing detected](images/calib_stage_1_start.png) | ![Coverage graph, partial coverage](images/calib_stage_2_partial.png) |
-| **Stage 1.** Nothing detected yet. Every edge is dark and thin, every node is dull. `paired 0/120  grid 0/3`. | **Stage 2.** Cameras 1 and 3 are lit — they can see the board right now. Edges have begun to thicken. `paired 60/120  grid 2/3`. |
+| **Stage 1.** Nothing detected yet. Every edge is dark and thin, every node is dull, and every count in the caption is zero. | **Stage 2.** Cameras 1 and 3 are lit — they can see the board right now. Edges have begun to thicken, and `paired` and `grid` are part way to their targets. |
 | ![Coverage graph, nearly ready](images/calib_stage_3_nearly.png) | ![Coverage graph, READY](images/calib_stage_4_ready.png) |
-| **Stage 3.** Nearly there. Camera 5 is lit, most edges are bright and thick, and the 1-4 edge is still thin — that pair has barely seen the board together. `paired 110/120  grid 3/3`. | **Stage 4.** Every condition met. The whole graph freezes solid white and the caption reads `READY — m:ss`, with the elapsed time stopped at the moment it got there. |
+| **Stage 3.** Nearly there. Camera 5 is lit, most edges are bright and thick, and the 1-4 edge is still thin — that pair has barely seen the board together. `grid` has reached 3/3 and `paired` is just short of its target. | **Stage 4.** Every condition met. The whole graph freezes solid white and the caption reads `READY — m:ss`, with the elapsed time stopped at the moment it got there. |
 
 Everything on the graph is counted in *detection ticks*. One tick is a single
 pass of the board detector across the current frame from every camera, so a tick

@@ -249,7 +249,8 @@ prompt, naming the `calibration/` folder.
 
 On a *repeat* calibration into the same session, nothing is overwritten and
 nothing is deleted. A dialog headed *Existing data will be moved aside* names
-both paths and waits; on Continue the whole `calibration/` folder is renamed
+both paths and waits. Its question ends *Continue?* and its two buttons read
+**OK** and **Cancel**. On OK the whole `calibration/` folder is renamed
 `calibration.previous-<HHMMSS>` beside itself and the new capture starts in a
 fresh, empty `calibration/`. Cancel leaves everything as it was and the
 acquisition does not start.
@@ -288,18 +289,23 @@ movement matters more than more exposure.
 Then the part you do: **move the board slowly through the arena and pause at
 each pose.** The coverage HUD in the sidebar keeps score and tells you when
 to stop. The four figures below are rendered illustrations of particular
-moments, not frames from one session, and the target in each caption is the one
-the profile they were drawn against set. Your own rig's caption shows your own
-`calibration_min_per_cam_shared`.
+moments, not frames from one session. They were drawn on a six-camera rig whose
+profile set `calibration_min_per_cam_shared: 250` and `calibration_min_edge: 80`,
+and before the caption carried a `groups` segment at all, so read the *shape* of
+the graph from them and not their numerals. The caption your own rig prints is
+`paired <worst>/<calibration_min_per_cam_shared>  grid <worst>/3  groups <n>/1`,
+against your own profile's thresholds.
 
 ### Stage 1 — nothing detected yet
 
 ![Coverage graph, nothing detected](images/calib_stage_1_start.png)
 
 Each numbered circle is a camera. Each line is a *pair* of cameras. Everything
-is dim, the caption reads `paired 0/120  grid 0/3  groups N/1` with one group
-per camera, and the timer has started. The `120` is the reference profile's
-`calibration_min_per_cam_shared`.
+is dim, the caption reads
+`paired 0/<calibration_min_per_cam_shared>  grid 0/3  groups N/1`, one group per
+camera, and the timer has started. The target after the slash is your own
+profile's: 120 on the shipped `3dpose` profile, 250 on the rig this figure was
+drawn against.
 
 **What to do:** hold the board up where at least two cameras can see it. A node
 brightens when that camera can see the board right now. If no node ever
@@ -313,8 +319,8 @@ brightens, the board is too dark or the wrong board config is selected; see
 Cameras 1 and 3 are glowing: they see the board at this instant. Lines that have
 begun to brighten and thicken are pairs accumulating shared detections. The
 four-cell badge on each node is that camera's field of view in quadrants; a cell
-turns green once the board's centre has been seen in it. The caption
-`paired 60/120  grid 2/3` reports the **worst** camera on each count.
+turns green once the board's centre has been seen in it. Every number in the
+caption reports the **worst** camera on that count, not a total.
 
 **What to do:** carry the board into the regions where two cameras overlap, so
 the lines fill in, and into the corners of each view, so the badges fill in. A
@@ -325,8 +331,9 @@ board waved in the middle of the arena grows neither.
 ![Coverage graph, nearly ready](images/calib_stage_3_nearly.png)
 
 Most lines are now thick and bright, `grid 3/3` says every camera has hit its
-quadrant minimum, and `paired 110/120` says the weakest camera is close. One
-pair, the vertical line between 1 and 4, is still thin and dark.
+quadrant minimum, and the `paired` count says the weakest camera is close to
+`calibration_min_per_cam_shared`. One pair, the vertical line between 1 and 4,
+is still thin and dark.
 
 **What to do:** work that pair. Hold the board where both cameras see it at
 once; for opposed cameras, edge-on between them. READY needs the pair graph to
@@ -379,7 +386,7 @@ It usually will not, on a first attempt. **READY is a coverage target, not a
 gate.** Flip Calibrate off at any moment and you have a perfectly ordinary
 calibration recording; the solve decides whether what you captured is usable.
 
-So when the caption sits at something like `paired 110/120`: **if the numbers
+So when the `paired` count sits just short of its target: **if the numbers
 are still climbing, keep going.** If they have stopped, the question is *which*
 condition is stuck. Grid badge short of 3/3? Carry the board into the corners of
 that camera's view. One edge still thin and dark? Work that pair, edge-on
@@ -1030,9 +1037,10 @@ shorter one may fit.
 **An existing recording in the target folder** is checked last, and it is never
 overwritten. If the folder holds a non-empty `.mp4`, `raw.bin`, `stream.h264`,
 `blockids.npy`, `frametimes.npy` or `alignment.npz`, a dialog headed *Existing
-data will be moved aside* names where it is going and waits. On Continue the
-folder is renamed `<name>.previous-<HHMMSS>` and this acquisition records into
-the original name; on Cancel nothing moves and the acquisition does not start.
+data will be moved aside* names where it is going and waits. Its question ends
+*Continue?* and its two buttons read **OK** and **Cancel**. On OK the folder is
+renamed `<name>.previous-<HHMMSS>` and this acquisition records into the
+original name; on Cancel nothing moves and the acquisition does not start.
 Nothing is ever deleted, which matters because recording over old files only
 replaces the ones this run writes: a camera that captured nothing would keep the
 previous session's mp4 and metadata under identical names, and the alignment
@@ -1421,7 +1429,7 @@ session that looks fine and is not, so read it before you need it.
 | `NVENC granted only 5 concurrent sessions but 6 cameras need one each.` | The GPU driver caps concurrent encode sessions, and that cap has changed across driver generations. Cameras beyond it would silently fall back to writing raw frames. Close anything else holding encode sessions, record fewer cameras, or set `realtime_encode: false` in the profile to record raw deliberately. |
 | `Disk may be short: a 10-minute recording would need ~X GiB and only Y GiB is free.` | A warning, not a refusal: ten minutes is an assumption, not a known recording length. A shorter recording is fine. |
 | `Disk is tight: a 10-minute recording needs ~X GiB of Y GiB free.` | The milder version of the same check, raised once ten minutes would use more than 80% of the free space. This session will fit; a second one may not. Clear space now rather than between recordings. |
-| `Existing data will be moved aside` | The target folder already holds videos or their metadata. It fires for a calibration as well as a recording, so it is what you see on a second calibration into the same session. Continue renames the whole folder to `<name>.previous-<HHMMSS>` and records into the original name; nothing is deleted or written over, and the previous solve's `calibration.toml`, `reprojection_error_histogram.png` and `codet_frames.json` go with it. Cancel abandons the start. Change the metadata fields first if you would rather the two attempts sat in separate sessions. |
+| `Existing data will be moved aside` | The target folder already holds videos or their metadata. It fires for a calibration as well as a recording, so it is what you see on a second calibration into the same session. The question ends *Continue?* but the affirmative button reads **OK**; it renames the whole folder to `<name>.previous-<HHMMSS>` and records into the original name; nothing is deleted or written over, and the previous solve's `calibration.toml`, `reprojection_error_histogram.png` and `codet_frames.json` go with it. Cancel abandons the start. Change the metadata fields first if you would rather the two attempts sat in separate sessions. |
 | `Could not open serial port COM3. Close Arduino Serial Monitor / other apps holding the port and retry.` | Something else has the port: an Arduino Serial Monitor, a second copy of the application, or the wrong port in the profile. |
 | `The trigger board did not acknowledge the start command, so no triggers would be sent.` | The board did not confirm the configuration, even after a forced reset, and it has confirmed before. The cameras are rolled back rather than recording a full-length session with no frames in it. Check the USB cable and that the board is running the Panopticon sketch. |
 | `Cannot record with this stim workflow` | The canvas has a forbidden pin, one pin driven by two chains, or a loop with no Starting block. The message names which. Fix the graph. |

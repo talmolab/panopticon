@@ -1661,9 +1661,12 @@ rigs, so nothing rig-specific belongs in code (notably not stim pin numbers).
 | `kick_max_lag` | Coordinator depth in frames. Ring RAM scales linearly with it |
 | `max_num_buffer` | Driver-side buffers per camera. Pool RAM scales linearly with it, and it is usually the larger of the two |
 | `n_cameras` | Refuse to start unless exactly this many cameras enumerate |
+| `camera_serials` | The serials this rig is made of. Opens only these and refuses a missing one, so a failed enumeration cannot rename the cameras after it. Ascending, unique, and the same length as `n_cameras`, or the profile is refused |
 | `gige_driver` | `socket`, `filter` or `auto` |
+| `gev_bandwidth_reserve_pct`, `gev_bandwidth_reserve_accum` | `GevSCBWR` and `GevSCBWRA`, written through the backend at open when set: link bandwidth held back for packet resends, and how many reserve slots may pool |
 | `trigger_rate_limit` | `AcquisitionFrameRate` in trigger mode; sets the exposure ceiling and paces readout |
 | `pfs_path` | Camera settings file: exposure, gain, ROI, pixel format, packet size, `GevSCPD` |
+| `output_dir`, `name` | Where sessions are written, and the label in the profile dropdown. The sidebar's directory button overrides `output_dir` per machine |
 | `board_config` | ChArUco geometry and `board_legacy` |
 | `serial_port`, `trigger_pins` | Trigger board location and pin map |
 | `stim_safe_pins` | Pins driven LOW before the serial handshake |
@@ -1703,10 +1706,14 @@ listing a subset.
 **Hardware-free suites.** Every one of these runs on a machine with no cameras,
 no trigger board and no GPU, which is what makes them the acceptance run for a
 fresh install. The whole set is
-`Get-ChildItem test_*.py | ForEach-Object { uv run python $_ }`, with
-`$env:QT_QPA_PLATFORM = "offscreen"` set first for the Qt ones.
+`Get-ChildItem test_*.py -Exclude test_sync_router.py | ForEach-Object { uv run python $_ }`,
+with `$env:QT_QPA_PLATFORM = "offscreen"` set first for the Qt ones. The
+exclusion is the one suite below that needs a GPU. The third column names what
+each suite needs on top of a bare python; every one of those is a core
+`[project]` dependency, so `uv sync` installs the lot and the only thing a
+headless host adds is the offscreen Qt platform.
 
-| Suite | Covers | Needs beyond the project environment |
+| Suite | Covers | Needs beyond a bare python |
 |---|---|---|
 | `test_frame_sync.py` | Coordinator equals post-hoc intersection; group integrity; wrap; retirement; drop attribution; the block-ID rate check | Nothing |
 | `test_grab_failure.py` | Every path out of `GrabThread.run()` retires the camera, with the SDK absent from `sys.modules` | Qt, offscreen |
