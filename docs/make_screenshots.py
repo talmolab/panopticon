@@ -20,6 +20,12 @@ captures of a particular session, and the docs say so where they appear. The
 coverage stages are expressed RELATIVE to the profile's thresholds and the
 READY flag comes from the detector's own rule, so the captions in the images
 follow the profile instead of drifting from it.
+
+RULE: run this on a real display, never with QT_QPA_PLATFORM=offscreen.
+REASON: the offscreen platform grabs the widgets with every drawText dropped,
+so the figures come out with no node numbers and no caption -- and the caption
+is where the thresholds and the group count are, which is the whole reason
+these images are regenerated rather than kept.
 """
 import argparse
 import sys
