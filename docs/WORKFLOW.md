@@ -171,11 +171,19 @@ be identified months later. Eight in all, in the sidebar:
 | Date | today, as `YYYYMMDD` | folder name and filename |
 | Mouse 1 | blank → `m1` | folder name and filename |
 | Mouse 2 | blank → `m2` | folder name and filename |
-| Assay | `open_field` | recorded in `session_metadata.json` |
-| Experimenter | `IT` | recorded in `session_metadata.json` |
-| Cohort | blank | recorded in `session_metadata.json` |
-| Cage | blank | recorded in `session_metadata.json` |
-| Notes | blank | recorded in `session_metadata.json` |
+| Assay | from the profile | recorded in `session_metadata.json` |
+| Experimenter | from the profile | recorded in `session_metadata.json` |
+| Cohort | from the profile, blank unless it sets one | recorded in `session_metadata.json` |
+| Cage | from the profile, blank unless it sets one | recorded in `session_metadata.json` |
+| Notes | from the profile, blank unless it sets one | recorded in `session_metadata.json` |
+
+The last five are pre-filled from the selected profile's `metadata_defaults`,
+not from anything in the code, and the reference `3dpose` profile fills in its
+own operator and assay: `IT` and `open_field`. **Change them in your own
+profile.** Whatever stands in a field when an acquisition ends is written into
+`session_metadata.json`, so a prefilled value nobody noticed attributes the
+session to somebody else. Switching profiles re-fills only the fields you have
+not typed into, so a value entered for this session survives the change.
 
 With Date `20260904`, Mouse 1 `m1` and Mouse 2 `m2`, the session folder becomes
 `<output>/20260904/m1_m2/` and each video inside it is named
