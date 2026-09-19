@@ -24,6 +24,7 @@ that pulls it back into the capture modules fails here.
 
     python test_grab_failure.py
 """
+import json
 import os
 import sys
 import threading
@@ -811,6 +812,162 @@ class _RaisingFull:
         return False
 
 
+# ── the split point is the CODED count, not the fed one ──────────────────────
+
+class _CodingEncoder:
+    """Encoder stand-in that counts coded pictures the way libx264 does.
+
+    `Encode()` returns as soon as the plane is handed to the child, so a frame
+    is coded one call later; `frames_out` therefore trails `encoded` by the
+    frame still in flight, and where the encoder dies the flush that would
+    have coded it never arrives. `dies_after` frames are accepted, the next
+    call raises.
+    """
+
+    def __init__(self, dies_after=None):
+        self._dies_after = dies_after
+        self.calls = 0
+        self.frames_out = 0
+        self.ended = False
+
+    def Encode(self, nv12):
+        self.calls += 1
+        if self._dies_after is not None and self.calls > self._dies_after:
+            raise RuntimeError("libx264 encoder died: ffmpeg exit=1")
+        if self.calls > 1:
+            self.frames_out += 1        # the PREVIOUS frame came back coded
+        return b"nal"
+
+    def EndEncode(self, timeout_s=None):
+        self.ended = True
+        if self._dies_after is not None:
+            return b""                  # a dead child flushes nothing
+        self.frames_out = self.calls    # a healthy flush codes the last frame
+        return b"nal"
+
+    def Close(self):
+        pass
+
+
+class _NvencLikeEncoder:
+    """Returns each frame's bytes from Encode() and exposes no frames_out."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def Encode(self, nv12):
+        self.calls += 1
+        return b"nal"
+
+    def EndEncode(self):
+        return b""
+
+
+def _drain(t, enc, tmp, name, n_frames):
+    """Feed n_frames through a real _EncoderThread and finish it as run() does.
+
+    Returns the camera directory the reconciliation wrote into.
+    """
+    d = tmp / name
+    d.mkdir()
+    fd = os.open(str(d / "stream.h264"),
+                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0))
+    et = gt._EncoderThread(0, enc, fd, d / "raw_tail.bin", H)
+    et.start()
+    for _ in range(n_frames):
+        et.queue.put(np.zeros((H * 3 // 2, W), np.uint8))
+    t.block_ids = list(range(1, n_frames + 1))
+    t.timestamps = [i / FPS for i in range(n_frames)]
+    t.frame_count = n_frames
+    exited = t._finish_encoder(et)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    assert exited, "the encoder thread did not finish draining"
+    return d
+
+
+def test_split_point_is_the_coded_count(tmp):
+    """An encoder that dies mid-stream must not have its last fed frame
+    recorded as persisted.
+
+    blockids.npy records only frames that reached a file. A frame accepted by
+    Encode() and never coded leaves NO gap when it is counted, so every later
+    frame of this camera maps to the wrong trigger and the recording still
+    looks perfect — the same silent class as the block-ID axiom.
+    """
+    enc = _CodingEncoder(dies_after=5)
+    t = _make(FakeRouter(), DeadCamera(), tmp, raw_path=tmp / "dying" / "raw.bin")
+    d = _drain(t, enc, tmp, "dying", 8)
+    # Fed frames 1-5 were accepted, 1-4 coded; 6-8 spilled. Trigger 5 reached
+    # NEITHER file, and it sits between the stream and the tail — so it comes
+    # out of the middle of the list, leaving a GAP that says so. Truncating the
+    # end instead would leave 1-7 against a video holding 1,2,3,4,6,7,8.
+    assert enc.frames_out == 4 and t.block_ids == [1, 2, 3, 4, 6, 7, 8],         (enc.frames_out, t.block_ids)
+    assert t.timestamps == [i / FPS for i in (0, 1, 2, 3, 5, 6, 7)], t.timestamps
+    assert t.frame_count == 7, t.frame_count
+    info = json.loads((d / "encoded.json").read_text())
+    assert info == {"encoded": 4, "spilled": 3, "persisted": 7}, info
+    assert any("coded=4 of 5 fed" in w for w in t.warnings), t.warnings
+    assert any("spliced out at index 4" in w for w in t.warnings), t.warnings
+    print("23) an encoder that dies mid-stream splits at the coded count and "
+          "splices the uncoded junction frame out of the middle: PASS")
+
+
+def test_healthy_encoder_keeps_every_frame(tmp):
+    """The reconciliation must be a no-op on a run that encoded everything."""
+    enc = _CodingEncoder()
+    t = _make(FakeRouter(), DeadCamera(), tmp, raw_path=tmp / "healthy" / "raw.bin")
+    d = _drain(t, enc, tmp, "healthy", 8)
+    assert enc.frames_out == 8 and t.block_ids == list(range(1, 9)),         (enc.frames_out, t.block_ids)
+    assert t.warnings == [] and not (d / "encoded.json").exists()
+    print("24) a healthy encoder keeps every block ID and writes no split "
+          "point: PASS")
+
+
+def test_encoder_without_frames_out_uses_the_fed_count(tmp):
+    """NVENC returns each frame's bytes from Encode(), so fed IS coded."""
+    enc = _NvencLikeEncoder()
+    t = _make(FakeRouter(), DeadCamera(), tmp, raw_path=tmp / "nvenc" / "raw.bin")
+    d = _drain(t, enc, tmp, "nvenc", 6)
+    assert enc.calls == 6 and t.block_ids == list(range(1, 7)),         (enc.calls, t.block_ids)
+    assert t.warnings == [] and not (d / "encoded.json").exists()
+    print("25) an encoder with no frames_out reconciles against the fed count: "
+          "PASS")
+
+
+def test_abandon_bounds_the_flush_as_well_as_the_join(tmp):
+    """release_encoder() passes a deadline on to an EndEncode that takes one."""
+    seen = []
+
+    class _TimedEncoder:
+        def Encode(self, nv12):
+            return b""
+
+        def EndEncode(self, timeout_s=None):
+            seen.append(timeout_s)
+            return b""
+
+    et = gt._EncoderThread(0, _TimedEncoder(), -1, tmp / "unused.bin", H)
+    et.release_encoder(timeout_s=0.25)
+    assert seen == [0.25], seen
+    et2 = gt._EncoderThread(0, _TimedEncoder(), -1, tmp / "unused.bin", H)
+    et2.release_encoder()
+    assert seen == [0.25, None], seen
+
+    class _NoTimeoutEncoder:
+        def EndEncode(self):
+            seen.append("no-arg")
+            return b""
+
+    et3 = gt._EncoderThread(0, _NoTimeoutEncoder(), -1, tmp / "unused.bin", H)
+    et3.release_encoder(timeout_s=0.25)
+    assert seen[-1] == "no-arg", seen
+    print("26) the teardown deadline reaches EndEncode where it takes one and "
+          "is dropped where it does not: PASS")
+
+
 def main():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -834,6 +991,10 @@ def main():
         test_pre_trigger_silence_is_not_a_stall(tmp)
         test_signalled_stall_without_history_retires(tmp)
         test_failed_grab_is_released_on_every_path(tmp)
+        test_split_point_is_the_coded_count(tmp)
+        test_healthy_encoder_keeps_every_frame(tmp)
+        test_encoder_without_frames_out_uses_the_fed_count(tmp)
+        test_abandon_bounds_the_flush_as_well_as_the_join(tmp)
     test_stop_incomplete_keeps_results_and_abandon_leaks_the_stuck_camera()
     test_stop_bounds_are_shared_not_per_thread()
     test_draining_thread_is_not_escalated()

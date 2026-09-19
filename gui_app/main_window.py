@@ -1652,15 +1652,15 @@ class MainWindow(QMainWindow):
         a board found carrying a previous session's paradigm.
 
         The waiting read belongs to the serial controller, which owns the
-        port and the ack grammar; until it offers one (`identify()`), the ack
-        this stop provokes is collected here. Pre-RDY firmware answers
-        nothing and costs one stop-ack timeout, once per launch.
+        port and the ack grammar, and `identify()` is it. The fallback below
+        stays only for a stand-in controller that predates it; pre-RDY
+        firmware answers nothing either way and costs one stop-ack timeout,
+        once per launch.
         """
         pins = self._profile.trigger_pins
         identify = getattr(teensy, "identify", None)
         if callable(identify):
-            identify()
-            return getattr(teensy, "board_id", None)
+            return identify(pins)
         teensy.stop_triggers(pins)
         if not getattr(teensy, "_speaks_rdy", False):
             await_ack = getattr(teensy, "_await_ack", None)

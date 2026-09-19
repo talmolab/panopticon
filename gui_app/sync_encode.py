@@ -28,7 +28,7 @@ _O_BINARY = getattr(os, "O_BINARY", 0)
 
 from gui_app import encoders
 from gui_app.frame_sync import FrameSyncCoordinator
-from gui_app.grab_thread import (_EncoderThread, write_split_point,
+from gui_app.grab_thread import (_EncoderThread, _end_encode, write_split_point,
                                  DRAIN_SENTINEL_TIMEOUT_S, DRAIN_JOIN_TIMEOUT_S)
 
 #: Bound on abandon() as a whole. An encoder thread that has not left
@@ -36,14 +36,21 @@ from gui_app.grab_thread import (_EncoderThread, write_split_point,
 ABANDON_TIMEOUT_S = 5.0
 
 
-def _release_loose_encoder(enc) -> None:
+def _release_loose_encoder(enc, timeout_s=None) -> None:
     """End and drop an encoder no _EncoderThread owns.
 
     The session is freed by the object's destructor, so the last reference
     must go here, after EndEncode() and Close() where the encoder has one.
+
+    `timeout_s` bounds the flush; None means the encoder's own default. RULE:
+    every caller passes a bound. REASON: this runs on a failure path with no
+    recording to save, and a CPU encoder's EndEncode waits on a child process
+    that may already be the reason the failure happened — an unbounded flush
+    would hang the constructor that is trying to report the encoders
+    unavailable.
     """
     try:
-        enc.EndEncode()
+        _end_encode(enc, timeout_s)
     except Exception:
         pass
     close = getattr(enc, "Close", None)
@@ -121,7 +128,9 @@ class SyncEncodeRouter:
             self.unavailable_reason = f"{type(e).__name__}: {e}"
             print(f"[sync] encoder init failed, kick-out unavailable: {e}", flush=True)
             if pending is not None:
-                _release_loose_encoder(pending)
+                # Bounded by the same budget abandon() uses: this path has no
+                # deadline of its own, and it must not become one.
+                _release_loose_encoder(pending, timeout_s=ABANDON_TIMEOUT_S)
                 pending = None
             for fd in self._fds:
                 try:
@@ -230,9 +239,21 @@ class SyncEncodeRouter:
         the process does not always exit here (the failed-finalize path returns
         to IDLE), so a leaked session is reported rather than assumed harmless.
 
-        `timeout_s` bounds the WHOLE call, not each thread: the threads are
-        wedged concurrently if at all, and a per-thread bound would make the
-        caller wait n times longer at nine cameras than at one.
+        `timeout_s` is a BEST-EFFORT bound on the whole call, not a bound per
+        thread: the threads are wedged concurrently if at all, and a per-thread
+        bound would make the caller wait n times longer at nine cameras than at
+        one. The remaining budget is passed down into release_encoder() too,
+        because the flush inside EndEncode() waits as long as the join does —
+        bounding only the join leaves the per-camera multiple in place.
+
+        Best effort, because the deadline does not reach every wait. Once
+        CpuEncoder.EndEncode's deadline expires it calls kill(), whose waits
+        are fixed (proc.wait 5 s plus two reader joins of 1 s), and EndEncode
+        then joins its stderr reader for another 1 s. A child wedged hard
+        enough to need killing can therefore overrun the shared deadline by
+        several seconds, once per such camera — so at nine cameras the
+        per-camera multiple is reduced, not eliminated. Removing the residual
+        needs kill()'s waits to share EndEncode's deadline, in cpu_encode.
 
         A stream.h264 left at zero bytes is removed once its fd is closed. An
         abandoned session never recorded a frame into it, and an empty stream
@@ -249,7 +270,8 @@ class SyncEncodeRouter:
                 exited = False
             if exited:
                 try:
-                    et.release_encoder()
+                    et.release_encoder(
+                        timeout_s=max(0.05, deadline - time.monotonic()))
                 except Exception:
                     pass
                 if i < len(self._fds):
@@ -317,6 +339,12 @@ class SyncEncodeRouter:
                 os.close(fd)
             except Exception:
                 pass
+        # What each encoder actually CODED, taken here because release_encoder()
+        # below drops the encoder the count lives on and the reconciliation
+        # further down needs it. A live thread's entry is unused (that camera
+        # is reported unverified instead).
+        coded = [et.coded_frames() if not is_alive else et.encoded
+                 for et, is_alive in zip(self._encoders, alive)]
         # Hand the encoder sessions back now rather than whenever the router
         # happens to become unreachable: the next acquisition needs them and the
         # NVENC driver cap leaves no slack at 9 cameras.
@@ -346,9 +374,23 @@ class SyncEncodeRouter:
         # the two arrays are identical by construction, so it passes while the
         # videos disagree.
         #
-        # encoded + spilled is the true persisted count, and both are in arrival
-        # order (FIFO queue, appended in the same order), so truncating to it is
-        # the correct repair rather than a guess.
+        # coded + spilled is the true persisted count, and both are in arrival
+        # order (FIFO queue, appended in the same order), so reconciling against
+        # it is the correct repair rather than a guess. Coded, not fed: Encode()
+        # accepting a frame is not the encoder emitting it, and where the
+        # encoder died the flush that would have emitted the last frame never
+        # arrives, so the fed count over-claims by one frame permanently.
+        #
+        # RULE: the (encoded - coded) frames the encoder never emitted are
+        # SPLICED OUT at index `coded`, not truncated from the end. REASON:
+        # stream.h264 holds fed frames [0, coded) and raw_tail.bin holds
+        # [encoded, encoded + spilled), and encode_worker concatenates the tail
+        # onto the stream — so the frames that reached neither file sit in the
+        # MIDDLE of the arrival order. Deleting from the end instead would leave
+        # a contiguous run of block IDs whose count matches the mp4 exactly
+        # while every frame from index `coded` onward carried a trigger
+        # (encoded - coded) too small: a misaligned recording that presents as a
+        # perfect one, which is the block-ID-axiom failure class.
         for i, et in enumerate(self._encoders):
             if alive[i]:
                 # Counters are still moving; any repair would be based on a
@@ -360,23 +402,31 @@ class SyncEncodeRouter:
                        f"count against blockids.npy.")
                 self._warn(i, msg)
                 continue
-            persisted = et.encoded + et.spilled
+            persisted = coded[i] + et.spilled
             claimed = len(self.block_ids[i])
+            lost = max(0, et.encoded - coded[i])
             if persisted != claimed:
                 msg = (f"cam{i+1}: block-ID bookkeeping claimed {claimed} frames but "
-                       f"only {persisted} were persisted (encoded={et.encoded} "
-                       f"spilled={et.spilled}, encoder_failed={et.failed}); "
-                       f"truncated to {persisted} so frame indices still map to the "
-                       f"correct triggers")
+                       f"only {persisted} were persisted (coded={coded[i]} of "
+                       f"{et.encoded} fed, spilled={et.spilled}, "
+                       f"encoder_failed={et.failed}); "
+                       f"{lost} uncoded frame(s) spliced out at index {coded[i]} "
+                       f"and the rest truncated to {persisted}, so frame indices "
+                       f"still map to the correct triggers")
                 self._warn(i, msg)
+                if lost:
+                    del self.block_ids[i][coded[i]:coded[i] + lost]
+                    del self.timestamps[i][coded[i]:coded[i] + lost]
                 del self.block_ids[i][persisted:]
                 del self.timestamps[i][persisted:]
             if et.spilled > 0:
                 # The split point between stream.h264 and raw_tail.bin, for
                 # the post-hoc encoder: if the tail cannot be merged it
-                # truncates the metadata to `encoded` rather than over-claim.
-                write_split_point(self._dirs[i], et.encoded, et.spilled)
-                self._warn(i, f"cam{i+1}: the encoder failed after {et.encoded} "
+                # truncates the metadata to the coded count rather than
+                # over-claim. That count, not the fed one, is where the
+                # elementary stream really ends.
+                write_split_point(self._dirs[i], coded[i], et.spilled)
+                self._warn(i, f"cam{i+1}: the encoder failed after {coded[i]} "
                               f"frames; {et.spilled} frames were spilled raw to "
                               f"raw_tail.bin and are merged at encode time")
 

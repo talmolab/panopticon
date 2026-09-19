@@ -830,6 +830,41 @@ def test_stim_trace():
     print("9) stim_trace: active from numbers not labels; chains rebuilt from the graph: PASS")
 
 
+
+def test_stim_trace_shares_the_boards_rounding():
+    """A duration off the millisecond grid must move the modelled boundary the
+    way the board moves it, not the way the typed float would.
+
+    The sketch counts whole milliseconds, so 1.0004 s IS 1000 ms on the board.
+    A trace that modelled 1.0004 s would put the boundary 0.4 ms late, and in a
+    looping chain that error accumulates every cycle until frames at every
+    boundary carry the wrong block.
+    """
+    from gui_app import stim_compiler
+    B = lambda bid, freq, pw, dur, pin=53: {"id": bid, "x": 0, "y": 0, "pin": pin,
+                                            "freq": freq, "pw": pw, "dur": dur,
+                                            "start": bid == "A", "end": False}
+    # A: 1.0004 s off, B: 1 s on, looping back to A.
+    blocks = [B("A", 0.0, 0.0, 1.0004), B("B", 20.0, 10.0, 1.0)]
+    edges = [{"src": "A", "dst": "B"}, {"src": "B", "dst": "A"}]
+    chains = stim_compiler.describe(blocks, edges)
+    steps, loop_to = chains[0]["steps"], chains[0].get("loops_back_to_step")
+    assert steps[0]["duration_ms"] == 1000, steps[0]
+    # Exactly at the modelled boundary the board is already in block B.
+    assert stim_trace.locate(steps, loop_to, 1.0)[0] == 1, \
+        "the boundary must sit where the board puts it, not 0.4 ms later"
+    # And the cycle is 2000 ms, so the same instant one cycle later matches.
+    assert stim_trace.locate(steps, loop_to, 3.0)[0] == 1
+    # Older provenance carries only duration_s and must still work.
+    legacy = json.loads(json.dumps(chains))
+    for st in legacy[0]["steps"]:
+        st.pop("duration_ms")
+    assert stim_trace.locate(legacy[0]["steps"], loop_to, 1.0002)[0] == 0, \
+        "a record without duration_ms falls back to the float duration"
+    print("15) stim_trace: block lengths come from the board's integer "
+          "milliseconds, with a fallback for older provenance: PASS")
+
+
 def test_cli_2_align(tmp: Path):
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     # calibration dir at 30 fps: fps must come from session_metadata, and the
@@ -905,6 +940,7 @@ def main():
         test_align_replace_failures(tmp, stub)
         test_encode_worker(tmp, stub)
         test_stim_trace()
+        test_stim_trace_shares_the_boards_rounding()
         test_cli_2_align(tmp)
         test_cli_3_stim_trace(tmp)
         test_encode_worker_tail_bookkeeping(tmp, stub)

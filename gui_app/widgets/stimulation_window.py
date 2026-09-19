@@ -34,6 +34,15 @@ MIN_ZOOM, MAX_ZOOM = 0.2, 4.0
 #: skipped, because drawing it costs one point per intersection of the scene.
 GRID_MIN_ZOOM = 0.4
 
+#: Pins held LOW from the instant the sketch boots, for an editor opened with
+#: no rig profile behind it (the standalone entry point). RULE: the pin lives
+#: here, with its only user, and never in the compiler. REASON: gui_app/ is
+#: shared between the two rigs, so a pin baked into stim_compiler is right for
+#: one and wrong for the other — on 3dface pin 53 would be driven LOW at boot
+#: on a pin that rig may use for something else. Every caller inside the
+#: application passes the profile's stim_safe_pins instead.
+STANDALONE_SAFE_LOW_PINS = (53,)
+
 
 def _pin_color(pin: int) -> QColor:
     hue = (int(pin) * 137) % 360
@@ -920,7 +929,7 @@ class StimulationWindow(QDialog):
                  is_busy: Callable[[], bool] = lambda: False,
                  board_taken: Callable[[], bool] | None = None,
                  get_safe_pins: Callable[[], list] = lambda: list(
-                     stim_compiler.DEFAULT_SAFE_LOW_PINS),
+                     STANDALONE_SAFE_LOW_PINS),
                  get_trigger_pins: Callable[[], list] = lambda: [],
                  get_serial: Callable[[], object] = lambda: None,
                  release_serial: Callable[[], None] = lambda: None,
@@ -1210,25 +1219,32 @@ class StimulationWindow(QDialog):
             return "\n\n".join(
                 [f"Pin {p} cannot carry a stim waveform: {why}." for p, why in bad]
                 + ["Move the block to a free pin."])
+        # Numbers the firmware cannot execute as written, and graph shapes it
+        # cannot turn into chains. Asked here, between the pin check and the
+        # conflict check, because compile_ino refuses both with a ValueError:
+        # without this the refusal reaches the operator as the launcher's
+        # generic error box with a traceback in it, and every one of these is
+        # otherwise SILENT on the board — the sketch runs, the trace says the
+        # pin was driven, and the pin did something else.
+        params = stim_compiler.parameter_problems(blocks)
+        if params:
+            return "\n\n".join(
+                [f"Block {bid}: {why}." for bid, why in params]
+                + ["Correct the numbers, or delete the block."])
+        shape = stim_compiler.structural_problems(blocks, edges)
+        if shape:
+            return "\n\n".join(s[:1].upper() + s[1:] + "." for s in shape)
         clash = stim_compiler.pin_conflicts(blocks, edges)
         if clash:
             pins = ", ".join(str(p) for p in clash)
-            # A block with several incoming arrows sits in every chain that
-            # reaches it, so a join A->C, B->C is itself a pin conflict on C.
-            # Name the merge, otherwise the message reads as a false alarm on
-            # a graph that looks legal.
-            fan_in: dict[str, int] = {}
-            for e in edges:
-                fan_in[e["dst"]] = fan_in.get(e["dst"], 0) + 1
-            merged = [b for b in blocks
-                      if fan_in.get(b["id"], 0) > 1 and int(b["pin"]) in clash]
-            if merged:
-                n = max(fan_in[b["id"]] for b in merged)
-                return (f"Pin {pins} is reached by {n} chains that merge into "
-                        f"one block.\n\nChains run in parallel and cannot join, "
-                        f"so every chain arriving at the merged block drives "
-                        f"its pin at once. Give the merged block its own chain, "
-                        f"or put the joining chains in sequence.")
+            # One message, because a real merge never reaches here: a block two
+            # chains reach is named by structural_problems() above (as a fan-in,
+            # or as a block no chain reaches when the second source feeds a
+            # flagged start), and that check returns first. Counting incoming
+            # ARROWS here instead would misread the one shape that does get
+            # this far — a chain looping back onto its own lead-in, which has
+            # two incoming arrows and exactly one chain — and blame a merge for
+            # a conflict that is really with some other chain on the same pin.
             return (f"Pin {pins} is driven by more than one chain.\n\nChains run "
                     f"at the same time, so they would fight over the output and "
                     f"the waveform would be neither one. Give each chain its own "
