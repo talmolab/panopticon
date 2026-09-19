@@ -30,6 +30,8 @@ from gui_app.widgets.camera_grid import CameraGridWidget
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.stimulation_window import StimulationWindow
 
+from gui_app import board_detector
+
 try:
     from gui_app.board_detector import BoardDetector
 except Exception:  # OpenCV missing → coverage HUD disabled, rest of GUI still runs
@@ -99,6 +101,13 @@ class MainWindow(QMainWindow):
         self._encode_worker: EncodeWorker | None = None
         self._align_worker: AlignWorker | None = None
         self._calib_worker: CalibrationWorker | None = None
+        #: The config the running solve was started with, so its completion
+        #: minutes later does not re-read fields the operator has edited since.
+        self._calib_config: SessionConfig | None = None
+        #: Workers that outlived their join. Kept referenced until Qt reports
+        #: them finished: dropping the last reference to a running QThread is
+        #: a qFatal, which no excepthook can intercept.
+        self._retired_workers: list = []
         self._config: SessionConfig | None = None
         self._video_dir: Path | None = None
         self._busy = False                 # a blocking camera op is running
@@ -785,10 +794,14 @@ class MainWindow(QMainWindow):
             self._created_dirs.append(video_dir)
         # Session-level warnings from a PREVIOUS run into this directory would
         # otherwise sit beside a clean recording and be believed months later.
-        try:
-            (video_dir / "WARNINGS.txt").unlink(missing_ok=True)
-        except OSError:
-            pass
+        for stale in ("WARNINGS.txt", "codet_frames.json"):
+            # A hint file from a previous calibration points at frame numbers
+            # in videos this run is about to replace; the solve refuses a
+            # mismatched one, but only once it has opened the mp4s.
+            try:
+                (video_dir / stale).unlink(missing_ok=True)
+            except OSError:
+                pass
         self._capture_warnings = []
         self._thermal_warnings = []
         self._thermal_reported = set()
@@ -1425,15 +1438,45 @@ class MainWindow(QMainWindow):
         if self._detector is not None:
             self._sidebar.update_coverage(self._detector)
 
-    def _stop_coverage_hud(self):
-        if self._coverage_worker is not None:
-            self._coverage_worker.stop()
-            self._coverage_worker.wait(2000)
+    def _stop_coverage_hud(self, timeout_ms: int = 5000):
+        """Join the coverage worker, then take its co-detection record.
+
+        RULE: the reference is kept until the thread has actually finished,
+        and codet_frames is read only once the join succeeded. REASON: the
+        loop exits between ticks and one tick is a ChArUco pass over every
+        camera's full-resolution frame, which on a loaded host runs past a
+        short wait; dropping the last reference to a running QThread is a
+        qFatal that no excepthook can intercept, and the detector's
+        dictionaries are still being written while the thread lives.
+
+        ``timeout_ms`` <= 0 waits without bound, which is what the close path
+        wants: the join is bounded by one detection pass either way.
+        """
+        joined = True
+        worker = self._coverage_worker
+        if worker is not None:
+            worker.stop()
+            joined = worker.wait() if timeout_ms <= 0 else worker.wait(timeout_ms)
             self._coverage_worker = None
+            if not joined:
+                print("[hud] coverage worker still inside a detection pass; "
+                      "keeping the reference until it finishes", flush=True)
+                self._retired_workers.append(worker)
+                worker.finished.connect(lambda w=worker: self._retire_worker(w))
+        if joined and self._detector is not None and self._detector.codet_frames:
+            self._save_codet_frames(self._detector.codet_frames)
         try:
             self._camera_mgr.set_keep_full(False)
         except Exception:
             pass
+
+    def _retire_worker(self, worker):
+        """Let go of a worker that outlived its join, once Qt reports it done."""
+        try:
+            self._retired_workers.remove(worker)
+        except ValueError:
+            pass
+        worker.deleteLater()
 
     def _stop_acquisition(self):
         # Stop the temperature poll FIRST. It is a GVCP register read on every
@@ -1452,8 +1495,6 @@ class MainWindow(QMainWindow):
             self._teensy.stop_triggers(self._profile.trigger_pins))
 
         self._stop_coverage_hud()
-        if self._detector is not None and self._detector.codet_frames:
-            self._save_codet_frames(self._detector.codet_frames)
         self._detector = None
         self._sidebar.hide_coverage()
 
@@ -1599,21 +1640,24 @@ class MainWindow(QMainWindow):
 
     def _save_codet_frames(self, codet_frames: list[dict[int, int]]):
         """Save co-detection frame indices so 1_calibrate.py can skip full-video
-        scanning and only process frames where the board was co-visible."""
+        scanning and only process frames where the board was co-visible.
+
+        The layout is board_detector's, not a second copy of it here: the
+        solve validates the hint file against the videos it opens, and a
+        writer that drifts from the reader is refused and falls back to a
+        full scan with no visible symptom but a slow solve.
+        """
         if not self._video_dir:
             return
-        import json
-        per_cam = {}
-        for tick in codet_frames:
-            for cam_idx, frame_n in tick.items():
-                name = self._camera_names[cam_idx]
-                per_cam.setdefault(name, set()).add(frame_n)
-        out = {cam: sorted(fns) for cam, fns in per_cam.items()}
         path = self._video_dir / "codet_frames.json"
-        with open(path, "w") as f:
-            json.dump(out, f)
-        print(f"[hud] saved {sum(len(v) for v in out.values())} co-detection "
-              f"frame indices to {path.name}", flush=True)
+        try:
+            n = board_detector.write_codet_frames(
+                path, codet_frames, self._camera_names)
+        except Exception as e:
+            print(f"[hud] could not save co-detection hints: {e}", flush=True)
+            return
+        print(f"[hud] saved {n} co-detection frame indices to {path.name}",
+              flush=True)
 
     def _save_frametimes(self, cam_results: list[tuple[int, list[float], list[int]]]):
         counts = [len(ts) for _, ts, _ in cam_results if ts]
@@ -1769,6 +1813,20 @@ class MainWindow(QMainWindow):
         self._finish_to_idle()
 
     def _finish_to_idle(self):
+        if self._acq_type == "calibration" and self._video_dir is not None:
+            # Stamp the hint file with the videos it was measured against.
+            # RULE: here, at the idle transition, not when the encode finishes.
+            # REASON: alignment REPLACES every mp4 and changes its size, so a
+            # stamp taken before it would never match the file the solve
+            # opens and every calibration would fall back to a full scan.
+            try:
+                n = board_detector.stamp_codet_videos(self._video_dir)
+                if n:
+                    print(f"[hud] co-detection hints stamped against {n} "
+                          f"videos", flush=True)
+            except Exception as e:
+                print(f"[hud] could not stamp the co-detection hints: {e}",
+                      flush=True)
         self._sidebar.set_fields_editable(True)
         self._sidebar.reset_toggles()
         self._state = State.IDLE
@@ -1789,7 +1847,12 @@ class MainWindow(QMainWindow):
         if self._calib_worker is not None and self._calib_worker.isRunning():
             self.statusBar().showMessage("A solve is already running")
             return
-        config = self._build_config()
+        try:
+            config = self._build_config().validate()
+        except ValueError as e:
+            QMessageBox.warning(self, "Check the session details",
+                                f"{e}\n\nFix the field and solve again.")
+            return
         calib_dir = config.video_dir("calibration")
 
         if not calib_dir.exists():
@@ -1816,18 +1879,25 @@ class MainWindow(QMainWindow):
         self._sidebar.set_solve_enabled(False)
         self.statusBar().showMessage("Solving calibration...")
 
+        # The solve runs for minutes and finishes against the fields as they
+        # were when it started, not as they are then: a mouse id edited in the
+        # meantime would copy the calibration into a different session.
+        self._calib_config = config
+        self._sidebar.set_fields_editable(False)
+
         self._calib_worker = CalibrationWorker(
             config.session_dir, CALIBRATION_SCRIPT, board_cfg)
         self._calib_worker.status.connect(lambda s: self.statusBar().showMessage(s))
-        self._calib_worker.finished.connect(self._on_calibration_done)
+        self._calib_worker.finished_solve.connect(self._on_calibration_done)
         self._calib_worker.start()
 
     def _on_calibration_done(self, success: bool, msg: str):
         self._sidebar.set_toggles_enabled(True)
         self._sidebar.set_solve_enabled(True)
+        self._sidebar.set_fields_editable(True)
         self._sidebar.set_status("IDLE", "#888")
         if success:
-            config = self._build_config()
+            config = self._calib_config or self._build_config()
             src = config.video_dir("calibration") / "calibration.toml"
             dst = config.video_dir("recording") / "calibration.toml"
             if src.exists():
@@ -1854,6 +1924,15 @@ class MainWindow(QMainWindow):
                               f"unchanged")
             else:
                 status = "Calibration solved (no toml found to copy)"
+            # A partial solve exits 0 by design, so the count is the only
+            # thing that says nine cameras went in and seven came out.
+            report = getattr(self._calib_worker, "report", None) or {}
+            cams = report.get("cameras") or []
+            dropped = sum(len(v) for v in (report.get("dropped") or {}).values())
+            if cams:
+                status = status.replace(
+                    "Calibration solved",
+                    f"Solved {len(cams)} of {len(cams) + dropped} cameras", 1)
             if msg:
                 QMessageBox.warning(self, "Calibration Warnings", msg[:800])
                 status += " (with warnings)"
@@ -2000,7 +2079,9 @@ class MainWindow(QMainWindow):
                 return
 
         self._display_timer.stop()
-        self._stop_coverage_hud()
+        # No bound at close: the loop exits after at most one detection pass,
+        # and there is no later moment at which a straggler could be joined.
+        self._stop_coverage_hud(timeout_ms=0)
         # Always stand the board down, not just mid-acquisition: stop_triggers
         # drives the stim pins LOW as well as the camera pins, so quitting can
         # never leave a paradigm — or a laser — running.
