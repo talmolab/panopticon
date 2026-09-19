@@ -87,6 +87,29 @@ class FakeEncoder:
         self.closed += 1
 
 
+class CodingFakeEncoder(FakeEncoder):
+    """FakeEncoder that also reports coded pictures, the way libx264 does.
+
+    Encode() returns once the plane is in the child, so the frame in flight is
+    not coded yet; the flush codes it. A child that died never flushes, so its
+    last fed frame stays uncoded for good.
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.flushed = False
+
+    def EndEncode(self):
+        self.flushed = self.fail_after is None
+        return super().EndEncode()
+
+    @property
+    def frames_out(self):
+        if self.flushed or self.encoded == 0:
+            return self.encoded
+        return self.encoded - 1
+
+
 class FakeFactory:
     """Per-camera encoder configuration, plus a note or a raise on demand."""
 
@@ -102,7 +125,8 @@ class FakeFactory:
             raise RuntimeError("simulated NVENC session cap (Error code : 21)")
         if self.note:
             notes.append(self.note)
-        enc = FakeEncoder(**self.per_cam.get(i, {}))
+        kw = dict(self.per_cam.get(i, {}))
+        enc = kw.pop("cls", FakeEncoder)(**kw)
         self.created.append(enc)
         return enc
 
@@ -702,6 +726,53 @@ with tempfile.TemporaryDirectory() as d:
     check(18, "GrabThread.abandon(): encoder aborted and released, fd closed, "
               "no retirement", ok, f"took={took:.2f}s ended={fac.created[0].ended} "
                                    f"deletable={deletable} warnings={t.warnings!r}")
+
+# 19 -- kick mode reconciles against the CODED count, not the fed one ---------
+# Same invariant as case 4, one layer deeper: a frame Encode() accepted but the
+# child never coded is not persisted, and counting it would map every later
+# frame of this camera to the wrong trigger with no gap in blockids.npy.
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    paths = _dirs(tmp, 2)
+    fac = FakeFactory()
+    fac.per_cam[0] = dict(cls=CodingFakeEncoder)
+    fac.per_cam[1] = dict(cls=CodingFakeEncoder, fail_after=10)
+    r = SyncEncodeRouter(paths, W, H, 21, fps=100, max_lag=50, encoder_factory=fac)
+    r.start()
+    _submit_all(r, 2, range(1, 101))
+    res = r.stop()
+    js = json.loads((tmp / "cam2" / "encoded.json").read_text())
+    ok = (res[0][0] == 100 and not _warn_text(tmp / "cam1")
+          and res[1][0] == 99 and res[1][2] == list(range(1, 100))
+          and js == {"encoded": 9, "spilled": 90, "persisted": 99}
+          and "coded=9 of 10 fed" in _warn_text(tmp / "cam2"))
+    check(19, "kick mode: the frame the dead encoder never coded is not "
+              "persisted, and the split point is the coded count", ok,
+          f"cam2={res[1][0]} json={js} warn={_warn_text(tmp / 'cam2')!r}")
+
+# 20 -- abandon()'s deadline bounds the flush as well as the join -------------
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    seen = []
+
+    class _TimedEncoder(FakeEncoder):
+        def EndEncode(self, timeout_s=None):
+            seen.append(timeout_s)
+            return super().EndEncode()
+
+    paths = _dirs(tmp, 3)
+    fac = FakeFactory()
+    for i in range(3):
+        fac.per_cam[i] = dict(cls=_TimedEncoder)
+    r = SyncEncodeRouter(paths, W, H, 21, fps=100, max_lag=50, encoder_factory=fac)
+    r.start()
+    _submit_all(r, 3, range(1, 11))
+    r.abandon(timeout_s=1.0)
+    ok = (len(seen) == 3 and all(t is not None and 0 < t <= 1.0 for t in seen)
+          and seen == sorted(seen, reverse=True))
+    check(20, "abandon() hands each EndEncode the budget left in the WHOLE "
+              "call, not a fresh one per camera", ok, f"timeouts={seen}")
+
 
 print()
 if failures:

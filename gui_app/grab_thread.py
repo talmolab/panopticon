@@ -9,6 +9,7 @@ contention, exhausts the pylon buffer pool and drops ~28% of frames as GigE
 critical path.
 """
 import gc
+import inspect
 import json
 import os
 import queue
@@ -95,6 +96,33 @@ def ring_slots(max_lag, kick: bool) -> int:
     return ENCODE_QUEUE_DEPTH + DECOUPLED_RING_SLACK
 
 
+def _end_encode(enc, timeout_s=None) -> None:
+    """End an encoder's bitstream, under the caller's deadline where it takes one.
+
+    RULE: a teardown deadline is passed down to EndEncode() whenever the
+    encoder accepts one, and omitted otherwise. REASON: EndEncode is the one
+    step of a teardown that waits — the CPU encoder flushes and reaps a child
+    process there — so a caller bounding the WHOLE teardown (abandon()) must
+    hand its remaining budget down, or the bound becomes per camera and nine
+    cameras cost nine times what was promised. NVENC's EndEncode takes no
+    argument, so the signature is inspected rather than assumed.
+    """
+    if timeout_s is None:
+        enc.EndEncode()
+        return
+    try:
+        params = inspect.signature(enc.EndEncode).parameters
+        takes = ("timeout_s" in params
+                 or any(p.kind is p.VAR_KEYWORD for p in params.values()))
+    except (TypeError, ValueError):
+        # A builtin or C-extension method with no introspectable signature.
+        takes = False
+    if takes:
+        enc.EndEncode(timeout_s=timeout_s)
+    else:
+        enc.EndEncode()
+
+
 class _EncoderThread(threading.Thread):
     """Drains ready-made NV12 frames from a queue into an H.264 stream.
 
@@ -133,7 +161,27 @@ class _EncoderThread(threading.Thread):
         #: queue can still end the thread.
         self._abort = False
 
-    def release_encoder(self):
+    def coded_frames(self) -> int:
+        """Frames the encoder actually emitted, not the frames fed to it.
+
+        RULE: bookkeeping that decides which frame maps to which trigger uses
+        this count, read after this thread's join and before release_encoder()
+        drops the encoder. REASON: blockids.npy records only frames that were
+        persisted, and `encoded` counts frames ACCEPTED by Encode() — on the
+        encoder-death path the final flush never arrives, so the last frame
+        fed is never coded and the fed count over-claims permanently. An
+        over-claim of even one frame maps every later frame of this camera to
+        the wrong trigger while leaving NO gap in blockids.npy, so it presents
+        as a perfect recording. An encoder that returns each frame's bytes
+        from Encode() (NVENC) exposes no `frames_out` and needs none: its fed
+        count IS its coded count.
+        """
+        enc = self._enc
+        if enc is None:
+            return self.encoded
+        return min(self.encoded, getattr(enc, "frames_out", self.encoded))
+
+    def release_encoder(self, timeout_s=None):
         """Free this thread's encoder session.
 
         `EndEncode()` ends the bitstream; the SESSION is released by the encoder
@@ -143,6 +191,11 @@ class _EncoderThread(threading.Thread):
         one leaked session can push a camera onto the raw fallback at ~129 GiB
         per 10 minutes.
 
+        `timeout_s` is the caller's remaining teardown budget, passed on to an
+        encoder whose EndEncode takes one; None means the encoder's own
+        default. A caller that reads coded_frames() must do so BEFORE this
+        call, which drops the encoder.
+
         ONLY call this once the thread is no longer running — before start() or
         after join(). run() dereferences self._enc per frame.
         """
@@ -150,7 +203,7 @@ class _EncoderThread(threading.Thread):
         if enc is None:
             return
         try:
-            enc.EndEncode()
+            _end_encode(enc, timeout_s)
         except Exception:
             pass
         close = getattr(enc, "Close", None)
@@ -1171,7 +1224,12 @@ class GrabThread(QThread):
             print(f"[grab{self._cam_index}] WARNING: {msg}", flush=True)
             self.warnings.append(msg)
             return False
-        print(f"[grab{self._cam_index}] encoded={enc_thread.encoded} spilled={enc_thread.spilled}", flush=True)
+        # The coded count is taken here, between the join and the release: the
+        # encoder must still exist to be asked, and its counters must have
+        # stopped moving.
+        coded = enc_thread.coded_frames()
+        print(f"[grab{self._cam_index}] encoded={enc_thread.encoded} "
+              f"coded={coded} spilled={enc_thread.spilled}", flush=True)
         # Hand the session back explicitly and NOW, rather than whenever this
         # thread object happens to become garbage: the next acquisition needs
         # it, and this non-kick path is itself the fallback used when sessions
@@ -1180,12 +1238,13 @@ class GrabThread(QThread):
             enc_thread.release_encoder()
         except Exception as e:
             print(f"[grab{self._cam_index}] encoder release failed: {e}", flush=True)
-        persisted = enc_thread.encoded + enc_thread.spilled
+        persisted = coded + enc_thread.spilled
         claimed = len(self.block_ids)
         if persisted != claimed:
             msg = (f"{cam}: block-ID bookkeeping claimed {claimed} frames but "
-                   f"only {persisted} were persisted (encoded={enc_thread.encoded} "
-                   f"spilled={enc_thread.spilled}, encoder_failed={enc_thread.failed}); "
+                   f"only {persisted} were persisted (coded={coded} of "
+                   f"{enc_thread.encoded} fed, spilled={enc_thread.spilled}, "
+                   f"encoder_failed={enc_thread.failed}); "
                    f"truncated to {persisted} so frame indices still map to the "
                    f"correct triggers")
             print(f"[grab{self._cam_index}] WARNING: {msg}", flush=True)
@@ -1196,10 +1255,10 @@ class GrabThread(QThread):
         if enc_thread.spilled > 0:
             # The split point between stream.h264 and raw_tail.bin, for the
             # post-hoc encoder: if the tail cannot be merged it truncates the
-            # metadata to `encoded` instead of over-claiming.
-            write_split_point(self._raw_path.parent, enc_thread.encoded,
-                              enc_thread.spilled)
-            msg = (f"{cam}: the encoder failed after {enc_thread.encoded} frames; "
+            # metadata to the coded count instead of over-claiming. The coded
+            # count, not the fed one, is where the stream really ends.
+            write_split_point(self._raw_path.parent, coded, enc_thread.spilled)
+            msg = (f"{cam}: the encoder failed after {coded} frames; "
                    f"{enc_thread.spilled} frames were spilled raw to raw_tail.bin "
                    f"and are merged at encode time")
             self.warnings.append(msg)
