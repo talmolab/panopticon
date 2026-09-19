@@ -65,17 +65,28 @@ The code follows that shape, so the module map doubles as a map of the diagram:
 |---|---|
 | `gui_app/backends/__init__.py` | The camera-backend contract, and the grab-result duck type |
 | `gui_app/backends/basler.py` | The only module that knows what a Basler camera is |
+| `gui_app/backends/sim.py`, `sim_board.py` | A simulated rig — cameras paced by a virtual trigger clock, and the board that paces them. Selected by `camera_backend: sim` |
 | `gui_app/camera_manager.py` | Vendor-neutral orchestration: open, describe, mode switches, start/stop |
 | `gui_app/grab_thread.py` | The per-camera hot loop, the NV12 ring, and the encoder drain thread |
+| `gui_app/cpu_affinity.py` | Thread placement on a hybrid CPU. Windows-only, and a no-op elsewhere |
 | `gui_app/frame_sync.py` | Cross-camera release logic. Pure integers, no Qt, no SDK |
 | `gui_app/sync_encode.py` | Router: owns the coordinator, the encoders, and the recorded metadata |
+| `gui_app/encoders.py` | The encoder seam: the factory protocol every encode path is resolved through |
 | `gui_app/nvenc.py` | PyNvVideoCodec loader, encoder factory, session probe |
+| `gui_app/cpu_encode.py` | The libx264 encoder behind that seam, one ffmpeg child per camera |
 | `gui_app/encode_worker.py` | Post-stop remux and the raw-mode encode pool |
+| `gui_app/ffmpeg_cmd.py` | Every ffmpeg command line, in one place, so no writer can lose `-g` or `+faststart` |
 | `gui_app/alignment.py` | Block-ID unwrap, intersection, post-hoc re-encode |
+| `gui_app/hardware_check.py` | The launch screen and the per-acquisition capacity preflight |
+| `gui_app/session_config.py`, `rig_setup.py`, `settings.py` | The rig profile and one session on it; the two calls that configure a manager from a profile; per-machine preferences |
 | `gui_app/serial_controller.py` | Trigger-board link and the RDY handshake |
 | `gui_app/stim_compiler.py` | Stim graph to Arduino sketch, including the trigger loop |
 | `gui_app/stim_trace.py` | Per-frame model of what the paradigm delivered |
-| `gui_app/board_detector.py`, `coverage_worker.py` | Live ChArUco coverage during calibration |
+| `gui_app/board_detector.py`, `coverage_worker.py`, `charuco.py` | Live ChArUco coverage during calibration, and the shared board construction the solve uses too |
+| `gui_app/ui_workers.py`, `calibration_worker.py`, `align_worker.py` | Blocking work off the Qt main thread: any callable, the solve, the alignment pass |
+| `gui_app/main_window.py`, `gui_app/widgets/` | The window's state machine, and the sidebar, camera grid, coverage graph and stimulation editor |
+| `gui_app/probe_guard.py` | Refuses to let a probe open the rig while a Panopticon is running |
+| `gui_app/mp_framesync.py` | A multi-process coordinator. **Not wired into the application**; kept with its own test |
 | `1_calibrate.py` | The calibration solve — a standalone script, run through `uv run` in the project environment |
 | `2_align.py`, `3_stim_trace.py` | Standalone equivalents of the in-app passes. Like `1_calibrate.py` they run in the project environment (`uv run python 2_align.py …`) and carry no inline dependency header, so a rig with no network can still run them |
 
@@ -1624,6 +1635,7 @@ what each becomes on Linux:
 | `configure_nic.ps1` | RSS receive queues via `Set-NetAdapterRss` | Linux equivalents are `ethtool -L`/`-X` and IRQ affinity |
 | `make_shortcut.ps1` | Desktop shortcut creation | Cosmetic |
 | `QueryThreadCycleTime` | Used by `tools/experiments/probe_gil_wait.py` to separate executing from waiting | Linux equivalent is per-thread CPU clock via `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` |
+| `gui_app/cpu_affinity.py` | Every entry point — core classification, pinning, thread priority, timer resolution — is guarded by a Windows check and returns without raising elsewhere, so `pin_capture_threads` and its three companions silently do nothing | `os.sched_setaffinity` and `os.nice` cover pinning and priority; the P-core/E-core split comes from sysfs rather than `GetSystemCpuSetInformation` |
 | `arduino-cli` upload | Invoked for firmware upload | Cross-platform, but the port name and reset behaviour differ |
 
 pypylon, PyQt5, numpy, OpenCV, PyNvVideoCodec and the trigger firmware toolchain
