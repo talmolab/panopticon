@@ -398,6 +398,15 @@ class MainWindow(QMainWindow):
     def _on_profile_changed(self, profile: RigProfile):
         if self._state != State.IDLE or self._busy:
             return
+        if self._stim_window is not None and self._stim_window.is_uploading():
+            # A profile carries the serial port, and arduino-cli is holding it.
+            QMessageBox.information(
+                self, "Firmware upload in progress",
+                "The trigger board is being flashed (~30 s). Switch profiles "
+                "once it has finished: the profile names the serial port, and "
+                "changing it under a running upload leaves the board in an "
+                "unknown state.")
+            return
         # close_all + open 6 cameras (+ .pfs load) is ~1-2 s of GigE round-trips;
         # run it off the UI thread so the window doesn't go "not responding".
         self._begin_busy("Switching cameras…")
@@ -1198,8 +1207,15 @@ class MainWindow(QMainWindow):
             blocks, _edges = self._stim_window.get_workflow()
             if not blocks:
                 return
+            # The sketch THIS acquisition put on the board, not the editor's
+            # own last upload: matches_uploaded_firmware has to answer "did
+            # the animal receive what this file describes", and a calibration
+            # clears the editor's record while the held paradigm is still
+            # what Record flashes back.
+            flashed, _label = self._sketch_for(self._acq_type)
             (self._video_dir / "stim_paradigm.json").write_text(
-                json.dumps(self._stim_window.provenance(), indent=2))
+                json.dumps(self._stim_window.provenance(flashed_source=flashed),
+                           indent=2))
             (self._video_dir / "stim_paradigm.ino").write_text(
                 self._stim_window.firmware_source(), encoding="utf-8")
             print(f"[stim] paradigm saved to {self._video_dir}", flush=True)
@@ -2275,8 +2291,18 @@ class MainWindow(QMainWindow):
                 on_applied=self._on_stim_applied,
                 parent=self,
             )
+            # The editor's Apply runs with this window at IDLE and not busy,
+            # so without this the acquisition toggles stay live over a ~30 s
+            # flash. The start path refuses anyway; greying them says so
+            # before the operator presses anything.
+            self._stim_window.uploading_changed.connect(
+                self._on_stim_upload_state)
         self._stim_window.show()
         self._stim_window.raise_()
+
+    def _on_stim_upload_state(self, uploading: bool):
+        """Grey the acquisition toggles for the duration of an editor flash."""
+        self._sidebar.set_toggles_enabled(not uploading)
 
     def _workers_running(self) -> bool:
         # _cam_op and _coverage_worker are usually masked by self._busy, but the
