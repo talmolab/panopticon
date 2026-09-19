@@ -49,8 +49,8 @@ calibration and 40 of recording -- while the wall clock stays inside a suite's
 budget. RULE: state the acquisitions in virtual seconds and buy the wall clock
 back with `SPEED`, never by shortening them. REASON: the sequence is what is
 under test, but a four-second recording gives the kick-out router almost
-nothing to route and leaves the second-acquisition ordinal defect too little
-room to show its size.
+nothing to route and leaves a camera that kept the previous acquisition's
+trigger ordinal too little room to show the gap at the front.
 
     set QT_QPA_PLATFORM=offscreen && python test_sim_gui.py
 """
@@ -118,7 +118,6 @@ DATA = SCRATCH / "data"
 DATA.mkdir(parents=True, exist_ok=True)
 
 failures = []
-expected_failures = []
 
 
 def check(num, name, ok, detail=""):
@@ -126,24 +125,6 @@ def check(num, name, ok, detail=""):
           + (f"  [{detail}]" if detail else ""), flush=True)
     if not ok:
         failures.append(name)
-
-
-def xfail(num, name, ok, finding, reason, detail=""):
-    """A case that fails on a KNOWN defect in a file this package does not own.
-
-    RULE: a known defect is recorded here and named by its finding id, never
-    deleted and never asserted the other way round. REASON: the suite has to
-    keep passing while the owning package fixes it, but a deleted case is a
-    guard nobody will put back, and a case inverted to expect the bug turns
-    green when the fix lands and red only when it regresses -- the wrong way
-    round. XPASS is therefore not a failure either: it says the fix arrived
-    and this case can go back to `check`.
-    """
-    verdict = "XPASS (fixed — promote to check)" if ok else f"XFAIL ({finding})"
-    print(f"{num}) {name}: {verdict}", flush=True)
-    print(f"   {reason}" + (f"  [{detail}]" if detail else ""), flush=True)
-    if not ok:
-        expected_failures.append(f"{finding}: {name}")
 
 
 class Box:
@@ -248,23 +229,7 @@ def fired_triggers(brd):
     return max(0, int((end - st.epoch_v) * st.fps))
 
 
-def rebase_ordinals(brd):
-    """Stand in for the fix to M1-02, so the steps after it assert something.
-
-    A camera arms (StartGrabbing) before the board is told to start, and
-    anchors its next trigger ordinal to the train that has just ENDED, while
-    `SimBoard.start` restarts ordinals at 1 -- so from the second acquisition
-    in a process on, the camera ignores every trigger until that stale ordinal
-    comes round. Moving the stopped board's epoch onto its stop instant makes
-    `ordinal_now()` read 0, which is what the camera would compute if it
-    re-anchored on the restart. Harmless once the backend does that itself.
-    """
-    with brd._lock:
-        if brd._stop_v is not None:
-            brd._epoch_v = brd._stop_v
-
-
-def run_step(win, kind, virtual_s, rebase=True):
+def run_step(win, kind, virtual_s):
     """Drive one acquisition from the sidebar toggle and wait out its tail.
 
     Returns (reached the acquiring state, came back to IDLE, the encoder
@@ -277,8 +242,6 @@ def run_step(win, kind, virtual_s, rebase=True):
     when they build their encoders, so reading it later would report whatever
     the next step installs rather than what wrote this acquisition's mp4s.
     """
-    if rebase:
-        rebase_ordinals(sim_board.shared_board())
     toggle = (win._sidebar._record_toggle if kind == "r"
               else win._sidebar._calibrate_toggle)
     want = State.RECORDING if kind == "r" else State.CALIBRATING
@@ -458,24 +421,26 @@ win = None
 # so one bad assertion reads as an interpreter-shutdown crash and leaves a
 # temp tree behind on the very run where cleanup matters most.
 try:
+    # This is mandate M1 itself: the window is built with the vendor SDK
+    # un-importable, on a profile that says `camera_backend: sim`. It works
+    # only because CameraManager records the backend NAME at construction and
+    # loads the backend on its first vendor call, by which time
+    # open_all(backend=...) has been given the profile's choice -- so a
+    # regression that loads one eagerly, or that reads the manager's backend
+    # object before the profile is resolved, fails here and not on the
+    # acceptance host.
     try:
         win = MainWindow()
         sdk_free_build, build_error = True, ""
     except ImportError as e:
         win, sdk_free_build, build_error = None, False, str(e).splitlines()[0]
-    xfail(1, "MainWindow builds with pypylon un-importable and a profile that "
+    check(1, "MainWindow builds with pypylon un-importable and a profile that "
              "says camera_backend: sim",
-          sdk_free_build, "M1-01",
-          "main_window.__init__ builds CameraManager() before the profile is "
-          "resolved, and CameraManager.__init__ loads the default 'basler' "
-          "backend eagerly, so pypylon is imported at construction whatever "
-          "the profile names and the application cannot start on a host "
-          "without the vendor SDK.", build_error)
+          sdk_free_build, build_error)
     if win is None:
-        # Stands in for that fix -- hand the manager the backend the profile
-        # names -- so every case below still drives the real window. It is one
-        # line here precisely because open_all already takes the backend by
-        # name.
+        # The run cannot continue: every case below drives this window. Build
+        # one with the backend named up front so the failure above is the only
+        # one reported, rather than 44 consequences of it.
         mw.CameraManager = functools.partial(CameraManager, "sim")
         win = MainWindow()
 
@@ -545,9 +510,10 @@ try:
     acquisition_ok(6, "calibration", session / "calibration", CAMS,
                    "calibration", factory, PASS_ONE_FACTORY)
 
-    # rebase=False: the second acquisition in a process is where M1-02 bites,
-    # and case 23 below is what states it. Every later step takes the stand-in.
-    started, idle, factory = run_step(win, "r", REC_S, rebase=False)
+    # The second acquisition in one process, which is where a camera that kept
+    # the previous train's trigger ordinal records short at the front; case 23
+    # below is what measures that.
+    started, idle, factory = run_step(win, "r", REC_S)
     check(14, "recording runs and the window returns to IDLE having shown "
               "exactly the dialogs the selected encoder implies",
           (started and idle and QApplication.activeModalWidget() is None
@@ -559,16 +525,13 @@ try:
 
     fired = fired_triggers(board)
     recorded = blockid_count(session / "recording", CAMS[0])
-    xfail(23, "a second acquisition in the same process records every trigger "
+    # The one loss mode a recording cannot show you: the frames that do arrive
+    # carry block IDs from 1 and stay contiguous, so a run short at the front
+    # looks perfect. Counted against the pulses the board actually fired,
+    # because that is the only number the camera cannot influence.
+    check(23, "a second acquisition in the same process records every trigger "
               "the board fired",
-          recorded >= 0 and abs(fired - recorded) <= 2, "M1-02",
-          "SimCamera.StartGrabbing anchors its next trigger ordinal to the "
-          "pulse train that has just ENDED, while SimBoard.start restarts "
-          "ordinals at 1, so a camera armed for any acquisition after the "
-          "first ignores every trigger until that stale ordinal comes round. "
-          "It is silent: the frames that do arrive still carry block IDs from "
-          "1 and stay contiguous, so the recording looks perfect and is "
-          "simply short at the front.",
+          recorded >= 0 and abs(fired - recorded) <= 2,
           f"fired={fired} recorded={recorded}")
 
     # -- 24-25 -- a paradigm, and the CPU encoder ----------------------------
@@ -685,11 +648,7 @@ finally:
         print(f"could not remove the scratch directory {SCRATCH}", flush=True)
 
 print()
-for known in expected_failures:
-    print(f"KNOWN DEFECT, not fixed here: {known}")
 if failures:
     print(f"{len(failures)} SIM-GUI TEST(S) FAILED: {failures}")
     sys.exit(1)
-print("ALL SIM-GUI TESTS PASS"
-      + (f" ({len(expected_failures)} expected failure(s))"
-         if expected_failures else ""))
+print("ALL SIM-GUI TESTS PASS")
