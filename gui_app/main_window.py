@@ -1728,14 +1728,21 @@ class MainWindow(QMainWindow):
                      if failed else ""))
         self.statusBar().showMessage(status)
 
-        problems = list(getattr(self, "_capture_warnings", []))
-        problems += list(getattr(self, "_thermal_warnings", []))
+        problems = list(self._capture_warnings)
+        problems += list(self._thermal_warnings)
+        # The encoder's own warnings are the truncated-tail cases: the mp4 has
+        # fewer frames than the capture intended and the metadata has been
+        # truncated to match, with the full arrays kept beside it. Nothing
+        # else reports them, and they are exactly what makes a session's
+        # frame count disagree with its trigger record.
+        problems += list(self._encode_worker.warnings)
         if failed:
             problems.append(
                 f"{len(failed)} camera(s) produced no usable video: "
                 f"{', '.join(failed)}. Their source files were KEPT rather than "
-                f"deleted — look for raw.bin / stream.h264 and encode_error.log "
-                f"in those camera directories.")
+                f"deleted — look for raw.bin / stream.h264, raw_tail.bin, "
+                f"encode_error.log, tail_error.log and WARNINGS.txt in those "
+                f"camera directories.")
         if problems:
             # Write it down as well as showing it: a dialog is dismissed and
             # forgotten, and this is exactly what someone needs months later
@@ -1792,24 +1799,66 @@ class MainWindow(QMainWindow):
         self._sidebar.show_progress(done, total, label="Aligning")
         self.statusBar().showMessage(f"Aligning {done}/{total}: {msg}")
 
+    def _regenerate_stim_trace(self, then):
+        """Rewrite stim_trace.csv off the UI thread, then call ``then``.
+
+        RULE: not on the UI thread, and the window stays busy until it is
+        written. REASON: the trace is one Python row per recorded frame, so a
+        17-minute session at 100 fps is ~100k rows and seconds of frozen
+        window — in the post-hoc mode that exists for troubled sessions —
+        and returning to IDLE first would let a new acquisition move
+        _video_dir under the worker.
+        """
+        self._begin_busy("Updating the stimulus trace...")
+        self._cam_op = CallableWorker(self._write_stim_trace)
+
+        def done(_result):
+            self._end_busy()
+            then()
+
+        self._cam_op.done.connect(done)
+        self._cam_op.start()
+
     def _on_align_done(self, summary: dict):
         self._sidebar.hide_progress()
+        failures = list(summary.get("failures") or [])
+        replaced_cams = list(summary.get("replaced_cams") or [])
+        n_cams = len(summary.get("camera_names") or self._camera_names)
         if summary.get("error"):
             self.statusBar().showMessage(
                 f"Alignment failed: {summary['error']} — videos left as-is")
         elif summary.get("replaced"):
-            # The align pass rewrote each camera's blockids.npy / frametimes.npy
-            # to the common set and replaced the mp4s. stim_trace.csv was
-            # written during _finalize, i.e. BEFORE that, so its frame column no
-            # longer matches the videos. Regenerate it against the aligned data;
-            # otherwise the file is silently offset in exactly the sessions that
-            # had trouble, and every file involved still looks self-consistent.
-            self._write_stim_trace()
             self.statusBar().showMessage(
-                f"Aligned: {summary['common_frames']} synchronized frames per camera")
-        elif summary.get("warnings"):
+                f"Aligned: {summary.get('common_frames', 0)} synchronized "
+                f"frames per camera")
+        elif replaced_cams:
+            # Wording comes from failures, never from warnings: a block-rate
+            # warning is informational and says nothing about whether a
+            # camera's video was replaced.
             self.statusBar().showMessage(
-                "Alignment finished with warnings — see log; originals kept")
+                f"Aligned {len(replaced_cams)} of {n_cams} cameras "
+                f"({', '.join(replaced_cams)}); "
+                f"{len(failures)} could not be replaced — see the log")
+        elif failures:
+            self.statusBar().showMessage(
+                f"Alignment replaced no camera ({failures[0]}) — originals kept")
+        else:
+            self.statusBar().showMessage("Alignment: videos already aligned")
+        if summary.get("index_error"):
+            QMessageBox.warning(
+                self, "Alignment could not index the videos",
+                f"{summary['index_error']}\n\nThe videos have been left as "
+                f"they are.")
+        # stim_trace.csv is written during the finalize, i.e. BEFORE the align
+        # pass rewrites each camera's blockids.npy / frametimes.npy and
+        # replaces its mp4, so its frame column no longer matches any camera
+        # that WAS replaced. Regenerate whenever one was — a block-rate
+        # warning must not decide this, or the trace is silently offset in
+        # exactly the sessions that had trouble while every file involved
+        # still looks self-consistent.
+        if summary.get("replaced") or replaced_cams:
+            self._regenerate_stim_trace(self._finish_to_idle)
+            return
         self._finish_to_idle()
 
     def _finish_to_idle(self):
