@@ -79,20 +79,23 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 #: default output directory is a real session tree on the rig machine.
 SCRATCH = Path(tempfile.mkdtemp(prefix="panopticon_sim_gui_"))
 
-from PyQt5.QtCore import QSettings
+from gui_app import settings as settings_mod
 
-# RULE: redirect QSettings before importing anything that constructs one.
-# REASON: the sidebar builds its store at MODULE import and the window reads
-# the remembered profile from it, so this is both how the run is pinned to the
-# simulated rig and how it is kept out of the operator's real settings --
-# which carry the board-sketch hint, a safety record about the firmware
-# believed to be on the trigger board.
-QSettings.setDefaultFormat(QSettings.IniFormat)
-QSettings.setPath(QSettings.IniFormat, QSettings.UserScope,
-                  str(SCRATCH / "settings"))
-_STORE = QSettings("Salk", "Panopticon")
-_STORE.setValue("profile_name", "sim")
+# RULE: redirect the settings store through the environment variable BEFORE
+# importing anything that reads it, and never with setDefaultFormat/setPath.
+# REASON: this run pins the remembered profile to the simulated rig, and the
+# operator's real store decides which rig the next launch comes up on and
+# carries the board-sketch hint, a safety record about the firmware believed
+# to be on the trigger board. setDefaultFormat plus setPath looks like it
+# redirects and does not: QSettings(ORG, APP) keeps the native format and the
+# registry path, so every write still escaped while the isolation read as
+# working. That is how a rig ended up remembering the simulated profile.
+os.environ[settings_mod.ENV_SETTINGS_FILE] = str(SCRATCH / "settings.ini")
+_STORE = settings_mod.app_settings()
+_STORE.setValue(settings_mod.KEY_PROFILE, "sim")
 _STORE.sync()
+assert "HKEY" not in _STORE.fileName(), (
+    f"settings isolation failed: writes are going to {_STORE.fileName()}")
 
 from PyQt5.QtWidgets import QApplication, QMessageBox as _RealMessageBox
 

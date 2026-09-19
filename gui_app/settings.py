@@ -10,6 +10,8 @@ The store is per machine and per user, so nothing in it describes the rig or
 the hardware attached to it: every value here is a HINT about what this
 machine did last, never evidence about what is plugged in now.
 """
+import os
+
 from PyQt5.QtCore import QSettings
 
 #: Organisation and application the settings live under. Changing either
@@ -27,9 +29,25 @@ KEY_BOARD_SKETCH = "board_sketch_sha"
 #: shared between rigs, so alphabetical order picks the wrong one.
 KEY_PROFILE = "profile_name"
 
+#: Set this to an absolute .ini path to send every value somewhere else.
+#:
+#: RULE: a test that builds a window, selects a profile or records a flash sets
+#: this first. REASON: without it those writes land in the operator's real
+#: store, which decides which rig the next launch comes up on and what firmware
+#: the board is believed to carry. Redirecting with
+#: ``QSettings.setDefaultFormat`` plus ``setPath`` does NOT work for the
+#: two-argument constructor below: it keeps the native format and the registry
+#: path, so the isolation reads as working while every write still escapes.
+#: This override is explicit because a silent one already cost a rig its
+#: remembered profile.
+ENV_SETTINGS_FILE = "PANOPTICON_SETTINGS_FILE"
+
 
 def app_settings() -> QSettings:
     """The application's settings store. Cheap: construct one per use."""
+    override = os.environ.get(ENV_SETTINGS_FILE)
+    if override:
+        return QSettings(override, QSettings.IniFormat)
     return QSettings(ORG, APP)
 
 
