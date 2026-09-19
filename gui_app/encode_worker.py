@@ -41,6 +41,14 @@ from gui_app import ffmpeg_cmd
 # of blockids.npy/frametimes.npy describe stream.h264; the rest describe
 # raw_tail.bin. Without it a failed tail merge cannot say how many frames the
 # mp4 holds, and the camera must fail rather than over-claim.
+#
+# RULE: "encoded" is the CODED-picture count -- the pictures the encoder
+# emitted into stream.h264 -- and not the frames fed to Encode(). REASON: an
+# encoder that died still accepted frames that were never coded, so the fed
+# count over-claims by whatever was in flight, and truncating the metadata to
+# it would map the mp4's frames onto the wrong triggers, which is the silent
+# failure this file exists to refuse. grab_thread.write_split_point is what
+# writes it; the key keeps its name because this reader already had it.
 ENCODED_JSON = "encoded.json"
 
 # Below this size a file cannot be an mp4 with a moov atom and one frame, so a
