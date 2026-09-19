@@ -191,7 +191,12 @@ letting it burn its one-second timeout.
 
 The sketch replies `RDY <n_cams> <fps>` from `announceReady()`, called from both
 config paths (`setup()` and the `loop()` reconfigure branch) and printed before
-`FRAME_START` is set, so the print latency cannot skew the clock.
+`FRAME_START` is set, so the print latency cannot skew the clock. Firmware that
+knows its own build appends an eight-hex sketch identity, `RDY <n_cams> <fps>
+<id>`. The host matches the whole stripped line rather than searching inside it:
+the ack exists to prove the board printed exactly this line, so `RDY 6 1000`
+cannot satisfy a request for 100 fps and a boot message run into the token is a
+garbled ack, not a confirmed start.
 
 ### The RDY handshake
 
@@ -228,11 +233,37 @@ pyserial, so it needs no board.
 
 `ACK_TIMEOUT` is 4 s because the sketch's `readFPS()` can burn a one-second
 `parseFloat()` timeout followed by `delay(500)`; a legitimate ack takes about
-1.5 s. `stop_triggers()` returns whether the board accepted the command, and the
-caller surfaces a failure loudly: a looping stim chain never ends on its own, so
-an unacknowledged stop can leave a laser driven with the UI showing IDLE.
-`pyserial`'s `is_open` stays True after the USB device disappears, so port state
-is not evidence that the board is there.
+1.5 s.
+
+The **stop** is acked too, for a stronger reason than the start. The reconfigure
+branch is what ends a paradigm — `camsLow(); allStimLow(); FPS_OUT = 0` — and a
+looping stim chain never ends on its own, so an unacknowledged stop can leave a
+laser driven while the window reads IDLE. A write leaving the host proves
+nothing: a wedged sketch, a board still in its bootloader after an upload, and
+foreign firmware all accept the bytes and stop nothing. So `stop_triggers()`
+writes the config with `fps = -1`, waits up to `STOP_ACK_TIMEOUT` (3 s) for
+`RDY <n_pins> 0` — `readFPS()` clamps the -1 to 0 — and returns False if it
+does not arrive, which the caller turns into a dialog. Firmware that has never
+spoken RDY is exempt, so a stock `trigger.ino` rig is not shown a warning it
+cannot act on. Waiting also serialises stop against the next start: the sketch
+drains its input for about 1.5 s before acking, and a start written into that
+window is swallowed, times out and forces the port reset that the long-lived
+connection exists to avoid. `pyserial`'s `is_open` stays True after the USB
+device disappears, so port state is not evidence that the board is there.
+
+**Which sketch the board is carrying** is decided by that identity, in
+preference to the per-machine record of what was last uploaded. The record says
+what this host last wrote onto whatever was on the port, so a board flashed from
+the Arduino IDE, swapped for another, or shared with a second rig would be
+trusted as stimulation-free while carrying a paradigm — which is the case the
+launch-time flash exists to cover. The identity is obtained by standing the
+board down, because the sketch prints its RDY line only in answer to a config
+and a stop is the one config that is always safe to send: it drives the camera
+pins and every stim pin LOW, which is also the right state for a board found
+running a paradigm. A board reporting anything other than the recording-only
+sketch's identity is reflashed, at most once per launch. Firmware that reports
+no identity falls back to the stored hash, and the log says that is what
+happened.
 
 ---
 

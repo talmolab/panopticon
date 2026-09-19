@@ -968,9 +968,28 @@ Check the result in Notepad. It is one `Feature<TAB>value` per line. Confirm
 `Width`, `Height`, `PixelFormat`, `ExposureTime`, `Gain`, `GevSCPSPacketSize`
 and `GevSCPD` read what you expect.
 
-A `.pfs` saved from a different camera of the same model is fine. It loads with
-validation disabled, and geometry and pixel format are read back from each
-camera afterwards and checked against each other.
+**What the code assumes the `.pfs` supplies.** The file is the camera contract,
+and these are the features the application depends on rather than sets:
+
+| Feature | What depends on it |
+|---|---|
+| `PixelFormat` = `Mono8` | The whole capture path assumes one byte per pixel. Read back at open and refused if it is anything else. |
+| `Width`, `Height` | The ring, the raw decode and the preflight. Read back at open, compared between cameras there, and compared with the profile before every acquisition. |
+| `TriggerSelector` = `FrameStart`, `TriggerMode` = `On`, `TriggerSource` = `Line1`, `TriggerActivation` = `RisingEdge` | The application writes these four itself at each acquisition, so the `.pfs` only has to leave them consistent with your wiring. |
+| `LineInverter` on `Line1` | Which physical edge `RisingEdge` means, and it is **per rig**: `configs/mono8_1920x1200.pfs` sets it to 0, `configs/mono8_mono.pfs` sets it to 1, so the two rigs trigger on opposite physical edges. Nothing in the code touches it. Get it wrong and the camera exposes on the trailing edge of the pulse. |
+| `ExposureTime`, `Gain` | The only source of a recording's exposure and gain. Read back at open and re-applied from that baseline at every acquisition start, clamped to the ceiling. |
+| `AcquisitionFrameRate`, `AcquisitionFrameRateEnable` | Overwritten from the profile's `trigger_rate_limit` in triggered mode. |
+| `GevSCPSPacketSize`, `GevSCPD` | Never touched by the application; the network path depends on them entirely. |
+| `MaxNumBuffer` | **Overridden** at open by the profile's `max_num_buffer`, so whatever the file says is discarded. |
+
+A `.pfs` saved from a different camera of the same model is fine, and the load
+is deliberately unvalidated (`FeaturePersistence.Load(..., False)`): a strict
+load fails on any feature the saving camera had and this one does not, which
+would make one file per camera model instead of one per rig. The contract is
+that the file is authoritative and the code validates only what it actually
+depends on — geometry and pixel format are read back from each camera
+afterwards, compared against each other and refused on a mismatch, and the
+exposure and gain actually applied are logged per camera.
 
 ### Step 7 — write the rig profile
 
