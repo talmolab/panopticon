@@ -2,6 +2,7 @@
 import json
 import shutil
 import time
+import traceback
 from datetime import datetime
 import numpy as np
 from enum import Enum
@@ -11,8 +12,9 @@ from PyQt5.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QApplication, QMe
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QPalette, QColor, QIcon, QCursor
 
-from gui_app.camera_manager import CameraManager, MAX_NUM_BUFFER
-from gui_app.grab_thread import ENCODE_QUEUE_DEPTH
+from gui_app.camera_manager import (AcquisitionStartRefused,
+                                    AcquisitionStopIncomplete, CameraManager)
+from gui_app.grab_thread import ring_slots
 from gui_app.serial_controller import TeensyController
 from gui_app.encode_worker import EncodeWorker
 from gui_app.align_worker import AlignWorker
@@ -35,6 +37,33 @@ except Exception:  # OpenCV missing → coverage HUD disabled, rest of GUI still
 
 CALIBRATION_SCRIPT = Path(__file__).parent.parent / "1_calibrate.py"
 
+#: What makes a directory "already holds an acquisition". blockids, frametimes
+#: and the alignment archive count as data too: a directory whose mp4s were
+#: moved away for labelling still holds the metadata that makes them
+#: interpretable, and without these patterns it reads as empty.
+DATA_PATTERNS = ("*.mp4", "raw.bin", "stream.h264", "blockids.npy",
+                 "frametimes.npy", "alignment.npz")
+
+
+def _has_capture_data(video_dir: Path) -> bool:
+    """True when this directory holds an acquisition worth keeping.
+
+    Zero-length files do not count: a start refused after the router opened
+    its streams leaves an empty stream.h264 per camera, and treating those as
+    data would have the next attempt move an empty directory aside and report
+    data that does not exist.
+    """
+    if not video_dir.exists():
+        return False
+    for pat in DATA_PATTERNS:
+        for path in video_dir.rglob(pat):
+            try:
+                if path.stat().st_size > 0:
+                    return True
+            except OSError:
+                continue
+    return False
+
 
 class State(Enum):
     IDLE = "IDLE"
@@ -45,6 +74,12 @@ class State(Enum):
 
 
 class MainWindow(QMainWindow):
+    #: Serial open attempts on the interactive start path. The port is
+    #: normally already held from launch, so this only runs when the board is
+    #: unplugged or held by another program; each failed attempt sleeps a
+    #: second, and the operator is waiting on a dialog either way.
+    START_SERIAL_RETRIES = 2
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Panopticon")
@@ -537,26 +572,44 @@ class MainWindow(QMainWindow):
             pass       # a dialog failure must not mask the printed warning
         return False
 
-    def _preflight_capacity(self) -> bool:
-        """Check RAM, NVENC sessions and disk against the ACTUAL camera count.
+    def _preflight_capacity(self, acq_type: str) -> bool:
+        """Refuse an acquisition the rig cannot complete. True to continue.
 
-        False means refuse to start. Cheap arithmetic plus a cached NVENC session
-        probe, so it costs nothing per recording after the first.
+        Checks the cameras' real geometry against the profile, then RAM, NVENC
+        sessions and disk against the ACTUAL camera count and the frame rate
+        THIS acquisition will run at. Cheap arithmetic plus a cached NVENC
+        session probe, so it costs nothing per recording after the first.
         """
         p = self._profile
-        realtime = bool(getattr(p, "realtime_encode", True))
-        kick = realtime and bool(getattr(p, "realtime_kick", False))
-        # Mirrors grab_thread: the kick-mode ring must outlast a frame's whole
-        # journey (coordinator up to max_lag, then the encoder queue).
-        ring_n = ((p.kick_max_lag + ENCODE_QUEUE_DEPTH + 64) if kick
-                  else (ENCODE_QUEUE_DEPTH + 4))
+        # The profile's width/height size the NV12 ring and the raw decode, so
+        # a disagreement with the cameras' ROI retires every camera in
+        # real-time mode and shears a full-length recording in raw mode.
+        # Refusing HERE keeps it a dialog: start_acquisition can only refuse by
+        # raising, and by then the session directory has been touched.
+        mismatch = self._camera_mgr.geometry_mismatch(p.frame_width,
+                                                      p.frame_height)
+        if mismatch:
+            print(f"[acq] REFUSING to start: {mismatch}", flush=True)
+            QMessageBox.critical(self, "Cannot start", mismatch)
+            return False
+
+        realtime = bool(p.realtime_encode)
+        kick = realtime and bool(p.realtime_kick)
+        # One formula, and it lives in grab_thread: the ring the preflight
+        # budgets RAM for must be the ring a grab thread allocates, or the
+        # preflight permits and refuses the wrong recordings.
+        ring_n = ring_slots(p.kick_max_lag, kick)
+        # A calibration runs at its own, lower rate; budgeting the recording
+        # rate for it overstates the disk cost by the ratio between them.
+        fps = (p.calibration_frame_rate if acq_type == "calibration"
+               else p.frame_rate)
         try:
             blocking, warnings = check_capacity(
                 n_cams=self._camera_mgr.num_cameras,
                 width=p.frame_width, height=p.frame_height,
                 ring_n=ring_n, max_num_buffer=p.max_num_buffer,
                 realtime=realtime, output_dir=self._sidebar.output_dir,
-                fps=p.frame_rate)
+                fps=fps, encoder=p.encoder)
         except Exception as e:
             # A broken preflight must never be what stops a recording.
             print(f"[acq] capacity preflight failed to run: {e}", flush=True)
@@ -578,68 +631,154 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
+    def _refuse_start(self, title: str, message: str) -> bool:
+        """Report a refused start and put the sidebar back. Always False.
+
+        reset_toggles(), not the silent variant: the state machine is at IDLE
+        here, so letting the signal fire is a no-op for it (_on_record_toggle
+        only acts when state == RECORDING) while still reversing the thumb
+        animation and re-enabling the sibling toggle.
+        """
+        print(f"[acq] refusing start: {title}", flush=True)
+        QMessageBox.critical(self, title, message)
+        self._sidebar.reset_toggles()
+        return False
+
+    def _stim_refusal(self, acq_type: str):
+        """(title, message) when the stimulation editor is not ready for this
+        acquisition, or None.
+
+        Each refusal prevents a session whose recorded paradigm is not the one
+        the animal received:
+
+        - A bench Test is armed. It borrows this window's serial link, and its
+          timed stop would cut this acquisition's camera triggers part-way
+          through while the window still reads RECORDING.
+        - record_blocker(): an Apply mid-flash (arduino-cli holds the port, and
+          a second flash on it leaves the board in an unknown state), a failed
+          Apply, or a canvas whose pins or parameters would break the block-ID
+          identity every downstream consumer assumes.
+        - The canvas differs from the paradigm this recording would flash. The
+          board would run the held paradigm while stim_paradigm.json,
+          stim_paradigm.ino and stim_trace.csv all describe the canvas. The
+          comparison is against _session_stim_ino, NOT the editor's own last
+          upload: a calibration invalidates that while the held paradigm is
+          still what Record flashes back.
+        """
+        if self._stim_window is None:
+            return None
+        if self._stim_window.is_testing():
+            return ("Stop the stimulation test first",
+                    "A stimulation test is driving the trigger board.\n\n"
+                    "Its timed stop would cut this acquisition's camera "
+                    "triggers part-way through, and the window would go on "
+                    "reading RECORDING with nothing being captured.\n\n"
+                    "Stop the test in the Stimulation editor, then start "
+                    "again.")
+        blocker = self._stim_window.record_blocker()
+        if blocker:
+            return ("Cannot record with this stim workflow", blocker)
+        if acq_type != "recording":
+            return None          # a calibration always runs stimulation-free
+        try:
+            blocks, _edges = self._stim_window.get_workflow()
+            if not blocks:
+                return None
+            canvas = self._stim_window.firmware_source()
+        except Exception as e:
+            return ("Cannot record with this stim workflow",
+                    f"The stimulation canvas could not be compiled, so what "
+                    f"the board would run cannot be established:\n\n{e}")
+        if self._session_stim_ino is None:
+            return ("Apply the stimulation paradigm first",
+                    "The canvas holds a paradigm that has never been Applied, "
+                    "so the board is carrying the recording-only sketch and "
+                    "nothing would fire.\n\nThe recording would still be "
+                    "labelled as stimulated: stim_paradigm.json, "
+                    "stim_paradigm.ino and stim_trace.csv are all written from "
+                    "the canvas.\n\nPress Apply in the Stimulation editor, or "
+                    "clear the canvas.")
+        if canvas != self._session_stim_ino:
+            return ("Apply the edited paradigm first",
+                    "The canvas has been edited since the last Apply, so this "
+                    "recording would run the PREVIOUS paradigm while "
+                    "stim_paradigm.json and stim_trace.csv describe the edited "
+                    "one.\n\nPress Apply in the Stimulation editor, or undo "
+                    "the edit.")
+        return None
+
     def _start_acquisition(self, acq_type: str):
-        # Refuse to start on top of a live or still-finalising acquisition. The
-        # sidebar already disables the toggles while busy, so a user cannot
-        # reach this — but any programmatic path that bypasses the widget starts
-        # a SECOND acquisition whose state the machine then loses track of
-        # (proven 2026-08-11: cameras kept streaming while _state read IDLE).
+        """Every check that can still refuse this acquisition, and nothing else.
+
+        RULE: no directory, file, camera or encoder side effect happens here;
+        those belong to _arm_acquisition. REASON: a firmware flash returns to
+        the event loop and re-enters _arm_acquisition when it finishes, so a
+        side effect placed here runs twice - which orphaned a router still
+        holding one NVENC session and one open stream.h264 per camera,
+        prompted about files the same run had just created, and left the
+        cameras in trigger mode with the window reading IDLE when the flash
+        failed.
+        """
+        # Refuse to start on top of a live or still-finalising acquisition.
+        # The sidebar already disables the toggles while busy, so a user cannot
+        # reach this - but any programmatic path that bypasses the widget
+        # starts a SECOND acquisition whose state the machine then loses track
+        # of (a second acquisition leaves the cameras streaming while _state
+        # reads IDLE).
         if self._state != State.IDLE or self._busy:
             print(f"[acq] refusing start: state={self._state.value} "
                   f"busy={self._busy}", flush=True)
-            self._sidebar.clear_toggles_silently()
+            self._sidebar.clear_toggle_silently(acq_type)
             return
 
-        # Capacity preflight. Every limit here scales linearly with camera
-        # count, and each one currently fails SILENTLY — a camera dropping to
-        # raw.bin because the driver's NVENC session cap was hit, a MemoryError
-        # inside a grab thread, or a disk filling mid-session. Refuse up front
-        # instead of half-recording.
-        # A stim graph on a camera trigger pin injects extra rising edges into
-        # ONE camera, so its block IDs advance faster and block-ID N stops
-        # meaning the same instant everywhere — which frame_sync, alignment.py
-        # and stim_trace all take as given. Apply and Test were gated; Record was
-        # not, and Record is the one that produces data.
-        if self._stim_window is not None:
-            blocker = self._stim_window.record_blocker()
-            if blocker:
-                print(f"[acq] refusing start, stim workflow: {blocker}", flush=True)
-                QMessageBox.critical(self, "Cannot record with this stim workflow",
-                                     blocker)
-                self._sidebar.reset_toggles()
-                return
+        refusal = self._stim_refusal(acq_type)
+        if refusal:
+            self._refuse_start(*refusal)
+            return
 
-        if not self._preflight_capacity():
-            # reset_toggles(), not the silent variant: we are at IDLE here, so
-            # letting the signal fire is a genuine no-op for the state machine
-            # (_on_record_toggle only acts when state == RECORDING) while still
-            # reversing the thumb animation and re-enabling the sibling toggle.
+        # The sidebar's free text becomes directory names and the prefix of
+        # every mp4 name, so it is validated where a dialog can be shown. Left
+        # to the mkdir, a separator nests the session somewhere else, '..'
+        # climbs out of the data directory, and the OSError lands in a Qt slot
+        # with the toggle left on.
+        try:
+            config = self._build_config().validate()
+        except ValueError as e:
+            self._refuse_start("Check the session details",
+                               f"{e}\n\nFix the field and start again.")
+            return
+
+        if not self._preflight_capacity(acq_type):
             self._sidebar.reset_toggles()
             return
 
-        self._config = self._build_config()
+        self._config = config
         self._acq_type = acq_type
-        video_dir = self._config.video_dir(acq_type)
+        # Firmware, then the port, then everything with a side effect:
+        # arduino-cli needs the port to itself, and both have to be settled
+        # before anything is written to disk or a camera is reconfigured.
+        if not self._ensure_sketch_for(acq_type):
+            return          # a flash is running; it re-enters _arm_acquisition
+        self._arm_acquisition(acq_type)
 
-        # blockids/frametimes/aligned count as data too: a directory whose mp4s
-        # were moved away for labelling still holds the metadata that makes them
-        # interpretable, and without these patterns it reads as empty and gets
-        # silently overwritten.
-        has_data = video_dir.exists() and any(
-            next(video_dir.rglob(pat), None) is not None
-            for pat in ("*.mp4", "raw.bin", "stream.h264",
-                        "blockids.npy", "frametimes.npy", "alignment.npz"))
-        if has_data:
-            reply = QMessageBox.question(
-                self, "Overwrite?",
-                f"Existing files found in:\n{video_dir}\n\nOverwrite?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if reply == QMessageBox.No:
-                self._sidebar.reset_toggles()
-                return
+    def _arm_acquisition(self, acq_type: str):
+        """Everything with a side effect, once nothing can refuse the start.
+
+        Re-entered by the firmware flash's completion callback, which is why
+        the checks are not repeated here.
+        """
+        config = self._config
+        video_dir = config.video_dir(acq_type)
+        if not self._move_existing_aside(video_dir):
+            self._sidebar.reset_toggles()
+            return
 
         self._video_dir = video_dir
+        # What this start created, so a refused start can take it back out
+        # instead of leaving an empty session folder behind.
+        self._created_dirs = []
+        if not video_dir.exists():
+            self._created_dirs.append(video_dir)
         # Session-level warnings from a PREVIOUS run into this directory would
         # otherwise sit beside a clean recording and be believed months later.
         try:
@@ -652,13 +791,18 @@ class MainWindow(QMainWindow):
         self._thermal_alert = None
         for cam in self._camera_names:
             cam_dir = self._video_dir / cam
+            if not cam_dir.exists():
+                self._created_dirs.append(cam_dir)
             cam_dir.mkdir(parents=True, exist_ok=True)
-            # Remove stale capture artifacts from a previous run in this dir —
+            # Remove stale capture artifacts from a previous run in this dir -
             # a leftover raw_tail.bin would otherwise be appended to the NEW
             # recording's stream at stop.
             # WARNINGS.txt is swept too: it is the only durable trace of a
             # block-ID reconciliation, so a stale one left beside a clean
             # recording is exactly what someone would trust months later.
+            # Every check that can refuse has already passed, so this sweep
+            # can no longer destroy a previous run's sources for an
+            # acquisition that then never starts.
             for stale in ("raw.bin", "raw_tail.bin", "stream.h264",
                           "tail.h264", "encode_error.log", "WARNINGS.txt"):
                 try:
@@ -666,53 +810,165 @@ class MainWindow(QMainWindow):
                 except OSError:
                     pass
 
-        raw_paths = [
-            self._video_dir / cam / "raw.bin"
-            for cam in self._camera_names
-        ]
+        raw_paths = [self._video_dir / cam / "raw.bin"
+                     for cam in self._camera_names]
 
-        # Calibration runs at a lower trigger rate (still sharp, plenty of distinct
-        # board poses) with a smooth 1:1 preview; recording stays at the full rate
-        # with a decimated preview to protect the disk-write loop.
-        fps = self._config.rate_for(acq_type)
+        # Calibration runs at a lower trigger rate (still sharp, plenty of
+        # distinct board poses) with a smooth 1:1 preview; recording stays at
+        # the full rate with a decimated preview to protect the disk-write loop.
+        fps = config.rate_for(acq_type)
         self._acq_fps = fps
         display_every = 1 if acq_type == "calibration" else 10
+        rt = config.realtime_encode
+        kick = config.realtime_kick
+        print(f"[acq] start_acquisition({acq_type}) fps={fps} realtime={rt} "
+              f"kick={kick}: switching cameras to trigger mode", flush=True)
 
-        rt = self._config.realtime_encode
-        kick = self._config.realtime_kick
-        print(f"[acq] start_acquisition({acq_type}) fps={fps} realtime={rt} kick={kick}: switching cameras to trigger mode", flush=True)
-        self._camera_mgr.start_acquisition(
-            raw_paths, display_every=display_every,
-            realtime=rt, width=self._config.frame_width,
-            height=self._config.frame_height, quality=self._config.quality,
-            fps=fps, realtime_kick=kick, kick_max_lag=self._config.kick_max_lag,
-            # Calibration gets its own exposure/gain when the profile sets them;
-            # a recording passes None, which RESTORES the .pfs values. Restoring
-            # rather than re-deriving is what guarantees a long calibration
-            # exposure can never leak into a 100 fps session, where it would
-            # silently halve the frame rate.
-            exposure_us=(self._config.calibration_exposure_us or None
-                         if acq_type == "calibration" else None),
-            gain_db=(self._config.calibration_gain_db
-                     if acq_type == "calibration"
-                     and self._config.calibration_gain_db >= 0 else None))
+        # Off the UI thread: the serial open, one trigger-mode reconfigure per
+        # camera, the readiness barrier (each thread pre-faults a multi-GiB
+        # NV12 ring) and the board's ack add up to seconds, and the rollback
+        # for a failed start can cost the whole stop budget. On the UI thread
+        # that is a 'not responding' window with the Stop toggle out of reach.
+        self._begin_busy("Starting...")
+        self._cam_op = CallableWorker(
+            lambda: self._start_body(acq_type, raw_paths, display_every,
+                                     rt, kick, fps))
+        self._cam_op.done.connect(self._on_acquisition_started)
+        self._cam_op.start()
 
-        # Put the right firmware on the board for this acquisition, flashing it
-        # only if the board is not already carrying it. A CALIBRATION ALWAYS
-        # gets the stimulation-free sketch: the board's config path calls
-        # initStim() regardless of which acquisition asked for triggers, and a
-        # calibration is the one acquisition performed with a PERSON inside the
-        # arena holding the target. Returning here means a flash is in flight
-        # and this method will be re-entered when it finishes.
-        if not self._ensure_sketch_for(acq_type):
-            return
+    def _move_existing_aside(self, video_dir: Path) -> bool:
+        """Move a directory that already holds data out of the way, with the
+        operator's consent. False means abort the acquisition.
 
-        teensy = self._teensy_connection()
+        RULE: existing data is never deleted and never recorded into, and the
+        NEW acquisition keeps the canonical directory name. REASON: recording
+        over old files only replaces the ones this run writes - a camera that
+        captures nothing keeps the previous session's mp4, blockids.npy and
+        frametimes.npy under identical names, so eight cameras are this
+        session and one is the last, with plausible block IDs, and alignment
+        then intersects two different sessions. 1_calibrate and
+        alignment.video_for find the videos under the names 'calibration' and
+        'recording', so the new run has to keep them and the old data is what
+        moves.
+        """
+        if not _has_capture_data(video_dir):
+            return True
+        stamp = datetime.now().strftime("%H%M%S")
+        moved = video_dir.with_name(f"{video_dir.name}.previous-{stamp}")
+        n = 2
+        while moved.exists():
+            moved = video_dir.with_name(f"{video_dir.name}.previous-{stamp}-{n}")
+            n += 1
+        reply = QMessageBox.question(
+            self, "Existing data will be moved aside",
+            f"{video_dir}\n\nalready holds data from an earlier acquisition."
+            f"\n\nIt will be MOVED to:\n\n{moved}\n\nNothing is deleted, and "
+            f"this acquisition records into the original folder name so the "
+            f"solve and the alignment scripts still find it.\n\nContinue?",
+            QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
+        if reply != QMessageBox.Ok:
+            print("[acq] start cancelled; existing data left in place",
+                  flush=True)
+            return False
+        try:
+            video_dir.rename(moved)
+        except OSError as e:
+            QMessageBox.critical(
+                self, "Could not move the existing data",
+                f"{video_dir}\n\ncould not be moved aside:\n\n{e}\n\nNothing "
+                f"has been deleted and nothing has been recorded. Close "
+                f"anything holding a file open in that folder, or move it by "
+                f"hand, then start again.")
+            return False
+        print(f"[acq] existing data moved aside to {moved}", flush=True)
+        return True
+
+    def _remove_created_dirs(self):
+        """Take back the empty directories a refused start created.
+
+        Only directories this start made, and only while they hold nothing but
+        the zero-length stream files a router opens, so a refused start leaves
+        no 'existing data' for the next attempt to move aside and no path
+        holding real data can be removed here.
+        """
+        for path in reversed(getattr(self, "_created_dirs", [])):
+            try:
+                for leftover in path.iterdir():
+                    if leftover.is_file() and leftover.stat().st_size == 0:
+                        leftover.unlink()
+                path.rmdir()
+            except OSError:
+                pass
+        self._created_dirs = []
+
+    def _start_body(self, acq_type, raw_paths, display_every, realtime, kick,
+                    fps) -> dict:
+        """Claim the board, start the cameras, start the triggers.
+
+        Runs on a worker thread and returns what _on_acquisition_started
+        needs: {"ok": True}, or {"ok": False, "title", "message"} plus
+        "cameras_closed" when the rollback had to abandon them.
+        """
+        try:
+            return self._start_body_inner(acq_type, raw_paths, display_every,
+                                          realtime, kick, fps)
+        except Exception as e:
+            traceback.print_exc()
+            # Unknown ground: the cameras may be in trigger mode and the board
+            # may already be triggering, so stand both down rather than leave
+            # them running behind an IDLE window.
+            return self._rollback_acquisition(
+                f"Starting the {acq_type} failed:\n\n{type(e).__name__}: {e}",
+                sent_start=True)
+
+    def _start_body_inner(self, acq_type, raw_paths, display_every, realtime,
+                          kick, fps) -> dict:
+        """The start sequence proper.
+
+        RULE: serial claim, cameras, readiness barrier, triggers - in that
+        order. REASON: the barrier exists so the board is never started while a
+        grab thread is still allocating its ring, and the serial claim comes
+        first because a port that cannot be opened must not leave every camera
+        sitting in trigger mode waiting for triggers that will never come.
+        """
+        config = self._config
+        teensy = self._teensy_connection(retries=self.START_SERIAL_RETRIES)
         if teensy is None:
-            self._rollback_acquisition(
-                f"Could not open serial port {self._profile.serial_port}.\n"
-                "Close Arduino Serial Monitor / other apps holding the port and retry.")
-            return
+            # Nothing has been started, so there is nothing to stand down: no
+            # camera is in trigger mode and the board never saw a start.
+            reason = getattr(self._teensy, "last_error", "") or ""
+            return {"ok": False,
+                    "title": "Could not open the trigger board",
+                    "message": (
+                        f"Serial port {self._profile.serial_port} could not be "
+                        f"opened, so no triggers would be sent. Nothing has "
+                        f"been started and nothing has been recorded."
+                        f"\n\nClose Arduino Serial Monitor or anything else "
+                        f"holding the port, check the cable, then start again."
+                        + (f"\n\n{reason}" if reason else ""))}
+
+        try:
+            self._camera_mgr.start_acquisition(
+                raw_paths, display_every=display_every,
+                realtime=realtime, width=config.frame_width,
+                height=config.frame_height, quality=config.quality,
+                fps=fps, realtime_kick=kick, kick_max_lag=config.kick_max_lag,
+                # Calibration gets its own exposure/gain when the profile sets
+                # them; a recording passes None, which RESTORES the .pfs
+                # values. Restoring rather than re-deriving is what guarantees
+                # a long calibration exposure can never leak into a 100 fps
+                # session, where it would silently halve the frame rate.
+                exposure_us=(config.calibration_exposure_us or None
+                             if acq_type == "calibration" else None),
+                gain_db=(config.calibration_gain_db
+                         if acq_type == "calibration"
+                         and config.calibration_gain_db >= 0 else None))
+        except AcquisitionStartRefused as e:
+            # Raised only once the cameras are back in free-run preview with
+            # nothing recorded, so there is nothing to roll back.
+            return {"ok": False, "title": "Cannot start the acquisition",
+                    "message": str(e)}
+
         # Barrier: never start the board while a grab thread is still
         # allocating. See CameraManager.wait_until_ready for the measurement.
         t_bar = time.perf_counter()
@@ -725,20 +981,57 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[acq] readiness barrier failed, starting anyway: {e}",
                   flush=True)
-        print(f"[acq] sending start_triggers pins={self._profile.trigger_pins} fps={fps}", flush=True)
+        try:
+            # Printed beside the readiness line so a session's log records
+            # where the capture threads actually ran, which is what a probe's
+            # numbers have to be compared against.
+            print(self._camera_mgr.pinning_report(), flush=True)
+        except Exception as e:
+            print(f"[acq] pinning report unavailable: {e}", flush=True)
+
+        print(f"[acq] sending start_triggers "
+              f"pins={self._profile.trigger_pins} fps={fps}", flush=True)
         if not teensy.start_triggers(self._profile.trigger_pins, fps):
             # The board never confirmed the config, even after a forced reset.
             # Recording now would produce a full-length session with no frames.
-            self._rollback_acquisition(
-                "The trigger board did not acknowledge the start command, so no "
-                "triggers would be sent.\n\nCheck the Arduino is connected and "
-                "running the Panopticon sketch, then retry.")
+            return self._rollback_acquisition(
+                "The trigger board did not acknowledge the start command, so "
+                "no triggers would be sent.\n\nCheck the Arduino is connected "
+                "and running the Panopticon sketch, then retry.",
+                sent_start=True)
+        # Arm every grab thread's stall detector. Until this arrives a run of
+        # retrieve timeouts is read as the board not yet running, so a camera
+        # dead from the start is only retired when the pre-trigger grace
+        # expires, minutes into the session.
+        self._camera_mgr.signal_triggers_started()
+        print("[acq] start_acquisition done", flush=True)
+        return {"ok": True}
+
+    def _on_acquisition_started(self, result):
+        """Finish the start on the UI thread: dialogs, state, HUD."""
+        self._end_busy()
+        if not isinstance(result, dict):
+            # CallableWorker delivers a raised exception AS the result, and
+            # _start_body turns one into a rollback dict, so this is the
+            # last-resort branch: report it rather than march on to RECORDING.
+            result = {"ok": False, "title": "Could not start the acquisition",
+                      "message": f"{type(result).__name__}: {result}"}
+        if not result.get("ok"):
+            self._remove_created_dirs()
+            self._video_dir = None
+            self._state = State.IDLE
+            self._sidebar.set_status("IDLE", "#888")
+            self._sidebar.reset_toggles()
+            if result.get("cameras_closed"):
+                self._camera_grid.setup_grid(0)
+                self._camera_names = []
+            QMessageBox.critical(self, result.get("title", "Cannot start"),
+                                 result.get("message", ""))
             return
-        print(f"[acq] start_acquisition done", flush=True)
 
         self._sidebar.set_fields_editable(False)
         self._start_thermal_watch()
-        if acq_type == "calibration":
+        if self._acq_type == "calibration":
             self._state = State.CALIBRATING
             self._sidebar.set_status("CALIBRATING", "#4488ff")
             # No stim provenance is written for a calibration, and none is
@@ -918,7 +1211,11 @@ class MainWindow(QMainWindow):
                 self._stim_window.invalidate_upload(
                     f"a {acq_type} needed the {label} sketch")
             self._teensy_connection()        # retake the port before acquiring
-            self._start_acquisition(acq_type)
+            # Re-enter at the SIDE EFFECTS, not at the top: every check has
+            # already passed, and repeating them would prompt a second time
+            # about data and re-run the preflight for an acquisition the
+            # operator has already confirmed.
+            self._arm_acquisition(acq_type)
 
         self._fw_op.done.connect(done)
         self._fw_op.start()
@@ -1042,28 +1339,54 @@ class MainWindow(QMainWindow):
             print("[acq] releasing serial port for upload", flush=True)
             self._teensy.close()
 
-    def _rollback_acquisition(self, message: str):
-        """Undo a half-started acquisition. The cameras are already grabbing in
-        trigger mode, so without this they sit waiting for triggers forever.
+    def _rollback_acquisition(self, message: str, sent_start: bool) -> dict:
+        """Undo a half-started acquisition and describe it for the dialog.
 
-        Stand the BOARD down first, before the cameras. This runs from the
-        `start_triggers() == False` branch, which is precisely the case where the
-        board may have consumed the config, begun triggering and run initStim()
-        but failed to ack — so a stim paradigm (and the laser pin) can be live
-        right now. Rolling back only the cameras leaves it running while the GUI
-        returns to IDLE showing "did not acknowledge", which reads to the user as
-        "nothing happened".
+        Runs on the start worker's thread, never the UI thread: stop_acquisition
+        can cost the whole stop budget (5 s + 10 s + 100 s), which on the UI
+        thread is a frozen window.
+
+        RULE: the board stands down before the cameras, and only when a start
+        was actually sent. REASON: the failing branch is the one where the board
+        may have consumed the config, begun triggering and run initStim() but
+        failed to ack, so a paradigm and its laser can be live right now, and
+        rolling back only the cameras leaves that running behind an IDLE window.
+        A port that never opened, on the other hand, received no start: telling
+        the operator there that the board "did not accept the stop" sends them
+        to power-cycle a board that was never running.
         """
-        if self._teensy is not None:
+        if sent_start and self._teensy is not None:
             if not self._teensy.stop_triggers(self._profile.trigger_pins):
                 message += ("\n\nWARNING: the trigger board did not accept the stop "
                             "command. It may still be triggering and any stim "
                             "paradigm may still be running. Power-cycle the board "
                             "and key off the laser before continuing.")
-        self._camera_mgr.stop_acquisition()
-        self._camera_mgr.resume_preview()
-        self._sidebar.reset_toggles()
-        self._on_camera_error(message)
+        result = {"ok": False, "title": "Could not start the acquisition",
+                  "message": message}
+        try:
+            self._camera_mgr.stop_acquisition()
+        except AcquisitionStopIncomplete as e:
+            # A grab thread outlived the stop bounds, so the cameras were left
+            # untouched for abandon(); reconfiguring a handle under a live
+            # RetrieveResult is concurrent native access, not an exception.
+            print(f"[acq] rollback could not stop cleanly: {e}", flush=True)
+            try:
+                self._camera_mgr.abandon()
+            except Exception as ae:
+                print(f"[acq] abandon during rollback failed: {ae}", flush=True)
+            result["cameras_closed"] = True
+            result["message"] += (
+                "\n\nThe cameras could not be stopped cleanly and have been "
+                "closed. Switch profile and back (or restart Panopticon) to "
+                "reopen them.")
+            return result
+        except Exception as e:
+            print(f"[acq] rollback stop failed: {e}", flush=True)
+        try:
+            self._camera_mgr.resume_preview()
+        except Exception as e:
+            print(f"[acq] rollback could not resume preview: {e}", flush=True)
+        return result
 
     def _start_coverage_hud(self):
         """Spin up the live ChArUco coverage graph for this calibration run."""
