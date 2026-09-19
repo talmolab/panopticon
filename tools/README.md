@@ -45,7 +45,7 @@ Run them as `uv run tools/experiments/<name>.py`.
 | `probe_copy_scaling.py` | Is the gray to NV12 copy GIL-bound, and what explains ~850 MB/s? | The copy releases the GIL and costs ~0.08 ms on a warm ring; the production ring is already warm, so neither page faults nor bandwidth explain the 2.7 ms reading. |
 | `probe_gil_wait.py` | How much of that 2.7 ms is executing, and how much is waiting for the GIL? | Almost all of it is GIL wait. The system tolerates about 300 us of GIL-held work per thread per frame at 17 threads; ~1000 us blows the 10 ms budget at 11 threads. |
 | `probe_pypylon_gil.py` | Which pypylon calls hold the GIL? | Every wrapped call releases it except the `%nothread` set, which includes the 2.3 MB copy behind `result.Array`. Uses the pylon emulator, so it needs no rig camera. |
-| `probe_zerocopy.py` | Which frame-access route should the grab loop use? | `GetArrayZeroCopy` wins: about 5x less executing time than `result.Array`, and `np.frombuffer(GetBuffer())` is no better than `.Array`. The result's row padding must be zero, which the probe now asserts. |
+| `probe_zerocopy.py` | Which frame-access route should the grab loop use? | `GetArrayZeroCopy` wins: about 5x less executing time than `result.Array`, and `np.frombuffer(GetBuffer())` is no better than `.Array`. The result's row padding must be zero; a nonzero value closes the camera and ends the run rather than raising, so the device is not left held. |
 | `probe_release_gil.py` | Does `result.Release()` hold the GIL? | Measured by exec-versus-wall and by thread scaling, so the answer does not rest on the timer alone. Re-run only with the rig quiet. |
 | `probe_native_cpu.py` | What does pylon's native GigE receive path cost, and where? | Attributes per-thread CPU to pylon's own threads and per-core DPC and interrupt time, which no Python-side measurement can see. This is the method behind the NIC preflight thresholds. |
 | `probe_multiproc.py` | Does splitting the grab loops across processes recover timing margin? | A prototype only. Each worker coordinates just its own cameras, so its output is NOT globally trigger-aligned and must never be used for real data. |
@@ -56,3 +56,15 @@ Put it at the root if an operator would run it again; put it in
 `tools/experiments/` once its question is answered, and add a row above saying
 what the answer was. Cite code by function name, not by line number: line
 numbers rot silently and a stale one sends the next reader to the wrong place.
+
+A script under `tools/experiments/` runs with its OWN directory as
+`sys.path[0]`, so it must set `REPO` and then `sys.path.insert(0, str(REPO))`
+at module level, above every `gui_app` or `tools` import in the file — the
+guard import included. An import placed further down, inside `main()` beside
+the guard call, raises `ModuleNotFoundError` before argparse or the guard ever
+run, and the probe then neither guards nor starts.
+
+Compiling a moved file cannot catch that; only running it can. After moving or
+adding one, run `<script> --help` from a directory that is not the repository
+root. `test_probe_guard.py` does exactly that for every
+`tools/experiments/probe_*.py`, and checks the path insert statically as well.

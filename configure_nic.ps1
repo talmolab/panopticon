@@ -174,12 +174,19 @@ function Get-DpcProcessor($port) {
     # no Get-NetAdapter* cmdlet, which is why an RSS setting cannot move a DPC.
     # Returns the processors the policy names, @() when no policy is set, or
     # $null when the key cannot be read, which needs elevation.
+    #
+    # RULE: every empty-array return is written `return ,@()` (unary comma).
+    # REASON: PowerShell unrolls a collection on return, so a plain `return @()`
+    # emits nothing and the caller receives $null -- which is this function's
+    # OTHER answer. Without the comma "no affinity policy is set", the normal
+    # shipped state, is reported as "the key is unreadable; re-run elevated",
+    # and the branch that names the real finding is dead code.
     try {
         $id  = (Get-NetAdapter -Name $port -ErrorAction Stop).PnPDeviceID
         $key = "HKLM:\SYSTEM\CurrentControlSet\Enum\$id\Device Parameters\Interrupt Management\Affinity Policy"
-        if (-not (Test-Path $key)) { return @() }
+        if (-not (Test-Path $key)) { return ,@() }
         $mask = (Get-ItemProperty -Path $key -ErrorAction Stop).AssignmentSetOverride
-        if ($null -eq $mask) { return @() }
+        if ($null -eq $mask) { return ,@() }
         $procs = @()
         if ($mask -is [byte[]]) {
             for ($b = 0; $b -lt $mask.Length; $b++) {
@@ -193,7 +200,9 @@ function Get-DpcProcessor($port) {
                 if ($m -band ([uint64]1 -shl $i)) { $procs += $i }
             }
         }
-        return $procs
+        # The same unrolling trap: a mask with no bits set leaves $procs
+        # empty, and an empty $procs must not read as "unreadable".
+        return ,$procs
     } catch {
         return $null
     }
@@ -318,8 +327,15 @@ foreach ($p in $Ports) {
 # took rather than guessing.
 $deadline = (Get-Date).AddSeconds(60)
 while ((Get-Date) -lt $deadline) {
-    $now = Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue
-    if (-not ($now | Where-Object { $_.NumberOfReceiveQueues -ne $Queues })) {
+    # RULE: the poll counts the objects that came back before it believes them.
+    # REASON: a Where-Object over an empty result matches nothing, so a read
+    # that returned no adapter at all -- a port still down from the reset this
+    # script itself causes -- otherwise reads as "every port already agrees"
+    # and the poll prints "settled after 0s" without having seen one queue
+    # count.
+    $now = @(Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue)
+    if ($now.Count -eq $Ports.Count -and
+        -not ($now | Where-Object { $_.NumberOfReceiveQueues -ne $Queues })) {
         Write-Host ("  settled after {0:N0}s" -f `
             (60 - ($deadline - (Get-Date)).TotalSeconds)) -ForegroundColor DarkGray
         break
@@ -330,12 +346,30 @@ Show-State "AFTER"
 
 # Verify rather than assume: a driver that silently ignores the request is the
 # expected failure mode here, not an error.
+#
+# RULE: read once, prove one object came back per port, and only then compare.
+# REASON: iterating the query inline runs the loop body zero times when the
+# query returns nothing, which leaves $bad empty and prints the green success
+# line for ports that were never read -- a verification that passes hardest
+# exactly when the instrument failed. That is the VERIFICATION RULE above,
+# inverted.
+$after  = @(Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue)
+$silent = @($Ports | Where-Object { $port = $_
+                                    -not ($after | Where-Object { $_.Name -eq $port }) })
 $bad = @()
-foreach ($r in (Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue)) {
+foreach ($r in $after) {
     if ($r.NumberOfReceiveQueues -ne $Queues) { $bad += $r.Name }
 }
+$verified = $true
 Write-Host ""
-if ($bad.Count -eq 0) {
+if ($silent.Count -gt 0) {
+    $verified = $false
+    Write-Host ("NOT VERIFIED: no RSS information came back for {0}" -f `
+        ($silent -join ", ")) -ForegroundColor Red
+    Write-Host "The queue count may or may not have been applied: it could not be read back,"
+    Write-Host "so this run proves nothing about those ports. A port still resetting"
+    Write-Host "reappears within a minute; check the link state below and re-run elevated."
+} elseif ($bad.Count -eq 0) {
     Write-Host "OK: every port reports $Queues receive queues." -ForegroundColor Green
     Write-Host "Next: run a recording and compare each port's ReceivedDiscardedPackets"
     Write-Host "and per-core % DPC Time against the same numbers taken before this run."
@@ -351,3 +385,7 @@ Write-Host ""
 Write-Host "Camera link state (every port must be Up):" -ForegroundColor Cyan
 Get-NetAdapter -Name $Ports -ErrorAction SilentlyContinue |
     Select-Object Name, Status, LinkSpeed | Format-Table -AutoSize
+
+# A run that could not read a port back exits nonzero: an operator script that
+# chains on this one must not treat an unread port as a configured port.
+if (-not $verified) { exit 1 }

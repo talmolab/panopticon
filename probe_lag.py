@@ -136,9 +136,13 @@ def main():
 
     mgr = CameraManager()
     mgr.error.connect(lambda m: print(f"[cam-error] {m}", flush=True))
-    # The GUI's two calls, in the GUI's order: the flags and the capture-core
-    # pool are set before the cameras open, because the pool decides where the
-    # grab threads land and open_all is what creates them.
+    # The GUI's two calls, in the GUI's order: the thread-placement flags
+    # (rig_setup.MANAGER_FLAGS) and the capture-core pool are set before the
+    # cameras open. open_all ends by starting the PREVIEW grab threads, and
+    # each grab thread copies pin_capture_threads and pins itself against the
+    # pool when it starts, so a flag set after open_all reaches the recording
+    # threads (start_acquisition rebuilds them) but never the preview ones --
+    # and the preview threads are the ones a profile switch leaves running.
     pool = rig_setup.apply_profile_to_manager(mgr, prof)
     mgr.pin_capture_threads = pin
     kwargs = rig_setup.open_kwargs(mgr, prof)

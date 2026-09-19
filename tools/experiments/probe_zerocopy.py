@@ -95,7 +95,14 @@ def main():
     #     is absent on these cameras, so reading it proves nothing, while
     #     `result.PaddingX` is the grab-result field GetArray() itself uses to
     #     build its strides and is always present. This gates the hot-path
-    #     change, so it asserts rather than reports.
+    #     change, so a nonzero value ends the run instead of being reported.
+    #
+    #     RULE: the gate closes the camera before it returns, and it is an
+    #     explicit check, never `assert`.
+    #     REASON: an AssertionError raised here -- after StopGrabbing but
+    #     before any Close() -- leaves the InstantCamera open, so the next run
+    #     cannot claim the device; and `python -O` strips assert statements,
+    #     which would turn the gate on a hot-path change into a no-op.
     cam.StartGrabbing(pylon.GrabStrategy_OneByOne)
     first = cam.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
     if not first.GrabSucceeded():
@@ -108,8 +115,11 @@ def main():
     first.Release()
     cam.StopGrabbing()
     print(f"  result.PaddingX = {padx}   result.PaddingY = {pady}")
-    assert (padx, pady) == (0, 0), (
-        f"row padding {padx}x{pady} would shear the zero-copy view")
+    if (padx, pady) != (0, 0):
+        cam.Close()
+        print(f"row padding {padx}x{pady} would shear the zero-copy view; "
+              f"refusing to A/B")
+        return 1
 
     # Production-shaped consumers: one NV12 ring slot + a preview decimate.
     nv12 = np.full((H * 3 // 2, W), 128, np.uint8)

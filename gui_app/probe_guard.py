@@ -77,6 +77,16 @@ def _process_table() -> list[tuple[int, int, str]] | None:
     containing a newline stays inside its own row. A text table of one line per
     process loses everything after such a newline and misses a marker that sits
     on a later line.
+
+    RULE: this process's own row is the canary. A table in which even this
+    process has no command line is UNKNOWN, not empty.
+    REASON: psutil turns a per-process AccessDenied into ``cmdline == None``
+    instead of raising, and the process NAME alone never contains a marker. On
+    a restricted account every row can come back that way, so the scan would
+    enumerate happily, match nothing and report "clear to run" while a GUI is
+    recording -- the fail-open this guard exists to close. A process can always
+    read its own command line, so losing that one means command lines are not
+    readable here at all.
     """
     try:
         import psutil
@@ -84,14 +94,23 @@ def _process_table() -> list[tuple[int, int, str]] | None:
         print(f"[guard] psutil is unavailable: {exc}", flush=True)
         return None
     rows: list[tuple[int, int, str]] = []
+    own_cmdline = False
     try:
         for proc in psutil.process_iter(["pid", "ppid", "cmdline", "name"]):
             info = proc.info
             argv = info.get("cmdline") or []
+            pid = int(info["pid"])
+            if argv and pid == os.getpid():
+                own_cmdline = True
             cmd = " ".join(argv) if argv else (info.get("name") or "")
-            rows.append((int(info["pid"]), int(info.get("ppid") or 0), cmd))
+            rows.append((pid, int(info.get("ppid") or 0), cmd))
     except Exception as exc:
         print(f"[guard] could not read the process table: {exc}", flush=True)
+        return None
+    if not own_cmdline:
+        print("[guard] the process table came back without this process's own "
+              "command line, so command lines are not readable here and no "
+              "marker could ever match.", flush=True)
         return None
     return rows
 
@@ -113,6 +132,28 @@ def find_others(rows: list[tuple[int, int, str]]) -> list[tuple[int, str]]:
     return [(pid, " ".join(cmd.split())[:120]) for pid, _ppid, cmd in rows
             if pid not in mine
             and any(m in cmd.lower() for m in PANOPTICON_MARKERS)]
+
+
+def _release_lock() -> None:
+    """Drop the lock on exit, but only while it still names this process.
+
+    RULE: a lock file naming another pid belongs to another probe and is left
+    alone.
+    REASON: ``--force`` may take over a lock whose holder is still running.
+    Deleting that file when this process exits would leave the running probe
+    with no lock at all and let the next probe's check pass against it, so the
+    half of the guard that protects probe against probe would disappear exactly
+    after the one command that says a human is watching.
+    """
+    try:
+        held = int(LOCK.read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return
+    if held == os.getpid():
+        try:
+            LOCK.unlink()
+        except OSError:
+            pass
 
 
 def refuse_if_panopticon_running(*, take_lock: bool = True,
@@ -151,24 +192,33 @@ def refuse_if_panopticon_running(*, take_lock: bool = True,
         except Exception:
             held = None
         if held and held != os.getpid():
+            # RULE: the refusal text belongs only to the branch that refuses; a
+            # forced run says it is overriding.
+            # REASON: an operator log is read after the fact, and a run that
+            # went ahead under --force while its log says "REFUSING TO START"
+            # tells the reader the opposite of what happened.
             if rows is None:
                 # An unknown table cannot show the holder is gone, and a lock
                 # declared stale is a lock overwritten, so unknown means HELD.
-                print(f"[guard] REFUSING TO START: {LOCK} is held by pid "
-                      f"{held} and the process table is unknown, so the lock "
-                      f"cannot be shown to be stale. Re-run with --force to "
-                      f"override.", flush=True)
                 if not force:
+                    print(f"[guard] REFUSING TO START: {LOCK} is held by pid "
+                          f"{held} and the process table is unknown, so the "
+                          f"lock cannot be shown to be stale. Re-run with "
+                          f"--force to override.", flush=True)
                     sys.exit(3)
+                print(f"[guard] overriding a lock held by pid {held} under an "
+                      f"unknown process table (--force).", flush=True)
             elif held in {pid for pid, _p, _c in rows}:
-                print(f"[guard] REFUSING TO START: another probe holds {LOCK} "
-                      f"(pid {held}).", flush=True)
                 if not force:
+                    print(f"[guard] REFUSING TO START: another probe holds "
+                          f"{LOCK} (pid {held}).", flush=True)
                     sys.exit(3)
+                print(f"[guard] overriding a lock held by running pid {held} "
+                      f"(--force).", flush=True)
             else:
                 print(f"[guard] clearing a stale lock from pid {held}",
                       flush=True)
     LOCK.write_text(str(os.getpid()), encoding="utf-8")
-    atexit.register(lambda: LOCK.unlink(missing_ok=True))
+    atexit.register(_release_lock)
     print(f"[guard] clear to run; holding {LOCK} (pid {os.getpid()})",
           flush=True)

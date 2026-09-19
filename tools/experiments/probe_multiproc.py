@@ -35,12 +35,22 @@ from pathlib import Path
 #: imports are anchored to it, never to the working directory, so a run
 #: started from anywhere reads the same package and writes to one place.
 REPO = Path(__file__).resolve().parents[2]
+#: RULE: the repository joins ``sys.path`` at MODULE level, above every
+#: ``gui_app``/``tools`` import in this file.
+#: REASON: ``sys.path[0]`` is this script's own directory, so an import placed
+#: further down -- inside ``main()``, beside the guard call -- raises
+#: ModuleNotFoundError before argparse or the guard ever run, and the probe
+#: then neither guards nor starts. Compiling the file cannot catch that; only
+#: running it can, which is why ``--help`` is part of the check.
+sys.path.insert(0, str(REPO))
+
+from gui_app.probe_guard import (add_force_argument,  # noqa: E402
+                                 refuse_if_panopticon_running)
 
 
 def worker(idx, serials, seconds, profile_name, q, switch_interval):
     """One acquisition process owning `serials`. Reports timing back on `q`."""
     import os
-    sys.path.insert(0, str(REPO))
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     # Per-process: each interpreter has its own switch interval, and comparing
     # against the threaded arm is only meaningful when both use production's.
@@ -117,8 +127,6 @@ def main() -> int:
     ap.add_argument("--profile", default="3dpose")
     ap.add_argument("--switch-interval", type=float, default=0.001,
                     help="sys.setswitchinterval in each worker; gui.py uses 0.001")
-    from gui_app.probe_guard import (add_force_argument,
-                                     refuse_if_panopticon_running)
     add_force_argument(ap)
     args = ap.parse_args()
     # The workers open every camera and the parent owns the trigger board,
@@ -127,7 +135,6 @@ def main() -> int:
     refuse_if_panopticon_running(force=args.force)
     print(f"switch interval {args.switch_interval} per worker  [gui.py uses 0.001]")
 
-    sys.path.insert(0, str(REPO))
     from gui_app.backends import load_backend
 
     be = load_backend("basler")

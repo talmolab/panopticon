@@ -75,6 +75,15 @@ def main():
 
     verdict = {"ok": None, "note": ""}
 
+    #: One clock for the whole run, so the settle polls and the hard backstop
+    #: cannot race. RULE: every settle poll gives up BEFORE the backstop fires.
+    #: REASON: a poll that outlives the backstop is replaced by "TIMED OUT ---
+    #: probable hang" in exactly the failing case it exists for, throwing away
+    #: the state/busy/preview detail that says WHICH way the GUI failed to come
+    #: back to rest.
+    backstop = time.perf_counter() + args.seconds + 180
+    settle_deadline = backstop - 10
+
     def finish(ok, note):
         verdict["ok"], verdict["note"] = ok, note
         print(f"\n[VERDICT] {args.case}: {'PASS' if ok else 'FAIL'} --- {note}",
@@ -138,7 +147,7 @@ def main():
             # resting state: IDLE, not busy, still previewing. "No hang" is
             # not the contract -- a GUI wedged in a non-IDLE state with dead
             # grab threads also fails to hang.
-            settle_then(time.perf_counter() + 180, "after the storm")
+            settle_then(settle_deadline, "after the storm")
         QTimer.singleShot(int(args.seconds * 1000), later)
 
     def serial_exclusive():
@@ -180,7 +189,7 @@ def main():
                     False, "a second process opened the trigger port while "
                            "the GUI was recording"))
             else:
-                settle_then(time.perf_counter() + 180,
+                settle_then(settle_deadline,
                             "port stayed exclusive; after the recording")
         QTimer.singleShot(int(args.seconds * 1000), done)
 
@@ -225,8 +234,11 @@ def main():
                              "serial_exclusive": serial_exclusive,
                              "quit_midrecord": quit_midrecord,
                              "stim_tandem": stim_tandem}[args.case])
-    # Hard backstop: never let an unattended case hang the machine.
-    QTimer.singleShot(int((args.seconds + 180) * 1000), lambda: (
+    # Hard backstop: never let an unattended case hang the machine. It fires
+    # 10 s after the settle polls give up, so a GUI that never returns to IDLE
+    # is judged by the invariant and not by this timeout.
+    QTimer.singleShot(int(max(0.0, backstop - time.perf_counter()) * 1000),
+                      lambda: (
         finish(False, "TIMED OUT --- probable hang") if verdict["ok"] is None
         else None, app.quit()))
     app.exec_()
