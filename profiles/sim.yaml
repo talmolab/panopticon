@@ -18,6 +18,13 @@ encoder: auto
 
 # Small frames and few cameras: this profile is for exercising the pipeline,
 # not for measuring it, and the NV12 ring is sized from these numbers.
+#
+# These three are the ONLY declaration of the simulated rig's shape:
+# gui_app/backends/sim.py reads them from this file (`sim.profile_shape`) and
+# builds that many cameras at that size, so growing the simulated rig is an
+# edit here and nowhere else. A second copy in the backend would be what the
+# application actually built, and the disagreement would surface as "Expected
+# N cameras but M enumerated" with nothing naming the cause.
 n_cameras: 3
 frame_width: 640
 frame_height: 400

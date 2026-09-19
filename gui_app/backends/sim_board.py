@@ -230,7 +230,8 @@ class SimSerial:
     Only what `TeensyController` uses is implemented — `is_open`,
     `reset_input_buffer()`, `write()`, `read()` and `close()` — because the
     controller is the only caller and a wider surface would be untested
-    fiction.
+    fiction. `board` is the one addition, and it is for test code: it names
+    the clock this port drives, which a real `serial.Serial` has no notion of.
 
     A closed port raises `OSError` rather than `serial.SerialException`: the
     controller catches both, and the builtin keeps the simulated rig free of a
@@ -313,11 +314,6 @@ class SimSerial:
             chunk = bytes(self._out[:size])
             del self._out[:size]
         return chunk
-
-    @property
-    def in_waiting(self) -> int:
-        with self._lock:
-            return len(self._out)
 
     def close(self) -> None:
         """Drop the host's end of the link.

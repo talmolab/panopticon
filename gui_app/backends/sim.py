@@ -25,22 +25,38 @@ oscillator is not the trigger board's: that offset is exactly what
 its tolerance on.
 """
 import random
+import sys
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 from gui_app.backends import sim_board
+from gui_app.session_config import RigProfile
 
-#: Cameras, geometry and faults a `load_backend("sim")` instance gets. They
-#: are module state rather than constructor arguments because `load_backend`
-#: takes only a name, so a caller configures the simulated rig here (or by
-#: constructing `SimBackend` directly) before the manager opens it.
-N_CAMERAS = 3
-WIDTH = 640
-HEIGHT = 400
+#: The profile that selects this backend, and the ONE place the simulated
+#: rig's shape is written down.
+#: RULE: read `n_cameras`/`frame_width`/`frame_height` from this profile
+#: instead of restating them as constants here.
+#: REASON: `load_backend` takes only a name, so a copy in this module is what
+#: the application would actually build, while `camera_manager` checks the
+#: cameras against the PROFILE. The two drifting apart surfaces as "Expected N
+#: cameras but M enumerated", or as a width mismatch, with nothing naming the
+#: cause — and growing the simulated rig is a one-line profile edit precisely
+#: so no code has to be touched to do it.
+SIM_PROFILE_PATH = Path(__file__).resolve().parents[2] / "profiles" / "sim.yaml"
+
+#: Shape overrides installed by `configure()`, for a test that needs a rig the
+#: profile does not describe. Empty means the profile decides.
+_SHAPE_OVERRIDES: dict = {}
+
+#: Per-camera faults a `load_backend("sim")` instance gets. Module state
+#: rather than a constructor argument because `load_backend` takes only a
+#: name, so a caller arms the simulated rig here (or by constructing
+#: `SimBackend` directly) before the manager opens it.
 FAULTS: dict = {}
 
 #: What the cameras report before anything sets them, matching the .pfs values
@@ -137,16 +153,43 @@ def set_faults(faults: dict | None) -> dict:
     return prev
 
 
+def profile_shape(path=None) -> tuple:
+    """`(n_cameras, width, height)` as the sim profile declares them.
+
+    Loaded through `RigProfile` rather than parsed here, because the profile
+    object is what `camera_manager` compares the opened cameras against: read
+    by any other route, the backend could agree with the file and still
+    disagree with the caller.
+    """
+    prof = RigProfile.load(Path(path) if path is not None else SIM_PROFILE_PATH)
+    return prof.n_cameras, prof.frame_width, prof.frame_height
+
+
+def rig_shape() -> tuple:
+    """The shape a `load_backend("sim")` instance is built with: the profile's,
+    with any `configure()` override applied. Cold path only — it reads the
+    profile file, so it is called when a backend is constructed, never per
+    frame."""
+    n, w, h = profile_shape()
+    return (_SHAPE_OVERRIDES.get("n_cameras", n),
+            _SHAPE_OVERRIDES.get("width", w),
+            _SHAPE_OVERRIDES.get("height", h))
+
+
 def configure(n_cameras: int | None = None, width: int | None = None,
               height: int | None = None) -> None:
-    """Set the simulated rig's shape for backends built by `load_backend`."""
-    global N_CAMERAS, WIDTH, HEIGHT
-    if n_cameras is not None:
-        N_CAMERAS = int(n_cameras)
-    if width is not None:
-        WIDTH = int(width)
-    if height is not None:
-        HEIGHT = int(height)
+    """Override the profile's shape for backends built by `load_backend`.
+
+    A `None` leaves that dimension to the profile, so calling this with no
+    arguments restores the profile's shape in full. The profile stays the
+    default so the simulated rig cannot be reshaped by accident.
+    """
+    global _SHAPE_OVERRIDES
+    _SHAPE_OVERRIDES = {
+        key: int(value) for key, value in (("n_cameras", n_cameras),
+                                           ("width", width),
+                                           ("height", height))
+        if value is not None}
 
 
 def _sleep_until(deadline: float) -> None:
@@ -231,14 +274,33 @@ class SimGrabResult:
         Reusing the buffer is the point: the view is only valid until
         `Release()`, and a consumer that keeps it reads a frame that has since
         been overwritten — which is the bug this contract exists to prevent.
+
+        RULE: on leaving the block, refuse a caller that still holds a
+        reference to the array, mirroring pypylon's own exit guard.
+        REASON: the buffer is reused and carries a plausible payload, so an
+        escaped view reads a live frame forever and the regression the
+        grab-loop invariant is written against — a consumer that STORES `img`
+        instead of copying out of it — would pass here and fail only on
+        hardware. One extra reference is the `with ... as img` target itself,
+        which Python leaves bound after the block; anything beyond that is a
+        reference the consumer chose to keep.
         """
         if self._released:
             raise RuntimeError("simulated: zero-copy view after Release()")
+        arr = self._cam._buffers[self._buf_index]
+        baseline = sys.getrefcount(arr)
         self._view_open = True
         try:
-            yield self._cam._buffers[self._buf_index]
+            yield arr
         finally:
             self._view_open = False
+            escaped = sys.getrefcount(arr) - baseline - 1
+            if escaped > 0:
+                raise RuntimeError(
+                    f"simulated: {escaped} reference(s) to the zero-copy view "
+                    f"outlive the with block; the view is a window onto a "
+                    f"buffer that is about to be reused, so a consumer must "
+                    f"copy out of it, never store it")
 
     def Release(self) -> None:
         """Return the buffer to the pool.
@@ -296,11 +358,21 @@ class SimCamera:
         self._next = 1            # next trigger ordinal to consider
         self._consumed = 0        # block IDs consumed since StartGrabbing
         self._delivered = 0       # frames handed over since StartGrabbing
+        #: Results handed over since the camera was opened, failed grabs
+        #: included. Not reset by a re-arm, because a link that has died stays
+        #: dead across one.
+        self.handed = 0
         #: Virtual time of the last trigger this camera ACQUIRED. Kept across
         #: a re-arm because the sensor's readout is not restarted by one.
         self._last_acq_v = -1e18
         self.starts = 0
-        self.stats = {"delivered": 0, "failed": 0, "underrun": 0,
+        #: RULE: `succeeded` counts only buffers handed over with
+        #: GrabSucceeded() True, and a failed grab is counted once, under
+        #: `failed`. REASON: `stream_stats` reports Total = succeeded + failed
+        #: + underrun the way a real camera does — one count per buffer — and
+        #: counting a failed grab in both halves would inflate
+        #: Total_Buffer_Count past the number of buffers the camera produced.
+        self.stats = {"succeeded": 0, "failed": 0, "underrun": 0,
                       "ignored": 0, "stalled": 0}
 
     # ---------------------------------------------------- CameraHandleProtocol
@@ -387,7 +459,11 @@ class SimCamera:
     def _make_result(self, i: int, st, ok: bool = True) -> SimGrabResult:
         self._consumed += 1
         self._delivered += 1
-        self.stats["delivered"] += 1
+        self.handed += 1
+        # A failed grab is already counted under "failed" by the caller; this
+        # buffer must not be counted twice.
+        if ok:
+            self.stats["succeeded"] += 1
         bid = self._block_id()
         tv = sim_board.SimBoard.trigger_v(i, st)
         self._last_acq_v = tv
@@ -418,7 +494,8 @@ class SimCamera:
         _sleep_until(due)
         self._consumed += 1
         self._delivered += 1
-        self.stats["delivered"] += 1
+        self.handed += 1
+        self.stats["succeeded"] += 1
         bid = self._block_id()
         buf_i = self._take_buffer()
         self._buffers[buf_i][0, 0] = bid & 0xFF
@@ -437,7 +514,7 @@ class SimCamera:
             _sleep_until(deadline)
             raise SimTimeout(f"cam{self.index + 1}: not grabbing")
         f = self.faults
-        if f.fail_after and self.stats["delivered"] >= f.fail_after:
+        if f.fail_after and self.handed >= f.fail_after:
             raise RuntimeError(
                 f"cam{self.index + 1}: simulated transport failure")
         if self._freerun_fps > 0:
@@ -494,8 +571,18 @@ class SimCamera:
             return self._make_result(i, st, ok=ok)
 
     def close(self) -> None:
+        """Close the camera and drop its buffer pool.
+
+        RULE: release the frame buffers here, not at garbage-collection time.
+        REASON: one application holds ONE backend for the life of the process
+        while `open_all` runs again on every profile switch and preview
+        restart, so a pool kept alive by a closed camera is stranded for the
+        whole session — n_cams x BUFFER_POOL x H x W bytes per cycle.
+        """
         self._grabbing = False
         self.is_open = False
+        self._buffers = []
+        self._free = []
 
 
 class SimBackend:
@@ -515,9 +602,17 @@ class SimBackend:
     def __init__(self, n_cameras: int | None = None, width: int | None = None,
                  height: int | None = None, faults: dict | None = None,
                  board: sim_board.SimBoard | None = None):
-        self.n_cameras = N_CAMERAS if n_cameras is None else int(n_cameras)
-        self.width = WIDTH if width is None else int(width)
-        self.height = HEIGHT if height is None else int(height)
+        # The profile decides the rig's shape; an explicit argument is a test
+        # asking for a rig of its own. The profile is read only when something
+        # is left to it, so a test that states its whole geometry does not
+        # depend on the file at all.
+        if None in (n_cameras, width, height):
+            prof_n, prof_w, prof_h = rig_shape()
+        else:
+            prof_n, prof_w, prof_h = n_cameras, width, height
+        self.n_cameras = prof_n if n_cameras is None else int(n_cameras)
+        self.width = prof_w if width is None else int(width)
+        self.height = prof_h if height is None else int(height)
         self.faults = dict(FAULTS if faults is None else faults)
         self._board = board
         self.cameras: list = []
@@ -608,7 +703,16 @@ class SimBackend:
         return cam.retrieve(timeout_ms)
 
     def close(self, cam) -> None:
+        """Close one camera and forget it.
+
+        RULE: drop the camera from `self.cameras`. REASON: the backend
+        outlives every camera it opens (the manager reloads one only when the
+        backend NAME changes), so a list that only ever grows keeps every
+        camera of every past session — and its buffers — alive.
+        """
         cam.close()
+        if cam in self.cameras:
+            self.cameras.remove(cam)
 
     # ----------------------------------------------------------- diagnostics
     def thermals(self, cam) -> dict:
@@ -621,11 +725,18 @@ class SimBackend:
 
     def stream_stats(self, cam) -> dict:
         """Counters in the shape the log expects, separating host starvation
-        (Buffer_Underrun) from transmission loss (Failed_Buffer)."""
+        (Buffer_Underrun) from transmission loss (Failed_Buffer).
+
+        `Total_Buffer_Count` counts each buffer ONCE, as a real camera does:
+        it is succeeded + failed + underrun, and a buffer that arrived with
+        GrabSucceeded() False is in the failed half only. Counting it in both
+        would report more buffers than the camera produced, and a test
+        asserting on the loss rate would read it as loss that did not happen.
+        """
         if cam.faults.stats_error:
             return {"error": cam.faults.stats_error}
         s = cam.stats
-        total = s["delivered"] + s["failed"] + s["underrun"]
+        total = s["succeeded"] + s["failed"] + s["underrun"]
         return {"Total_Buffer_Count": total,
                 "Failed_Buffer_Count": s["failed"],
                 "Buffer_Underrun_Count": s["underrun"],

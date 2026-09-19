@@ -161,13 +161,24 @@ check(1, "load_backend('sim') returns a SimBackend implementing CameraBackend",
       isinstance(backend, SimBackend) and backend.name == "sim" and not missing,
       f"missing={missing}")
 
-# 2 -- the profile that selects it loads and validates ------------------------
+# 2 -- the profile that selects it loads, and the backend is built FROM it ----
+# The rig's shape is declared once, in the profile. The backend `load_backend`
+# builds must be that shape and enumerate that many cameras: `camera_manager`
+# checks the cameras against the PROFILE, so a backend carrying its own copy of
+# the numbers would refuse to start the moment the profile was edited, with a
+# message ("Expected N cameras but M enumerated") that names neither cause.
 prof = RigProfile.load(Path(__file__).parent / "profiles" / "sim.yaml")
-check(2, "profiles/sim.yaml selects the sim backend and the sim port",
+shape_from_profile = (backend.n_cameras == prof.n_cameras
+                      and (backend.width, backend.height)
+                      == (prof.frame_width, prof.frame_height)
+                      and len(backend.enumerate_devices()) == prof.n_cameras)
+check(2, "profiles/sim.yaml selects the sim backend and the sim port, and the "
+         "backend takes its shape from that profile",
       (prof.camera_backend == "sim" and prof.serial_port == "sim"
-       and prof.n_cameras == 3 and (prof.frame_width, prof.frame_height) == (640, 400)
-       and prof.encoder == "auto"),
-      f"{prof.camera_backend} {prof.serial_port} {prof.n_cameras}")
+       and prof.encoder == "auto" and shape_from_profile),
+      f"{prof.camera_backend} {prof.serial_port} profile="
+      f"{prof.n_cameras}x{prof.frame_width}x{prof.frame_height} backend="
+      f"{backend.n_cameras}x{backend.width}x{backend.height}")
 
 # 3 -- geometry, handle and result satisfy the documented protocols -----------
 sim_board.reset_board(speed=1.0)
@@ -349,11 +360,17 @@ with tempfile.TemporaryDirectory() as d:
 # 10 -- a stalled stream is re-armed and re-based onto the true ordinal -------
 # The grab loop needs 25 consecutive 200 ms timeouts before it re-arms, so the
 # stall has to outlast five real seconds; at speed 4 that is 20 virtual
-# seconds of silence. Raw mode: this camera's own block-ID bookkeeping is what
-# the resync has to get right, and no encoder is involved in that.
+# seconds of silence. 30 virtual seconds (7.5 real) leaves 2.5 s of margin,
+# because each timeout costs slightly MORE than 200 ms — the loop's error
+# handling and logging run between them — and on a loaded machine a margin of
+# a few per cent starves the re-arm and reports it as a resync bug.
+# Over-running is free: a SECOND re-arm would need another five real seconds
+# of silence, which this stall is still far short of. Raw mode: this camera's
+# own block-ID bookkeeping is what the resync has to get right, and no encoder
+# is involved in that.
 with tempfile.TemporaryDirectory() as d:
     tmp = Path(d)
-    stall_at, stall_s = 320, 22.0
+    stall_at, stall_s = 320, 30.0
     rig = Rig(tmp, 1, {0: SimFaults(ppm=250e-6, stall_at=stall_at,
                                     stall_s=stall_s)},
               speed=4.0, kick=False)
@@ -428,6 +445,110 @@ check(12, "a missed board pulse costs every camera the same trigger and "
       (got12[0] == got12[1] == list(range(1, 48))
        and b12.stream_stats(cams12[0])["Failed_Buffer_Count"] == 0),
       f"n={[len(g) for g in got12]} tail={got12[0][-3:]}")
+
+# 13 -- a zero-copy view that escapes the with block is caught ---------------
+# The fixture exists to prove the grab loop's hardest invariant: `img` is a
+# window onto a buffer that is about to be reused, so a consumer must copy out
+# of it and never store it. pypylon's own exit guard counts references; a
+# stand-in that did not would pass a regression here and fail only on the rig.
+sim_board.reset_board(speed=1.0)
+b13 = SimBackend(n_cameras=1, width=W, height=H)
+cam13 = b13.open(b13.enumerate_devices()[0], "unused.pfs", 600)
+b13.set_triggered(cam13, 165.0)
+b13.start_grabbing(cam13)
+ser13 = sim_board.SimSerial()
+ser13.write(b"6,2,4,6,8,10,12,100\n")
+ser13.read(64)
+# A consumer that copies out is the correct one and must not be refused.
+r13 = b13.retrieve(cam13, 200)
+copied_ok = True
+try:
+    with r13.GetArrayZeroCopy() as img13:
+        taken = img13.copy()
+except RuntimeError:
+    copied_ok = False
+r13.Release()
+# A consumer that STORES the view is the bug, and it must be named.
+r13b = b13.retrieve(cam13, 200)
+kept = []
+escape_caught = False
+try:
+    with r13b.GetArrayZeroCopy() as img13b:
+        kept.append(img13b)
+except RuntimeError as e:
+    escape_caught = "outlive" in str(e)
+kept.clear()
+r13b.Release()
+# A numpy VIEW kept on the buffer is the same leak wearing a disguise: it
+# holds the base array alive, so the guard must catch it too.
+r13c = b13.retrieve(cam13, 200)
+view_caught = False
+try:
+    with r13c.GetArrayZeroCopy() as img13c:
+        kept.append(img13c[::2, ::2])
+except RuntimeError:
+    view_caught = True
+kept.clear()
+r13c.Release()
+ser13.write(b"6,2,4,6,8,10,12,-1\n")
+check(13, "an escaped zero-copy view is refused on leaving the with block, "
+          "while a consumer that copies out is not",
+      (copied_ok and taken.shape == (H, W) and escape_caught and view_caught),
+      f"copied_ok={copied_ok} escape_caught={escape_caught} "
+      f"view_caught={view_caught}")
+
+# 14 -- closing a camera releases it and its buffers -------------------------
+# One backend lives for the life of the process while `open_all` runs again on
+# every profile switch and preview restart, so anything a close leaves behind
+# is stranded for the whole session rather than for one recording.
+sim_board.reset_board(speed=1.0)
+b14 = SimBackend(n_cameras=3, width=W, height=H)
+cams14 = [b14.open(d, "unused.pfs", 600) for d in b14.enumerate_devices()]
+held = cams14[0]
+opened14 = len(b14.cameras)
+for c in cams14:
+    b14.close(c)
+# A second open/close cycle must leave exactly as much behind as the first.
+for c in [b14.open(d, "unused.pfs", 600) for d in b14.enumerate_devices()]:
+    b14.close(c)
+check(14, "closing a camera drops it from the backend and frees its buffer "
+          "pool, so repeated sessions do not strand memory",
+      (opened14 == 3 and b14.cameras == [] and held._buffers == []
+       and held._free == [] and not held.is_open),
+      f"opened={opened14} left={len(b14.cameras)} "
+      f"buffers={len(held._buffers)} free={len(held._free)}")
+
+# 15 -- a failed grab is counted once, like a real camera --------------------
+# Total_Buffer_Count is what a session log reports and what a loss rate is
+# computed from: one buffer must contribute one count, whether or not the grab
+# succeeded, or the arithmetic reports loss that never happened.
+sim_board.reset_board(speed=20.0)
+b15 = SimBackend(n_cameras=1, width=W, height=H,
+                 faults={0: SimFaults(failed_grab_every=3)})
+cam15 = b15.open(b15.enumerate_devices()[0], "unused.pfs", 600)
+b15.set_triggered(cam15, 165.0)
+b15.start_grabbing(cam15)
+ser15 = sim_board.SimSerial()
+ser15.write(b"6,2,4,6,8,10,12,100\n")
+ser15.read(64)
+buffers15, failed15 = 0, 0
+while buffers15 < 30:
+    try:
+        r = b15.retrieve(cam15, 200)
+    except SimTimeout:
+        break
+    buffers15 += 1
+    failed15 += 0 if r.GrabSucceeded() else 1
+    r.Release()
+ser15.write(b"6,2,4,6,8,10,12,-1\n")
+st15 = b15.stream_stats(cam15)
+check(15, "every third grab fails and Total_Buffer_Count still equals the "
+          "number of buffers the camera handed over",
+      (buffers15 == 30 and failed15 == 10
+       and st15["Total_Buffer_Count"] == buffers15
+       and st15["Failed_Buffer_Count"] == failed15
+       and st15["Buffer_Underrun_Count"] == 0),
+      f"buffers={buffers15} failed={failed15} stats={st15}")
 
 print()
 if failures:

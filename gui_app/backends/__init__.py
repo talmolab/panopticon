@@ -199,9 +199,12 @@ class CameraBackend(Protocol):
         Order defines camera names (`cam1`...`camN`), which are baked into the
         calibration extrinsics — so an unstable order silently mislabels data.
         The device objects are opaque apart from `GetSerialNumber()`, which
-        must return a `str`: `camera_manager` names cameras with it, sorts on
-        it, and compares it with the profile's `camera_serials` entries as
-        strings, so a number here would match nothing and refuse to start."""
+        must return a `str`: `camera_manager` names it in its failure messages
+        and compares it with the profile's `camera_serials` entries as
+        strings, so a number here would match nothing and refuse to start. The
+        caller does NOT sort — the stable order above is this backend's
+        obligation, and camera names are positional over the order returned
+        here (`cam{i+1}`), not derived from the serial."""
 
     def open(self, device, pfs_path: str, max_num_buffer: int):
         """Open and configure one camera, returning a `CameraHandleProtocol`.
