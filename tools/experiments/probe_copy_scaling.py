@@ -10,7 +10,7 @@ No cameras needed. Answers three questions that gate the 9-camera architecture:
 
   Q2  Does ring size explain the measured 2.7 ms / ~850 MB/s?
       The production NV12 ring is `max_lag + ENCODE_QUEUE_DEPTH + 64` buffers
-      (grab_thread.py:244) = 744 x 3.456 MB = 2.57 GB per camera. A destination
+      (GrabThread's ring allocation) = 744 x 3.456 MB = 2.57 GB per camera. A destination
       that large is never cache-resident and page-faults on first touch. Compared
       here: small (cache-friendly) vs large-cold vs large-prefaulted.
 
@@ -24,8 +24,8 @@ Controls are included so a scaling number can be trusted:
                the harness can detect serialization at all.
 If either control misbehaves, ignore the copy numbers; the harness is lying.
 
-    uv run probe_copy_scaling.py
-    uv run probe_copy_scaling.py --threads 1,3,6,9,12 --iters 200
+    uv run tools/experiments/probe_copy_scaling.py
+    uv run tools/experiments/probe_copy_scaling.py --threads 1,3,6,9,12 --iters 200
 """
 import argparse
 import json
@@ -35,6 +35,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+
+#: The repository root, three levels up from tools/experiments/. Output is
+#: anchored to it, never to the working directory, so a run started from
+#: anywhere writes to one place.
+REPO = Path(__file__).resolve().parents[2]
 
 W, H = 1920, 1200
 FRAME_BYTES = W * H                      # mono8 source frame = 2.304 MB
@@ -158,7 +163,8 @@ def main():
                     help="per-thread ring depth for the large case. 200 x 3.456 MB"
                          " = 691 MB/thread; kept below production 744 so that"
                          " 9 threads stay ~6.2 GB instead of 23 GB.")
-    ap.add_argument("--out", default="probe_out/copy_scaling.json")
+    ap.add_argument("--out",
+                    default=str(REPO / "probe_out" / "copy_scaling.json"))
     args = ap.parse_args()
 
     tcounts = [int(x) for x in args.threads.split(",")]

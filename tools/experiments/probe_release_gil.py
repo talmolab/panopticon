@@ -22,44 +22,29 @@ Two measurements, because neither alone is conclusive:
 Run with the cameras free and the machine otherwise quiet -- analysis running
 alongside a measurement has invalidated a conclusion on this rig before.
 
-    uv run probe_release_gil.py                 # all cameras
-    uv run probe_release_gil.py --cams 1        # single-camera control
+    uv run tools/experiments/probe_release_gil.py                 # all cameras
+    uv run tools/experiments/probe_release_gil.py --cams 1        # single-camera control
 """
 from __future__ import annotations
 
 import argparse
-import ctypes
 import statistics
 import sys
 import threading
 import time
-from ctypes import wintypes
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+#: The repository root, three levels up from tools/experiments/. Output and
+#: imports are anchored to it, never to the working directory, so a run
+#: started from anywhere reads the same package and writes to one place.
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
 
 from gui_app.backends import load_backend
+from gui_app.probe_guard import (add_force_argument,
+                                 refuse_if_panopticon_running)
 from gui_app.session_config import RigProfile
-
-# --- QueryThreadCycleTime: cycles this thread actually EXECUTED ---------------
-_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_k32.QueryThreadCycleTime.argtypes = [wintypes.HANDLE,
-                                      ctypes.POINTER(ctypes.c_ulonglong)]
-_k32.QueryThreadCycleTime.restype = wintypes.BOOL
-
-
-def cycles(_buf=ctypes.c_ulonglong()):
-    _k32.QueryThreadCycleTime(_k32.GetCurrentThread(), ctypes.byref(_buf))
-    return _buf.value
-
-
-def calibrate_cycles_per_s(dur=0.3):
-    """Cycles per second for this thread, so cycles convert to milliseconds."""
-    c0, t0 = cycles(), time.perf_counter()
-    x = 0
-    while time.perf_counter() - t0 < dur:
-        x += 1
-    return (cycles() - c0) / (time.perf_counter() - t0)
+from tools.perfclock import calibrate_cycles_per_s, thread_cycles as cycles
 
 
 def main() -> int:
@@ -67,7 +52,11 @@ def main() -> int:
     ap.add_argument("--cams", type=int, default=0, help="0 = all enumerated")
     ap.add_argument("--frames", type=int, default=600, help="per camera")
     ap.add_argument("--profile", default="3dpose")
+    add_force_argument(ap)
     args = ap.parse_args()
+    # Opens every camera, so another instance holding them makes both the
+    # thread-scaling arm and the exec/wall split meaningless.
+    refuse_if_panopticon_running(force=args.force)
 
     paths = {p.stem: p for p in RigProfile.list_profiles()}
     prof = RigProfile.load(paths.get(args.profile, next(iter(paths.values()))))

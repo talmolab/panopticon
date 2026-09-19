@@ -19,8 +19,8 @@ needs one authoritative coordinator publishing decisions to all workers (the
 frontier is nine int64s, so the channel is tiny) -- worth building only if the
 timing below justifies it.
 
-    uv run probe_multiproc.py --workers 3 --seconds 60
-    uv run probe_multiproc.py --workers 1 --seconds 60    # control
+    uv run tools/experiments/probe_multiproc.py --workers 3 --seconds 60
+    uv run tools/experiments/probe_multiproc.py --workers 1 --seconds 60    # control
 """
 from __future__ import annotations
 
@@ -31,13 +31,26 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path(__file__).parent
+#: The repository root, three levels up from tools/experiments/. Output and
+#: imports are anchored to it, never to the working directory, so a run
+#: started from anywhere reads the same package and writes to one place.
+REPO = Path(__file__).resolve().parents[2]
+#: RULE: the repository joins ``sys.path`` at MODULE level, above every
+#: ``gui_app``/``tools`` import in this file.
+#: REASON: ``sys.path[0]`` is this script's own directory, so an import placed
+#: further down -- inside ``main()``, beside the guard call -- raises
+#: ModuleNotFoundError before argparse or the guard ever run, and the probe
+#: then neither guards nor starts. Compiling the file cannot catch that; only
+#: running it can, which is why ``--help`` is part of the check.
+sys.path.insert(0, str(REPO))
+
+from gui_app.probe_guard import (add_force_argument,  # noqa: E402
+                                 refuse_if_panopticon_running)
 
 
 def worker(idx, serials, seconds, profile_name, q, switch_interval):
     """One acquisition process owning `serials`. Reports timing back on `q`."""
     import os
-    sys.path.insert(0, str(REPO))
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     # Per-process: each interpreter has its own switch interval, and comparing
     # against the threaded arm is only meaningful when both use production's.
@@ -96,7 +109,10 @@ def worker(idx, serials, seconds, profile_name, q, switch_interval):
             blocks[serials[c]] = (int(b[0]), int(b[-1]), int(b.size),
                                   int(np.asarray(b).sum()))
     q.put({"worker": idx, "serials": serials,
-           "frames": [getattr(r, "frames", None) for r in res] if res else None,
+           # stop_acquisition returns (frames, timestamps, block_ids)
+           # tuples, so the count is element 0; an attribute lookup on a
+           # tuple silently yields None and blanks the whole report.
+           "frames": [r[0] for r in res] if res else None,
            "delivery_lags": lags, "blocks": blocks})
     try:
         mgr.close_all()
@@ -111,10 +127,14 @@ def main() -> int:
     ap.add_argument("--profile", default="3dpose")
     ap.add_argument("--switch-interval", type=float, default=0.001,
                     help="sys.setswitchinterval in each worker; gui.py uses 0.001")
+    add_force_argument(ap)
     args = ap.parse_args()
+    # The workers open every camera and the parent owns the trigger board,
+    # so no other instance may be running: shared devices make the timing
+    # this probe reports describe the contention rather than the split.
+    refuse_if_panopticon_running(force=args.force)
     print(f"switch interval {args.switch_interval} per worker  [gui.py uses 0.001]")
 
-    sys.path.insert(0, str(REPO))
     from gui_app.backends import load_backend
 
     be = load_backend("basler")

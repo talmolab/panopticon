@@ -1,12 +1,12 @@
 """Drive the REAL GUI through a SEQUENCE of acquisitions in one process.
 
-Why this exists. `probe_gui_record.py` runs recordings, and on 2026-09-14 three
-consecutive 600 s recordings passed while the bug Isaac hits was very much
-alive. His reproduction is a *mixed* sequence in a single GUI process --
-recording, then a calibration, then a recording -- and the second recording
-degraded: encode queue full at qsize 183-204 against ENCODE_QUEUE_DEPTH 200,
-avg_proc 1.0 -> 5-7 ms, and five cameras climbing, with grab-thread affinity
-identical to the clean first recording.
+Why this exists. Plain repeated recordings are not the reproduction: on
+2026-09-14 three consecutive 600 s recordings passed while the bug Isaac hits
+was very much alive. His reproduction is a *mixed* sequence in a single GUI
+process -- recording, then a calibration, then a recording -- and the second
+recording degraded: encode queue full at qsize 183-204 against
+ENCODE_QUEUE_DEPTH 200, avg_proc 1.0 -> 5-7 ms, and five cameras climbing, with
+grab-thread affinity identical to the clean first recording.
 
 The suspected mechanism is that encoder threads are placed afresh for every
 acquisition, so an unpinned encoder can land on an E-core -- which cannot
@@ -14,9 +14,16 @@ sustain encode submission for one 1920x1200 stream at 100 fps -- and the full
 queue then stalls every camera through the shared NV12 ring. A single
 recording cannot test that. A sequence can.
 
+This is the only GUI-driving probe: a plain unattended recording is the
+one-step sequence `--steps r:300`, so there is one scaffold to keep correct
+rather than two that drift.
+
     uv run probe_seq.py                         # record 120, calibrate 60, record 120
     uv run probe_seq.py --steps r:180,c:60,r:180
     uv run probe_seq.py --steps r:120,c:60,r:120,c:60,r:120
+    uv run probe_seq.py --steps r:300            # one unattended recording
+    uv run probe_seq.py --steps r:300 --stim data/test_stim/stim_config.json
+    uv run probe_seq.py --steps r:300 --display-hz 10
 
 `r:N` is a recording of N seconds, `c:N` a calibration. Calibration here runs
 with no board in front of the cameras, which is fine: the point is to exercise
@@ -29,10 +36,14 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
+
+from gui_app.probe_guard import (add_force_argument,
+                                 refuse_if_panopticon_running)
 
 
 def parse_steps(spec: str):
@@ -52,15 +63,24 @@ def parse_steps(spec: str):
 
 
 def main():
-    from gui_app.probe_guard import refuse_if_panopticon_running
-    refuse_if_panopticon_running()
     ap = argparse.ArgumentParser()
     ap.add_argument("--steps", default="r:120,c:60,r:120",
                     help="comma list of r:SECONDS / c:SECONDS, in order")
     ap.add_argument("--warmup", type=float, default=8)
     ap.add_argument("--gap", type=float, default=4,
                     help="seconds to settle between steps (after ENCODING ends)")
+    ap.add_argument("--stim", type=Path, default=None,
+                    help="load this stim_config.json and Apply it before the "
+                         "first step")
+    ap.add_argument("--display-hz", type=float, default=None,
+                    help="throttle the GUI's display refresh (default 30 Hz). "
+                         "Tests whether main-thread display work is what "
+                         "pushes the grab threads under 100 fps.")
+    add_force_argument(ap)
     args = ap.parse_args()
+    # Drives the whole rig through a real MainWindow, so no other Panopticon
+    # may be running; parsing first keeps --help answerable either way.
+    refuse_if_panopticon_running(force=args.force)
     steps = parse_steps(args.steps)
 
     from gui_app.main_window import MainWindow, State as S
@@ -69,7 +89,12 @@ def main():
     win = MainWindow()
     win.show()
 
-    scratch = Path("probe_out") / "gui_scratch"
+    # Unique session id + scratch output dir: otherwise this reuses the default
+    # m1_m2 path, and _start_acquisition would block forever on the "Overwrite?"
+    # dialog with nobody to click it ... and would clobber real data if answered.
+    # Clear it first, because the GUI raises that modal whenever the session
+    # directory already holds data and an unattended probe cannot answer it.
+    scratch = REPO / "probe_out" / "gui_scratch"
     if scratch.exists():
         import shutil
         shutil.rmtree(scratch, ignore_errors=True)
@@ -80,6 +105,11 @@ def main():
     print(f"[probe] sequence: "
           + "  ".join(f"{'record' if k == 'r' else 'calibrate'} {s:g}s"
                       for k, s in steps), flush=True)
+
+    if args.display_hz:
+        win._display_timer.setInterval(int(1000 / args.display_hz))
+        print(f"[probe] display refresh throttled to {args.display_hz:g} Hz",
+              flush=True)
 
     state = {"i": 0}
 
@@ -114,7 +144,46 @@ def main():
         else:
             QTimer.singleShot(60000, app.quit)
 
-    QTimer.singleShot(int(args.warmup * 1000), start)
+    def begin():
+        QTimer.singleShot(int(args.warmup * 1000), start)
+
+    if args.stim:
+        import json
+        cfg = json.loads(args.stim.read_text())
+        win._on_stimulation()
+        sw = win._stim_window
+        sw._canvas.load_workflow(cfg.get("blocks", []), cfg.get("edges", []))
+        print(f"[probe] loaded stim paradigm from {args.stim}; uploading.",
+              flush=True)
+
+        def after_upload(ok, msg):
+            print(f"[probe] stim upload ok={ok}: {msg[:200]}", flush=True)
+            if not ok:
+                # Do NOT record behind a failed upload. The GUI shows a MODAL
+                # error dialog here, and a modal runs a nested event loop in
+                # which QTimer still fires -- so a recording started while the
+                # "Upload failed" box was open would be labelled stimulated
+                # although nothing was ever flashed.
+                print("[probe] ABORTING: refusing to record without the "
+                      "paradigm on the board", flush=True)
+                QApplication.instance().exit(2)
+                return
+            begin()
+        # arduino-cli needs the serial port to itself; the GUI holds it warm
+        # after startup, so an upload behind a held port loses the race and
+        # fails with "exit 1".
+        try:
+            win.release_serial_port()
+            print("[probe] released serial port for arduino-cli", flush=True)
+        except Exception as e:
+            print(f"[probe] could not release serial port: {e}", flush=True)
+        sw._apply_btn.click()
+        if sw._upload_worker is not None:
+            sw._upload_worker.done.connect(after_upload)
+        else:
+            begin()
+    else:
+        begin()
     return app.exec_()
 
 

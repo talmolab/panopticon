@@ -1,7 +1,7 @@
 """E3: verify a zero-copy replacement for `img = result.Array` on a real camera.
 
 WHY
-`grab_thread.py:339` does `img = result.Array`. pypylon's GetArray() ALLOCATES a fresh
+The grab loop's frame access used to be `img = result.Array`. pypylon's GetArray() ALLOCATES a fresh
 2.3 MB numpy array and memcpys the driver buffer into it -- and pypylon's `%nothread`
 list means that copy runs with the GIL HELD. Round-1 agent measurements on this rig, on
 one real 100 fps camera:
@@ -15,8 +15,11 @@ system tolerates <=300 us of GIL-held work per thread per frame even at 17 threa
 ~1000 us blows the 10 ms budget at 11 threads. So removing this copy is the whole game.
 
 WHAT THIS CHECKS BEFORE THE HOT PATH IS EDITED
-  1. PaddingX == 0. GetArrayZeroCopy reshapes the buffer to (H, W) and does NOT account
-     for row padding, so a nonzero PaddingX would silently shear the image. Must assert.
+  1. result.PaddingX == 0 and result.PaddingY == 0. GetArrayZeroCopy reshapes the
+     buffer to (H, W) and does NOT account for row padding, so nonzero padding shears
+     every frame silently. The check asserts on the GRAB RESULT, not on cam.PaddingX:
+     the nodemap feature is absent on these cameras, while the result field is what
+     GetArray() itself reads to build its strides.
   2. The context-manager semantics survive OUR access pattern. pypylon's zero-copy
      context raises on exit if any reference to the view escaped, and production touches
      the frame six ways (snapshot copy, NV12 ring copy, os.write, preview decimate,
@@ -25,46 +28,42 @@ WHAT THIS CHECKS BEFORE THE HOT PATH IS EDITED
      fps, execution time (QueryThreadCycleTime) and wall time, so the choice is made on
      numbers rather than on the docstring.
 
-    uv run probe_zerocopy.py --seconds 12
+    uv run tools/experiments/probe_zerocopy.py --seconds 12
 """
 import argparse
-import ctypes
 import json
 import statistics
+import sys
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 import numpy as np
 from pypylon import pylon
 
-_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_k32.QueryThreadCycleTime.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ulonglong)]
-_k32.QueryThreadCycleTime.restype = wintypes.BOOL
-_k32.GetCurrentThread.restype = wintypes.HANDLE
+#: The repository root, three levels up from tools/experiments/. Output and
+#: imports are anchored to it, never to the working directory, so a run
+#: started from anywhere reads the same package and writes to one place.
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
 
-
-def cycles(_b=ctypes.c_ulonglong()):
-    _k32.QueryThreadCycleTime(_k32.GetCurrentThread(), ctypes.byref(_b))
-    return _b.value
-
-
-def calibrate(dur=0.25):
-    c0, t0 = cycles(), time.perf_counter()
-    x = 0
-    while time.perf_counter() - t0 < dur:
-        for i in range(10000):
-            x += i
-    return (cycles() - c0) / (time.perf_counter() - t0)
+from gui_app.probe_guard import (add_force_argument,
+                                 refuse_if_panopticon_running)
+from tools.perfclock import calibrate_cycles_per_s, thread_cycles as cycles
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=12)
-    ap.add_argument("--out", default="probe_out/zerocopy.json")
+    ap.add_argument("--out", default=None,
+                    help="results JSON (default: probe_out/zerocopy.json "
+                         "inside the repository, not the working dir)")
+    add_force_argument(ap)
     args = ap.parse_args()
+    # Opens a camera, so it must not run beside an instance that already
+    # holds it; a second opener changes the frame rate this A/B compares.
+    refuse_if_panopticon_running(force=args.force)
 
-    cps = calibrate()
+    cps = calibrate_cycles_per_s()
     tl = pylon.TlFactory.GetInstance()
     devs = tl.EnumerateDevices()
     if not devs:
@@ -76,15 +75,6 @@ def main():
     H = cam.Height.GetValue()
     pf = cam.PixelFormat.GetValue()
     print(f"camera: {devs[0].GetModelName()} {W}x{H} {pf}")
-
-    # (1) PaddingX must be zero or the (H, W) reshape shears the image.
-    padx = None
-    for node in ("PaddingX",):
-        try:
-            padx = getattr(cam, node).GetValue()
-        except Exception as e:
-            print(f"  {node}: unavailable ({type(e).__name__})")
-    print(f"  PaddingX = {padx}")
 
     # Free-run so the probe does not need the trigger board. Frame arrival is then
     # camera-paced rather than 100 Hz-paced, which is what we want: it measures how
@@ -98,6 +88,38 @@ def main():
         cam.AcquisitionFrameRate.SetValue(100.0)
     except Exception as e:
         print(f"  frame-rate set failed: {e}")
+
+    # (1) The grab RESULT's padding must be zero, or the (H, W) reshape
+    #     GetArrayZeroCopy performs shears every frame silently. Read it off
+    #     the result, not the camera: `cam.PaddingX` is the nodemap feature and
+    #     is absent on these cameras, so reading it proves nothing, while
+    #     `result.PaddingX` is the grab-result field GetArray() itself uses to
+    #     build its strides and is always present. This gates the hot-path
+    #     change, so a nonzero value ends the run instead of being reported.
+    #
+    #     RULE: the gate closes the camera before it returns, and it is an
+    #     explicit check, never `assert`.
+    #     REASON: an AssertionError raised here -- after StopGrabbing but
+    #     before any Close() -- leaves the InstantCamera open, so the next run
+    #     cannot claim the device; and `python -O` strips assert statements,
+    #     which would turn the gate on a hot-path change into a no-op.
+    cam.StartGrabbing(pylon.GrabStrategy_OneByOne)
+    first = cam.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+    if not first.GrabSucceeded():
+        first.Release()
+        cam.StopGrabbing()
+        cam.Close()
+        print("first grab failed, so row padding is unknown; refusing to A/B")
+        return 1
+    padx, pady = int(first.PaddingX), int(first.PaddingY)
+    first.Release()
+    cam.StopGrabbing()
+    print(f"  result.PaddingX = {padx}   result.PaddingY = {pady}")
+    if (padx, pady) != (0, 0):
+        cam.Close()
+        print(f"row padding {padx}x{pady} would shear the zero-copy view; "
+              f"refusing to A/B")
+        return 1
 
     # Production-shaped consumers: one NV12 ring slot + a preview decimate.
     nv12 = np.full((H * 3 // 2, W), 128, np.uint8)
@@ -180,9 +202,10 @@ def main():
     run("np.frombuffer(GetBuffer())", fb)
 
     cam.Close()
-    out = Path(args.out)
+    out = Path(args.out) if args.out else REPO / "probe_out" / "zerocopy.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"padding_x": padx, "w": W, "h": H,
+    out.write_text(json.dumps({"padding_x": padx, "padding_y": pady,
+                               "w": W, "h": H,
                                "results": results}, indent=1))
 
     # Correctness: all three must read the SAME first pixel value class (they are
