@@ -69,14 +69,13 @@ def arduino_cli_help() -> str:
         "Apply/Test, which compile and flash the trigger board.")
 
 
-#: The safe pins come from the rig profile's `stim_safe_pins` (RigProfile) and
-#: are held LOW from the instant the sketch boots, before the serial handshake,
-#: so a powered laser driver never sits on a floating input pin. The compiler
-#: takes them as a REQUIRED argument and applies no default of its own, because
-#: gui_app/ is shared between rigs and a pin baked in here is right for one rig
-#: and wrong for another. This constant remains only as the standalone stim
-#: editor's default when it runs without a profile; it is not used in this module.
-DEFAULT_SAFE_LOW_PINS = (53,)
+# The safe pins come from the rig profile's `stim_safe_pins` (RigProfile) and
+# are held LOW from the instant the sketch boots, before the serial handshake,
+# so a powered laser driver never sits on a floating input pin. RULE: this
+# module declares no default for them and every entry point takes them as a
+# required argument. REASON: gui_app/ is shared between rigs, so a pin named
+# here is right for one rig and wrong for the other; the standalone editor's
+# own fallback lives beside its only user, in widgets/stimulation_window.py.
 
 
 def resolve_starts(blocks: list[dict],

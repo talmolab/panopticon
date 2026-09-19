@@ -34,6 +34,15 @@ MIN_ZOOM, MAX_ZOOM = 0.2, 4.0
 #: skipped, because drawing it costs one point per intersection of the scene.
 GRID_MIN_ZOOM = 0.4
 
+#: Pins held LOW from the instant the sketch boots, for an editor opened with
+#: no rig profile behind it (the standalone entry point). RULE: the pin lives
+#: here, with its only user, and never in the compiler. REASON: gui_app/ is
+#: shared between the two rigs, so a pin baked into stim_compiler is right for
+#: one and wrong for the other — on 3dface pin 53 would be driven LOW at boot
+#: on a pin that rig may use for something else. Every caller inside the
+#: application passes the profile's stim_safe_pins instead.
+STANDALONE_SAFE_LOW_PINS = (53,)
+
 
 def _pin_color(pin: int) -> QColor:
     hue = (int(pin) * 137) % 360
@@ -920,7 +929,7 @@ class StimulationWindow(QDialog):
                  is_busy: Callable[[], bool] = lambda: False,
                  board_taken: Callable[[], bool] | None = None,
                  get_safe_pins: Callable[[], list] = lambda: list(
-                     stim_compiler.DEFAULT_SAFE_LOW_PINS),
+                     STANDALONE_SAFE_LOW_PINS),
                  get_trigger_pins: Callable[[], list] = lambda: [],
                  get_serial: Callable[[], object] = lambda: None,
                  release_serial: Callable[[], None] = lambda: None,

@@ -751,6 +751,15 @@ check(76, "and the shape the repair removed is one the editor would have "
       str(stim_compiler.structural_problems(two_out, two_edges)))
 
 
+# -- the standalone safe-pin fallback lives with its only user ----------------
+# RULE the constant enforces: no rig pin is named inside the shared compiler.
+check(77, "the editor carries the standalone safe-pin fallback and the shared "
+          "compiler names no pin of its own",
+      sw.STANDALONE_SAFE_LOW_PINS == (53,)
+      and not hasattr(stim_compiler, "DEFAULT_SAFE_LOW_PINS"),
+      str(getattr(stim_compiler, "DEFAULT_SAFE_LOW_PINS", "gone")))
+
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): " + ", ".join(failures))
