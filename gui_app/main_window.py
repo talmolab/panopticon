@@ -323,15 +323,15 @@ class MainWindow(QMainWindow):
 
         Repainting is per-pane work on the Qt MAIN thread — QImage conversion
         plus a widget repaint each — so its cost is linear in camera count while
-        the grab threads' deadline stays fixed at one trigger period. Measured
-        2026-09-10 at nine cameras: identical runs gave 5.07–5.57 ms of grab-loop
-        slack headless against 2.87–4.34 ms with the GUI up, and that ~1.5–2 ms
-        gap is this timer.
+        the grab threads' deadline stays fixed at one trigger period. At nine
+        cameras this timer costs ~1.5-2 ms of grab-loop slack (5.07-5.57 ms
+        headless against 2.87-4.34 ms with the GUI up).
 
-        Six cameras keep the historical 33 ms. Beyond that the period grows with
-        the count so total repaint work per second stays roughly flat, capped at
-        100 ms (10 Hz) because the preview's job is aiming and focus, not motion:
-        capture never has priority taken from it for a picture nobody is scoring.
+        Six cameras keep a 33 ms period. Beyond that the period grows with the
+        count so total repaint work per second stays roughly flat, capped at
+        100 ms (10 Hz) because the preview's job is aiming and focus, not
+        motion: capture never has priority taken from it for a picture nobody
+        is scoring.
         """
         n = max(1, getattr(self._camera_mgr, "num_cameras", 0) or 6)
         return int(min(100, max(33, round(33 * n / 6))))
@@ -557,11 +557,11 @@ class MainWindow(QMainWindow):
     def _poll_thermals(self):
         """Warn about an overheating camera while there is still time to act.
 
-        The GUI used to read temperatures only at stop, which records the
-        problem but cannot prevent it: a camera that reaches its shutdown
-        threshold stops delivering, so by the time the number is visible the
-        session is already short a camera and the block-ID bookkeeping has had
-        to truncate.
+        Temperatures must be polled DURING an acquisition: read only at stop
+        they record the problem but cannot prevent it, because a camera that
+        reaches its shutdown threshold stops delivering, and by the time the
+        number is visible the session is already short a camera and the
+        block-ID bookkeeping has had to truncate.
 
         Every threshold comes from the camera itself -- `BslTemperatureStatus`
         is the vendor's own verdict and `BsliOverTemperature` its shutdown
@@ -1507,7 +1507,7 @@ class MainWindow(QMainWindow):
 
         This eager open is the whole point and must not become lazy: first use
         would then BE the first Record, which just moves the reset flash into
-        recording #1 (observed 2026-07-27).
+        recording #1.
 
         Non-fatal, though: one attempt here, and if the board is not reachable
         yet the next _teensy_connection() call retries with the full count.
