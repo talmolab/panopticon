@@ -991,8 +991,18 @@ rejects a genuinely unsupported keyword, but treats the codes in `_NVENC_FATAL`
 (1, 2, 4, 5, 10, 21) as fatal after a single GC retry. Descending the ladder on a
 session-limit error is actively harmful: if a slot frees part-way down, a later
 rung succeeds with a reduced configuration and the recording quietly gets encoder
-settings nobody chose. Every rung carries `gopLength`/`idrPeriod` regardless, and
-the code says loudly when a reduced configuration was used.
+settings nobody chose. Every rung carries the GOP keys regardless, and the code
+says loudly when a reduced configuration was used.
+
+The GOP keys are lowercase `gop` and `idrperiod`, and the only proof they took
+effect is the encoded bitstream. PyNvVideoCodec accepts an unrecognised keyword
+without complaint, so the ladder's earlier `gopLength`/`idrPeriod` were dropped
+silently: measured, they produce output byte-identical to passing no GOP at all.
+Every real-time recording therefore held one IDR for its whole length, which is
+what makes a finished video take minutes to scrub. `-g <fps>` on the ffmpeg
+writers does not cover this path, because the default remux is a stream copy and
+copies whatever GOP NVENC wrote. `nvenc.gop_is_honoured()` encodes two GOPs and
+counts IDRs; the launch preflight runs it so a renamed keyword is loud.
 
 `hardware_check.nvenc_session_capacity()` caches the probe but records whether
 the answer was a refusal (the real ceiling) or the probe's own limit (a lower

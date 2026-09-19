@@ -152,15 +152,24 @@ def create_h264_encoder(width: int, height: int, qp: int,
     # control (constqp -> driver default), i.e. different output quality than
     # the profile asked for.
     #
-    # EVERY rung carries gopLength/idrPeriod, and there is no bare attempt after
-    # the ladder. Without an explicit GOP, NVENC's driver default can produce ONE
-    # IDR for a whole recording, which makes the mp4 unseekable in the LUC3D
-    # labeler and unwalkable by ffprobe, and that failure is invisible until
-    # someone opens the file days later. Failing to create an encoder is the
-    # better outcome: the callers fall back to raw frames, which encode later
-    # with a known GOP.
+    # EVERY rung carries the GOP, and there is no bare attempt after the ladder.
+    # Without an explicit GOP, NVENC's driver default produces ONE IDR for a
+    # whole recording, which makes the mp4 unseekable in the LUC3D labeler and
+    # unwalkable by ffprobe, and that failure is invisible until someone scrubs
+    # a finished video days later. Failing to create an encoder is the better
+    # outcome: the callers fall back to raw frames, which encode later with a
+    # known GOP.
+    #
+    # RULE: the keys are lowercase `gop` and `idrperiod`, and the only proof
+    # they work is the bitstream -- see gop_is_honoured(). REASON:
+    # PyNvVideoCodec accepts unknown keyword arguments SILENTLY. `gopLength`
+    # and `idrPeriod`, the names this ladder carried before, were dropped on
+    # the floor: measured, they produce output byte-identical to passing no GOP
+    # at all, so every real-time recording had a single IDR while the code, the
+    # tests and the docs all agreed the GOP was explicit. A test that asserts
+    # on keyword NAMES cannot catch this; only counting IDRs in the output can.
     gop = str(fps)
-    _gop_kw = dict(gopLength=gop, idrPeriod=gop)
+    _gop_kw = dict(gop=gop, idrperiod=gop)
     ladder = (
         dict(codec="h264", preset=preset, tuning_info=tuning, rc="constqp",
              qp=str(qp), **_gop_kw),
@@ -203,7 +212,7 @@ def create_h264_encoder(width: int, height: int, qp: int,
             note = (f"NVENC full encoder config rejected ({last_err}); created "
                     f"with reduced settings {kw} -- quality may differ from "
                     f"profile qp={qp}. The GOP is still explicit "
-                    f"(gopLength={gop}).")
+                    f"(gop={gop}).")
             print(f"[nvenc] WARNING: {note}", flush=True)
             if notes is not None:
                 notes.append(note)
@@ -211,6 +220,56 @@ def create_h264_encoder(width: int, height: int, qp: int,
     raise RuntimeError(
         f"NVENC encoder creation failed with every accepted kwarg set: "
         f"{last_err}") from last_err
+
+
+def count_idr(chunks) -> int:
+    """IDR pictures in an Annex-B byte stream, by NAL type 5 after a start code."""
+    buf = b"".join(bytes(c) for c in chunks if c is not None and len(c))
+    n = i = 0
+    while True:
+        j = buf.find(b"\x00\x00\x01", i)
+        if j < 0 or j + 3 >= len(buf):
+            return n
+        if buf[j + 3] & 0x1F == 5:
+            n += 1
+        i = j + 3
+
+
+def gop_is_honoured(fps: int = 100, size: int = 256) -> bool | None:
+    """Does this build apply the GOP keywords? None when NVENC is unavailable.
+
+    RULE: verify the bitstream, never the keyword names. REASON: PyNvVideoCodec
+    accepts unknown keyword arguments silently, so a build that renames one
+    reads as configured while producing a single IDR for the whole recording.
+    That is unseekable in the labeler and invisible until someone scrubs a
+    finished video, and it is exactly what shipped while the ladder carried
+    `gopLength`/`idrPeriod`. Names are unverifiable by construction; IDRs in
+    the output are not.
+
+    Encodes two GOPs of a changing picture and asks for at least two IDRs.
+    Small and short: tens of milliseconds, cheap enough for a preflight.
+    """
+    _load()
+    if _nvc is None:
+        return None
+    import numpy as np
+    enc = None
+    try:
+        enc = create_h264_encoder(size, size, 21, fps)
+        frame = np.full(size * size * 3 // 2, 128, dtype=np.uint8)
+        out = []
+        for i in range(2 * fps):
+            frame[: size * size] = (i * 7) % 255
+            out.append(enc.Encode(frame))
+        out.append(enc.EndEncode())
+        return count_idr(out) >= 2
+    except Exception as e:
+        print(f"[nvenc] GOP verification could not run: {e}", flush=True)
+        return None
+    finally:
+        if enc is not None:
+            del enc
+        gc.collect()
 
 
 def probe_monochrome_support(codec: str = "h264", gpuid: int = 0) -> int:

@@ -23,7 +23,10 @@ class EncoderProtocol(Protocol):
     is the gray image and whose UV plane is a constant 128. Both calls return
     Annex-B H.264 bytes, possibly empty; the caller appends them to
     `stream.h264` verbatim. Every produced stream must carry an explicit GOP of
-    one IDR per second (`gopLength == fps`), because the labeler seeks by IDR.
+    one IDR per second, because the labeler seeks by IDR and a stream-copy
+    remux cannot add keyframes the encoder never wrote. Prove it on the output,
+    not from the options passed: an encoder library that ignores an unknown
+    option leaves a stream with a single IDR and says nothing.
 
     Any GPU or process resource the encoder holds is released when the object
     is destroyed, and additionally by `Close()` when the object has one. The

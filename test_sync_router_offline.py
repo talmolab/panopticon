@@ -497,7 +497,11 @@ try:
         exhausted_raised = False
     except RuntimeError as e:
         exhausted_raised = "every accepted kwarg set" in str(e)
-    gop_everywhere = all("gopLength" in kw and "idrPeriod" in kw for kw in f.calls)
+    # Names only. A kwarg PyNvVideoCodec does not recognise is dropped without a
+    # word, so this cannot prove the GOP is applied -- it only pins the ladder
+    # against losing the keys. The bitstream check is nvenc.gop_is_honoured(),
+    # exercised on a GPU host by test_sync_router.py.
+    gop_everywhere = all("gop" in kw and "idrperiod" in kw for kw in f.calls)
     f2 = _FakeNvc("cap"); nvenc._nvc = f2
     try:
         nvenc.create_h264_encoder(W, H, 21, fps=100)

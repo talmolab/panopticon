@@ -59,6 +59,10 @@ class HardwareReport:
     #: PyNvVideoCodec loads here (the real-time capture path). The two are
     #: different libraries against the same hardware and can disagree.
     nvenc_runtime: bool = False
+    #: The real-time encoder actually applies its GOP setting, measured from
+    #: the bitstream. None when NVENC is unavailable or the check could not
+    #: run. False means recordings will be a single IDR and unseekable.
+    nvenc_gop_ok: bool | None = None
     #: Concurrent NVENC sessions the driver granted, -1 when not probed.
     nvenc_sessions: int = -1
     #: libx264 frames per second per core, by preset, -1.0 when not benched.
@@ -194,6 +198,23 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
     report.has_nvenc = check_nvenc()
     report.nvenc_runtime = check_nvenc_runtime()
     _ffmpeg_nvenc_ok = report.has_nvenc
+
+    # RULE: measure the GOP from the bitstream at launch, not from the options
+    # the encoder was given. REASON: an encoder library drops an unrecognised
+    # option silently, and the result is a recording with one IDR that nobody
+    # notices until they scrub it. Cheap enough to do every launch.
+    if report.nvenc_runtime:
+        try:
+            from gui_app import nvenc
+            report.nvenc_gop_ok = nvenc.gop_is_honoured()
+        except Exception:
+            report.nvenc_gop_ok = None
+        if report.nvenc_gop_ok is False:
+            report.warnings.append(
+                "NVENC ignores the GOP setting on this build, so recordings "
+                "would hold one keyframe and be unseekable in the labeler. "
+                "Check the keyword names in gui_app/nvenc.py against the "
+                "installed PyNvVideoCodec before recording.")
 
     if report.cpu_cores < 4:
         report.warnings.append(
@@ -799,6 +820,11 @@ def format_report(report: HardwareReport) -> str:
         f"{'available' if report.nvenc_runtime else 'NOT available'}, "
         f"post-hoc (ffmpeg h264_nvenc) "
         f"{'available' if report.has_nvenc else 'NOT available'}")
+    if report.nvenc_gop_ok is False:
+        lines.append("       GOP NOT APPLIED: recordings would hold one keyframe "
+                     "and be unseekable")
+    elif report.nvenc_gop_ok:
+        lines.append("       GOP verified from the bitstream: one keyframe per second")
     if report.nvenc_sessions >= 0:
         lines.append(f"       {report.nvenc_sessions} concurrent encode sessions granted")
     # The CPU fallback's measured ceiling, so the operator can compare it with

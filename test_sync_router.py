@@ -23,6 +23,7 @@ import argparse, shutil, tempfile, threading, time, random
 from pathlib import Path
 import numpy as np, cv2
 from gui_app.sync_encode import SyncEncodeRouter
+from gui_app import nvenc
 
 
 def main() -> int:
@@ -119,7 +120,18 @@ def main() -> int:
 
     ids_identical = all(results[i][2] == results[0][2] for i in range(NCAM))
     print(f"\nall cameras identical block IDs: {ids_identical}")
-    passed = ok and ids_identical
+
+    # The GOP is only provable from the bitstream: an encoder library that does
+    # not recognise a keyword drops it without a word, and the recording then
+    # holds one keyframe for its whole length -- unseekable in the labeler, and
+    # invisible until someone scrubs a finished video. This is the GPU-side
+    # check; the offline suite can only pin the keyword names.
+    gop_ok = nvenc.gop_is_honoured()
+    print(f"NVENC applies its GOP (measured on the bitstream): {gop_ok}")
+    if gop_ok is None:
+        print("  (could not measure; not counted for or against)")
+
+    passed = ok and ids_identical and gop_ok is not False
     print("RESULT:", "ALL PASS" if passed else "FAIL")
     shutil.rmtree(tmp, ignore_errors=True)
     # Exit status, not just a printed verdict: a harness or shell loop reads the

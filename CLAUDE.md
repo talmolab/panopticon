@@ -420,8 +420,15 @@ Plain scripts, no pytest — run directly:
     does NOT free a session — the object's **destructor** does, so encoders must be
     `del`'d (`_EncoderThread.release_encoder()`). NVENCSTATUS **21 is the session limit,
     not a config error**: never descend a kwarg fallback ladder on it, and keep
-    `gopLength`/`idrPeriod` on every rung — losing the GOP yields one IDR for a whole
-    recording, which is unseekable in LUC3D.
+    the GOP keys (`gop`/`idrperiod`, lowercase) on every rung — losing the GOP yields
+    one IDR for a whole recording, which is unseekable in LUC3D.
+  - **The GOP is proven from the bitstream, never from the keyword names**
+    (`nvenc.gop_is_honoured()`, run by the launch preflight). PyNvVideoCodec accepts
+    unknown kwargs SILENTLY. The ladder carried `gopLength`/`idrPeriod` for months;
+    measured, that output is byte-identical to passing no GOP at all, so every
+    real-time recording held a single IDR while the code, the tests and this file all
+    said the GOP was explicit. `-g <fps>` on the ffmpeg writers never covered this:
+    the default path stream-COPIES `stream.h264`, so the GOP is whatever NVENC wrote.
   - **`blockids.npy` must only record frames that were actually persisted.** A successful
     `queue.put_nowait` means the queue accepted the frame, not that it was encoded; a dead
     encoder silently accepts a queue's worth and encodes none, which makes frame *i* of
