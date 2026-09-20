@@ -342,8 +342,7 @@ def run_solve(session, board_yaml, *extra):
 
 # One TemporaryDirectory owns the whole e2e tree so nothing outlives the run;
 # a separately created parent would stay behind in %TEMP% on every run.
-with tempfile.TemporaryDirectory(prefix="calib_e2e_",
-                                 dir=os.environ.get("CLAUDE_SCRATCH") or None) as td:
+with tempfile.TemporaryDirectory(prefix="calib_e2e_") as td:
     session, board_yaml, n_frames = make_session(td)
     calib = session / "calibration"
 
