@@ -2312,7 +2312,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(status)
 
         problems = list(self._capture_warnings)
-        problems += list(self._thermal_warnings)
         # The encoder's own warnings are the truncated-tail cases: the mp4 has
         # fewer frames than the capture intended and the metadata has been
         # truncated to match, with the full arrays kept beside it. Nothing
@@ -2326,6 +2325,19 @@ class MainWindow(QMainWindow):
                 f"deleted — look for raw.bin / stream.h264, raw_tail.bin, "
                 f"encode_error.log, tail_error.log and WARNINGS.txt in those "
                 f"camera directories.")
+        # Temperature is reported LIVE during the run (the status-bar alert),
+        # which is where it can still be acted on. After encoding it is added
+        # to the report only when the session actually lost frames, so a clean
+        # recording on chronically-warm cameras is not flagged for heat that
+        # cost nothing - the common case on a rig where several cameras sit
+        # above Critical by installation. When frames WERE lost, the thermal
+        # history is included so overheating is on the table as the cause.
+        # Either way the temperatures stay in session_metadata.json.
+        lost_frames = bool(self._capture_warnings) or bool(failed) \
+            or bool(self._encode_worker.warnings) \
+            or (len(frame_counts) > 1 and min_frames != max_frames)
+        if self._thermal_warnings and lost_frames:
+            problems += list(self._thermal_warnings)
         if problems:
             # Write it down as well as showing it: a dialog is dismissed and
             # forgotten, and this is exactly what someone needs months later
@@ -2340,17 +2352,46 @@ class MainWindow(QMainWindow):
                 self, "Recording completed with problems",
                 f"{body}\n\nThis has also been written to:\n{warnings_path}")
 
-        # Kick-out normally guarantees every camera encoded the same triggers,
-        # so alignment is skipped. But a retirement or a truncation breaks that
-        # guarantee mid-recording — those videos are NOT equal-length, and
-        # skipping the one pass that would trim them to the common set leaves
-        # them permanently disjoint. _start_alignment() no-ops when the videos
-        # already agree, so running it here costs nothing in the normal case.
+        # Kick-out keeps every camera on the same triggers, so a kick-mode
+        # session is NOT auto-aligned, even after it dropped frames: the
+        # operator asked for the forced-drop and block-rate warnings to be
+        # reported (WARNINGS.txt, above) rather than followed by an
+        # unrequested re-encode. Only the explicit post-hoc mode (realtime_kick
+        # False) trims at stop. A kick session whose videos are genuinely
+        # unequal length - a retirement, a truncated tail - is flagged so the
+        # operator can run 2_align.py by hand instead of it happening silently.
         rig = self._session_rig()
-        needs_align = (not rig.realtime_kick) or bool(problems)
-        if rig.realtime_encode and needs_align and self._start_alignment():
-            return
+        if rig.realtime_encode and not rig.realtime_kick:
+            if self._start_alignment():
+                return
+        elif rig.realtime_encode:
+            self._warn_if_unequal_videos()
         self._finish_to_idle()
+
+    def _warn_if_unequal_videos(self):
+        """Flag a kick-mode session whose per-camera videos are not equal
+        length, without re-encoding it. The operator chose to skip auto-align,
+        but an unequal set left unremarked is the silent trap this reports.
+        """
+        try:
+            _names, blocks, _videos = alignment.load_blockids(self._video_dir)
+            if not alignment.needs_alignment(blocks):
+                return
+        except Exception as e:
+            print(f"[align] equal-length check skipped ({e})", flush=True)
+            return
+        note = ("The cameras did not all keep the same frames, so the videos "
+                "are not equal length. Auto-alignment is off, so they are left "
+                "as recorded. Run 2_align.py on this session to trim them to "
+                "the common frames before using them together.")
+        print(f"[align] {note}", flush=True)
+        warnings_path = self._video_dir / "WARNINGS.txt"
+        try:
+            with warnings_path.open("a", encoding="utf-8") as f:
+                f.write("\n" + note + "\n")
+        except OSError as e:
+            print(f"[align] could not append to WARNINGS.txt: {e}", flush=True)
+        QMessageBox.warning(self, "Videos are not equal length", note)
 
     def _start_alignment(self) -> bool:
         """Start the align worker if cameras dropped different frames. Returns
