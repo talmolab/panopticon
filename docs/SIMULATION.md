@@ -267,7 +267,7 @@ The two that are specifically about the simulated rig:
   file. What it asserts:
   - both passes reach IDLE having shown exactly the dialogs the selected
     encoder implies — none on the GPU path, "Proceed?" plus "Recording
-    completed with problems" on the CPU one, and the move-aside prompt on the
+    completed with problems" on the CPU one, and the overwrite prompt on the
     second pass;
   - block IDs contiguous, equal-length and identical across the three
     cameras, with `frametimes.npy` beside them holding one entry each;

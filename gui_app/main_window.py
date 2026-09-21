@@ -130,7 +130,11 @@ class MainWindow(QMainWindow):
         self._created_dirs: list = []
         #: (canonical, moved) when this start renamed a previous acquisition
         #: out of the way, so a start refused afterwards can put it back.
-        self._moved_aside: tuple | None = None
+        #: Set to the video_dir the operator has agreed to overwrite, so the
+        #: worker deletes it once the start is committed. Reset at each
+        #: user-initiated start; survives the firmware-flash re-entry so the
+        #: operator is asked once, not again after the flash.
+        self._overwrite_dir: Path | None = None
         self._cam_op: CallableWorker | None = None
         #: The capacity preflight, which runs off the UI thread because the
         #: NVENC session probe it may trigger spawns an isolated child.
@@ -1067,6 +1071,10 @@ class MainWindow(QMainWindow):
 
         self._config = config
         self._acq_type = acq_type
+        # A fresh user start: forget any overwrite the operator agreed to on a
+        # previous start. _arm_acquisition (which the firmware flash re-enters)
+        # reads this and must not clear it, or the flash would re-prompt.
+        self._overwrite_dir = None
         if self._worker_busy(self._cap_op):
             print("[acq] a capacity check is still running; not starting",
                   flush=True)
@@ -1084,18 +1092,19 @@ class MainWindow(QMainWindow):
         """Everything with a side effect, once nothing can refuse the start.
 
         Re-entered by the firmware flash's completion callback. The checks
-        that must NOT be repeated are the capacity preflight and the
-        move-aside prompt: one is slow, the other asks the operator a question
-        they have already answered. The stimulation predicate IS repeated,
-        because it is pure and the canvas can be edited during the ~30 s
-        flash - and a canvas edited there records a paradigm the board was
-        never given.
+        that must NOT be repeated are the capacity preflight and the overwrite
+        prompt: one is slow, the other asks the operator a question they have
+        already answered (the consent is remembered in self._overwrite_dir).
+        The stimulation predicate IS repeated, because it is pure and the
+        canvas can be edited during the ~30 s flash - and a canvas edited
+        there records a paradigm the board was never given.
 
-        RULE: the only file side effect here is the move-aside, which needs
-        the operator. Creating the directories and clearing the previous run's
-        files belongs to the start worker, after the serial claim. REASON:
-        the claim, the camera start and the board's ack can all still refuse,
-        and a refused start must leave the target directory as it found it.
+        RULE: no file side effect happens here. The overwrite is only agreed
+        to here; the delete, the directory creation and the clearing of the
+        previous run's files all belong to the start worker, after the serial
+        claim. REASON: the claim, the camera start and the board's ack can all
+        still refuse, and a start refused because the port was busy - the
+        common one - must not have destroyed the data it was going to replace.
         """
         refusal = self._stim_refusal(acq_type)
         if refusal:
@@ -1104,8 +1113,7 @@ class MainWindow(QMainWindow):
 
         config = self._config
         video_dir = config.video_dir(acq_type)
-        self._moved_aside = None
-        if not self._move_existing_aside(video_dir):
+        if not self._confirm_overwrite(video_dir):
             self._sidebar.reset_toggles()
             return
 
@@ -1152,56 +1160,67 @@ class MainWindow(QMainWindow):
         self._cam_op.done.connect(self._on_acquisition_started)
         self._cam_op.start()
 
-    def _move_existing_aside(self, video_dir: Path) -> bool:
-        """Move a directory that already holds data out of the way, with the
-        operator's consent. False means abort the acquisition.
+    def _confirm_overwrite(self, video_dir: Path) -> bool:
+        """Ask the operator before overwriting a session that already holds
+        data. False means abort the acquisition.
 
-        RULE: existing data is never deleted and never recorded into, and the
-        NEW acquisition keeps the canonical directory name. REASON: recording
-        over old files only replaces the ones this run writes - a camera that
-        captures nothing keeps the previous session's mp4, blockids.npy and
-        frametimes.npy under identical names, so eight cameras are this
+        Consent only: the directory is deleted later, by the worker, once the
+        serial port is open and the start can no longer be refused for the
+        common reason. Records the agreed directory in self._overwrite_dir so
+        the firmware-flash re-entry does not ask twice, and so the worker
+        knows exactly which directory the operator agreed to lose.
+
+        RULE: the whole session directory is deleted, not overwritten file by
+        file, and only the acquisition being started. REASON: recording over
+        old files only replaces the ones THIS run writes - a camera that
+        captures nothing would keep the previous session's mp4, blockids.npy
+        and frametimes.npy under identical names, so eight cameras are this
         session and one is the last, with plausible block IDs, and alignment
-        then intersects two different sessions. 1_calibrate and
-        alignment.video_for find the videos under the names 'calibration' and
-        'recording', so the new run has to keep them and the old data is what
-        moves.
+        then intersects two different sessions. Deleting the directory whole
+        removes that trap; the new run recreates it under the same name, which
+        is what 1_calibrate and alignment.video_for resolve a session by.
         """
+        if self._overwrite_dir == video_dir:
+            return True                       # already agreed this start
         if not _has_capture_data(video_dir):
-            return True
-        stamp = datetime.now().strftime("%H%M%S")
-        moved = video_dir.with_name(f"{video_dir.name}.previous-{stamp}")
-        n = 2
-        while moved.exists():
-            moved = video_dir.with_name(f"{video_dir.name}.previous-{stamp}-{n}")
-            n += 1
+            return True                       # nothing to overwrite, no prompt
         reply = QMessageBox.question(
-            self, "Existing data will be moved aside",
+            self, "Overwrite the existing data?",
             f"{video_dir}\n\nalready holds data from an earlier acquisition."
-            f"\n\nIt will be MOVED to:\n\n{moved}\n\nNothing is deleted, and "
-            f"this acquisition records into the original folder name so the "
-            f"solve and the alignment scripts still find it.\n\nContinue?",
-            QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
-        if reply != QMessageBox.Ok:
+            f"\n\nStarting will PERMANENTLY DELETE it and record over it. This "
+            f"cannot be undone.\n\nOverwrite?",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+        if reply != QMessageBox.Yes:
             print("[acq] start cancelled; existing data left in place",
                   flush=True)
             return False
-        try:
-            video_dir.rename(moved)
-        except OSError as e:
-            QMessageBox.critical(
-                self, "Could not move the existing data",
-                f"{video_dir}\n\ncould not be moved aside:\n\n{e}\n\nNothing "
-                f"has been deleted and nothing has been recorded. Close "
-                f"anything holding a file open in that folder, or move it by "
-                f"hand, then start again.")
-            return False
-        # Remembered so a start refused AFTER this point can put it back:
-        # the dialog above promises the acquisition records into the original
-        # folder name, and every consumer resolves a session by that name.
-        self._moved_aside = (video_dir, moved)
-        print(f"[acq] existing data moved aside to {moved}", flush=True)
+        self._overwrite_dir = video_dir
         return True
+
+    def _overwrite_dir_if_agreed(self):
+        """Delete the session the operator agreed to overwrite. Worker side,
+        after the serial claim, so a port-busy refusal costs no data.
+
+        RULE: rmtree only a path resolving strictly inside the output
+        directory, and only the one the operator agreed to. REASON: the
+        session path is built from free-text fields, and a component that
+        escaped validation must never turn this into an rmtree of somewhere
+        else. Same guard as the quit-time cleanup.
+        """
+        target = self._overwrite_dir
+        if target is None or target != self._video_dir or not target.exists():
+            return
+        try:
+            base = Path(self._sidebar.output_dir).resolve()
+            resolved = target.resolve()
+            inside = resolved.is_relative_to(base) and resolved != base
+        except (OSError, ValueError):
+            inside = False
+        if not inside:
+            raise OSError(f"refusing to overwrite {target}: outside the "
+                          f"output directory {self._sidebar.output_dir}")
+        shutil.rmtree(target)
+        print(f"[acq] overwrote existing data in {target}", flush=True)
 
     def _remove_created_dirs(self):
         """Take back the empty directories a refused start created.
@@ -1221,54 +1240,18 @@ class MainWindow(QMainWindow):
                 pass
         self._created_dirs = []
 
-    def _restore_moved_aside(self):
-        """Put a previous acquisition back under its canonical name when this
-        start was refused after moving it out of the way.
-
-        RULE: the canonical directory name - 'recording', 'calibration' -
-        exists again whenever the start that renamed it did not run. REASON:
-        1_calibrate, alignment.video_for, 2_align and the Solve button all
-        resolve a session BY that name, so a start refused after the rename -
-        a port another program holds, a camera that will not enter trigger
-        mode, a board that never acks - otherwise leaves the session holding
-        only '<name>.previous-HHMMSS' and every consumer finding nothing,
-        against a dialog that promised the original folder name.
-
-        The move is undone only when the canonical path is gone, so nothing
-        the refused start managed to write is ever overwritten.
-        """
-        pair, self._moved_aside = self._moved_aside, None
-        if not pair:
-            return
-        canonical, moved = pair
-        if not moved.exists():
-            return
-        if canonical.exists():
-            # The refused start left something behind that could not be taken
-            # back out, so the previous acquisition stays under its aside
-            # name rather than being written over.
-            print(f"[acq] {canonical} still exists; leaving the previous "
-                  f"acquisition in {moved.name}", flush=True)
-            return
-        try:
-            moved.rename(canonical)
-        except OSError as e:
-            print(f"[acq] could not put {moved} back as {canonical}: {e}",
-                  flush=True)
-            return
-        print(f"[acq] start refused; {moved.name} restored as "
-              f"{canonical.name}", flush=True)
-
     def _create_capture_dirs(self):
         """Make this acquisition's directories and clear what it writes into.
 
-        Runs on the start worker, after the serial claim. Only the files the
-        capture itself opens are removed here - a leftover raw.bin or
-        stream.h264 from a previous run would otherwise be written into or
-        appended to. A non-empty one of either is data, so _move_existing_aside
-        has already moved the whole directory away and what is removed here is
-        the zero-length remains of a start that was refused.
+        Runs on the start worker, after the serial claim. If the operator
+        agreed to overwrite, the whole previous session is deleted first, here
+        rather than at the prompt, so a start refused because the port was
+        busy leaves the old data untouched. After that only the files the
+        capture itself opens are removed - a leftover raw.bin or stream.h264
+        from a start that was refused would otherwise be written into or
+        appended to.
         """
+        self._overwrite_dir_if_agreed()
         if not self._video_dir.exists():
             self._created_dirs.append(self._video_dir)
         for cam in self._camera_names:
@@ -1453,9 +1436,6 @@ class MainWindow(QMainWindow):
                       "message": f"{type(result).__name__}: {result}"}
         if not result.get("ok"):
             self._remove_created_dirs()
-            # After the empty directories, so the canonical name is free for
-            # the previous acquisition to move back into.
-            self._restore_moved_aside()
             self._video_dir = None
             self._state = State.IDLE
             self._sidebar.set_status("IDLE", "#888")
@@ -1467,9 +1447,8 @@ class MainWindow(QMainWindow):
                                  result.get("message", ""))
             return
 
-        # The start is committed, so the previous acquisition stays where the
-        # operator was told it would go.
-        self._moved_aside = None
+        # The start is committed; the overwrite, if any, has already happened.
+        self._overwrite_dir = None
         self._sidebar.set_fields_editable(False)
         self._start_thermal_watch()
         if self._acq_type == "calibration":

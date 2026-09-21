@@ -374,7 +374,7 @@ def make(tmp, *, mgr=None, teensy=None, stim=None, flash_needed=False,
     w._acq_fps = 0
     w._finalized = True
     w._created_dirs = []
-    w._moved_aside = None
+    w._overwrite_dir = None
     w._board_id_stale = True
     w._board_identity_reflashed = False
     w._session_stim_ino = None
@@ -487,33 +487,34 @@ with tempfile.TemporaryDirectory() as td:
           not (tmp / "20260101" / "m1_m2" / "recording").exists()
           and w._sidebar.reset_calls == 1)
 
-# 7-11 ── existing data is moved aside, never overwritten ───────────────────
+# 7-11 ── existing data is overwritten on consent, deleted whole ────────────
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td)
     rec = tmp / "20260101" / "m1_m2" / "recording"
     old_mp4 = touch(rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4", b"old")
     touch(rec / "cam1" / "blockids.npy", b"ids")
-    _MsgBox.reset(answer=_MsgBox.Ok)
+    _MsgBox.reset(answer=_MsgBox.Yes)
     w = make(tmp)
     w._start_acquisition("recording")
-    moved = [p for p in (tmp / "20260101" / "m1_m2").iterdir()
+    aside = [p for p in (tmp / "20260101" / "m1_m2").iterdir()
              if p.name.startswith("recording.previous-")]
-    check(7, "existing data is moved to a suffixed folder, not deleted",
-          len(moved) == 1 and _body(moved[0] / "cam1" / old_mp4.name) == b"old",
+    check(7, "the previous session is deleted, not kept beside the new one",
+          not aside and not (rec / "cam1" / old_mp4.name).exists()
+          and not (rec / "cam1" / "blockids.npy").exists(),
           str([p.name for p in (tmp / '20260101' / 'm1_m2').iterdir()]))
-    check(8, "the new acquisition keeps the canonical folder name",
-          rec.exists() and (rec / "cam1").is_dir() and not (rec / "cam1"
-                                                            / old_mp4.name).exists())
-    check(9, "the dialog names the folder it will move",
-          any("previous-" in t for _k, _t, t in _MsgBox.shown),
-          _MsgBox.texts()[:160])
+    check(8, "the new acquisition recreates the canonical folder fresh",
+          rec.exists() and (rec / "cam1").is_dir())
+    check(9, "the dialog warns the data will be deleted",
+          any("DELETE" in t or "Overwrite" in t for _k, _t, t in _MsgBox.shown),
+          _MsgBox.texts()[:200])
     check(10, "and the recording started",
           w._state is State.RECORDING
           and "signal_triggers_started" in w._camera_mgr.calls,
           str(w._camera_mgr.calls))
 
-check(11, "the Overwrite prompt is gone from the source",
-      SOURCE.count("Overwrite?") == 0)
+check(11, "the move-aside is gone from the source",
+      SOURCE.count("_move_existing_aside") == 0
+      and SOURCE.count(".previous-") == 0)
 
 # 12-13 ── cancelling keeps the data and starts nothing ─────────────────────
 with tempfile.TemporaryDirectory() as td:
@@ -524,9 +525,7 @@ with tempfile.TemporaryDirectory() as td:
     w = make(tmp)
     w._start_acquisition("recording")
     check(12, "Cancel leaves the existing data exactly where it was",
-          _body(rec / "cam1" / "stream.h264") == b"stream"
-          and not any(p.name.startswith("recording.previous-")
-                      for p in (tmp / "20260101" / "m1_m2").iterdir()))
+          _body(rec / "cam1" / "stream.h264") == b"stream")
     check(13, "Cancel starts nothing and resets the toggles",
           "start_acquisition" not in w._camera_mgr.calls
           and w._sidebar.reset_calls == 1 and w._state is State.IDLE)
@@ -842,8 +841,9 @@ with tempfile.TemporaryDirectory() as td:
 # 55-59 ── a start refused after the move-aside puts the data back ──────────
 # The dialog promises "this acquisition records into the original folder name
 # so the solve and the alignment scripts still find it". 1_calibrate,
-# alignment.video_for, 2_align and the Solve button all resolve a session BY
-# that name, so a start refused after the rename must restore it.
+# the overwrite is consented on the UI thread but DELETED by the worker, after
+# the serial claim, so the common refusal (port busy) costs no data while a
+# committed start overwrites as agreed.
 def _with_previous_data(tmp):
     rec = tmp / "20260101" / "m1_m2" / "recording"
     touch(rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4", b"old")
@@ -858,52 +858,56 @@ def _moved_dirs(tmp):
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td)
     rec = _with_previous_data(tmp)
-    _MsgBox.reset(answer=_MsgBox.Ok)
+    _MsgBox.reset(answer=_MsgBox.Yes)
     w = make(tmp)
     w._teensy.last_error = "PermissionError: COM3 is held"
     w._teensy_connection = lambda retries=10: None
     w._start_acquisition("recording")
-    check(55, "a start the port refuses leaves the canonical folder in place",
-          rec.is_dir(),
+    check(55, "a port-busy refusal happens before the delete, so the data "
+          "the operator agreed to overwrite is still there",
+          rec.is_dir()
+          and _body(rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4") == b"old"
+          and not _moved_dirs(tmp),
           str([p.name for p in (tmp / "20260101" / "m1_m2").iterdir()]))
-    check(56, "with the previous acquisition's data still in it, not aside",
-          _body(rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4") == b"old"
-          and not _moved_dirs(tmp))
+    check(56, "and the start was refused, not recorded",
+          w._state is State.IDLE
+          and "start_acquisition" not in w._camera_mgr.calls)
 
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td)
     rec = _with_previous_data(tmp)
-    _MsgBox.reset(answer=_MsgBox.Ok)
+    _MsgBox.reset(answer=_MsgBox.Yes)
     refused = AcquisitionStartRefused("Could not put every camera into "
                                       "trigger mode")
     w = make(tmp, mgr=_Mgr(start_error=refused))
     w._start_acquisition("recording")
-    check(57, "a camera that refuses trigger mode restores it too",
-          rec.is_dir() and not _moved_dirs(tmp)
-          and (rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4").exists())
+    check(57, "a camera refusal comes AFTER the port opened, so the overwrite "
+          "the operator agreed to has already happened",
+          w._state is State.IDLE
+          and not (rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4").exists())
 
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td)
     rec = _with_previous_data(tmp)
-    _MsgBox.reset(answer=_MsgBox.Ok)
+    _MsgBox.reset(answer=_MsgBox.Yes)
     w = make(tmp, teensy=_Teensy(ack=False))
     w._start_acquisition("recording")
-    check(58, "and so does a board that never acks the start",
-          rec.is_dir() and not _moved_dirs(tmp)
-          and (rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4").exists())
+    check(58, "a board that never acks also comes after the delete; the start "
+          "is refused and the overwrite stands",
+          w._state is State.IDLE
+          and not (rec / "cam1" / "20260101-m1_m2-cam1-recording.mp4").exists())
 
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td)
     rec = _with_previous_data(tmp)
-    _MsgBox.reset(answer=_MsgBox.Ok)
+    _MsgBox.reset(answer=_MsgBox.Yes)
     w = make(tmp)
     w._start_acquisition("recording")
-    moved = _moved_dirs(tmp)
-    check(59, "a start that DID run leaves the old data aside, as promised",
-          w._state is State.RECORDING and len(moved) == 1
-          and _body(moved[0] / "cam1"
-                    / "20260101-m1_m2-cam1-recording.mp4") == b"old"
-          and rec.is_dir())
+    check(59, "a start that ran deleted the old data and kept the name",
+          w._state is State.RECORDING and not _moved_dirs(tmp)
+          and rec.is_dir()
+          and not (rec / "cam1"
+                   / "20260101-m1_m2-cam1-recording.mp4").exists())
 
 # 60-62 ── the sweep waits for the board, and the port comes first ──────────
 # WARNINGS.txt, encode_error.log, codet_frames.json, tail.h264 and

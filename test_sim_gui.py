@@ -490,7 +490,7 @@ try:
     PASS_ONE_DIALOGS = sorted(set(CPU_DIALOGS)) if CPU_PATH else []
     PASS_TWO_DIALOGS = sorted(set(
         (CPU_DIALOGS if CPU_PATH else ["Recording completed with problems"])
-        + ["Existing data will be moved aside"]))
+        + ["Overwrite the existing data?"]))
     PASS_ONE_FACTORY = (cpu_encode.x264_factory if CPU_PATH
                         else encoders.nvenc_factory)
     print(f"   encoder path {selected!r}: pass one expects "
@@ -569,27 +569,27 @@ try:
 
     # -- 26-44 -- pass two: the same session again, on the CPU encoder -------
     started, idle, factory = run_step(win, "c", CAL_S)
-    moved_cal = sorted(session.glob("calibration.previous-*"))
+    aside_cal = sorted(session.glob("calibration.previous-*"))
     check(26, "a second calibration into the same session returns to IDLE and "
-              "moves the first one aside instead of recording over it",
+              "overwrites the first, keeping the canonical folder name",
           (started and idle and QApplication.activeModalWidget() is None
-           and len(moved_cal) == 1
-           and (moved_cal[0] / CAMS[0] / "blockids.npy").exists()
+           and not aside_cal
+           and (session / "calibration" / CAMS[0] / "blockids.npy").exists()
            and Box.seen() == PASS_TWO_DIALOGS),
-          f"started={started} idle={idle} moved={[p.name for p in moved_cal]} "
+          f"started={started} idle={idle} aside={[p.name for p in aside_cal]} "
           f"dialogs={Box.seen()} expected={PASS_TWO_DIALOGS}")
     acquisition_ok(27, "calibration (libx264)", session / "calibration", CAMS,
                    "calibration", factory, cpu_encode.x264_factory)
 
     started, idle, factory = run_step(win, "r", REC_S)
-    moved_rec = sorted(session.glob("recording.previous-*"))
+    aside_rec = sorted(session.glob("recording.previous-*"))
     check(35, "a second recording into the same session returns to IDLE and "
-              "moves the first one aside",
+              "overwrites the first",
           (started and idle and QApplication.activeModalWidget() is None
-           and len(moved_rec) == 1
-           and (moved_rec[0] / CAMS[0] / "blockids.npy").exists()
+           and not aside_rec
+           and (session / "recording" / CAMS[0] / "blockids.npy").exists()
            and Box.seen() == PASS_TWO_DIALOGS),
-          f"started={started} idle={idle} moved={[p.name for p in moved_rec]} "
+          f"started={started} idle={idle} aside={[p.name for p in aside_rec]} "
           f"dialogs={Box.seen()} expected={PASS_TWO_DIALOGS}")
     acquisition_ok(36, "recording (libx264)", session / "recording", CAMS,
                    "recording", factory, cpu_encode.x264_factory)

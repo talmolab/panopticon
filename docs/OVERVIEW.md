@@ -204,11 +204,13 @@ and refuses outright in four cases:
   pins, or a single pin driven by two chains at once.
 
 A tight disk is a warning, not a refusal, and every warning becomes a "Start
-anyway?" prompt. Existing data in the target folder is never overwritten and
-never deleted: a dialog headed *Existing data will be moved aside* names both
-paths, and on OK the whole folder is renamed `<name>.previous-<HHMMSS>` while
-this acquisition records into a fresh folder under the canonical name. Cancel
-leaves everything where it is and the acquisition does not start. The check
+anyway?" prompt. Existing data in the target folder is never overwritten
+silently: a dialog headed *Overwrite the existing data?* warns that the folder
+will be permanently deleted, and only on **Yes** is it removed and the
+acquisition recorded fresh under the same name. Cancel leaves everything where
+it is and the acquisition does not start. The delete happens only once the
+serial port has opened, so a start refused because the port is busy leaves the
+old data untouched. The check
 counts `blockids.npy`, `frametimes.npy` and `alignment.npz` as well as videos,
 so a folder whose mp4s were moved away for labelling is still recognised as
 holding data; zero-length files are not counted, so a start refused after
