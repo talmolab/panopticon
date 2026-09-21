@@ -75,11 +75,11 @@ expect_pose = dict(
     max_num_buffer=600, n_cameras=9, gige_driver="socket",
     camera_backend="basler", encoder="auto", serial_port="COM3",
     trigger_pins=[2, 4, 6, 8, 10, 12], stim_safe_pins=[53],
-    trigger_rate_limit=165.0, calibration_exposure_us=15000.0,
+    trigger_rate_limit=165.0, calibration_exposure_us=5000.0,
     calibration_gain_db=-1.0, calibration_min_per_cam_shared=120,
     calibration_min_edge=20, calibration_min_grid_cells=3,
     pin_capture_threads=True, encoder_pcores=False, pin_encoder_threads=False,
-    capture_core_exclude=[0, 1], thermal_poll_s=0.0, camera_serials=None,
+    capture_core_exclude=[0, 1], thermal_poll_s=20.0, camera_serials=None,
     gev_bandwidth_reserve_pct=None, gev_bandwidth_reserve_accum=None,
     metadata_defaults={"experimenter": "IT", "assay": "open_field"},
 )
