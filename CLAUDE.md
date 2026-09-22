@@ -18,7 +18,9 @@ Launch: `uv run gui.py` (or `conda run -n 3dpose python gui.py`).
   `test_serial_handshake.py` after `serial_controller.py` (the guard against recording zero
   frames), `test_frame_sync.py` after `frame_sync.py`, `test_grab_failure.py` after
   `grab_thread.py`, `test_board_coverage.py` after `board_detector.py`,
-  `test_sync_router[_offline].py` for the encoder router.
+  `test_sync_router[_offline].py` for the encoder router. These `test_*.py` files
+  are local-only — gitignored, not shipped in the public tree, recoverable from
+  git history — so this map is for a maintainer's working tree, not a fresh clone.
 - `.gitignore` anchors `/_*.py` to the repo root — do **not** unanchor it. A bare `_*.py`
   also matches `__init__.py` and silently keeps a package out of every commit, breaking a
   fresh clone. `!**/__init__.py` is a second line of defence; after adding a package, verify

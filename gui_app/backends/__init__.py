@@ -38,10 +38,11 @@ WRITING A NEW BACKEND
 2. Return camera handles satisfying `CameraHandleProtocol` from `open()`, and
    result objects satisfying `GrabResultProtocol` from `retrieve()`.
 3. Register it in `load_backend()`.
-4. Run `test_grab_failure.py` and `test_sim_backend.py` (both need PyQt5 but
-   no hardware and no SDK) and then `probe_lag.py` against real cameras, and
-   check the `cycle=` figure in the grab threads' log equals your frame
-   period.
+4. Exercise the retirement and simulated-backend paths headlessly first (the
+   offline suite covers both with PyQt5 but no hardware and no SDK), then run
+   real cameras through the GUI — `uv run probe_network.py` first confirms every
+   camera's path — and check the `cycle=` figure in the grab threads' log equals
+   your frame period.
 5. `gui_app/backends/sim.py` is the worked example: it implements this whole
    contract with no SDK, so a question this document leaves open can be
    answered by reading what the simulated rig does.

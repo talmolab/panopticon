@@ -459,9 +459,8 @@ speed (it writes and deletes a 16 MB file to find out).
 
 Windows, today, but the dependency is shallow. The Windows-specific pieces are
 `PylonGigEConfigurator` and the inbound firewall rule, the `configure_nic.ps1`
-and `make_shortcut.ps1` scripts, the two performance probes
-`tools/experiments/probe_gil_wait.py` and
-`tools/experiments/probe_native_cpu.py`, and `gui_app/cpu_affinity.py`, whose
+and `make_shortcut.ps1` scripts, the performance profiling that separates
+GIL-held work from native CPU time, and `gui_app/cpu_affinity.py`, whose
 every entry point — core classification, pinning, thread priority, timer
 resolution — is guarded by a Windows check and returns without raising
 elsewhere, so `pin_capture_threads` and its three companions silently do
@@ -1350,75 +1349,24 @@ running is the only thing that tells you whether *this* machine keeps up.
 
 ### Without any cameras
 
-Every `test_*.py` in the repository root except `test_sync_router.py` runs on
-the code alone: no cameras, no trigger board, no GPU. They are plain scripts,
-not pytest, so run the lot rather than picking:
+The offline test suite is the project's own acceptance run on the code alone —
+no cameras, no trigger board, no GPU — but it is not shipped in the lean public
+tree. It stays in git history: recover it with
+`git log --all --diff-filter=D -- "test_*.py"` and check out the commit that last
+held those files, or request it from the maintainers.
 
-```powershell
-$env:QT_QPA_PLATFORM = "offscreen"
-Get-ChildItem test_*.py -Exclude test_sync_router.py |
-    ForEach-Object { uv run python $_ }
-```
-
-The offscreen platform is what lets the suites that build Qt widgets run on a
-machine with no display; on a desktop session it is optional.
-[INTERNALS.md](INTERNALS.md#tests-and-probes) has the canonical table of what
-each suite covers and what it needs.
-
-Each ends with one summary line, for example:
-
-```
-ALL FRAMESYNC EQUIVALENCE TESTS PASS
-ALL GRAB-FAILURE TESTS PASS
-ALL STIM COMPILER TESTS PASS
-ALL SERIAL HANDSHAKE TESTS PASS
-```
-
-Read the last line only. The suites deliberately exercise failure paths, so
-alarming output on the way through is expected:
-
-```
-[sync] cam3 RETIRED from the alignment set: stalled in test.
-[grab3] STALLED — re-arming stream (attempt 1)
-[teensy] no ack — reopening port to force a board reset
-```
-
-Run them through `uv run`, not a bare `python`: several need numpy, OpenCV or
-PyQt5 from the project environment, and a few skip cases silently without them.
-
-That set is also the acceptance run for a machine with **no rig hardware at
-all**: install without the vendor SDKs (`uv sync --no-group rig`, see
-[CONTRIBUTING.md](../CONTRIBUTING.md)) and every suite in the block above still
-passes, because none of them needs pypylon or PyNvVideoCodec.
-
-One more suite needs an NVENC GPU, though still no cameras, which is why the
-command above excludes it. `pynvvideocodec` is in the `rig` group, so this one
-is exactly the suite that cannot run after `uv sync --no-group rig`:
-
-```powershell
-uv run python test_sync_router.py
-```
-
-Beyond the suites, `profiles/sim.yaml` selects a simulated camera backend and a
-simulated trigger board, so the application itself — preview, Calibrate,
-Record, Stop, the stimulation editor's Apply — runs end to end with nothing
-plugged in. Pick `sim` from the profile dropdown.
+`profiles/sim.yaml` selects a simulated camera backend and a simulated trigger
+board, so the application itself — preview, Calibrate, Record, Stop, the
+stimulation editor's Apply — runs end to end with nothing plugged in. Pick `sim`
+from the profile dropdown; [SIMULATION.md](SIMULATION.md) walks through it.
 
 ### With real cameras
 
-The suites say the logic is sound. They cannot say whether this machine, network
-and set of cameras hold the frame-period deadline. Answer that before a real
-session:
-
-```powershell
-uv run probe_lag.py --seconds 90 --label install-check
-```
-
-This drives the real capture path headless (`CameraManager`, `GrabThread`,
-`SyncEncodeRouter`, `FrameSyncCoordinator`, `TeensyController`), so its result
-applies to the GUI; only Qt's display work is missing. It writes
-`probe_out/install-check/trace.json`; the video goes to a scratch directory and
-is deleted unless you pass `--keep`.
+The offline checks say the logic is sound. They cannot say whether this machine,
+network and set of cameras hold the frame-period deadline. Answer that before a
+real session: run `uv run probe_network.py` first to confirm every camera's path
+carries 9000-byte packets, then record a short session on the GUI and read the
+per-camera `stream stats` the grab threads print at stop.
 
 A healthy run looks like this:
 

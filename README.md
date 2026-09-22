@@ -55,7 +55,6 @@ need it.
 git clone https://github.com/talmolab/panopticon.git
 cd panopticon
 uv sync                      # no cameras or NVIDIA GPU here? uv sync --no-group rig
-uv run python test_frame_sync.py
 uv run gui.py
 ```
 
@@ -65,19 +64,12 @@ arithmetic, the network, and the two files that describe your rig.
 
 ## Verify without hardware
 
-Every `test_*.py` in the repository root except `test_sync_router.py` runs with
-no cameras, no trigger board and no GPU, and that whole set is the acceptance
-run for a fresh install:
-
-```powershell
-$env:QT_QPA_PLATFORM = "offscreen"
-Get-ChildItem test_*.py -Exclude test_sync_router.py |
-    ForEach-Object { uv run python $_ }
-```
-
-Each ends in one `ALL ... PASS` line and exits non-zero on the first failure.
-[docs/INTERNALS.md](docs/INTERNALS.md#tests-and-probes) says what each suite
-covers.
+The offline test suite is maintained by the project but is not shipped in the
+lean public tree; it stays in git history (recover it with
+`git log --all --diff-filter=D -- "test_*.py"` and check out that commit, or ask
+the maintainers). To exercise the application itself with nothing plugged in, run
+it on the simulated rig: `uv run gui.py`, then pick `sim` from the profile
+dropdown ([docs/SIMULATION.md](docs/SIMULATION.md)).
 
 The application itself also runs with nothing plugged in: `profiles/sim.yaml`
 selects a simulated camera backend and a simulated trigger board, so preview,

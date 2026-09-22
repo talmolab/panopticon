@@ -98,7 +98,8 @@ is bounded in turn). A clean flush is nowhere near that: measured 5–7 ms, sinc
 camera, so a caller that is itself under a deadline should pass its remaining
 time rather than take the default.
 
-Invariants that are not negotiable and are asserted in `test_cpu_encode.py`:
+Invariants that are not negotiable and are asserted by the maintained offline
+suite:
 
 - **`-g <fps>`** — one IDR per second. The LUC3D labeler seeks by IDR; a stream
   with one IDR is unseekable and the failure is invisible until someone opens
@@ -225,24 +226,18 @@ what an evaluation of adding that field would start from.
 
 ## Testing
 
-```
-python test_cpu_encode.py      # command invariants, router round trip, teardown
-python test_hardware_check.py  # the preflight branches, stubbed
-```
-
-`test_cpu_encode.py` pushes 200 synthetic frames per camera for two 640x400
-cameras through `SyncEncodeRouter` with the x264 factory and asserts the
-stream's coded-picture count equals the recorded block IDs, that there is one
-IDR per second, that the stream remuxes with `-c copy` and decodes back to the
-same frame count, that `frames_out` equals the coded pictures in the stream and
-does not catch up when the child is killed, that `EndEncode` kills a wedged
-child inside its deadline, and that `Close` and `kill` behave. It needs ffmpeg
-and nothing else; it skips cleanly when the binary is missing.
-
-`test_hardware_check.py` starts no process at all: the NVENC session probe, the
-`h264_nvenc` test encode, `PyNvVideoCodec` and the libx264 bench are stubbed in
-every case, so it neither allocates a GPU session nor depends on the order the
-cases run in.
+These invariants are covered by the project's maintained offline suite, kept in
+git history but not shipped in the lean public tree. It verifies the libx264
+fallback end to end: pushing synthetic frames per camera through
+`SyncEncodeRouter` with the x264 factory, the stream's coded-picture count equals
+the recorded block IDs, there is one IDR per second, the stream remuxes with
+`-c copy` and decodes back to the same frame count, `frames_out` equals the coded
+pictures in the stream and does not catch up when the child is killed, `EndEncode`
+kills a wedged child inside its deadline, and `Close` and `kill` behave (ffmpeg
+is all it needs, and it skips cleanly when the binary is missing). The preflight
+branches are exercised with every hardware probe — the NVENC session probe, the
+`h264_nvenc` test encode, `PyNvVideoCodec` and the libx264 bench — stubbed, so no
+GPU session is allocated and the cases do not depend on the order they run in.
 
 ## Related measurement: NVENC monochrome support
 

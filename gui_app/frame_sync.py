@@ -9,7 +9,7 @@ frames that are identical across cameras — normal GOP encoding then yields
 equal-length, trigger-aligned videos with no post-hoc re-encode.
 
 This is pure logic (no Qt, no pylon, no frame copies of its own), which is what
-lets `test_frame_sync.py` prove it equivalent to the post-hoc block-ID
+lets the offline test suite prove it equivalent to the post-hoc block-ID
 intersection headlessly. Keep it that way: it is now the DEFAULT capture path
 (`realtime_kick: true`), so this equivalence proof is the only thing standing
 between a change here and silently misaligned recordings. Frame objects are

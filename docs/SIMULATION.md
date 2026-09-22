@@ -74,17 +74,14 @@ uv sync --no-group rig
 
 Everything below runs in that environment.
 
-RULE: run the offline suite at least once with `PyNvVideoCodec` un-importable
-before believing it is hardware-free. REASON: `profiles/sim.yaml` says
+The sim's encoder path depends on the host. `profiles/sim.yaml` says
 `encoder: auto`, so the launch preflight picks NVENC on a machine that has it
 and libx264 on one that does not, and the CPU path raises two dialogs the GPU
 path never shows — the capacity preflight's "Proceed?" and the completion
-warning carrying libx264's own note. A suite green on an NVENC workstation can
-therefore still fail on the acceptance host. `test_sim_gui.py` derives every
-dialog expectation from the encoder that was actually installed, which is what
-makes one file cover both; a host that has the GPU can reproduce the other
-branch by putting a `sitecustomize.py` on `PYTHONPATH` whose meta-path finder
-raises `ImportError` for `PyNvVideoCodec`.
+warning carrying libx264's own note. So the dialogs you see when running the sim
+depend on the encoder actually installed; a host that has the GPU can reproduce
+the CPU branch by putting a `sitecustomize.py` on `PYTHONPATH` whose meta-path
+finder raises `ImportError` for `PyNvVideoCodec`.
 
 ---
 
@@ -218,108 +215,72 @@ board was driven rather than assume it.
 
 ## The offline suite
 
-Every suite below runs with no hardware and no vendor SDK. They are plain
-scripts: one `PASS`/`FAIL` line per case, non-zero exit on failure.
+The behaviours the simulated rig exercises are covered by the project's
+maintained offline suite, which runs with no hardware and no vendor SDK. It is
+not shipped in the lean public tree; it stays in git history (recover it with
+`git log --all --diff-filter=D -- "test_*.py"` and check out that commit, or ask
+the maintainers).
 
-```
-set QT_QPA_PLATFORM=offscreen
-uv run python test_frame_sync.py
-uv run python test_board_coverage.py
-uv run python test_stim_guard.py
-uv run python test_thermal_watch.py
-uv run python test_mp_framesync.py
-uv run python test_stim_compiler.py
-uv run python test_serial_handshake.py
-uv run python test_grab_failure.py
-uv run python test_sim_backend.py
-uv run python test_sync_router_offline.py
-uv run python test_alignment.py
-uv run python test_calibrate.py
-uv run python test_camera_manager.py
-uv run python test_cpu_affinity.py
-uv run python test_cpu_encode.py
-uv run python test_hardware_check.py
-uv run python test_main_window_start.py
-uv run python test_probe_guard.py
-uv run python test_session_config.py
-uv run python test_widgets.py
-uv run python test_sim_gui.py
-```
+Two parts of it are specifically about the simulated rig, and the invariants they
+pin are worth knowing whether or not you run them. One drives the real
+`GrabThread`, `SyncEncodeRouter` and `FrameSyncCoordinator` against the simulated
+cameras with `pypylon` un-importable, asserting on the GUARDS one fault at a time.
+The other builds the actual `MainWindow` on `profiles/sim.yaml` and drives a
+calibration then a recording twice — once on whichever encoder the launch
+preflight selects, once on libx264 — and checks that:
 
-`QT_QPA_PLATFORM=offscreen` matters for every suite that builds a widget:
-without it they need a display. `PYTHONIOENCODING=utf-8` is worth setting on
-Windows, because several print non-ASCII.
-
-`test_sync_router.py` is the one test NOT in this list: it is an NVENC smoke
-test and needs the GPU.
-
-The two that are specifically about the simulated rig:
-
-- **`test_sim_backend.py`** drives the real `GrabThread`, `SyncEncodeRouter`
-  and `FrameSyncCoordinator` against the simulated cameras and asserts on the
-  GUARDS, one fault at a time. `pypylon` is made un-importable up front.
-- **`test_sim_gui.py`** builds the actual `MainWindow` on `profiles/sim.yaml`
-  and drives a calibration then a recording through the sidebar toggles,
-  twice — once on whichever encoder the launch preflight selects, once on
-  libx264. Each acquisition runs for the duration the acceptance names, 20
-  virtual seconds of calibration and 40 of recording, compressed by the
-  virtual clock (`SPEED`) into about 35 seconds of wall clock for the whole
-  file. What it asserts:
-  - both passes reach IDLE having shown exactly the dialogs the selected
-    encoder implies — none on the GPU path, "Proceed?" plus "Recording
-    completed with problems" on the CPU one, and the overwrite prompt on the
-    second pass;
-  - block IDs contiguous, equal-length and identical across the three
-    cameras, with `frametimes.npy` beside them holding one entry each;
-  - one mp4 per camera, as long as the trigger record;
-  - that the mp4s came from the encoder the pass demands — the installed
-    factory, and the libx264 note in each camera's `WARNINGS.txt`, which is
-    present on the CPU path and absent on the GPU one;
-  - that `alignment.load_blockids` reads the acquisition back and finds
-    nothing to trim;
-  - `session_metadata.json` beside each acquisition's videos, `stim_trace.csv`
-    and `stim_paradigm.json`/`.ino` under an applied paradigm, and the
-    moved-aside folders on the second pass.
+- each pass reaches IDLE having shown exactly the dialogs the selected encoder
+  implies — none on the GPU path, "Proceed?" plus "Recording completed with
+  problems" on the CPU one, and the overwrite prompt on the second pass;
+- block IDs are contiguous, equal-length and identical across the cameras, with
+  `frametimes.npy` beside them holding one entry each;
+- there is one mp4 per camera, as long as the trigger record, from the encoder
+  the pass demands — with the libx264 note in each camera's `WARNINGS.txt` on the
+  CPU path and absent on the GPU one;
+- `alignment.load_blockids` reads the acquisition back and finds nothing to trim;
+- `session_metadata.json` sits beside each acquisition's videos, with
+  `stim_trace.csv` and `stim_paradigm.json`/`.ino` under an applied paradigm, and
+  the moved-aside folders on the second pass.
 
 ### No known gaps
 
-`test_sim_gui.py` carries no XFAIL cases: every one of its checks passes with
-`pypylon` un-importable, and the launch this document's own entry point
+The application has no known gaps running with no hardware: every check passes
+with `pypylon` un-importable, and the launch this document's own entry point
 describes — `uv run gui.py`, then pick `sim` — reaches the dropdown on such a
 host too, which together are what "the application runs with no hardware"
 means. Three defects found while this was being written are fixed and now
-guarded by cases of their own, and each is worth knowing about because a
+guarded by the offline suite, and each is worth knowing about because a
 regression in any of them is quiet:
 
 - `CameraManager` records the backend NAME at construction and loads the
   backend on its first vendor call. An eager load imports the vendor SDK
   whatever the profile says, because the window builds the manager before the
   profile is resolved — so the GUI would not start at all on a host with no
-  `pypylon`, however loudly the profile asked for `sim`. Case 1 builds the
-  window with `pypylon` un-importable; case 45 proves nothing pulled it in.
+  `pypylon`, however loudly the profile asked for `sim`. The suite builds the
+  window with `pypylon` un-importable and proves nothing pulled it in.
 - A simulated camera re-anchors to trigger 1 when the board starts a new pulse
   train. The application arms every camera BEFORE it tells the board to start,
   and `SimBoard.start` restarts ordinals at 1, so a camera still holding the
   ordinal it computed against the train that had just ended ignored every
   trigger of the next one until that stale number came round. It is silent:
   the frames that do arrive carry block IDs from 1 and stay contiguous, so a
-  recording short at the front looks perfect. Case 23 counts what the second
+  recording short at the front looks perfect. The suite counts what the second
   acquisition in a process recorded against the pulses the board fired, and
-  `test_sim_backend` case 16 pins the anchor itself — two pulse trains, no
-  GUI, no waiting out a recording.
+  pins the anchor itself over two pulse trains — no GUI, no waiting out a
+  recording.
 - The startup camera open is wrapped, so a backend that cannot be imported
   becomes the Camera Error dialog rather than an exception out of
   `MainWindow.__init__`. It runs synchronously, inside the constructor, and it
   is where the profile's backend is loaded for the first time — so on a host
   with no vendor SDK an unguarded open left no window, hence no profile
-  dropdown, hence no way to reach `sim` at all. `test_sim_gui` cannot see this
-  one: it pins `profile_name` to `sim` before the window is built.
-  `test_main_window_start` case 81 builds the real window with `pypylon`
-  un-importable and a `basler` profile remembered.
+  dropdown, hence no way to reach `sim` at all. The GUI-driven check cannot see
+  this one, since it pins `profile_name` to `sim` before the window is built; a
+  separate case builds the real window with `pypylon` un-importable and a
+  `basler` profile remembered.
 
-`probe_seq.py`, the interactive GUI-driving probe, takes `--profile`, so
-`uv run probe_seq.py --profile sim --steps c:20,r:40` drives the simulated rig
-without changing which rig the GUI comes up on next time.
+To drive the simulated rig yourself, run `uv run gui.py` and pick `sim` from the
+profile dropdown; the selection applies to that launch only and does not change
+which rig the GUI comes up on next time.
 
 ---
 

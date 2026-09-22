@@ -16,3 +16,19 @@ probe_out/
 # Internal engineering notebook: kept on this machine, not published.
 # Its history stays in the repo; it simply stops receiving updates upstream.
 docs/PERF_EXPERIMENTS.md
+
+# Dev-only files kept locally but not shipped in the public product tree
+# (untracked 2026-09-21; git history preserves them, so `git log -- <path>` and
+# a checkout of an older commit still have them). The offline test suite still
+# runs locally; CONTRIBUTING.md explains where it lives. probe_network.py,
+# gui_app/probe_guard.py and configure_nic.ps1 stay TRACKED on purpose — the
+# install guide points users to them.
+/test_*.py
+/probe_abuse.py
+/probe_cpu_load.py
+/probe_lag.py
+/probe_seq.py
+/tools/
+/docs/make_screenshots.py
+/docs/make_example_plots.py
+/gui_app/mp_framesync.py

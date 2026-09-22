@@ -21,33 +21,11 @@ GUI itself needs the `rig` group.
 
 ## Running the tests
 
-The tests are plain scripts: each prints a `PASS` line per case, prints an
-`ALL ... PASS` line at the end and exits non-zero on the first failure. Run
-them directly with the project interpreter:
-
-```powershell
-uv run python test_frame_sync.py
-uv run python test_board_coverage.py
-uv run python test_stim_guard.py
-uv run python test_thermal_watch.py
-uv run python test_mp_framesync.py
-uv run python test_stim_compiler.py
-uv run python test_serial_handshake.py
-uv run python test_grab_failure.py
-```
-
-Suites that build Qt widgets need an offscreen platform when no display is
-available:
-
-```powershell
-$env:QT_QPA_PLATFORM = "offscreen"
-```
-
-Run the suite that guards the module you touched before opening a pull
-request, and run all of them before merging. `CLAUDE.md` lists which suite
-guards which module. A change that alters behaviour comes with a test that
-exercises it offline. A script that needs a camera, a serial port or an NVENC
-session says so in its docstring and is not part of the offline set above.
+The offline test suite is maintained by the project but is not shipped in the
+lean public tree. It remains in git history: recover it with
+`git log --all --diff-filter=D -- "test_*.py"` and check out the commit that last
+held those files, or request it from the maintainers. A change that alters
+behaviour comes with a test that exercises it offline.
 
 ## Changes to the hot path need rig validation
 

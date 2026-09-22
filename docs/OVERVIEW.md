@@ -9,7 +9,6 @@ and delivers optogenetic stimulation.
 For a first session start with [WORKFLOW.md](WORKFLOW.md), which walks through
 one from launch to finished files.
 
-Regenerate the screenshots with `uv run python docs/make_screenshots.py`.
 Callout positions come from Qt's widget geometry, so the numbers in each figure
 match the numbers in the text.
 
