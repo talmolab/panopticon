@@ -214,12 +214,11 @@ class BoardDetector:
                 # this camera has gathered, which is the right thing to steer
                 # by but the WRONG thing to threshold.
                 #
-                # Thresholding the weighted number was a real bug (found in
-                # review 2026-09-11): at nine cameras all seeing the board,
-                # partners=8, so a target of 120 was met in FIFTEEN ticks --
-                # a 16.7x drop in the actual bar, which would have greenlit a
-                # calibration on almost no data and produced a confident,
-                # badly-conditioned solve.
+                # Threshold FRAMES, never the partner-weighted number: at nine
+                # cameras all seeing the board partners=8, so a target of 120 is
+                # met in FIFTEEN ticks -- a 16.7x drop in the actual bar, which
+                # would greenlight a calibration on almost no data and produce a
+                # confident, badly-conditioned solve.
                 self.per_cam_frames[i] += 1
                 self.per_cam_covis[i] += partners
             for a in range(len(seen)):
@@ -239,10 +238,10 @@ class BoardDetector:
         Computed every tick rather than only at READY, because it is the
         condition operators cannot see any other way: per-camera counts and grid
         coverage can all be satisfied while the graph sits in several clusters
-        that never observed the board together. A 9-camera session on 2026-09-10
-        reached `paired 260/250 grid 4/3` on every camera and still solved only
-        4 cameras, because the graph was three separate groups — with nothing on
-        screen saying so.
+        that never observed the board together. A nine-camera calibration can reach
+        `paired 260/250 grid 4/3` on every camera and still solve only four,
+        because the graph is three separate groups — with nothing on screen
+        saying so (the solve keeps the largest connected component).
         """
         parent = list(range(self.n))
 

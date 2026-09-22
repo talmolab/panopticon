@@ -946,8 +946,7 @@ anywhere. The application computes the ceiling from the profile's
 exposure, then gain.
 
 **Getting enough light without overdoing it.** The reference values come from
-measurement. They were raised to 3000 µs and 6.0 dB from 2000 µs and 0 dB on
-2026-08-11, because the older pair left 65% of pixels in levels 0–15 with
+measurement. They are 3000 µs and 6.0 dB; at 2000 µs and 0 dB the older pair left 65% of pixels in levels 0–15 with
 **21.5% clipped at exactly 0**, destroyed at the converter and unrecoverable
 however much you brighten the video afterwards. Overshooting is just as easy:
 that 3.0x increase lands about 4% of pixels saturated, where 7x would clip
@@ -1070,7 +1069,7 @@ the table sort out where those two part company.
 | `realtime_kick` | `false`, selecting post-hoc alignment instead | Gate frames through the cross-camera coordinator during capture, so the videos are trigger-aligned with no post-hoc re-encode. With it off, alignment runs after encoding and re-encodes each video. The shipped `3dpose` profile sets `true`; kick-out is the mode the rest of this documentation describes. |
 | `kick_max_lag` | 240; the shipped `3dpose` profile sets 480 | How many frames one camera may lag the others before its missing triggers are force-dropped. Drives the NV12 ring size, so it is the main RAM lever; see *Choosing `kick_max_lag`* below. |
 | `max_num_buffer` | 1000; the shipped `3dpose` profile sets 600 | Driver-side buffers queued per camera, and usually the larger half of the RAM bill: `n_cams x max_num_buffer x frame_bytes`, so 1000 is 19.3 GiB at nine 1920x1200 cameras against 11.6 GiB at 600. Keep it at or above `kick_max_lag`. See *RAM* in section 1. |
-| `gige_driver` | `socket` | `socket` is user-space with reliable packet resends. `filter` is the in-kernel driver: less CPU, but with default resend settings it discards a frame rather than asking for the lost packet again, measured dropping about 23% of frames under six cameras at 100 fps on 2026-06-12. `auto` leaves pylon's default. |
+| `gige_driver` | `socket` | `socket` is user-space with reliable packet resends. `filter` is the in-kernel driver: less CPU, but with default resend settings it discards a frame rather than asking for the lost packet again, measured dropping about 23% of frames under six cameras at 100 fps. `auto` leaves pylon's default. |
 | `gev_bandwidth_reserve_pct` | not set, so each camera keeps its `.pfs` value | `GevSCBWR`, written through the backend at open: the percentage of link bandwidth (0..100) held back for packet resends. Reserving bandwidth lowers the bandwidth every camera is assigned, so it trades throughput for resend headroom and is opt-in per rig rather than a default. Outside 0..100 is refused at load. |
 | `gev_bandwidth_reserve_accum` | not set, so each camera keeps its `.pfs` value | `GevSCBWRA`, written at open beside the percentage above: how many reserve slots may pool, so a burst of resends can draw on more than one interval's reserve. Negative is refused at load. Set it with the percentage, not alone. |
 | `trigger_rate_limit` | 165, the reference camera's own maximum frame rate rather than a property of Panopticon | `AcquisitionFrameRate` written in trigger mode. Set it to *your* camera's maximum frame rate; 165 is that number for the reference a2A1920-165g5m. Keep it above the trigger rate, and never set it to `0`. See *Setting `trigger_rate_limit`* below. |
@@ -1581,8 +1580,8 @@ how far the views drift apart by the end, and the same text goes into
 `WARNINGS.txt` beside the videos.
 
 The tolerance is 0.3%, from measurement rather than theory. Across 74
-camera-sessions of real data (2026-06-12 to 2026-09-03, at both 30 and 100 fps,
-including the sessions that lost 24% and 43% of frames) the measured rate sits
+camera-sessions of real data at both 30 and 100 fps, including the sessions that
+lost 24% and 43% of frames) the measured rate sits
 between **+220 and +250 ppm** of configured, the fixed offset between the trigger
 board's resonator and the cameras' own oscillators. 0.3% leaves 12x margin over
 the worst real sample while still catching a camera that ignores one trigger in

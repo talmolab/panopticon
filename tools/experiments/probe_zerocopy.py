@@ -1,7 +1,8 @@
-"""E3: verify a zero-copy replacement for `img = result.Array` on a real camera.
+"""Verify a zero-copy replacement for `img = result.Array` on a real camera.
+(Findings: docs/HISTORY.md, phase 5.)
 
 WHY
-The grab loop's frame access used to be `img = result.Array`. pypylon's GetArray() ALLOCATES a fresh
+The grab loop must not use `img = result.Array`. pypylon's GetArray() ALLOCATES a fresh
 2.3 MB numpy array and memcpys the driver buffer into it -- and pypylon's `%nothread`
 list means that copy runs with the GIL HELD. Round-1 agent measurements on this rig, on
 one real 100 fps camera:
@@ -10,8 +11,8 @@ one real 100 fps camera:
     + result.Array                74.8 fps   exec 1.300 ms   gil_held 2.221 ms
     + GetArrayZeroCopy           101.3 fps   exec 0.372 ms   gil_held 1.686 ms
 
-`.Array` alone drops ONE camera below the 100 fps trigger rate. E2 then showed the
-system tolerates <=300 us of GIL-held work per thread per frame even at 17 threads, but
+`.Array` alone drops ONE camera below the 100 fps trigger rate. The system tolerates
+<=300 us of GIL-held work per thread per frame even at 17 threads, but
 ~1000 us blows the 10 ms budget at 11 threads. So removing this copy is the whole game.
 
 WHAT THIS CHECKS BEFORE THE HOT PATH IS EDITED
@@ -127,7 +128,7 @@ def main():
 
     def consume(img, do_preview):
         """Exactly what production does with the frame, so the cost is comparable."""
-        nv12[:H, :] = img                      # NV12 ring copy (the E1 copy)
+        nv12[:H, :] = img                      # NV12 ring copy
         if do_preview:
             _ = img[::dwn, ::dwn].copy()       # preview decimate
         return int(img[0, 0])                  # force a real read

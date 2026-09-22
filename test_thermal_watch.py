@@ -1,11 +1,11 @@
 """The live thermal watch: does an overheating camera get reported in time?
 
-Why this is worth a test. Until 2026-09-11 the GUI read temperatures only at
-stop, which records an overheating camera but cannot prevent it -- by the time
-the number is visible the camera has already stopped delivering and the
-block-ID bookkeeping has truncated the session. The watch added that day is the
-only thing standing between a hot rig and a silently short recording, and on
-the reference rig four of nine cameras sit above the vendor's Critical
+Why this is worth a test. Reading temperatures only at stop records an
+overheating camera but cannot prevent it -- by the time the number is visible
+the camera has already stopped delivering and the block-ID bookkeeping has
+truncated the session. The live watch is the only thing standing between a hot
+rig and a silently short recording, and on the reference rig four of nine
+cameras sit above the vendor's Critical
 threshold with one peaking 1 C below shutdown, so it fires for real.
 
 The thresholds must come from the CAMERA (`BslTemperatureStatus`,

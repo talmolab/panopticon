@@ -133,7 +133,7 @@ class BaslerBackend:
         reliably recover lost packets. This is the proven setting.
         "filter": in-kernel pylon GigE Vision driver — far less CPU, but with
         default resend settings it silently dropped ~23% of frames (~5,800
-        single-frame gaps per camera) under 6x100 fps load on 2026-06-12. It
+        single-frame gaps per camera) under 6x100 fps load. It
         discards a frame with a lost packet instead of asking for it again.
         "auto": leave pylon's default. No-op for non-GigE cameras.
         """
@@ -313,10 +313,9 @@ class BaslerBackend:
         exposure at ~3.94 ms at 165, and what caused the original 50 fps bug
         when it was left at 100 (every second trigger was skipped).
 
-        Setting it to 0 removes that ceiling and was tried on 2026-08-11: it
-        cost 8-15% of frames IN TRANSMISSION, because the limiter also paces
-        readout and without it every camera bursts onto the link at once.
-        Reverted the same day. Keep it above the trigger rate.
+        Setting it to 0 removes that ceiling but costs 8-15% of frames IN
+        TRANSMISSION, because the limiter also paces readout and without it every
+        camera bursts onto the link at once. Keep it above the trigger rate.
 
         `announce` is set for camera 0 only: the disabled-limiter warning is a
         property of the rig, so it is printed once rather than once per camera.
@@ -493,9 +492,9 @@ class BaslerBackend:
         have no fan and cool by conduction through the mount, so temperature is
         a property of the INSTALLATION, not the camera — two identical cameras
         differ by tens of degrees depending on bracket material, airflow and
-        what is mounted next to them. Nothing read this until 2026-09-10, when
-        three cameras turned out to be sitting above the 76 C `Critical`
-        threshold with no record of whether that was new.
+        what is mounted next to them. Record it every session so a camera found above
+        the 76 C `Critical` threshold can be told apart from one that has always
+        run there.
 
         `DeviceTemperature` decays after a session ends, so `BslTemperatureMax`
         is the number worth keeping. All keys are optional: a camera that does
@@ -526,11 +525,11 @@ class BaslerBackend:
                                    NOT harmless: the resend arrives after the
                                    rest of the buffer, so that camera completes
                                    late, and a camera completing late every few
-                                   frames IS per-camera drift. On 2026-09-11 the
-                                   cameras behind a switch with flow control
-                                   disabled ran 16,800 resends per 90 s against
-                                   10 for their siblings and were the laggards,
-                                   having lost no frames at all. Treat a count
+                                   frames IS per-camera drift. Cameras behind a
+                                   switch with flow control disabled run
+                                   thousands of resends per 90 s against ~10 for
+                                   their siblings and become the laggards, having
+                                   lost no frames at all. Treat a count
                                    three orders of magnitude above the other
                                    cameras as a fault; check switch flow
                                    control first.

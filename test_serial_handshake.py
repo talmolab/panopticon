@@ -3,9 +3,9 @@
 Background: the serial connection is now held open across recordings, because
 opening it resets the Arduino and floats every pin for ~1-2 s — long enough for
 a connected laser driver to fire. The cost is that a start command may land in
-the sketch's loop() reconfigure branch rather than a freshly reset setup(). On
-2026-07-26 that path silently failed and produced a 15 s recording with zero
-triggers, so every start is now confirmed by an `RDY <n_cams> <fps>` ack.
+the sketch's loop() reconfigure branch rather than a freshly reset setup(). That
+path can silently fail and produce a recording with zero triggers, so every
+start is confirmed by an `RDY <n_cams> <fps>` ack.
 
 The rules pinned down here:
   - confirmed on the open connection   -> no reset, no laser flash
@@ -114,7 +114,7 @@ def test_legacy_firmware_still_records():
 
 def test_regression_is_a_hard_failure():
     """A board that has acked before going quiet is a genuine fault, not old
-    firmware. This is the 2026-07-26 zero-trigger case; it must abort."""
+    firmware. This is the zero-trigger case; it must abort."""
     alive = {"v": True}
     c, log, state = controller(
         lambda cmd, gen: ACK if (alive["v"] and cmd == START) else b"")

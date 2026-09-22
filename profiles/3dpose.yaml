@@ -20,56 +20,30 @@ quality: 21
 encode_parallel: 3           # concurrent NVENC jobs (raw mode) / .h264->mp4 remux jobs (realtime mode)
 realtime_encode: true        # GPU H.264 encode during capture (no raw.bin, no post-hoc pass). Set false for the raw fallback.
 realtime_kick: true          # default: real-time cross-camera frame kick-out — only frames every camera caught are encoded, so videos come out trigger-aligned with no post-hoc re-encode.
-# Driver-side buffers per camera. LOWERED 1000 -> 250 on 2026-09-10, forced by the
-# move to 9 cameras: at 1000 the pylon pool alone is 9 x 1000 x 2.304 MB = 20.7 GiB,
-# and with the NV12 ring on top the capacity preflight refused to start anything on
-# a 63.4 GiB machine. 250 is 5.2 GiB and still 2.5 s of slack at 100 fps (8.3 s at
-# the 30 fps calibration rate) -- 1000 was 10 s, which is far more jitter than this
-# rig has ever shown: Buffer_Underrun_Count has been 0 on every camera since the
-# GetArrayZeroCopy fix. Watch that counter after a session; nonzero means the pool
-# ran dry and this went too low.
-#
-# RAISED 250 -> 600 on 2026-09-10, same day, after cam9 sat at 2.4 s of delivery
-# lag for a whole recording: the pool at 250 is 2.5 s at 100 fps, so it was one
-# hiccup from running dry. INVARIANT worth keeping: the pool must be at least as
-# deep as kick_max_lag, or the pool empties before the coordinator is willing to
-# give up on the laggard, and a recoverable lag becomes lost frames.
+# Driver-side buffers per camera. RAM = n_cameras x this x 2.304 MB (11.6 GiB at
+# 9 x 600). Must be at least as deep as kick_max_lag, or the pool empties before
+# the coordinator gives up on a laggard and a recoverable lag becomes lost frames.
+# Buffer depth is not monotonically good — too deep and the capacity preflight
+# refuses to start (9 x 1000 is 20.7 GiB of pool alone). Watch Buffer_Underrun_Count
+# after a session; nonzero means the pool ran dry and this is too low.
+# (History and the sizing A/B: docs/HISTORY.md, phase 6.)
 max_num_buffer: 600
 
-kick_max_lag: 480            # Coordinator buffer, in frames.
-                             # Lowered to 240 on 2026-09-10 when observed lag was
-                             # 0-13 and the RAM was needed -- then PUT BACK the same
-                             # day. cam9 spent an entire recording 2.4 s behind, which
-                             # is exactly 240 frames, so the coordinator sat on the cap
-                             # and force-dropped 4,682 triggers that all nine cameras
-                             # had actually captured. At 480 none of those are lost.
-                             # This is MITIGATION, not a fix: cam9 is healthy at 30 fps
-                             # and cannot hold 100 fps, and it is on the new Ethernet 3
-                             # switch along with cam7 and cam8, which both dropped off
-                             # the bus entirely the same day. Fix that and 240 becomes
-                             # reasonable again -- but re-measure, do not assume.
-                             # HISTORY: RAISED 2026-08-11 when one
-                             # camera per session drifted to the cap and force-dropped
-                             # frames every camera had captured (12.3% loss at 240).
-                             # ROOT CAUSE FOUND 2026-09-03: that drift was result.Array's
-                             # GIL-held 2.3 MB memcpy in the grab loop, since replaced
-                             # with GetArrayZeroCopy. Observed cross-camera lag is now
-                             # median 0 / p95 1 / max 2, so this headroom currently buys
-                             # nothing -- it could likely drop back to 240, halving the
-                             # NV12 ring (max_lag + queue + 64 buffers/cam = 2.39 GiB
-                             # each at 480). Deferred pending a rig A/B; do NOT lower it
-                             # blind, and do NOT raise it to 1000 -- that starved
-                             # capture outright (24% loss, 2026-06-17).
+kick_max_lag: 480            # Frames the coordinator waits for a lagging camera before
+                             # force-dropping a trigger every other camera caught. Sizes the
+                             # NV12 ring (max_lag + queue + 64 buffers/cam, ~2.39 GiB each at
+                             # 480). Must not exceed the pool (max_num_buffer). Do NOT lower it
+                             # blind (a camera that cannot hold 100 fps rides the cap and
+                             # force-drops frames every camera captured) and do NOT raise it to
+                             # 1000 (that starves capture outright, 24% loss). A/B on the rig,
+                             # never assume. See docs/HISTORY.md for the 240/480 measurements.
 
 # Number of cameras that MUST enumerate before a session starts. Camera names are
 # positional by serial-number order, so a camera that fails to enumerate (dead switch
 # port, unpowered, still booting) renames every camera after it and silently attaches
-# the calibration extrinsics to the wrong physical cameras.
-#
-# RAISED 6 -> 9 on 2026-09-10 when the third switch and cameras 7-9 were installed.
-# The new serials (42017507, 42017508, 42019425) sort AFTER the original six
-# (41920544-41920549), so cam1-cam6 keep the identities their old calibrations were
-# solved against and the new cameras become cam7/cam8/cam9.
+# the calibration extrinsics to the wrong physical cameras. When adding cameras, confirm
+# the new serials sort AFTER the existing ones (here 41920544-41920549 = cam1-cam6,
+# 42017507/42017508/42019425 = cam7-cam9), or every later camera is renamed.
 n_cameras: 9
 
 # --- Calibration-only exposure / gain -----------------------------------------
@@ -91,34 +65,28 @@ n_cameras: 9
 # pause at each pose. If it is still too dark, raise calibration_gain_db next
 # (each +6 dB doubles signal, and noise with it) -- exposure first, gain second.
 # 0 / -1 mean "leave the .pfs value alone".
-calibration_exposure_us: 5000      # 5 ms = one-third of the old 15 ms, after the lighting was improved
+calibration_exposure_us: 5000      # 5 ms; motion blur, not the ceiling, is the limit at 30 fps
 calibration_gain_db: -1            # -1 = keep the .pfs gain (6 dB)
 
 # --- Calibration coverage HUD: when to stop waving the board -----------------
-# LOWERED 2026-09-10 from 250/80. Those made a 9-camera calibration take far
-# longer than the data could be used for: 1_calibrate.py caps intrinsics at 60
-# pose-diverse frames per camera and stereo at 30 shared frames per pair, and
-# discards the rest, so 250/80 was asking for ~4x and ~2.7x what the solve ever
-# reads. 120/40 keeps ~2x and ~1.3x margin over those caps.
+# 1_calibrate.py caps intrinsics at 60 pose-diverse frames per camera and stereo
+# at 30 shared frames per pair and discards the rest, so these thresholds need
+# ~2x margin over those caps, no more; higher just makes a nine-camera
+# calibration take far longer than the data can be used for.
 #
 # The waving time is dominated by CONNECTIVITY, not by these counts -- the graph
-# must be one component, which is what a lower min_edge helps most: in the
-# 2026-09-10 session two groups sat at 46 shared detections and would have
-# merged instantly at 40 but not at 80.
+# must be one component, which is what a lower min_edge helps most.
 #
 # If calibrations start coming out marginal, raise these first and read
 # reprojection_error_histogram.png for the evidence. Leave the grid criterion
 # alone -- it is cheap and it is the one that actually stops a board being waved
 # in a single spot, which yields confident, badly-conditioned intrinsics.
 calibration_min_per_cam_shared: 120
-# Shared board sightings needed before a camera PAIR counts as connected.
-# Halved from 40 on 2026-09-14: Isaac reported the board-waving still demanded
-# far too many pairings, and connecting nine cameras needs at least eight edges,
-# so this number multiplies through the whole exercise. 40 was already a
-# reduction from 80, and a 9/9 solve landed at 40 -- so 20 keeps real margin
-# over whatever the solver actually needs while halving the work. If waving is
-# still slow, 15 is the next step; the true floor is what the solve needs for a
-# stable relative pose per pair, which nobody has measured yet.
+# Shared board sightings before a camera PAIR counts as connected. Nine cameras
+# need at least eight edges, so this number multiplies through the whole
+# exercise; a 9/9 solve has succeeded at 40, so 20 keeps margin. 15 is the next
+# step down if waving is still slow; the true floor (what the solve needs for a
+# stable relative pose per pair) has not been measured.
 calibration_min_edge: 20
 calibration_min_grid_cells: 3
 
@@ -131,10 +99,10 @@ serial_port: COM3
 # are written inside one noInterrupts() block, so every camera takes the same
 # edge. What matters is that no camera's Line1 sits on a pin that is not listed.
 #
-# THIS RIG FANS OUT, so the list did NOT grow when the count went 6 -> 9
-# (2026-09-10): cameras 7-9 share pins 10 and 12 with existing cameras rather
-# than getting their own. Listing a pin with nothing on it is harmless, so this
-# is deliberately a superset of what is wired.
+# THIS RIG FANS OUT: cameras 7-9 share pins 10 and 12 with existing cameras
+# rather than getting their own, so nine cameras still need only six pins.
+# Listing a pin with nothing on it is harmless, so this is deliberately a
+# superset of what is wired.
 #
 # WATCH THE CURRENT BUDGET when fanning out. An ATmega2560 output is rated for
 # roughly 20 mA, and a camera's opto-isolated Line1 is driven by CURRENT, not
@@ -146,76 +114,52 @@ serial_port: COM3
 # 0/1 (Serial0) and 53 (the laser, see stim_safe_pins) are refused outright.
 trigger_pins: [2, 4, 6, 8, 10, 12]
 
-gige_driver: socket          # socket = user-space w/ reliable packet resends (proven). filter = in-kernel pylon GigE Vision driver: less CPU but silently dropped ~23% of frames w/ default resend settings (2026-06-12)
+gige_driver: socket          # socket = user-space transport with reliable packet resends. filter = in-kernel pylon GigE Vision driver: less CPU, but with default resend settings it discards a frame on a lost packet (~23% loss at 6 x 100 fps).
 
 # Optostim pins forced LOW at boot (before the serial handshake) so a powered
 # laser driver never sees a floating pin. Pin 53 = laser. Workflow pins are
 # added automatically; this list is the floor.
 stim_safe_pins: [53]
 
-# Disable the camera's internal rate generator in trigger mode. It does nothing while
-# externally triggered but enforces a minimum interval of exposure + 1/rate, which is what
-# capped exposure at ~3.94 ms. 0 = disabled; 3dface stays on 165 until tested there.
-trigger_rate_limit: 165      # REVERTED 2026-08-11: setting this to 0 (limiter off) cost
-                             # 8-15% of frames IN TRANSMISSION. Cameras still acquired every
-                             # trigger (rate 100.03, block IDs contiguous) but delivery
-                             # dropped to 85-92% vs 99.98% with the limiter on. The limiter
-                             # paces readout over 6.06 ms; without it six cameras burst
-                             # together after each trigger and the marginal links lose
-                             # packets. Worst on cams 1/4/6. Do not disable this again
-                             # without fixing the network margin first.
+# Written to AcquisitionFrameRate in trigger mode. It does nothing while
+# externally triggered but enforces a minimum interval of exposure + 1/rate,
+# which is what caps exposure at ~3.94 ms. Keep it at 165, never 0: the limiter
+# also paces each camera's readout across 6.06 ms, and without it every camera
+# bursts onto its link at once after the shared trigger and marginal links drop
+# 8-15% of frames in transmission (see docs/HISTORY.md).
+trigger_rate_limit: 165
 
 # --- Hybrid-CPU thread placement -------------------------------------------
-# ENABLED 2026-09-11. The Ultra 9 285K is 8 P-cores + 16 E-cores, and at nine
-# cameras Panopticon runs ~19 busy threads, so most cannot be on a P-core and
-# Windows picks differently every launch. A grab thread on an E-core runs a few
-# percent slow, which is unrecoverable: the loop retrieves at exactly the rate
-# frames arrive. That is the rotating laggard (cam9, then cam5, then cam4 on
-# three consecutive sessions).
-#
-# Measured, 9 cameras, 90 s, headless, production switch interval:
-#   off                       avg_proc 2.99 ms  slack 5.93  worst camera lag 13
-#   grab pinned one P-core ea          2.19        7.03                      10
-#   grab confined to P-set             3.53        5.34                      14
-# Fixed placement beats handing the scheduler the set: no migration, better
-# cache locality. Encoders are deliberately left unpinned -- see
-# pin_encoder_threads in session_config.py for the numbers.
+# Pin each grab thread to its own P-core. The Ultra 9 285K is 8 P + 16 E cores,
+# and at nine cameras Panopticon runs ~19 busy threads, so Windows places most
+# on E-cores and picks differently every launch. A grab thread on an E-core runs
+# a few percent slow, which the loop cannot absorb (it retrieves at exactly the
+# rate frames arrive) -- that is the rotating laggard. Fixed placement beats
+# handing the scheduler the P-set: no migration, better cache locality. Encoders
+# are deliberately left unpinned (see pin_encoder_threads in session_config.py).
 pin_capture_threads: true
 
-# OFF: confining encoders to the P-core set was tried on 2026-09-14 and is a
-# REGRESSION. It raised the grab threads' copy time from 0.7 ms to 2.8-2.9 ms
-# in EVERY recording -- nine encoders sharing eight P-cores with nine pinned
-# grab threads -- and it did not stop the divergence it was aimed at: cam5
-# still reached 296 and cam2 185 in the two recordings that followed. The
-# option is kept in the code because the E-core failure mode it addresses is
-# real, but it is not the answer here.
+# Leave off. Confining encoders to the P-core set (nine encoders sharing eight
+# P-cores with nine pinned grab threads) quadruples the grab threads' copy time
+# (0.7 -> 2.8 ms) and does not stop the divergence it targets. Kept as an option
+# because the E-core failure mode it addresses is real, but it is not the answer
+# here. See docs/HISTORY.md, phase 6.
 encoder_pcores: false
 
 # Keep capture threads off CPU 0 and CPU 1, which carry ~46% of NIC DPC time on
-# this machine. Measured 2026-09-14, nine cameras, 90 s, pinned, lag behind the
-# leader as median/p95/max: excluding nothing gave the CPU-0 camera 0/6/12 and
-# under the GUI it diverged to kick_max_lag and was force-dropped; excluding
-# [0] gave 0/3/4; excluding [0, 1] gave ALL NINE 0/1/1. Leaves 6 cores for 9
-# cameras, so three float across the pool -- a far better trade than parking a
-# camera on the busiest core in the machine.
+# this machine: a grab thread pinned there is descheduled by the traffic it is
+# receiving (median/p95/max lag 0/6/12 on CPU 0 vs 0/1/1 excluded, and it
+# diverges under GUI load). Leaves 6 cores for 9 cameras, so three float across
+# the pool -- a far better trade than parking a camera on the busiest core.
 capture_core_exclude: [0, 1]
 
 # Seconds between camera temperature polls while acquiring; 0 disables. These
-# cameras have no fan and cool by conduction through the mount, so temperature
-# is a property of the installation: measured 2026-09-11 over a 600 s run, four
-# of the nine sit above the vendor's 76 C Critical threshold and cam6 peaked at
-# 80 C against an 81 C shutdown, while cam9 never passed 70 C. The GUI used to
-# read temperatures only at stop, which is too late to act on. Thresholds are
-# read from each camera, never from this file.
-# Turned OFF 2026-09-11 at Isaac's request: the warnings were firing constantly
-# because four of nine cameras genuinely sit above the vendor's Critical
-# threshold, which he is addressing with heatsinks rather than in software. The
-# watch itself is kept and tested (test_thermal_watch.py) -- set this back to
-# 20.0 to re-enable it once the cameras are cooler, so a NEW thermal problem
-# still gets caught. Temperatures are recorded in session metadata either way.
-# Re-enabled at 20 s: the live status-bar alert is the only place an
-# overheating camera can still be acted on before it shuts down. The
-# post-encoding report no longer nags about heat unless the session actually
-# lost frames (see main_window._on_encoding_done), so a warm-but-clean session
-# is no longer flagged and the watch can stay on without spamming.
+# cameras have no fan and cool by conduction through the mount, so temperature is
+# a property of the installation: four of the nine sit above the vendor's 76 C
+# Critical threshold by mounting, which is being addressed with heatsinks, not in
+# software. Thresholds are read from each camera, never from this file, and
+# temperatures go into session metadata either way. The live status-bar alert is
+# the only place an overheating camera can be acted on before it shuts down; the
+# post-encoding report only flags heat when the session actually lost frames
+# (main_window._on_encoding_done), so a warm-but-clean session does not nag.
 thermal_poll_s: 20

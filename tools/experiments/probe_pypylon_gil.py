@@ -1,4 +1,5 @@
-"""E3: what does pypylon do with the GIL, and is zero-copy capture real?
+"""What does pypylon do with the GIL, and is zero-copy capture real?
+(Findings: docs/HISTORY.md, phase 5.)
 
 Source-reading answer (pypylon 26.4.1, SWIG 4.3, built with `-threads`):
 every wrapped C++ method releases the GIL for the duration of the call EXCEPT the

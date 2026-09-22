@@ -78,10 +78,9 @@ def _warm():
 
     Encode() pulls in more machinery the first time it is called. When six
     encoder threads hit that simultaneously they pile up on the import
-    machinery and the WHOLE PROCESS wedges — proven 2026-08-11 with a
-    faulthandler dump showing one thread parked in importlib.find_spec() under
-    Encode() while every grab thread sat idle and the recording produced
-    nothing at all. Doing one throwaway encode here, inside the load lock,
+    machinery and the WHOLE PROCESS wedges — one thread parks in
+    importlib.find_spec() under Encode() while every grab thread sits idle and
+    the recording produces nothing at all. Doing one throwaway encode here, inside the load lock,
     means the encoder threads only ever meet the already-imported fast path.
 
     Tiny frame, and failures are swallowed: this is a hazard removal, not a
@@ -307,10 +306,10 @@ def probe_max_sessions_isolated(width: int = 1920, height: int = 1200,
     the caller needs most of them back moments later. `EndEncode()` does not
     free a session -- only the encoder's destructor does -- so in-process the
     release always races the next allocation, no matter how carefully the
-    references are dropped. That race was documented on 2026-09-10, addressed
-    with an explicit pop-and-delete plus a collect, and recurred on 2026-09-14:
-    two 600 s GUI recordings hung at exactly the `[hw] NVENC sessions:` line,
-    before start_triggers, while shorter runs on the same build passed.
+    references are dropped. An explicit pop-and-delete plus a collect is not
+    enough -- the race has hung two 600 s GUI recordings at exactly the
+    `[hw] NVENC sessions:` line, before start_triggers, while shorter runs on
+    the same build passed.
 
     Process exit frees GPU sessions unconditionally, which turns that race into
     a guarantee. The cost is one interpreter start, paid once per GUI session
@@ -378,9 +377,9 @@ def probe_max_sessions(width: int = 1920, height: int = 1200, limit: int = 24) -
     and GC timing, and this probe holds the most sessions of anything in the
     process. At 9 cameras the preflight asks for 11 of a 12-session cap and the
     router then wants 9 more immediately, so any that linger put the request at
-    20 against 12. Observed 2026-09-10 as an intermittent HANG at recording
-    start, right after the `[hw] NVENC sessions:` line — intermittent precisely
-    because it depended on when the collector ran. So drop every reference
+    20 against 12, an intermittent HANG at recording start right after the
+    `[hw] NVENC sessions:` line — intermittent precisely because it depends on
+    when the collector runs. So drop every reference
     explicitly and collect before returning.
     """
     _load()

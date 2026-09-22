@@ -1,10 +1,10 @@
 """Drive the REAL GUI through a SEQUENCE of acquisitions in one process.
 
-Why this exists. Plain repeated recordings are not the reproduction: on
-2026-09-14 three consecutive 600 s recordings passed while the bug Isaac hits
-was very much alive. His reproduction is a *mixed* sequence in a single GUI
-process -- recording, then a calibration, then a recording -- and the second
-recording degraded: encode queue full at qsize 183-204 against
+Why this exists. Plain repeated recordings are not the reproduction: three
+consecutive 600 s recordings in a fresh process pass while the real bug is
+alive. The reproduction is a *mixed* sequence in a single GUI process --
+recording, then a calibration, then a recording -- where the second recording
+degrades: encode queue full at qsize 183-204 against
 ENCODE_QUEUE_DEPTH 200, avg_proc 1.0 -> 5-7 ms, and five cameras climbing, with
 grab-thread affinity identical to the clean first recording.
 

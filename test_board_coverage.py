@@ -1,8 +1,8 @@
 """Calibration coverage: connectivity, weighting, and the READY conditions.
 
-The condition these guard is the one that cost a real session. On 2026-09-10 a
-nine-camera calibration reached `paired 260/250` and `grid 4/3` on every camera,
-never went READY, and solved only four cameras: the co-visibility graph was in
+The condition these guard is the one that cost a real session: a nine-camera
+calibration can reach `paired 260/250` and `grid 4/3` on every camera, never go
+READY, and solve only four cameras: the co-visibility graph was in
 three disconnected groups and the solve kept the group holding cam1 (which
 happened to be the largest; it now keeps the largest by construction). Per-camera
 numbers cannot express that — each cluster looks fully covered from the inside —
@@ -131,7 +131,7 @@ check(8, "an edge at exactly min_edge does join them",
 
 # 9 -------------------------------------------------------------------------
 # Everything per-camera satisfied, graph split: READY must stay false. This is
-# the exact shape of the 2026-09-10 session.
+# the graph shape from the real three-group calibration.
 d = make(6)
 d.per_cam_frames = np.full(6, 999)
 d.per_cam_covis = np.full(6, 999)
@@ -176,8 +176,8 @@ check(13, "bridge_hint is None once the graph is connected",
       d.bridge_hint() is None)
 
 # 14 ------------------------------------------------------------------------
-# Regression: the real 2026-09-10 nine-camera graph must reproduce the three
-# groups, and the largest must be the four cameras the solve actually kept.
+# Fixture from a real nine-camera calibration: the graph must reproduce the
+# three groups, and the largest must be the four cameras the solve kept.
 d = make(9)
 d.per_cam_frames = np.full(9, 999)
 d.per_cam_covis = np.full(9, 999)
@@ -189,15 +189,15 @@ for (i, j), v in real.items():
     edge(d, i, j, v)
 d._update_ready()
 comps = sorted([sorted(c) for c in d.components])
-check(14, "2026-09-10 session reproduces its three groups",
+check(14, "real nine-camera graph reproduces its three groups",
       comps == [[0, 3, 6, 8], [1, 2, 5], [4, 7]] and not d.ready)
 check(15, "and its largest group is the four cameras the solve kept",
       sorted(max(d.components, key=len)) == [0, 3, 6, 8])
 
 # 16 — REGRESSION: partner weighting must not shortcut the READY threshold.
-# Review 2026-09-11 found per_cam_covis (weighted by partner count) was being
-# thresholded against min_per_cam_shared, so at nine cameras all seeing the
-# board partners=8 and a target of 120 was met in FIFTEEN ticks. READY must
+# READY must count FRAMES: per_cam_covis (weighted by partner count) is
+# display-only, and thresholding it against min_per_cam_shared let a 120 target
+# pass in fifteen ticks at nine cameras (partners=8). READY must
 # count FRAMES; the weighted number is for display only.
 d = make(9, min_per_cam_shared=120)
 for _ in range(20):

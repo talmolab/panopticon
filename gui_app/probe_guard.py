@@ -1,19 +1,16 @@
 """Refuse to start a probe while any Panopticon is already running.
 
 Two instances enumerate the same cameras and fight over them, and the lag that
-produces looks exactly like a laggard bug. On 2026-09-14 three concurrent
-instances -- launched by loop scripts that outlived the pkill meant to stop them
--- produced two "divergence" findings that drove two code changes, both since
-reverted.
+produces looks exactly like a laggard bug: three concurrent instances have
+produced false "divergence" findings that drove two since-reverted code changes.
 
-Two earlier attempts at this guard each failed in an instructive way:
+Both checks below are required, because each alone has a gap:
 
-  * A command-line scan alone refused to start at all, because `uv run` spawns
-    a second python in the same tree and the guard detected its own parent.
-  * A lock file alone missed the case that actually matters most: **Isaac's own
-    GUI**, launched from the desktop shortcut, never takes a probe lock. A probe
-    would happily start alongside it and ruin both his session and the
-    measurement.
+  * A command-line scan alone refuses to start at all, because `uv run` spawns
+    a second python in the same tree and the guard detects its own parent.
+  * A lock file alone misses a GUI launched from the desktop shortcut, which
+    never takes a probe lock. A probe would start alongside it and ruin both
+    the session and the measurement.
 
 So do both. Scan for any Panopticon process, excluding this process's own
 ancestry, AND hold a lock so two probes cannot race each other. Never delete

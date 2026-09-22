@@ -1246,8 +1246,8 @@ contrast sliders.
 Exposure and gain live **only** in the `.pfs` camera settings file, and the
 preview cannot show a problem with either: it free-runs at 30 fps and is
 downsampled, so an exposure that is far too long looks perfectly healthy there.
-The reference rig records at **3000 µs and 6.0 dB**, raised from 2000 µs and 0
-dB on 2026-08-11 because the older pair put 65% of pixels in levels 0–15 with
+The reference rig records at **3000 µs and 6.0 dB**; at 2000 µs and 0 dB the
+older pair put 65% of pixels in levels 0–15 with
 **21.5% clipped at exactly 0**, destroyed at the converter and unrecoverable
 however much you brighten the video afterwards. For more light, the order is
 **more infrared illumination first, then exposure, then gain**. Step 6 of

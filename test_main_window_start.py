@@ -1,11 +1,11 @@
 """The main window's start, refuse, roll back and quit decisions.
 
 Why this is worth a test. The start sequence is where a mistake costs a
-session rather than a frame: cameras and the NVENC router used to be started
-before the firmware check, so a sketch swap re-entered the sequence, orphaned
-a router holding one encoder session and one open stream.h264 per camera,
-prompted about files the same run had just created, and on a failed flash left
-nine cameras in trigger mode while the window read IDLE. Everything asserted
+session rather than a frame: cameras and the NVENC router must not be started
+before the firmware check, or a sketch swap re-enters the sequence, orphans a
+router holding one encoder session and one open stream.h264 per camera, prompts
+about files the same run just created, and on a failed flash leaves nine cameras
+in trigger mode while the window reads IDLE. Everything asserted
 here is an ORDER or a REFUSAL, not an appearance: what runs before what, what
 is never reached, what is moved rather than deleted, and what the quit path is
 allowed to remove.

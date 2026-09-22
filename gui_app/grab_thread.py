@@ -876,7 +876,7 @@ class GrabThread(QThread):
                         # work vs 0.157 ms here (5.33x, probe_zerocopy.py on a real
                         # camera). That is ~0.68 ms per camera per frame, and it is the
                         # term that scales with camera count: 9 cams x 0.68 = 6.1 ms of
-                        # a 10 ms window. E2 showed <=300 us/thread/frame is safe even
+                        # a 10 ms window. The GIL-wait budget is <=300 us/thread/frame even
                         # at 17 threads while ~1000 us blows the budget at 11, so this
                         # single change is what makes 9 cameras arithmetically possible.
                         #

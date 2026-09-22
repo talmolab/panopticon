@@ -727,7 +727,7 @@ def test_upload_timeout_waits_for_avrdude():
     print("17) upload timeout: compile killed, avrdude waited for, advice matches: PASS")
 
 
-# ── the sketch-swap invalidation rule (added 2026-09-04) ────────────────────
+# ── the sketch-swap invalidation rule ──────────────────────────────────────
 # A calibration always flashes the recording-only sketch. If the stim editor is
 # not told, its _uploaded_ino still holds the paradigm, so Test finds canvas ==
 # uploaded, skips the re-upload prompt, and drives a board with NUM_CHAINS == 0:

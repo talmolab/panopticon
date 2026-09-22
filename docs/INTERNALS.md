@@ -387,8 +387,7 @@ With the limiter on, each camera spreads readout and transmission across
 link immediately after the shared trigger, all at the same moment, and marginal
 links drop packets.
 
-Tried on the reference rig on 2026-08-11, reverted the same day. It cost **8–15%
-of frames in transmission**: the cameras still acquired every trigger and
+With the limiter off, **8–15% of frames are lost in transmission**: the cameras still acquired every trigger and
 numbered them contiguously, but delivery fell from 99.98% to 85–92%. Keep the
 limiter above the trigger rate. If you need more light, *raise* the limiter
 rather than disabling it. That buys exposure headroom at the cost of some pacing,
@@ -396,8 +395,7 @@ and is worth trying only when the network has margin to give.
 
 Exposure and gain live in the `.pfs` and nowhere else; no code path sets them
 except the calibration override and the ceiling clamp. On the reference rig they
-are 3000 µs and 6.0 dB, raised on 2026-08-11 from 2000 µs and 0 dB, about 3x the
-light in total.
+are 3000 µs and 6.0 dB, about 3x the light of the 2000 µs / 0 dB pair.
 The old values put 65% of pixels in levels 0–15, with **21.5% clipped at exactly
 0**: destroyed at the ADC, unrecoverable by brightening the video afterwards. At
 3000 µs the exposure sits about 0.94 ms below the 3.94 ms ceiling that 100 fps
@@ -487,7 +485,7 @@ because the two drivers disagree about asking for a lost packet again.
   thread more slack when the encoders contend for CPU.
 - **`filter`** — the in-kernel pylon GigE Vision driver. Far less CPU, but with
   default resend settings it discards a frame containing a lost packet instead of
-  asking for it again: measured on 2026-06-12 at ~23% frame loss under a
+  asking for it again: measured at ~23% frame loss under a
   6x100 fps load, appearing as thousands of single-frame gaps per camera, with
   nothing in the logs to say so.
 - **`auto`** — leave the vendor default. No-op for non-GigE transports.
@@ -497,7 +495,7 @@ costs you frames is how many resends fail, which `Failed_Buffer_Count` reports.
 
 The reference rig's cameras split into two groups by physical path, though the
 driver and socket settings are identical on all six. Over a 20-minute six-camera
-run on 2026-09-03, the quiet path issued **3** resend requests per camera and the
+run, the quiet path issued **3** resend requests per camera and the
 noisy path around **9,700**, a factor of three thousand apart. The run still
 came out with 120,106 frames on every camera, having lost 60 frames across all
 six out of 720,636 submissions. `Failed_Buffer_Count` was 2 per camera on the
@@ -644,7 +642,7 @@ thread per frame is safe even at 17 threads; ~1000 µs blows a 10 ms budget at
 a specific access route on a live camera with
 `tools/experiments/probe_zerocopy.py`.
 
-Moving the six-camera reference rig onto the zero-copy view on 2026-09-03 took
+Moving the six-camera reference rig onto the zero-copy view took
 mean loop `cycle` from 12.0 ms to exactly 10.00 ms, the trigger period. It took
 `Buffer_Underrun_Count` from 245–882 per camera to 0, and forced drops from as
 much as 12.34% to 0. A 60 s run after the change captured 100.00% of triggers.
@@ -1449,8 +1447,8 @@ trigger from end effects, and crying wolf on a two-second test clip would teach
 people to ignore the warning.
 
 The tolerance, `BLOCK_RATE_TOL = 0.003`, is measured rather than picked. Across
-**74 camera-sessions** of real recordings (2026-06-12 to 2026-09-03, at 30 and
-100 fps, including the sessions that lost 24% and 43% of their frames) the
+**74 camera-sessions** of real recordings at 30 and 100 fps, including the
+sessions that lost 24% and 43% of their frames the
 measured rate lands between **+220 and +250 ppm** of the configured value, every
 time. That offset is physics: the fixed disagreement between the trigger board's
 resonator and the cameras' oscillators, stable enough that the whole observed

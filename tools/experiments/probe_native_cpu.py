@@ -1,12 +1,13 @@
-"""E5: attribute host CPU to pylon's NATIVE GigE receive threads, which hold no GIL
+"""Attribute host CPU to pylon's NATIVE GigE receive threads, which hold no GIL
 and therefore appear in NO Python-side measurement we have ever taken.
+(Findings: docs/HISTORY.md, phase 5.)
 
 WHY THIS EXISTS
 At 9 cameras the host must reassemble 9 x 100 x 2.304 MB = 2.07 GB/s of GVSP payload,
-234,000 packets/s (measured 260.1 packets/frame -- Total_Packet_Count/Total_Buffer_Count
-from the 2026-08-11 logs -- so jumbo frames really are in effect). That work runs on
-threads created inside PylonGigE_v11_TL.dll and in NIC ISR/DPC context. E1/E2/E3 measured
-only Python threads, so this term is entirely unmeasured. It is also the term that
+234,000 packets/s (measured 260.1 packets/frame from Total_Packet_Count/Total_Buffer_Count,
+so jumbo frames are in effect). That work runs on threads created inside
+PylonGigE_v11_TL.dll and in NIC ISR/DPC context, which the Python-side probes never
+measured, so this term is entirely unmeasured. It is also the term that
 "trigger_rate_limit: 0" hit: 8-15% of frames lost purely in transmission at SIX cameras,
 with block IDs contiguous and acquisition at 100.03 fps.
 
