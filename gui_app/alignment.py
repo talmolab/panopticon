@@ -7,8 +7,11 @@ IDs common to ALL cameras are the triggers every camera captured, and the
 hardware trigger fires all cameras simultaneously — so those frames are a
 synchronized, equal-length set.
 
-Imports are limited to numpy + (lazily) cv2 / imageio-ffmpeg so this module is
-importable both in the GUI venv and under ``uv run 2_align.py`` (isolated env).
+Imports are limited to numpy + (lazily) imageio-ffmpeg, both project
+dependencies, so this module is importable from the GUI venv and from the
+``2_align.py`` CLI alike. Decoding goes through the bundled ffmpeg rather than
+OpenCV: a mono source decodes straight to one gray plane instead of a BGR
+triple that is converted back per frame.
 """
 import json
 import os
@@ -19,9 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
-# Stdlib-only module (collections.deque), so it does not widen what this file
-# needs — 2_align.py runs in an isolated env with numpy/cv2/imageio-ffmpeg.
 from gui_app.frame_sync import block_rate_warnings as _block_rate_warnings
+from gui_app import ffmpeg_cmd
 
 # GigE Vision 16-bit block IDs cycle through 1..65535 (0 is reserved "no block
 # id"), so they wrap 65535 -> 1 every 65535 triggers unless extended 64-bit IDs
@@ -29,6 +31,15 @@ from gui_app.frame_sync import block_rate_warnings as _block_rate_warnings
 # software safety net that unwraps a stream that wrapped anyway (and recovers
 # recordings made before the 64-bit mode was set).
 BLOCKID_WRAP = 65535
+
+# Name of the per-camera re-encode target. It sits beside the real mp4 while
+# ffmpeg writes it, so every mp4 lookup must exclude it and every run must
+# clear a stale one left by an interrupted predecessor.
+ALIGN_TMP_NAME = "aligned_tmp.mp4"
+
+# Below this size an "mp4" cannot hold a moov atom plus one frame, so a file
+# this small is a failed encode whatever ffmpeg's exit status said.
+MIN_MP4_BYTES = 1024
 
 
 def _unwrap_blockids(b: np.ndarray, period: int = BLOCKID_WRAP) -> np.ndarray:
@@ -38,8 +49,20 @@ def _unwrap_blockids(b: np.ndarray, period: int = BLOCKID_WRAP) -> np.ndarray:
     wrap at the same trigger; unwrapping each stream independently yields trigger
     ordinals that stay consistent across cameras. A wrap is a large negative step
     (~ -(period-1)); a small decrease means genuinely corrupt/reordered data.
+
+    IDs at or below zero are rejected before the wrap test: 0 is the GigE
+    "no block id" value and -1 is the grab thread's "could not read the block
+    ID" sentinel. Above ID 32767 the -1 sentinel would otherwise read as a wrap
+    and shift every later frame of that camera by one period, which empties the
+    cross-camera intersection and truncates the recording under --replace.
     """
-    b = b.astype(np.int64)
+    b = np.asarray(b).astype(np.int64)
+    bad = b <= 0
+    if np.any(bad):
+        raise ValueError(
+            f"{int(bad.sum())} non-positive block ID(s) (0 is reserved, -1 "
+            f"means the camera did not report one); first at index "
+            f"{int(np.argmax(bad))}")
     if b.size < 2:
         return b
     d = np.diff(b)
@@ -59,11 +82,23 @@ def camera_dirs(rec_dir: Path) -> list[Path]:
 
 
 def video_for(cam_dir: Path):
-    mp4s = [f for f in cam_dir.iterdir()
-            if f.suffix == ".mp4" and "recording" in f.name]
-    if not mp4s:
-        mp4s = [f for f in cam_dir.iterdir() if f.suffix == ".mp4"]
-    return mp4s[0] if mp4s else None
+    """The one mp4 that is this camera's recording, or None.
+
+    The re-encode scratch file is excluded and candidates are sorted, so the
+    answer does not depend on directory enumeration order. More than one
+    candidate is an error rather than a guess: under --replace the wrong pick
+    would be re-encoded while the real recording stayed the superset.
+    """
+    cam_dir = Path(cam_dir)
+    mp4s = sorted(f for f in cam_dir.iterdir()
+                  if f.suffix == ".mp4" and f.name != ALIGN_TMP_NAME)
+    preferred = [f for f in mp4s if "recording" in f.name]
+    cands = preferred or mp4s
+    if len(cands) > 1:
+        raise ValueError(f"{cam_dir}: {len(cands)} mp4 candidates, cannot tell "
+                         f"which is the recording: "
+                         f"{', '.join(f.name for f in cands)}")
+    return cands[0] if cands else None
 
 
 def load_blockids(rec_dir: Path):
@@ -81,6 +116,14 @@ def load_blockids(rec_dir: Path):
         b = np.load(bpath)
         if b.ndim != 1:
             raise ValueError(f"{bpath}: expected 1-D block IDs, got {b.shape}")
+        # A camera with no recorded frames has no common set with anyone, so
+        # aligning would trim every other camera to zero frames. It is refused
+        # here with the camera named rather than surfacing later as an
+        # IndexError on the empty array.
+        if b.size == 0:
+            raise ValueError(f"{bpath}: no frames recorded (empty block-ID "
+                             f"array); {cd.name} cannot be aligned and the "
+                             f"recording has no common frames")
         b = _unwrap_blockids(b)  # undo 16-bit wrap so IDs are globally monotonic
         names.append(cd.name)
         blocks.append(b)
@@ -145,61 +188,170 @@ def needs_alignment(blocks: list[np.ndarray]) -> bool:
     return any(b.size > common.size for b in blocks)
 
 
+class Analysis:
+    """Everything the read-only half of an alignment knows about a recording.
+
+    Built once per run so the CLI's pre-flight table, the dry-run report and
+    ``align_recording`` all print from the same numbers instead of each
+    loading and intersecting the block IDs again.
+    """
+
+    def __init__(self, rec_dir, fps: int):
+        self.rec_dir = Path(rec_dir)
+        self.fps = int(fps)
+        self.names, self.blocks, self.videos = load_blockids(self.rec_dir)
+        self.common, self.frame_index = compute_alignment(self.blocks)
+        self.full_span = int(max(int(b[-1]) for b in self.blocks)
+                             - min(int(b[0]) for b in self.blocks) + 1)
+        self.needed = any(b.size > self.common.size for b in self.blocks)
+        # Runs on every path, including the ones that report "already aligned":
+        # a camera ignoring triggers keeps its block IDs gapless, so the
+        # intersection is total and nothing else here looks wrong.
+        self.rate_warnings = block_rate_warnings(self.rec_dir, self.names,
+                                                 self.blocks, self.fps)
+
+    def per_camera(self) -> dict:
+        return {nm: dict(recorded=int(b.size),
+                         dropped=int(self.full_span - b.size))
+                for nm, b in zip(self.names, self.blocks)}
+
+    def summary(self) -> dict:
+        """The public, JSON-serialisable view; no arrays."""
+        return dict(recording=str(self.rec_dir), camera_names=list(self.names),
+                    trigger_span=self.full_span,
+                    common_frames=int(self.common.size), needed=self.needed,
+                    per_camera=self.per_camera(),
+                    rate_warnings=list(self.rate_warnings))
+
+
+def analyse(rec_dir, fps: int = 100) -> Analysis:
+    return Analysis(rec_dir, fps)
+
+
+def summarize(rec_dir, fps: int = 100) -> dict:
+    """Read-only summary (block-ID intersection + block-rate check), nothing written."""
+    return analyse(rec_dir, fps).summary()
+
+
 def _ffmpeg_exe() -> str:
-    from imageio_ffmpeg import get_ffmpeg_exe
-    return get_ffmpeg_exe()
+    return ffmpeg_cmd.ffmpeg_exe()
+
+
+def _open_gray_reader(video: Path):
+    """Decode a video to one gray plane per frame with the bundled ffmpeg.
+
+    Returns ``(w, h, frames)`` where ``frames`` yields ``w*h`` bytes per frame
+    and must be ``close()``d by the caller so the decoder process is reaped.
+    Kept as a seam so tests can feed synthetic frames without a real mp4.
+    """
+    from imageio_ffmpeg import read_frames
+    gen = read_frames(str(video), pix_fmt="gray", bits_per_pixel=8)
+    meta = next(gen)
+    w, h = meta["size"]
+    return int(w), int(h), gen
+
+
+def _log_tail(path: Path, n: int = 2000) -> str:
+    try:
+        return Path(path).read_text(errors="replace")[-n:].strip()
+    except OSError:
+        return ""
 
 
 def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
-                    fps: int, quality: int) -> int:
-    """Re-encode only the selected frame indices, in order, into dst (gray)."""
-    import cv2
+                    fps: int, quality: int, backend: str | None = None,
+                    stop=None, err_log: Path | None = None) -> int:
+    """Re-encode only the selected frame indices, in order, into dst (gray).
+
+    Raises unless ffmpeg exited 0 AND ``dst`` exists with a plausible size AND
+    every selected frame was decoded and piped. The caller replaces the only
+    copy of a camera's recording with ``dst``, so "frames were piped" is not
+    good enough: a muxer error, disk-full during the ``+faststart`` rewrite or
+    an encoder flush error all exit non-zero after consuming every input byte.
+
+    ffmpeg's stderr goes to ``align_error.log`` beside ``dst`` (removed on
+    success) because the GUI runs under pythonw, where inherited stderr has
+    nowhere to go. ``stop()`` returning True aborts the encode.
+    """
+    video, dst = Path(video), Path(dst)
+    frame_idx = np.asarray(frame_idx, dtype=np.int64)
     keep = set(int(i) for i in frame_idx)
-    cap = cv2.VideoCapture(str(video))
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     last = int(frame_idx[-1]) if frame_idx.size else -1
-    startupinfo = None
-    if os.name == "nt":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    cmd = [
-        _ffmpeg_exe(), "-y",
-        "-f", "rawvideo", "-vcodec", "rawvideo",
-        "-pix_fmt", "gray", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-        "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p",
-        "-preset", "fast", "-qp", str(quality), "-g", str(fps),
-        "-bf:v", "0", "-gpu", "0",
-        # moov atom to the front — this output REPLACES the session recording
-        # (os.replace below), so it is the file LUC3D actually opens. See
-        # gui_app/encode_worker.py for why moov-at-end breaks the browser labeler.
-        "-movflags", "+faststart",
-        "-loglevel", "error", str(dst),
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, startupinfo=startupinfo)
+    err_log = Path(err_log) if err_log else dst.with_name("align_error.log")
+
+    w, h, frames = _open_gray_reader(video)
+    cmd = [_ffmpeg_exe(), *ffmpeg_cmd.global_args("error"),
+           *ffmpeg_cmd.rawvideo_input_args(w, h, fps), "-i", "-",
+           *ffmpeg_cmd.h264_encoder_args(fps, quality, backend),
+           *ffmpeg_cmd.mp4_container_args(), str(dst)]
     n = written = 0
+    stopped = False
     try:
-        while n <= last:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if n in keep:
-                if frame.ndim == 3:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                proc.stdin.write(np.ascontiguousarray(frame).tobytes())
-                written += 1
-            n += 1
+        with open(err_log, "wb") as err:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=err,
+                                    **ffmpeg_cmd.quiet_popen_kwargs())
+            try:
+                for frame in frames:
+                    if n > last:
+                        break
+                    if stop is not None and stop():
+                        stopped = True
+                        proc.kill()
+                        break
+                    if n in keep:
+                        proc.stdin.write(frame)
+                        written += 1
+                    n += 1
+            except OSError:
+                # ffmpeg died mid-stream; the exit-status check below reports
+                # its stderr. BrokenPipeError (EPIPE) is what POSIX raises;
+                # Windows raises a plain OSError with EINVAL for a pipe whose
+                # reader has exited, so catching only BrokenPipeError there
+                # replaces the diagnosis with "[Errno 22] Invalid argument".
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+                proc.wait()
     finally:
-        proc.stdin.close()
-        proc.wait()
-        cap.release()
+        frames.close()
+
+    if stopped:
+        raise RuntimeError("stopped before the re-encode finished")
+    size = dst.stat().st_size if dst.exists() else 0
+    if proc.returncode != 0 or size < MIN_MP4_BYTES:
+        tail = _log_tail(err_log)
+        raise RuntimeError(
+            f"ffmpeg exited {proc.returncode}, output {size} bytes"
+            + (f": {tail}" if tail else ""))
+    if written != frame_idx.size:
+        raise RuntimeError(
+            f"decoded {written}/{frame_idx.size} selected frames (source has "
+            f"{n} frames, index needs up to {last + 1})")
+    err_log.unlink(missing_ok=True)
     return written
+
+
+def _save_atomic(path: Path, arr: np.ndarray) -> None:
+    """np.save via a sibling .npy and os.replace, so a reader never sees a
+    half-written file and a failure leaves the original untouched."""
+    path = Path(path)
+    tmp = path.with_name(path.stem + ".tmp.npy")
+    np.save(tmp, arr)
+    os.replace(tmp, path)
 
 
 def _rewrite_metadata(cam_dir: Path, cam_blockids: np.ndarray,
                       frame_idx: np.ndarray, common: np.ndarray, fps: int):
-    """Replace blockids.npy + frametimes.npy with the aligned (common) set."""
-    np.save(cam_dir / "blockids.npy", common.astype(np.int64))
+    """Replace blockids.npy + frametimes.npy with the aligned (common) set.
+
+    Both arrays are computed first and written atomically afterwards, so a
+    failure between the two files cannot leave one describing the aligned set
+    and the other the original.
+    """
     ft_path = cam_dir / "frametimes.npy"
     m = common.size
     frame_nums = np.arange(1, m + 1, dtype=np.float64)
@@ -214,97 +366,180 @@ def _rewrite_metadata(cam_dir: Path, cam_blockids: np.ndarray,
             ts = ts - ts[0]
     if ts is None:
         ts = (common - common[0]).astype(np.float64) / float(fps)
-    np.save(ft_path, np.stack([frame_nums, ts]))
+    _save_atomic(cam_dir / "blockids.npy", common.astype(np.int64))
+    _save_atomic(ft_path, np.stack([frame_nums, ts]))
+
+
+def _write_index(out: Path, an: Analysis, frame_index: np.ndarray,
+                 replaced_flags: list, manifest: dict) -> None:
+    out.mkdir(exist_ok=True)
+    np.savez(out / "alignment.npz", common_block_ids=an.common,
+             frame_index=frame_index, camera_names=np.array(an.names),
+             video_is_common=np.array(replaced_flags, dtype=bool))
+    with open(out / "alignment.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
+
+def clear_stale_tmp(rec_dir: Path) -> list[Path]:
+    """Remove ``aligned_tmp.mp4`` left behind by an interrupted run.
+
+    Called before the video lookup so the scratch file of a killed
+    predecessor can neither be mistaken for a recording nor block this run's
+    own ``os.replace``.
+    """
+    removed = []
+    for cd in camera_dirs(rec_dir):
+        p = cd / ALIGN_TMP_NAME
+        if p.exists():
+            p.unlink()
+            removed.append(p)
+    return removed
 
 
 def align_recording(rec_dir, fps: int = 100, quality: int = 21,
                     replace: bool = False, parallel: int = 3,
-                    progress=None) -> dict:
+                    progress=None, backend: str | None = None,
+                    should_stop=None, analysis: Analysis | None = None) -> dict:
     """Align a recording by block ID.
 
     Always writes ``aligned/alignment.{npz,json}`` (the lossless index). When
     ``replace`` and some camera has extra frames, re-encodes each camera's mp4
-    down to the common frames and atomically replaces the original, rewriting
-    that camera's blockids.npy + frametimes.npy to match.
+    down to the common frames, atomically replaces the original, and only then
+    rewrites that camera's blockids.npy + frametimes.npy to match — video
+    first, because a locked mp4 (open in a player) must not leave metadata
+    describing frames the video does not have.
+
+    Every camera is attempted and every outcome recorded: the summary carries
+    ``failures`` (per-camera messages), ``replaced_cams``, ``failed_cams`` and
+    ``replaced`` (True only when alignment was needed and NO camera failed).
+    Block-rate warnings are informational and live in ``rate_warnings``; they
+    never make a replaced recording report itself as kept, because the GUI
+    regenerates stim_trace.csv from ``replaced``. ``warnings`` is the display
+    list, rate warnings followed by failures.
+
+    The index is written after the replacement pass, with ``frame_index`` for
+    a replaced camera set to ``arange(common.size)`` and ``video_is_common``
+    marking it, so a consumer cannot apply a pre-replacement index to a video
+    that is now the common set. The index is derived data; the summary is the
+    record of what happened to the videos. A failure writing it is therefore
+    reported in ``index_error`` (and appended to ``failures``/``warnings``)
+    instead of raised, because raising after the videos were replaced would
+    make the caller report them as left as-is.
+
+    ``analysis`` lets a caller that already built the ``Analysis`` for this
+    recording (the CLI prints its table from one) pass it in, so the block
+    IDs are loaded and intersected once per run; it must describe the same
+    recording at the same fps.
 
     ``progress(done, total, msg)`` is called as cameras complete (thread-safe).
-    Returns a summary dict.
+    ``should_stop()`` returning True skips cameras not yet started and aborts
+    the one in flight, each recorded as a failure with its original kept.
     """
     rec_dir = Path(rec_dir)
-    names, blocks, videos = load_blockids(rec_dir)
-    common, frame_index = compute_alignment(blocks)
-    full_span = int(max(int(b[-1]) for b in blocks)
-                    - min(int(b[0]) for b in blocks) + 1)
-    need = any(b.size > common.size for b in blocks)
+    clear_stale_tmp(rec_dir)
+    if analysis is None:
+        an = analyse(rec_dir, fps)
+    else:
+        an = analysis
+        if Path(an.rec_dir).resolve() != rec_dir.resolve() or an.fps != int(fps):
+            raise ValueError(
+                f"analysis describes {an.rec_dir} at {an.fps} fps, not "
+                f"{rec_dir} at {fps} fps")
+    names, blocks, videos = an.names, an.blocks, an.videos
+    common, frame_index = an.common, an.frame_index
+    need = an.needed
+    stop = should_stop or (lambda: False)
 
-    out = rec_dir / "aligned"
-    out.mkdir(exist_ok=True)
-    np.savez(out / "alignment.npz", common_block_ids=common,
-             frame_index=frame_index, camera_names=np.array(names))
-    manifest = dict(
-        recording=str(rec_dir), camera_names=names, trigger_span=full_span,
-        common_frames=int(common.size), replaced=bool(replace and need),
-        per_camera={nm: dict(recorded=int(b.size),
-                             dropped=int(full_span - b.size))
-                    for nm, b in zip(names, blocks)},
-    )
-    with open(out / "alignment.json", "w") as f:
-        json.dump(manifest, f, indent=2)
-
-    # Runs before the early returns below, because the dangerous case reports
-    # "already aligned": a camera ignoring triggers keeps its block IDs
-    # gapless, so the intersection is total and nothing here looks wrong.
-    rate_warnings = block_rate_warnings(rec_dir, names, blocks, fps)
-    for msg in rate_warnings:
+    for msg in an.rate_warnings:
         print(f"[align] WARNING: {msg}", flush=True)
 
-    summary = dict(common_frames=int(common.size), trigger_span=full_span,
-                   needed=need, replaced=False, camera_names=names,
-                   per_camera=manifest["per_camera"],
-                   warnings=list(rate_warnings))
-
     total = len(names)
-    if not need:
-        if progress:
-            progress(total, total, "already aligned")
-        return summary
-    if not replace:
-        return summary  # index written; videos left as-is
-
+    failures: list[str] = []
+    replaced_cams: list[str] = []
+    failed_cams: list[str] = []
     lock = threading.Lock()
     done = [0]
 
-    def _one(c):
-        nm, vid = names[c], videos[c]
-        if vid is None:
-            with lock:
-                summary["warnings"].append(f"{nm}: no video, skipped")
-                done[0] += 1
-                if progress:
-                    progress(done[0], total, f"{nm} skipped (no video)")
-            return
-        cam_dir = vid.parent
-        tmp = cam_dir / "aligned_tmp.mp4"
-        written = extract_aligned(vid, frame_index[c], tmp, fps, quality)
-        if written != common.size:
-            tmp.unlink(missing_ok=True)
-            with lock:
-                summary["warnings"].append(
-                    f"{nm}: extracted {written}/{common.size}, original KEPT")
-                done[0] += 1
-                if progress:
-                    progress(done[0], total, f"{nm} FAILED, kept original")
-            return
-        _rewrite_metadata(cam_dir, blocks[c], frame_index[c], common, fps)
-        os.replace(tmp, vid)  # atomic; original disjoint mp4 replaced
+    def _finish(nm: str, msg: str):
         with lock:
             done[0] += 1
             if progress:
-                progress(done[0], total, f"{nm} aligned")
+                progress(done[0], total, msg)
 
-    workers = max(1, min(parallel or total, total))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        list(pool.map(_one, range(total)))
+    def _fail(nm: str, why: str, msg: str):
+        with lock:
+            failures.append(f"{nm}: {why}")
+            failed_cams.append(nm)
+        _finish(nm, msg)
 
-    summary["replaced"] = not summary["warnings"]
+    def _one(c):
+        nm, vid = names[c], videos[c]
+        tmp = None
+        video_replaced = False
+        try:
+            if stop():
+                raise RuntimeError("stopped before re-encode; original kept")
+            if vid is None:
+                raise FileNotFoundError("no video; metadata left as recorded")
+            cam_dir = vid.parent
+            tmp = cam_dir / ALIGN_TMP_NAME
+            extract_aligned(vid, frame_index[c], tmp, fps, quality,
+                            backend=backend, stop=stop)
+            os.replace(tmp, vid)  # atomic; original disjoint mp4 replaced
+            video_replaced = True
+            _rewrite_metadata(cam_dir, blocks[c], frame_index[c], common, fps)
+        except Exception as e:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+            if video_replaced:
+                # The video is the common set but the metadata may not be.
+                # Say so explicitly: this camera needs its metadata fixed by
+                # hand, not another re-encode.
+                _fail(nm, f"video REPLACED but metadata rewrite failed: {e}",
+                      f"{nm} metadata rewrite FAILED")
+            else:
+                _fail(nm, f"{e}", f"{nm} FAILED, kept original")
+            return
+        with lock:
+            replaced_cams.append(nm)
+        _finish(nm, f"{nm} aligned")
+
+    if need and replace:
+        workers = max(1, min(parallel or total, total))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_one, range(total)))
+    elif not need and progress:
+        progress(total, total, "already aligned")
+
+    replaced_flags = [nm in replaced_cams for nm in names]
+    post_index = frame_index.copy()
+    for c, flag in enumerate(replaced_flags):
+        if flag:
+            post_index[c] = np.arange(common.size, dtype=np.int64)
+
+    summary = an.summary()
+    summary.update(
+        replaced=bool(need and replace and not failures),
+        failures=list(failures), replaced_cams=list(replaced_cams),
+        failed_cams=list(failed_cams), stopped=bool(stop()),
+        warnings=list(an.rate_warnings) + list(failures),
+        index_error=None,
+    )
+    for nm, flag in zip(names, replaced_flags):
+        summary["per_camera"][nm]["video_is_common"] = bool(flag)
+
+    # ``replaced`` is settled above from the camera outcomes alone: the videos
+    # and their metadata are already on disk in their final form, so a disk
+    # full, a locked alignment.npz or a stray file named "aligned" cannot
+    # unmake that, and the caller must still regenerate what derives from the
+    # replaced videos.
+    manifest = {k: v for k, v in summary.items() if k != "warnings"}
+    try:
+        _write_index(rec_dir / "aligned", an, post_index, replaced_flags, manifest)
+    except Exception as e:
+        msg = f"aligned/: index write failed: {e}"
+        print(f"[align] WARNING: {msg}", flush=True)
+        summary["index_error"] = msg
+        summary["failures"].append(msg)
+        summary["warnings"].append(msg)
     return summary

@@ -171,11 +171,19 @@ be identified months later. Eight in all, in the sidebar:
 | Date | today, as `YYYYMMDD` | folder name and filename |
 | Mouse 1 | blank → `m1` | folder name and filename |
 | Mouse 2 | blank → `m2` | folder name and filename |
-| Assay | `open_field` | recorded in `session_metadata.json` |
-| Experimenter | `IT` | recorded in `session_metadata.json` |
-| Cohort | blank | recorded in `session_metadata.json` |
-| Cage | blank | recorded in `session_metadata.json` |
-| Notes | blank | recorded in `session_metadata.json` |
+| Assay | from the profile | recorded in `session_metadata.json` |
+| Experimenter | from the profile | recorded in `session_metadata.json` |
+| Cohort | from the profile, blank unless it sets one | recorded in `session_metadata.json` |
+| Cage | from the profile, blank unless it sets one | recorded in `session_metadata.json` |
+| Notes | from the profile, blank unless it sets one | recorded in `session_metadata.json` |
+
+The last five are pre-filled from the selected profile's `metadata_defaults`,
+not from anything in the code, and the reference `3dpose` profile fills in its
+own operator and assay: `IT` and `open_field`. **Change them in your own
+profile.** Whatever stands in a field when an acquisition ends is written into
+`session_metadata.json`, so a prefilled value nobody noticed attributes the
+session to somebody else. Switching profiles re-fills only the fields you have
+not typed into, so a value entered for this session survives the change.
 
 With Date `20260904`, Mouse 1 `m1` and Mouse 2 `m2`, the session folder becomes
 `<output>/20260904/m1_m2/` and each video inside it is named
@@ -236,24 +244,26 @@ the ruler is worth ten seconds.
 
 A calibration is a full acquisition, so **every check described under
 [Record](#8-record) applies to Calibrate as well**: the same stimulation-graph
-refusal, the same RAM, NVENC and disk preflight, and the same
-`Existing files found in: <path>  Overwrite?` prompt, naming the `calibration/`
-folder.
+refusal, the same RAM, NVENC and disk preflight, and the same overwrite
+prompt, naming the `calibration/` folder.
 
-On a *repeat* calibration into the same session, Yes overwrites the videos and
-removes each camera's transient and bookkeeping files (`raw.bin`,
-`raw_tail.bin`, `stream.h264`, `tail.h264`, `encode_error.log` and
-`WARNINGS.txt`) plus the acquisition-level `WARNINGS.txt`.
+On a *repeat* calibration into the same session, the existing data is
+overwritten only after you agree. A dialog headed *Overwrite the existing
+data?* warns that the `calibration/` folder will be permanently deleted and
+waits. Its two buttons read **Yes** and **Cancel**, and Cancel is the default.
+On Yes the whole `calibration/` folder is deleted and the new capture starts
+fresh under the same name. Cancel leaves everything as it was and the
+acquisition does not start.
 
-It leaves the previous solve's output alone: `calibration.toml`,
-`reprojection_error_histogram.png` and `codet_frames.json` all stay. Until the
-next Solve, the plot and the `.toml` beside your fresh videos describe the
-*previous* attempt. And if the coverage HUD did not run this time (no OpenCV
-installed, or a board config that matches nothing), that stale
-`codet_frames.json` is what the next Solve uses as its frame hints.
-
-So change a metadata field to land the recording in a new session folder, or
-delete the `calibration/` folder before recalibrating.
+The whole folder is removed rather than individual files overwritten, so the
+previous attempt's solve output — `calibration.toml`,
+`reprojection_error_histogram.png` and `codet_frames.json` — cannot be left
+stale beside the new videos, and the next Solve cannot silently reuse the last
+attempt's frame hints. If you want to keep an earlier calibration, change the
+metadata fields so the two attempts land in separate sessions before you start,
+or copy the folder aside yourself first. The delete happens only once the
+serial port has opened, so a start the port refuses leaves the old data in
+place.
 
 Flip the **Calibrate** toggle to begin. Three things change at once: the cameras
 switch to hardware-triggered mode at the profile's `calibration_frame_rate` (30
@@ -277,14 +287,23 @@ movement matters more than more exposure.
 Then the part you do: **move the board slowly through the arena and pause at
 each pose.** The coverage HUD in the sidebar keeps score and tells you when
 to stop. The four figures below are rendered illustrations of particular
-moments, not frames from one session.
+moments, not frames from one session. They were drawn on a six-camera rig whose
+profile set `calibration_min_per_cam_shared: 250` and `calibration_min_edge: 80`,
+and before the caption carried a `groups` segment at all, so read the *shape* of
+the graph from them and not their numerals. The caption your own rig prints is
+`paired <worst>/<calibration_min_per_cam_shared>  grid <worst>/3  groups <n>/1`,
+against your own profile's thresholds.
 
 ### Stage 1 — nothing detected yet
 
 ![Coverage graph, nothing detected](images/calib_stage_1_start.png)
 
 Each numbered circle is a camera. Each line is a *pair* of cameras. Everything
-is dim, the caption reads `paired 0/250  grid 0/3`, and the timer has started.
+is dim, the caption reads
+`paired 0/<calibration_min_per_cam_shared>  grid 0/3  groups N/1`, one group per
+camera, and the timer has started. The target after the slash is your own
+profile's: 120 on the shipped `3dpose` profile, 250 on the rig this figure was
+drawn against.
 
 **What to do:** hold the board up where at least two cameras can see it. A node
 brightens when that camera can see the board right now. If no node ever
@@ -298,8 +317,8 @@ brightens, the board is too dark or the wrong board config is selected; see
 Cameras 1 and 3 are glowing: they see the board at this instant. Lines that have
 begun to brighten and thicken are pairs accumulating shared detections. The
 four-cell badge on each node is that camera's field of view in quadrants; a cell
-turns green once the board's centre has been seen in it. The caption
-`paired 60/250  grid 2/3` reports the **worst** camera on each count.
+turns green once the board's centre has been seen in it. Every number in the
+caption reports the **worst** camera on that count, not a total.
 
 **What to do:** carry the board into the regions where two cameras overlap, so
 the lines fill in, and into the corners of each view, so the badges fill in. A
@@ -310,8 +329,9 @@ board waved in the middle of the arena grows neither.
 ![Coverage graph, nearly ready](images/calib_stage_3_nearly.png)
 
 Most lines are now thick and bright, `grid 3/3` says every camera has hit its
-quadrant minimum, and `paired 200/250` says the weakest camera is close. One
-pair, the vertical line between 1 and 4, is still thin and dark.
+quadrant minimum, and the `paired` count says the weakest camera is close to
+`calibration_min_per_cam_shared`. One pair, the vertical line between 1 and 4,
+is still thin and dark.
 
 **What to do:** work that pair. Hold the board where both cameras see it at
 once; for opposed cameras, edge-on between them. READY needs the pair graph to
@@ -336,12 +356,17 @@ READY is three conditions holding at once, not a time or a frame count. Each is
 measured per camera on every detection tick, and the caption reports the *worst*
 camera, which is why it can sit still while one camera catches up.
 
-**Every camera has at least 250 paired detections.** A tick counts for a camera
+**Every camera has at least `calibration_min_per_cam_shared` paired detections**,
+120 on the reference profile. A tick counts for a camera
 only when that camera *and at least one other* saw the board in the same tick,
-since a view no one else shares cannot help place that camera. Detection runs at
-up to about 30 ticks per second.
+since a view no one else shares cannot help place that camera. Ticks are best
+effort rather than a fixed rate: detection runs over the cameras one at a time
+and costs more on a cluttered scene, so nine cameras typically manage 10-20 a
+second and fewer when the arena is busy. The log line `[hud] coverage ticks/s:`
+reports what the rig is achieving.
 
-**The pair graph is connected**, counting only pairs with at least 80 shared
+**The pair graph is connected**, counting only pairs with at least
+`calibration_min_edge` shared
 detections. The geometry is built by chaining pairs, so two well-covered
 clusters that never once see the board at the same time cannot be expressed in a
 single coordinate frame.
@@ -359,7 +384,7 @@ It usually will not, on a first attempt. **READY is a coverage target, not a
 gate.** Flip Calibrate off at any moment and you have a perfectly ordinary
 calibration recording; the solve decides whether what you captured is usable.
 
-So when the caption sits at something like `paired 210/250`: **if the numbers
+So when the `paired` count sits just short of its target: **if the numbers
 are still climbing, keep going.** If they have stopped, the question is *which*
 condition is stuck. Grid badge short of 3/3? Carry the board into the corners of
 that camera's view. One edge still thin and dark? Work that pair, edge-on
@@ -1007,13 +1032,32 @@ Two more, tight RAM and short disk space, are warnings you can override with
 **Start anyway?**, because the disk figure assumes a ten-minute recording and a
 shorter one may fit.
 
-**An existing recording in the target folder** is checked last. If the folder
-already holds an `.mp4`, `raw.bin`, `stream.h264`, `blockids.npy`,
-`frametimes.npy` or `alignment.npz`, you are asked
-`Existing files found in: <path>  Overwrite?` and nothing is touched unless you
-say yes. Metadata counts as data here: a folder whose videos have been moved
-away for labelling still holds the small files that make those videos
-interpretable.
+**An existing recording in the target folder** is checked last, and it is never
+overwritten without a prompt. If the folder holds a non-empty `.mp4`,
+`raw.bin`, `stream.h264`, `blockids.npy`, `frametimes.npy` or `alignment.npz`,
+a dialog headed *Overwrite the existing data?* warns that the folder will be
+permanently deleted and waits. Its two buttons read **Yes** and **Cancel**, and
+Cancel is the default, so an accidental Enter does not wipe a session. On Yes
+the whole folder is deleted and this acquisition records fresh under the same
+name; on Cancel nothing changes and the acquisition does not start. The folder
+is deleted whole rather than file by file, which matters because overwriting
+individual files would only replace the ones this run writes: a camera that
+captured nothing would keep the previous session's mp4 and metadata under
+identical names, and the alignment would then intersect two different sessions.
+
+The delete is deferred until the serial port has opened, the one refusal common
+enough to matter, so a start the port turns down leaves the data you agreed to
+overwrite still in place. Once the port is held the overwrite is committed.
+
+Metadata counts as data here: a folder whose videos have been moved away for
+labelling still holds the small files that make those videos interpretable.
+Zero-length files do not, so an earlier start that was refused after opening its
+streams is not mistaken for a session worth prompting about.
+
+If the start is refused *after* the move — a serial port another program holds,
+a camera that will not enter trigger mode, a board that never acks — the rename
+is undone and the previous acquisition is back under its own name before the
+refusal reaches you.
 
 With the checks passed, the cameras go to triggered mode at the profile's
 `frame_rate` with the `.pfs` exposure and gain *restored*: the original values
@@ -1149,8 +1193,19 @@ whatever else says otherwise. They are NumPy binaries, so run this on the
 finished recording folder instead of opening them:
 
 ```
-uv run 2_align.py <recording_dir>
+uv run python 2_align.py <recording_dir>
 ```
+
+`uv run python <script>` runs it in the project environment, the one `uv sync`
+built. Every script here does: none of them resolves an environment of its own,
+so the check works on a rig with no network.
+
+The trigger rate it compares against comes from the recording's own
+`session_metadata.json` — `frame_rate` for a recording folder,
+`calibration_frame_rate` for a calibration one — and the run prints which field
+it read. Pass `--fps <rate>` only when that file is missing, which is when the
+command says so and falls back to 100; on a 30 fps calibration folder the
+fallback would report every camera as running at a third of the rate.
 
 It prints the camera list, the union trigger span, the number of common
 (aligned) frames, and a per-camera table:
@@ -1340,7 +1395,7 @@ kick-out, or one that lost frames unevenly, adds `aligned/`.
 
 `aligned/` means two different things. It appears when the alignment pass ran on
 a recording that needed it, and also when somebody ran
-`uv run 2_align.py <recording_dir>` just to check, since that command always
+`uv run python 2_align.py <recording_dir>` just to check, since that command always
 writes the index. Open `aligned/alignment.json` to tell which: `replaced: false`
 with every camera's `dropped` at 0 is a check on a clean recording, while
 nonzero `dropped` values are the real thing. A re-encode only ever happens with
@@ -1377,7 +1432,7 @@ session that looks fine and is not, so read it before you need it.
 | `NVENC granted only 5 concurrent sessions but 6 cameras need one each.` | The GPU driver caps concurrent encode sessions, and that cap has changed across driver generations. Cameras beyond it would silently fall back to writing raw frames. Close anything else holding encode sessions, record fewer cameras, or set `realtime_encode: false` in the profile to record raw deliberately. |
 | `Disk may be short: a 10-minute recording would need ~X GiB and only Y GiB is free.` | A warning, not a refusal: ten minutes is an assumption, not a known recording length. A shorter recording is fine. |
 | `Disk is tight: a 10-minute recording needs ~X GiB of Y GiB free.` | The milder version of the same check, raised once ten minutes would use more than 80% of the free space. This session will fit; a second one may not. Clear space now rather than between recordings. |
-| `Existing files found in: <path>  Overwrite?` | The target folder already holds videos or their metadata. It fires for a calibration as well as a recording, so it is what you see on a second calibration into the same session. Yes replaces the videos and sweeps each camera's transient and bookkeeping files, but leaves a previous solve's `calibration.toml`, `reprojection_error_histogram.png` and `codet_frames.json` in place. Change the metadata fields to name a new session if you would rather keep the old attempt. |
+| `Overwrite the existing data?` | The target folder already holds videos or their metadata. It fires for a calibration as well as a recording, so it is what you see on a second calibration into the same session. The affirmative button reads **Yes** and Cancel is the default; on Yes the whole folder is permanently deleted and the acquisition records fresh under the same name, previous solve output (`calibration.toml`, `reprojection_error_histogram.png`, `codet_frames.json`) included. Cancel abandons the start. Change the metadata fields first if you would rather the two attempts sat in separate sessions. |
 | `Could not open serial port COM3. Close Arduino Serial Monitor / other apps holding the port and retry.` | Something else has the port: an Arduino Serial Monitor, a second copy of the application, or the wrong port in the profile. |
 | `The trigger board did not acknowledge the start command, so no triggers would be sent.` | The board did not confirm the configuration, even after a forced reset, and it has confirmed before. The cameras are rolled back rather than recording a full-length session with no frames in it. Check the USB cable and that the board is running the Panopticon sketch. |
 | `Cannot record with this stim workflow` | The canvas has a forbidden pin, one pin driven by two chains, or a loop with no Starting block. The message names which. Fix the graph. |
@@ -1401,7 +1456,7 @@ session that looks fine and is not, so read it before you need it.
 | `cam3: encoder did not finish draining, so the frame-to-trigger mapping is UNVERIFIED.` | Counters were still moving at teardown, so no repair was attempted rather than one guessed from a moving target. Check that camera's mp4 frame count against `blockids.npy` before trusting its alignment. |
 | `cam5 was RETIRED mid-recording (…). Its video ends at that point; the other cameras continued and stay aligned with each other.` | That camera's stream stalled, or its trigger ordinals could not be re-established after a restart, so it was dropped from the alignment set. The alternative — publishing frames under a guessed ordinal — would corrupt every camera. The survivors are fine. |
 | `Recording did not finish cleanly` | Saving failed, for example a full disk. The raw capture files are still in the folder and have **not** been encoded or deleted. Do not start another recording into that folder. |
-| `Alignment failed: … — videos left as-is` | The alignment pass could not complete. The originals are untouched. `uv run 2_align.py <recording_dir> --replace` retries it from a terminal. |
+| `Alignment failed: … — videos left as-is` | The alignment pass could not complete. The originals are untouched. `uv run python 2_align.py <recording_dir> --replace` retries it from a terminal. |
 | `Trigger board did not confirm the stop` | The stop command was not accepted. The board may still be triggering, and a looping stimulation chain never ends on its own. Power-cycle the board and key off the laser. |
 | `cam2: block IDs advanced at 99.31/s while the trigger board runs at 100/s …` | That camera did not produce one frame per trigger, so its frames are paired with the other cameras' frames from a different instant. See [When a recording looks perfect and is not](#when-a-recording-looks-perfect-and-is-not) below — this is the one failure that presents as success. |
 | `All 6 cameras report the same block-ID rate (99.31/s), which is off the configured 100/s by the same amount.` | Not a camera fault. Cameras do not fail identically, so suspect the reference: the profile's frame rate may not match what the board is driving, or these cameras may not report device timestamps in nanoseconds. The videos are probably aligned with each other; it is the absolute timebase that is in question. |
@@ -1429,7 +1484,7 @@ the "Recording completed with problems" dialog and in
 `<recording>/WARNINGS.txt`. The tolerance and the measurements behind it are in
 [INTERNALS.md](INTERNALS.md#checking-the-axiom-against-an-independent-clock).
 
-It also runs inside the alignment pass, so **`uv run 2_align.py <recording_dir>`
+It also runs inside the alignment pass, so **`uv run python 2_align.py <recording_dir>`
 re-examines an existing recording**, including one made before this check
 existed. It writes the alignment index and prints any rate warning without
 needing `--replace`, and the check happens even when the recording reports as

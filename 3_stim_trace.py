@@ -1,22 +1,24 @@
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "numpy",
-# ]
-# ///
 """Write a per-frame stimulus trace next to a recording's videos.
 
 New recordings get ``stim_trace.csv`` automatically at stop; this is for
-recordings made before that existed, or to regenerate after editing a paradigm.
+recordings made before that existed, or to regenerate after editing a paradigm
+(the ``blocks``/``edges`` graph in ``stim_paradigm.json`` is recompiled, so an
+edit to the block list changes the trace).
 
-    uv run 3_stim_trace.py <recording_dir>          # one recording
-    uv run 3_stim_trace.py data --all               # every recording under a root
-    uv run 3_stim_trace.py <recording_dir> --fps 100
+Runs in the project environment, so use the project's interpreter:
+
+    uv run python 3_stim_trace.py <recording_dir>          # one recording
+    uv run python 3_stim_trace.py data --all               # every recording under a root
+    uv run python 3_stim_trace.py <recording_dir> --fps 100
 
 The mapping is exact because one Arduino drives both the camera triggers and the
 stimulus: frame -> block ID (trigger ordinal) -> seconds since stim t=0. See
 ``gui_app/stim_trace.py`` for the details, including why this is a prediction of
 what the paradigm delivered rather than an observation that it did.
+
+Exit status: 0 when every target was written; 1 when a single target was
+skipped or when any recording in a ``--all`` batch failed (the batch itself
+continues past the failure and prints a SKIP line for it).
 """
 import argparse
 import json
@@ -65,13 +67,19 @@ def main():
 
     failures = 0
     for rec in targets:
-        out, msg = write_trace(rec, _fps_for(rec, args.fps))
+        # One corrupt recording (non-monotonic block IDs, a truncated json, a
+        # half-written .npy) must cost that recording a SKIP line, not the
+        # rest of the batch.
+        try:
+            out, msg = write_trace(rec, _fps_for(rec, args.fps))
+        except Exception as e:
+            out, msg = None, f"{type(e).__name__}: {e}"
         if out is None:
             print(f"SKIP {rec}: {msg}")
             failures += 1
         else:
             print(f"OK   {out}: {msg}")
-    return 1 if failures and not args.all else 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

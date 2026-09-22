@@ -1,5 +1,17 @@
-# 3DPose — 6x Basler a2A1920-165g5m GigE, 1920x1200, 100 fps
+# 3DPose — 9x Basler a2A1920-165g5m GigE, 1920x1200, 100 fps
 name: 3dpose
+# Camera backend module (gui_app/backends/<name>.py). The profile names the
+# vendor so porting a rig is a profile edit; "basler" is the only one shipped.
+camera_backend: basler
+# Video encoder: auto = NVENC when a session is free, else libx264; nvenc, x264
+# or raw force one path. auto keeps a driver that lowers the NVENC session cap
+# from turning into a failed recording.
+encoder: auto
+# Sidebar pre-fill for a new session. These are this rig's operator and assay,
+# written into every session_metadata.json, so they live here and not in code.
+metadata_defaults:
+  experimenter: IT
+  assay: open_field
 frame_width: 1920
 frame_height: 1200
 frame_rate: 100
@@ -79,7 +91,7 @@ n_cameras: 9
 # pause at each pose. If it is still too dark, raise calibration_gain_db next
 # (each +6 dB doubles signal, and noise with it) -- exposure first, gain second.
 # 0 / -1 mean "leave the .pfs value alone".
-calibration_exposure_us: 15000     # 15 ms = 5x the 3 ms recording exposure
+calibration_exposure_us: 5000      # 5 ms = one-third of the old 15 ms, after the lighting was improved
 calibration_gain_db: -1            # -1 = keep the .pfs gain (6 dB)
 
 # --- Calibration coverage HUD: when to stop waving the board -----------------
@@ -201,4 +213,9 @@ capture_core_exclude: [0, 1]
 # watch itself is kept and tested (test_thermal_watch.py) -- set this back to
 # 20.0 to re-enable it once the cameras are cooler, so a NEW thermal problem
 # still gets caught. Temperatures are recorded in session metadata either way.
-thermal_poll_s: 0
+# Re-enabled at 20 s: the live status-bar alert is the only place an
+# overheating camera can still be acted on before it shuts down. The
+# post-encoding report no longer nags about heat unless the session actually
+# lost frames (see main_window._on_encoding_done), so a warm-but-clean session
+# is no longer flagged and the watch can stay on without spamming.
+thermal_poll_s: 20

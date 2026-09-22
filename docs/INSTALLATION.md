@@ -222,10 +222,9 @@ host ports = ceil(n_cameras / cameras that fit on one port)
 ```
 
 Six 100 fps cameras at three per 10 GbE port is two host ports, and three
-cameras need a switch in between. That is how the reference rig is built: six
-cameras in two groups of three, each group behind its own switch, each switch
-uplinked to its own 10 GbE port on the host. Nine cameras would be three groups,
-three switches and three ports.
+cameras need a switch in between. That is how the reference rig is built, and
+how it grew: nine cameras in three groups of three, each group behind its own
+switch, each switch uplinked to its own 10 GbE port on the host.
 
 Two things about those switches are easy to overlook. Their access ports have to
 run at the camera's own link speed, not just the uplink; a switch with 1 GbE
@@ -275,12 +274,28 @@ only the first two are visible inside the application:
    Three 1920x1200 cameras at 100 fps is about 78,000 packets/s per port,
    measured at 46% of a single core against a 4% average across 24 cores.
 
-**How it scales.** Threads grow at two per camera plus the UI, about 13 busy
-threads at six cameras. All share the one GIL, so the binding constraint is
-GIL-held work per thread per frame rather than core count: up to about 300 µs
+**How it scales.** Threads grow at two per camera plus the UI: about 19 busy
+threads at nine cameras, 13 at six. All share the one GIL, so the binding
+constraint is GIL-held work per thread per frame rather than core count: up to about 300 µs
 per thread per frame is safe even at 17 threads, while ~1000 µs breaks the 10 ms
 budget at 11. Cores beyond the grab and encode threads mostly help the network
 stack.
+
+**Hybrid CPUs.** On a processor with both performance and efficiency cores the
+scheduler has to put most of those threads on efficiency cores, and it chooses
+differently every launch. A grab thread there is not given more work; it
+executes the same work more slowly, and the loop can never make that up, because
+it retrieves at exactly the rate frames arrive. The symptom is one camera per
+session falling behind, a different camera each time. Four profile fields decide
+placement, all read by `gui_app/cpu_affinity.py`, all Windows-only and all
+no-ops on a CPU with one kind of core: `pin_capture_threads` pins one grab
+thread per performance core and raises its priority, `capture_core_exclude`
+keeps those threads off the cores carrying the network stack's deferred
+procedure calls, and `encoder_pcores` and `pin_encoder_threads` do the
+equivalent for the encoder threads. The two encoder fields ship off because they
+measured worse on the reference rig; they are kept because the efficiency-core
+failure mode they address is real on a rig with more cameras than performance
+cores. Step 7 gives the shipped values.
 
 The startup check asks one question about the CPU: it warns below 4 physical
 cores, a floor for running the application rather than a verdict on the rig you
@@ -304,46 +319,53 @@ NV12 ring          = n_cams x (kick_max_lag + ENCODE_QUEUE_DEPTH + 64)
                             x 1.5 x frame_bytes
 ```
 
-`MAX_NUM_BUFFER = 1000` (`gui_app/camera_manager.py`), 10 seconds of slack at
+Pool depth is the profile field **`max_num_buffer`**, covered in step 7. That
+name is the one to edit: `MAX_NUM_BUFFER = 1000` in `gui_app/camera_manager.py`
+is only the fallback for a caller that passes no depth, and `MaxNumBuffer` is
+pylon's own node name. The shipped profile sets 600, six seconds of slack at
 100 fps. `ENCODE_QUEUE_DEPTH = 200` (`gui_app/grab_thread.py`). The factor 1.5
 is NV12: a full-size luma plane plus a half-size chroma plane held at a constant
 128. The `+ 64` is spare slots so a buffer cannot be reused while still in
 flight. The ring exists only in real-time encode mode; in kick-out mode it is
 sized as above, otherwise `ENCODE_QUEUE_DEPTH + 4` buffers per camera.
 
-Worked example, 6 cameras at 1920x1200 with `kick_max_lag: 480`:
+Worked example at the shipped settings, `max_num_buffer: 600` and
+`kick_max_lag: 480`, 6 cameras at 1920x1200:
 
 ```
-pool  = 6 x 1000 x 2,304,000 B                   = 12.9 GiB
+pool  = 6 x 600 x 2,304,000 B                    =  7.7 GiB
 ring buffers per camera = 480 + 200 + 64         = 744
 ring  = 6 x 744 x (1920 x 1800) B                = 14.4 GiB
-total                                            = 27.2 GiB
+total                                            = 22.1 GiB
 ```
 
-The same settings at 9 cameras: 19.3 + 21.6 = **40.9 GiB**. Halving the cap to
+The same settings at 9 cameras: 11.6 + 21.6 = **33.1 GiB**. Halving the cap to
 `kick_max_lag: 240` does not halve the ring, because the queue depth and spare
 slots stay put: 504 buffers instead of 744, or 1.62 GiB per camera, giving
-22.6 GiB at 6 cameras and 33.9 GiB at 9.
+17.4 GiB at 6 cameras and 26.2 GiB at 9. Keep the pool at or above
+`kick_max_lag` whichever way you move it: a pool shallower than the coordinator's
+patience empties before the coordinator gives up on a laggard, and a recoverable
+lag becomes lost frames.
 
 Those totals have to be *available* when Record is pressed, with the operating
 system and the GUI on top, so budget roughly twice the pool-plus-ring figure for
-your camera count, not a little more. Twice 27.2 GiB is why the reference rig
-carries 63.4 GB for six cameras at `kick_max_lag: 480`.
+your camera count, not a little more. The reference rig carries 63.4 GB against
+a nine-camera demand of 33.1 GiB, so more than half the machine is buffers.
 
 The application does this arithmetic at Record time, against the cameras
 actually open, and **refuses to start if it will not fit** in available memory:
 
 ```
-Not enough RAM for 9 cameras: 40.9 GiB needed (19.3 pylon pool + 21.6 NV12
-ring), 31.2 GiB available. Lower MaxNumBuffer or kick_max_lag, or close other
-applications.
+Not enough RAM for 9 cameras: 33.1 GiB needed (11.6 pylon pool + 21.6 NV12
+ring), 31.2 GiB available. Lower `max_num_buffer` or `kick_max_lag` in the rig
+profile, or close other applications.
 ```
 
 Above 75% of available memory it warns and asks before proceeding.
 
 Separately, the startup check warns below 16 GB of RAM in total, a floor for the
 application to run at all. A 16 GB machine passes the launch check happily and
-is then refused by every six-camera recording, 27.2 GiB being nowhere near it.
+is then refused by every six-camera recording, 22.1 GiB being nowhere near it.
 Size against your own figure, not the startup warning.
 
 ### GPU
@@ -373,8 +395,8 @@ in the rig profile to put every camera on the raw path deliberately.
 ```
 
 On the reference rig the probe returns **12 sessions on an RTX 5080**, more than
-the six cameras it runs and more than the nine it is being scaled towards, so a
-current consumer card is not the binding constraint. The historic caps of 2 and
+the nine cameras it runs, so a current consumer card is not the binding
+constraint. The historic caps of 2 and
 3 are why the number is probed: an older card really can grant fewer sessions
 than you have cameras.
 
@@ -437,10 +459,18 @@ speed (it writes and deletes a 16 MB file to find out).
 
 Windows, today, but the dependency is shallow. The Windows-specific pieces are
 `PylonGigEConfigurator` and the inbound firewall rule, the `configure_nic.ps1`
-and `make_shortcut.ps1` scripts, and the two performance probes
-`probe_gil_wait.py` and `probe_native_cpu.py`. The capture path does not depend
-on them: the binary-file flag is resolved with `getattr(os, "O_BINARY", 0)`, the
-`subprocess.STARTUPINFO` use in `encode_worker.py` is guarded by `sys.platform`,
+and `make_shortcut.ps1` scripts, the two performance probes
+`tools/experiments/probe_gil_wait.py` and
+`tools/experiments/probe_native_cpu.py`, and `gui_app/cpu_affinity.py`, whose
+every entry point — core classification, pinning, thread priority, timer
+resolution — is guarded by a Windows check and returns without raising
+elsewhere, so `pin_capture_threads` and its three companions silently do
+nothing off Windows (`os.sched_setaffinity` and `os.nice` are the Linux
+equivalents for pinning and priority, and the P-core/E-core split comes from
+sysfs rather than `GetSystemCpuSetInformation`). The capture path does not
+depend on any of them: the binary-file flag is resolved with
+`getattr(os, "O_BINARY", 0)`, the `subprocess.STARTUPINFO` use in
+`encode_worker.py` is guarded by `sys.platform`,
 the serial port is a profile field, and `arduino-cli` is found via PATH or an
 environment variable. NVENC and pypylon both support Linux.
 
@@ -455,13 +485,16 @@ list.
 | CPU | Intel Ultra 9 285K, 24 cores (8 performance + 16 efficiency) |
 | RAM | 63.4 GB |
 | GPU | NVIDIA RTX 5080, 12 concurrent NVENC sessions measured |
-| Cameras | 6x Basler a2A1920-165g5m (5 GigE), 1920x1200 mono8 at 100 fps |
-| Network | 2 switches, 3 cameras each, one 10 GbE host port per switch |
-| Trigger board | Arduino Mega 2560 on `COM3`, one pin per camera |
+| Cameras | 9x Basler a2A1920-165g5m (5 GigE), 1920x1200 mono8 at 100 fps |
+| Network | 3 switches, 3 cameras each, one 10 GbE host port per switch |
+| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins fanned out across the nine cameras |
 | OS | Windows |
 
-On that machine a 60-second six-camera run at 100 fps captured 100.00% of
-triggers; section 3 quotes the rest of that run's numbers.
+Every performance figure in these pages names the camera count it was measured
+at, because nearly all of them scale with it: the 60-second run at 100 fps that
+captured 100.00% of triggers was six cameras, and the flow-control and
+thread-placement measurements were nine. Section 3 quotes the rest of that
+60-second run's numbers.
 
 ---
 
@@ -532,7 +565,7 @@ this page only to keep the example paths short.
 
 ```powershell
 cd $HOME\Desktop
-git clone --recurse-submodules https://github.com/talmolab/panopticon.git
+git clone https://github.com/talmolab/panopticon.git
 cd panopticon
 ```
 
@@ -543,11 +576,9 @@ Cloning into 'panopticon'...
 remote: Enumerating objects: ...
 Receiving objects: 100% ...
 Resolving deltas: 100% ...
-Submodule 'campy' (https://github.com/Elmaestrotango/campy.git) registered for path 'campy'
 ```
 
-`--recurse-submodules` matters: `campy` is a submodule. If you already cloned
-without it, run `git submodule update --init --recursive`.
+The repository has no submodules, so a plain clone is complete.
 
 If `git` is not recognized, install Git for Windows from
 <https://git-scm.com/download/win> and reopen PowerShell.
@@ -569,13 +600,21 @@ ends with a line like `Installed 22 packages in 42s`. Later runs are instant:
 
 ```
 Resolved 26 packages in 1ms
-warning: Skipping installation of entry points (`project.scripts`) for package
-`panopticon` because this project is not packaged; ...
 Checked 22 packages in 0.82ms
 ```
 
-That warning is normal. The command creates a `.venv` folder in the repository
-holding the interpreter and all packages; nothing is installed system-wide.
+The command creates a `.venv` folder in the repository holding the interpreter
+and all packages; nothing is installed system-wide.
+
+On a machine with no Basler cameras and no NVIDIA GPU, leave the vendor SDKs
+out:
+
+```powershell
+uv sync --no-group rig
+```
+
+Everything except the acquisition GUI itself runs in that environment,
+including every hardware-free test suite and the post-session tools.
 
 Check the important imports:
 
@@ -587,7 +626,10 @@ Expected: `ok`. Anything else means the sync did not complete; run `uv sync`
 again and read the error.
 
 This step and the clone are the only ones that need internet. Acquisition,
-encoding and calibration all run offline.
+encoding, the calibration solve and the post-session checks all run offline
+afterwards, because every script runs in the environment `uv sync` just built
+rather than resolving one of its own. Run them as
+`uv run python <script>.py`.
 
 ### Step 5 — put the cameras on the network (GigE)
 
@@ -720,17 +762,31 @@ differently from another.
 Sweep the camera subnet and look for a live host that is neither the adapter nor
 a camera. No temporary address is needed, because you are already on that subnet:
 
-```bash
-for i in $(seq 1 254); do
-  ( ping -n 1 -w 250 "192.168.5.$i" | grep -qa "TTL=" && echo "ALIVE 192.168.5.$i" ) &
-  (( i % 64 == 0 )) && wait
-done; wait
+```powershell
+$subnet = "192.168.5"
+$probes = 1..254 | ForEach-Object {
+    [pscustomobject]@{
+        IP   = "$subnet.$_"
+        Ping = (New-Object System.Net.NetworkInformation.Ping).SendPingAsync("$subnet.$_", 250)
+    }
+}
+[System.Threading.Tasks.Task]::WaitAll($probes.Ping)
+$probes | Where-Object { $_.Ping.Result.Status -eq 'Success' } |
+          ForEach-Object { "ALIVE $($_.IP)" }
 ```
+
+All 254 pings go out at once and the whole sweep takes about a second. It works
+in Windows PowerShell 5.1, the version Windows ships with, so nothing extra is
+needed.
 
 Then tell switch from camera by MAC prefix — `arp -a` after the sweep. Basler
 cameras are `00-30-53-*`; your switch vendor has its own OUI. Confirm with
-`curl -s -o /dev/null -w '%{http_code}' http://<ip>/`, which answers `200` for a
-web UI.
+
+```powershell
+(Invoke-WebRequest -UseBasicParsing -Uri http://<ip>/ -TimeoutSec 3).StatusCode
+```
+
+which answers `200` for a web UI.
 
 Do **not** bother with vendor layer-2 discovery protocols. NETGEAR's NSDP (UDP
 63321/63322) is unimplemented on the Smart Managed Pro line: on the reference rig
@@ -919,9 +975,28 @@ Check the result in Notepad. It is one `Feature<TAB>value` per line. Confirm
 `Width`, `Height`, `PixelFormat`, `ExposureTime`, `Gain`, `GevSCPSPacketSize`
 and `GevSCPD` read what you expect.
 
-A `.pfs` saved from a different camera of the same model is fine. It loads with
-validation disabled, and geometry and pixel format are read back from each
-camera afterwards and checked against each other.
+**What the code assumes the `.pfs` supplies.** The file is the camera contract,
+and these are the features the application depends on rather than sets:
+
+| Feature | What depends on it |
+|---|---|
+| `PixelFormat` = `Mono8` | The whole capture path assumes one byte per pixel. Read back at open and refused if it is anything else. |
+| `Width`, `Height` | The ring, the raw decode and the preflight. Read back at open, compared between cameras there, and compared with the profile before every acquisition. |
+| `TriggerSelector` = `FrameStart`, `TriggerMode` = `On`, `TriggerSource` = `Line1`, `TriggerActivation` = `RisingEdge` | The application writes these four itself at each acquisition, so the `.pfs` only has to leave them consistent with your wiring. |
+| `LineInverter` on `Line1` | Which physical edge `RisingEdge` means, and it is **per rig**: `configs/mono8_1920x1200.pfs` sets it to 0, `configs/mono8_mono.pfs` sets it to 1, so the two rigs trigger on opposite physical edges. Nothing in the code touches it. Get it wrong and the camera exposes on the trailing edge of the pulse. |
+| `ExposureTime`, `Gain` | The only source of a recording's exposure and gain. Read back at open and re-applied from that baseline at every acquisition start, clamped to the ceiling. |
+| `AcquisitionFrameRate`, `AcquisitionFrameRateEnable` | Overwritten from the profile's `trigger_rate_limit` in triggered mode. |
+| `GevSCPSPacketSize`, `GevSCPD` | Never touched by the application; the network path depends on them entirely. |
+| `MaxNumBuffer` | **Overridden** at open by the profile's `max_num_buffer`, so whatever the file says is discarded. |
+
+A `.pfs` saved from a different camera of the same model is fine, and the load
+is deliberately unvalidated (`FeaturePersistence.Load(..., False)`): a strict
+load fails on any feature the saving camera had and this one does not, which
+would make one file per camera model instead of one per rig. The contract is
+that the file is authoritative and the code validates only what it actually
+depends on — geometry and pixel format are read back from each camera
+afterwards, compared against each other and refused on a mismatch, and the
+exposure and gain actually applied are logged per camera.
 
 ### Step 7 — write the rig profile
 
@@ -934,8 +1009,8 @@ sidebar dropdown under its `name`. Copy `profiles/3dpose.yaml` to
 
 ```yaml
 name: my_rig                 # what the dropdown shows
-frame_width: 1920            # must match the .pfs Width
-frame_height: 1200           # must match the .pfs Height
+frame_width: 1920            # must match the .pfs Width; checked at Record
+frame_height: 1200           # must match the .pfs Height; checked at Record
 frame_rate: 100              # trigger rate for recordings, Hz
 calibration_frame_rate: 30   # trigger rate for calibration captures
 quality: 21                  # NVENC constant quantizer; lower = better, bigger
@@ -945,6 +1020,8 @@ realtime_kick: true          # release a trigger to the encoders only once every
                              # camera has caught it, so videos come out aligned
 kick_max_lag: 480            # frames of cross-camera lag tolerated; the NV12
                              # ring scales with this
+max_num_buffer: 600          # driver-side buffers per camera; keep it at or
+                             # above kick_max_lag
 gige_driver: socket          # socket | filter | auto
 trigger_rate_limit: 165      # AcquisitionFrameRate applied in trigger mode
 
@@ -953,13 +1030,25 @@ output_dir: "data"
 board_config: "configs/boards/charuco_8x8_15mm.yaml"
 
 serial_port: COM3                    # the trigger board's port
-trigger_pins: [2, 4, 6, 8, 10, 12]   # one output pin per camera
+trigger_pins: [2, 4, 6, 8, 10, 12]   # every pin that drives a camera; one pin
+                                     # may feed several, so this is not a
+                                     # camera count
 n_cameras: 6                         # refuse to start unless exactly this many
 
 stim_safe_pins: [53]                 # YOUR stim pins, forced LOW from the
                                      # instant the sketch boots; [] if none
 calibration_exposure_us: 15000       # calibration-only exposure; 0 = keep .pfs
 calibration_gain_db: -1              # calibration-only gain; -1 = keep .pfs
+
+calibration_min_per_cam_shared: 120  # coverage HUD: co-detection ticks per cam
+calibration_min_edge: 20             # ...that connect a camera PAIR
+calibration_min_grid_cells: 3        # ...FOV quadrants each camera must cover
+
+pin_capture_threads: true            # hybrid CPU: one grab thread per P-core
+capture_core_exclude: [0, 1]         # keep those threads off the NIC's DPC cores
+encoder_pcores: false                # confine encoders to the P-core set
+pin_encoder_threads: false           # one encoder per E-core; measured worse
+thermal_poll_s: 0                    # seconds between temperature polls; 0 = off
 ```
 
 Field by field. The middle column is what the application uses when the field is
@@ -969,7 +1058,10 @@ the table sort out where those two part company.
 | Field | If the field is omitted | What it does |
 |---|---|---|
 | `name` | file stem | Label in the profile dropdown. |
-| `frame_width`, `frame_height` | 1920, 1200 | Frame geometry. Must match what the cameras report after the `.pfs` loads. |
+| `camera_backend` | `basler` | Which module in `gui_app/backends/` drives the cameras. `basler` is the only backend for real hardware; `sim` runs the application against simulated cameras and a simulated trigger board, which is what `profiles/sim.yaml` selects. An unknown name is refused when the profile loads. |
+| `encoder` | `auto` | Which H.264 encoder a recording asks for: `auto`, `nvenc`, `x264` or `raw`. The value is validated at load, but no caller runs the selection yet, so a recording encodes on NVENC whatever this says; [CPU_ENCODE.md](CPU_ENCODE.md) tracks that. |
+| `metadata_defaults` | `experimenter` and `assay` blank | Sidebar pre-fill for a new session, written into every `session_metadata.json`. The shipped `3dpose` profile fills in the reference rig's own operator and assay, so **set your own values** rather than copying them. Accepted keys: `experimenter`, `assay`, `cohort`, `cage`, `notes`. |
+| `frame_width`, `frame_height` | 1920, 1200 | Frame geometry. Must match what the cameras report after the `.pfs` loads, and it is checked: Calibrate and Record compare the two before anything is started and refuse with `The profile records 1920x1200 but the cameras are configured for 1280x1024: fix the .pfs (or the profile) so they agree.` These two numbers size the NV12 ring and the raw decode, so a disagreement would retire every camera in real-time mode and shear a full-length recording in raw mode. |
 | `frame_rate` | 100 | Trigger rate for recordings. Sets the frame period the grab loop must keep up with, and the H.264 GOP length: the spacing of keyframes a player can start decoding from, one per second here. |
 | `calibration_frame_rate` | 30 | Trigger rate for calibration captures. A slowly waved board gains nothing from 100 fps, and the longer period raises the exposure ceiling from about 3.94 ms to about 27 ms (3.5 ms and 24.5 ms after the 90% clamp), which is why `calibration_exposure_us: 15000` is safe. |
 | `quality` | 21 | NVENC constant quantiser. |
@@ -977,18 +1069,29 @@ the table sort out where those two part company.
 | `realtime_encode` | `true` | GPU H.264 during capture. `false` writes raw frames and encodes afterwards, at the raw disk rate from section 1 (1.38 GB/s for six cameras at 100 fps, against 2.8 MB/s encoded). |
 | `realtime_kick` | `false`, selecting post-hoc alignment instead | Gate frames through the cross-camera coordinator during capture, so the videos are trigger-aligned with no post-hoc re-encode. With it off, alignment runs after encoding and re-encodes each video. The shipped `3dpose` profile sets `true`; kick-out is the mode the rest of this documentation describes. |
 | `kick_max_lag` | 240; the shipped `3dpose` profile sets 480 | How many frames one camera may lag the others before its missing triggers are force-dropped. Drives the NV12 ring size, so it is the main RAM lever; see *Choosing `kick_max_lag`* below. |
+| `max_num_buffer` | 1000; the shipped `3dpose` profile sets 600 | Driver-side buffers queued per camera, and usually the larger half of the RAM bill: `n_cams x max_num_buffer x frame_bytes`, so 1000 is 19.3 GiB at nine 1920x1200 cameras against 11.6 GiB at 600. Keep it at or above `kick_max_lag`. See *RAM* in section 1. |
 | `gige_driver` | `socket` | `socket` is user-space with reliable packet resends. `filter` is the in-kernel driver: less CPU, but with default resend settings it discards a frame rather than asking for the lost packet again, measured dropping about 23% of frames under six cameras at 100 fps on 2026-06-12. `auto` leaves pylon's default. |
+| `gev_bandwidth_reserve_pct` | not set, so each camera keeps its `.pfs` value | `GevSCBWR`, written through the backend at open: the percentage of link bandwidth (0..100) held back for packet resends. Reserving bandwidth lowers the bandwidth every camera is assigned, so it trades throughput for resend headroom and is opt-in per rig rather than a default. Outside 0..100 is refused at load. |
+| `gev_bandwidth_reserve_accum` | not set, so each camera keeps its `.pfs` value | `GevSCBWRA`, written at open beside the percentage above: how many reserve slots may pool, so a burst of resends can draw on more than one interval's reserve. Negative is refused at load. Set it with the percentage, not alone. |
 | `trigger_rate_limit` | 165, the reference camera's own maximum frame rate rather than a property of Panopticon | `AcquisitionFrameRate` written in trigger mode. Set it to *your* camera's maximum frame rate; 165 is that number for the reference a2A1920-165g5m. Keep it above the trigger rate, and never set it to `0`. See *Setting `trigger_rate_limit`* below. |
 | `thermal_poll_s` | 20.0; `0` disables | Seconds between camera temperature checks while acquiring. A camera that reaches its shutdown temperature stops delivering mid-session, so the GUI warns in the status bar and in `WARNINGS.txt` while there is still time to act. Every threshold is read from the camera itself (`BslTemperatureStatus`, `BsliOverTemperature`), so nothing here assumes a particular model. The read is a GVCP register access per camera — cheap at this interval, never put it on a per-frame path. |
 | `pfs_path` | — | The camera settings file from step 6. |
 | `output_dir` | — | Where recordings go. The sidebar's directory button overrides it per machine. |
 | `board_config` | — | The printed ChArUco board, in `configs/boards/*.yaml`. The shipped `charuco_8x8_15mm.yaml` describes the reference rig's own board, `board_legacy: true` and all, so it is the wrong starting point for a freshly printed one; see *Calibration* in section 4. Measure your board and correct `square_length`: it sets the world scale of the solve, so a wrong value scales every 3D coordinate downstream. |
 | `serial_port` | `COM3`, the reference rig's port rather than a sensible fallback | The trigger board's serial port. Step 8 shows how to find yours. |
-| `trigger_pins` | `[2, 4, 6, 8, 10, 12]`, the reference rig's wiring rather than a sensible fallback | One output pin per camera, each wired to that camera's `Line1`; see *Wiring the trigger line* in section 1. Also refused as stimulation pins, since extra edges on one camera would break alignment. |
+| `trigger_pins` | `[2, 4, 6, 8, 10, 12]`, the reference rig's wiring rather than a sensible fallback | Every pin driving a camera's `Line1`, which is **not** necessarily one pin per camera: the reference rig fans these six pins out across nine cameras. What matters is that no camera sits on a pin the list omits; see *Wiring the trigger line* in section 1. A pin here is refused as a stimulation pin, and a pin on the serial link or in `stim_safe_pins` is refused here, both when the profile loads. |
 | `n_cameras` | 0, a code fallback nobody should keep | Refuse to start unless exactly this many cameras enumerate. `0` disables the check. Camera names are positional by serial-number order, so a camera that fails to enumerate renames every camera after it and attaches the calibration extrinsics to the wrong physical cameras. Set it. |
+| `camera_serials` | not set, so every enumerated camera is opened and named by enumeration order | The serial numbers this rig is made of, quoted strings in ascending order. Set it and `open_all()` opens only these and refuses when one of them is missing, which is the actual cure for the renaming hazard in the row above: a camera that fails to enumerate stops the session instead of renaming the ones after it. Names stay positional over the serial-sorted subset, so the list is refused at load unless it is ascending, free of duplicates, and the same length as `n_cameras`. Quote each serial: YAML reads a bare leading-zero number as octal. |
 | `stim_safe_pins` | `[53]`, the reference rig's laser pin, which is no protection at all on a rig wired differently | **Set this to the pin or pins your own stimulus hardware is wired to**; `[]` if you have none. They go LOW in the first statement of the sketch's `setup()`, before the serial handshake. `setup()` blocks on that handshake until the GUI connects, so a pin not listed here floats for the whole wait, and a powered laser driver reads floating as ON. Pins a loaded paradigm uses are added automatically, so this list is the floor protecting the recording-only sketch, the one flashed at launch when no paradigm is loaded. |
 | `calibration_exposure_us` | 0.0 | Exposure for calibration captures only; the `.pfs` values return for recordings. `0` keeps the `.pfs` value. The binding limit here is motion blur rather than the ceiling: at 15 ms a briskly waved board smears and its corners stop resolving, so move it slowly and pause at each pose. |
 | `calibration_gain_db` | -1.0 | Same for gain. `-1` keeps the `.pfs` value. |
+| `calibration_min_per_cam_shared` | 120; the shipped `3dpose` profile also sets 120 | Co-detection ticks every camera needs before the calibration coverage HUD reports READY. Set it against what the solve consumes: intrinsics are capped at 60 pose-diverse frames per camera and stereo at 30 shared frames per pair, and everything past those caps is discarded. |
+| `calibration_min_edge` | 40; the shipped `3dpose` profile sets 20 | Co-detections that make a camera *pair* count as connected. READY needs the graph to be one connected component, not every pair connected, so this is the number that decides whether two groups of cameras merge — and connectivity, not the per-camera count, is what dominates the time spent waving. |
+| `calibration_min_grid_cells` | 3 | Quadrants of its own field of view, out of 4, each camera must see the board in. The criterion that stops a board being waved in one spot; relax it last. |
+| `pin_capture_threads` | `false`; the shipped `3dpose` profile sets `true` | Pin one grab thread per performance core and raise its priority. Windows and a hybrid CPU only, a no-op elsewhere. See *Hybrid CPUs* in section 1. |
+| `capture_core_exclude` | `[0]`; the shipped `3dpose` profile sets `[0, 1]` | Logical CPUs the pinned capture threads are kept off, because a grab thread on a core carrying the NIC's deferred-procedure-call work is descheduled by the traffic it is receiving. |
+| `encoder_pcores` | `false` | Confine the encoder threads to the performance-core set. Off because it measured a regression on the reference rig; kept for a rig with more cameras than performance cores. |
+| `pin_encoder_threads` | `false` | Pin one encoder thread per efficiency core. Off because it measured much worse: one efficiency core cannot sustain encode submission for a 1920x1200 stream at 100 fps. |
 
 Paths may be relative to the repository root or absolute.
 
@@ -1001,29 +1104,26 @@ in section 4.
 
 **What the shipped profiles deliberately override.** Copying
 `profiles/3dpose.yaml` gets all of this right without thinking. Writing a
-minimal profile from scratch does not, because three of the fallbacks above are
+minimal profile from scratch does not, because several of the fallbacks above are
 not what the reference rig runs: the shipped profile sets `realtime_kick: true`,
-`kick_max_lag: 480` and `n_cameras: 6`. Real-time kick-out, the mode the rest of
+`kick_max_lag: 480`, `max_num_buffer: 600` and `n_cameras: 9`. Real-time kick-out, the mode the rest of
 this documentation describes and the one the RAM arithmetic in section 1
 assumes, is on because the profile says so, not because the field is optional.
 Leave it out and you silently get post-hoc alignment with a re-encode instead,
 and nothing will tell you.
 
-**Choosing `kick_max_lag`.** This trades RAM against frames, and the evidence is
-specific. A clean A/B on 2026-08-11 (100,968 frames over 17 minutes, identical
-camera settings, only the cap differing) released 87.68 fps with 12.34% loss at
-240, against 99.14 fps with 0.88% loss at 480. The 4.7 GiB that 240 saves at six
-cameras was not free when it was measured. Going the other way is no free win
-either: `kick_max_lag: 1000` starved capture outright, losing 24% of frames on
-2026-06-17, and the ring grows linearly with the cap the whole way there.
+**Choosing `kick_max_lag`.** This trades RAM against frames, and both directions
+have cost frames on a real rig, so it is not a free dial. The ring grows
+linearly with the cap, a cap far above the lag the rig actually shows buys
+nothing, and a cap high enough to outgrow the machine starves capture outright.
+Two rules hold whatever value you pick: `max_num_buffer` stays at or above
+`kick_max_lag`, and a change is A/B'd on the rig rather than reasoned about.
 
-What has changed since is the grab loop. After the fix of 2026-09-03 the
-observed cross-camera lag on the reference rig is median 0, p95 1, max 2 frames,
-so 480 frames of headroom currently buys nothing. Dropping back to 240 would
-very likely be free now; that reduction is deferred pending an A/B on the rig
-rather than being wrong. Until that measurement exists: size RAM for 480 to keep
-the shipped configuration, and treat 240 as a tested-but-superseded option to
-A/B on your own rig, never a blind saving.
+The shipped value is 480, and the comment on `kick_max_lag` in
+`profiles/3dpose.yaml` is the single source for what that number is worth here:
+it records the measurements that raised it, the measurements that lowered it,
+and the condition under which lowering it again would be safe. Read that comment
+before changing the field, and size RAM for whatever it says.
 
 ### Step 8 — flash the trigger firmware
 
@@ -1121,7 +1221,10 @@ A splash panel reads *Panopticon / Loading cameras...*, then the main window
 opens with one live preview pane per camera, free-running at about 30 fps.
 [OVERVIEW.md](OVERVIEW.md) names the controls.
 
-![The main window at idle, six live preview panes and the sidebar](images/main_idle.png)
+![The main window at idle: one live preview pane per camera, with the sidebar on the right](images/main_idle.png)
+
+The figure shows six panes because that is how many cameras the rig it was
+captured on had open; yours has one per camera that enumerated.
 
 The console shows one block per camera:
 
@@ -1153,8 +1256,8 @@ What to check in that output:
   single-threaded)`, so the first acquisition answers this. The probe asks for
   two more sessions than there are cameras and stops as soon as it gets them,
   which is why it reads `[hw] NVENC sessions: 8 (at least — probe stopped at its
-  limit), needed 8` on the six-camera reference rig even though that card will
-  grant 12 if asked for more.
+  limit), needed 8` on a six-camera rig even though that card will grant 12 if
+  asked for more.
 
 Every launch writes the same text to `logs/panopticon_<date>_<time>.log`, which
 is where to look when the app starts from the desktop shortcut and has no
@@ -1248,16 +1351,22 @@ running is the only thing that tells you whether *this* machine keeps up.
 
 ### Without any cameras
 
-Four test suites run on the code alone. They are plain scripts, not pytest.
+Every `test_*.py` in the repository root except `test_sync_router.py` runs on
+the code alone: no cameras, no trigger board, no GPU. They are plain scripts,
+not pytest, so run the lot rather than picking:
 
 ```powershell
-uv run python test_frame_sync.py
-uv run python test_grab_failure.py
-uv run python test_stim_compiler.py
-uv run python test_serial_handshake.py
+$env:QT_QPA_PLATFORM = "offscreen"
+Get-ChildItem test_*.py -Exclude test_sync_router.py |
+    ForEach-Object { uv run python $_ }
 ```
 
-Each ends with one summary line:
+The offscreen platform is what lets the suites that build Qt widgets run on a
+machine with no display; on a desktop session it is optional.
+[INTERNALS.md](INTERNALS.md#tests-and-probes) has the canonical table of what
+each suite covers and what it needs.
+
+Each ends with one summary line, for example:
 
 ```
 ALL FRAMESYNC EQUIVALENCE TESTS PASS
@@ -1275,23 +1384,26 @@ alarming output on the way through is expected:
 [teensy] no ack — reopening port to force a board reset
 ```
 
-What each one covers:
+Run them through `uv run`, not a bare `python`: several need numpy, OpenCV or
+PyQt5 from the project environment, and a few skip cases silently without them.
 
-| Suite | Covers |
-|---|---|
-| `test_frame_sync.py` | The kick-out coordinator matches a post-hoc block-ID intersection: exact equivalence, bounded skew, forced drops, freeze recovery, the 16-bit block-ID wrap, retiring a stalled camera. |
-| `test_grab_failure.py` | Camera-failure paths against a stub camera and router: a camera that cannot start grabbing, a failed ring allocation, a grab thread that exits quietly, repeated grab errors, re-arm exhaustion. Each must retire that camera so the others keep recording aligned. |
-| `test_stim_compiler.py` | Stimulation graph to firmware: start resolution, cycle-safe chain extraction, integer-microsecond encoding, safe-pin boot order, pin conflicts, forbidden pins, the RDY ack, the per-frame stimulus trace. |
-| `test_serial_handshake.py` | The four trigger-board handshake outcomes: confirmed, retry after reset, legacy firmware, and a board that has acknowledged before going silent (which must refuse to record). pyserial is stubbed, so no COM port is needed. |
+That set is also the acceptance run for a machine with **no rig hardware at
+all**: install without the vendor SDKs (`uv sync --no-group rig`, see
+[CONTRIBUTING.md](../CONTRIBUTING.md)) and every suite in the block above still
+passes, because none of them needs pypylon or PyNvVideoCodec.
 
-Run them through `uv run`, not a bare `python`: tests 10-13 of the stimulation
-suite need numpy and skip silently without it.
-
-A fifth suite needs an NVENC GPU but still no cameras:
+One more suite needs an NVENC GPU, though still no cameras, which is why the
+command above excludes it. `pynvvideocodec` is in the `rig` group, so this one
+is exactly the suite that cannot run after `uv sync --no-group rig`:
 
 ```powershell
 uv run python test_sync_router.py
 ```
+
+Beyond the suites, `profiles/sim.yaml` selects a simulated camera backend and a
+simulated trigger board, so the application itself — preview, Calibrate,
+Record, Stop, the stimulation editor's Apply — runs end to end with nothing
+plugged in. Pick `sim` from the profile dropdown.
 
 ### With real cameras
 
@@ -1367,9 +1479,8 @@ of your message.
 | `uv : The term 'uv' is not recognized` | PowerShell was opened before uv was installed. Open a new window; if it persists, sign out and back in. |
 | `git : The term 'git' is not recognized` | Install Git for Windows, then reopen PowerShell. |
 | `uv sync` fails to download | No internet, or a proxy. The clone and this step are the only ones that need it. |
-| `warning: Skipping installation of entry points (project.scripts)` | Normal. The project is not packaged; nothing is wrong. |
-| `git status` shows `m campy` | Line-ending differences inside the submodule, not real edits. It affects nothing. |
 | `make_shortcut.ps1` prints `No venv at ...` | `uv sync` has not been run in this copy of the repository. |
+| A dialog reads `Panopticon failed to start` and names a file under `logs/` | The window never got as far as opening. The dialog gives the exception and the log path, because the desktop shortcut runs `pythonw.exe` and has no console to print to. The usual first-run causes are the pylon SDK not installed, a profile that will not load, or an incomplete `uv sync`; an `ImportError` adds a line saying so. |
 | `... cannot be loaded because running scripts is disabled` | Launch the script as `powershell -ExecutionPolicy Bypass -File <script>.ps1`, as shown above. |
 | `This must run elevated (Set-NetAdapterRss needs admin).` | `configure_nic.ps1` needs an Administrator PowerShell window. |
 
@@ -1410,7 +1521,8 @@ of your message.
 | Message | Cause and fix |
 |---|---|
 | `No cameras are open. Recording would run the trigger protocol — and any baked-in stim paradigm — while saving nothing.` | Open the cameras first: pick a profile whose `pfs_path` resolves and whose cameras enumerate. |
-| `Not enough RAM for N cameras: ...` | The buffers do not fit in available memory. The message breaks it into pool and ring. Lower `kick_max_lag`, lower `MAX_NUM_BUFFER`, or close other applications. |
+| `The profile records 1920x1200 but the cameras are configured for ...` | The profile's `frame_width`/`frame_height` disagree with the ROI the cameras report. Refused before anything is started, so the cameras stay in preview and the session directory is untouched. Fix whichever is wrong — the `.pfs` or the profile — and start again. |
+| `Not enough RAM for N cameras: ...` | The buffers do not fit in available memory. The message breaks it into pool and ring. Lower `max_num_buffer` or `kick_max_lag` in the rig profile, or close other applications. Both are profile fields: neither `MAX_NUM_BUFFER` nor `MaxNumBuffer` appears in the YAML you edit. |
 | `RAM is tight for N cameras: ...` | Over 75% of available memory. It asks before proceeding. |
 | `NVENC granted only N concurrent sessions but M cameras need one each.` | The driver's session cap is below the camera count, often because another process holds sessions (a browser's hardware encode, an orphaned ffmpeg). Close them, record fewer cameras, or set `realtime_encode: false` in the profile to put every camera on the raw path deliberately. Both shipped profiles carry that field set to `true`, so it is a value you change rather than a line you add. Read the *Disk* part of section 1 first: raw needs roughly 500x the space. |
 | `NVENC granted no encode sessions, so real-time encoding cannot start.` | No sessions available at all. Set `realtime_encode: false` in the profile to write raw frames and encode afterwards, and read the *Disk* part of section 1 first, because that is a completely different disk budget. |
@@ -1461,7 +1573,7 @@ The videos look perfect while drifting apart in time.
 hardware oscillator, independent of its block-ID counter, so the two together
 settle the question: over any span, block IDs must advance at the trigger rate.
 That comparison runs per camera when a recording stops, and again inside
-`align_recording()`, so `uv run 2_align.py <recording_dir>` can re-examine a
+`align_recording()`, so `uv run python 2_align.py <recording_dir>` can re-examine a
 recording you already have. Nothing was added to the per-frame hot path; the
 device timestamps were already collected. When a camera fails, a *Recording
 completed with problems* dialog names the camera, its measured rate and roughly

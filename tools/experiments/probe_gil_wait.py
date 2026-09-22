@@ -44,55 +44,30 @@ PASS/FAIL
   - If wall stays ~0.08 ms even at 17 competitors, GIL contention does not explain
     production and something else is going on -- go looking again.
 
-    uv run probe_gil_wait.py
-    uv run probe_gil_wait.py --gil-us 100,300,1000 --competitors 0,5,11,17
+    uv run tools/experiments/probe_gil_wait.py
+    uv run tools/experiments/probe_gil_wait.py --gil-us 100,300,1000 --competitors 0,5,11,17
 """
 import argparse
-import ctypes
 import json
 import statistics
+import sys
 import threading
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 import numpy as np
 
+#: The repository root, three levels up from tools/experiments/. Output is
+#: anchored to it, never to the working directory, so a run started from
+#: anywhere writes to one place.
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+
+from tools.perfclock import calibrate_cycles_per_s, thread_cycles
+
 W, H = 1920, 1200
 NV12_H = H * 3 // 2
 PERIOD = 0.010            # 100 fps trigger period
-
-# --- QueryThreadCycleTime -----------------------------------------------------
-_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_k32.QueryThreadCycleTime.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ulonglong)]
-_k32.QueryThreadCycleTime.restype = wintypes.BOOL
-_k32.GetCurrentThread.argtypes = []
-_k32.GetCurrentThread.restype = wintypes.HANDLE
-
-
-def thread_cycles(_h=None, _buf=ctypes.c_ulonglong()):
-    """Cycles executed by the CALLING thread. GetCurrentThread() is a pseudo-handle
-    valid only in the calling thread, which is exactly what we want here."""
-    if not _k32.QueryThreadCycleTime(_k32.GetCurrentThread(), ctypes.byref(_buf)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return _buf.value
-
-
-def calibrate_cycles_per_s(dur=0.30):
-    """Cycles/second while genuinely running, measured uncontended.
-
-    Turbo and P/E-core placement make this approximate, but we only need it to tell
-    "executed for 0.08 ms" apart from "sat waiting for 2.6 ms", which is a 30x
-    difference -- far larger than the calibration error.
-    """
-    c0, t0 = thread_cycles(), time.perf_counter()
-    x = 0
-    while time.perf_counter() - t0 < dur:
-        for i in range(10000):
-            x += i
-    c1, t1 = thread_cycles(), time.perf_counter()
-    return (c1 - c0) / (t1 - t0), x
-
 
 # --- workload -----------------------------------------------------------------
 def gil_burn(target_us):
@@ -191,10 +166,11 @@ def main():
                     help="GIL-held us per competitor per 10 ms frame")
     ap.add_argument("--iters", type=int, default=400, help="copies in the measured thread")
     ap.add_argument("--ring", type=int, default=200)
-    ap.add_argument("--out", default="probe_out/gil_wait.json")
+    ap.add_argument("--out",
+                    default=str(REPO / "probe_out" / "gil_wait.json"))
     args = ap.parse_args()
 
-    cps, _ = calibrate_cycles_per_s()
+    cps = calibrate_cycles_per_s()
     print(f"calibration: {cps/1e9:.3f} G cycles/s while executing")
     print(f"measured thread: production copy at 100 Hz, ring={args.ring} "
           f"({args.ring*W*NV12_H/2**30:.2f} GiB), {args.iters} copies/case\n")

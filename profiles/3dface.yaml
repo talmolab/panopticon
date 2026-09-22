@@ -1,5 +1,14 @@
 # 3DFace — 6x Basler acA1300-200um USB3, 1280x1024, 100 fps
 name: 3dface
+# Camera backend module (gui_app/backends/<name>.py); pylon covers USB3 too.
+camera_backend: basler
+# Video encoder: auto = NVENC when a session is free, else libx264.
+encoder: auto
+# Sidebar pre-fill for a new session; written into every session_metadata.json,
+# so the values are this rig's, not a code default.
+metadata_defaults:
+  experimenter: IT
+  assay: ""
 frame_width: 1280
 frame_height: 1024
 frame_rate: 100
@@ -9,6 +18,12 @@ encode_parallel: 3
 realtime_encode: true
 realtime_kick: true
 kick_max_lag: 240
+
+# Cameras that MUST enumerate before a session starts. Camera names are
+# positional by serial-number order, so a camera that fails to enumerate renames
+# every camera after it and attaches the calibration extrinsics to the wrong
+# physical cameras; open_all refuses a count other than this.
+n_cameras: 6
 
 pfs_path: "configs/mono8_mono.pfs"
 output_dir: "data"

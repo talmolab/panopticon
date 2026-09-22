@@ -1,5 +1,4 @@
 """Bonsai-style stimulus workflow editor for Panopticon."""
-import hashlib
 import json
 import math
 import time
@@ -28,11 +27,48 @@ PORT_R = 6
 GRID = 20
 SNAP_RADIUS = 26          # scene-unit snap distance
 ARROW_LEN, ARROW_HALF = 11, 5
+#: Scale bounds for the canvas view. The lower bound keeps blocks readable and
+#: the upper bound keeps a few wheel notches from pushing the graph off-canvas.
+MIN_ZOOM, MAX_ZOOM = 0.2, 4.0
+#: Below this view scale the 20-unit grid is denser than the pixels and is
+#: skipped, because drawing it costs one point per intersection of the scene.
+GRID_MIN_ZOOM = 0.4
+
+#: Pins held LOW from the instant the sketch boots, for an editor opened with
+#: no rig profile behind it (the standalone entry point). RULE: the pin lives
+#: here, with its only user, and never in the compiler. REASON: gui_app/ is
+#: shared between the two rigs, so a pin baked into stim_compiler is right for
+#: one and wrong for the other — on 3dface pin 53 would be driven LOW at boot
+#: on a pin that rig may use for something else. Every caller inside the
+#: application passes the profile's stim_safe_pins instead.
+STANDALONE_SAFE_LOW_PINS = (53,)
 
 
 def _pin_color(pin: int) -> QColor:
     hue = (int(pin) * 137) % 360
     return QColor.fromHsv(hue, 170, 210)
+
+
+def block_mode(freq: float, pw: float) -> tuple[str, float]:
+    """Classify how a (freq, pulse-width) pair drives its pin.
+
+    Returns (kind, duty_percent) with kind one of ``low`` (nothing fires),
+    ``train`` (a pulse train), ``constant`` (pulse width equals the period,
+    so the pin is held HIGH) or ``impossible`` (pulse width exceeds the period,
+    which the firmware also renders as constant ON). The block label and the
+    waveform preview both read this one function so they can never disagree
+    about where a train turns into a constant level; a disagreement at that
+    threshold is how a laser ends up held ON while the canvas shows a train.
+    """
+    if freq <= 0 or pw <= 0:
+        return "low", 0.0
+    period = 1000.0 / freq
+    duty = pw / period * 100.0
+    if pw > period * (1 + 1e-9):
+        return "impossible", duty
+    if pw >= period * (1 - 1e-9):
+        return "constant", duty
+    return "train", duty
 
 
 # ── ConnectorPort ─────────────────────────────────────────────────────────────
@@ -135,10 +171,10 @@ class BlockItem(QGraphicsItem):
 
     def mode_text(self) -> str:
         """How this block's freq/pulse-width actually drive the pin."""
-        if self.freq <= 0 or self.pw <= 0:
+        kind, duty = block_mode(self.freq, self.pw)
+        if kind == "low":
             return "pin LOW"
-        duty = self.pw * self.freq / 10.0  # pw(ms) * freq(Hz) / 1000 as a percent
-        if duty >= 100:
+        if kind in ("constant", "impossible"):
             return "constant ON"
         return f"{duty:g}% duty"
 
@@ -233,6 +269,15 @@ class BlockItem(QGraphicsItem):
 class ArrowItem(QGraphicsItem):
     def __init__(self, src_block: BlockItem, src_port: ConnectorPort,
                  dst_block: BlockItem, dst_port: ConnectorPort):
+        # One outgoing arrow per block, enforced here rather than trusted. The
+        # compiler follows a single successor per block, so a second arrow
+        # would be drawn but never run; a silent overwrite of out_arrow also
+        # leaves the first arrow orphaned in dst.in_arrows.
+        if src_block.out_arrow is not None:
+            raise ValueError(
+                f"block {src_block.block_id} already has an outgoing arrow")
+        if src_block is dst_block:
+            raise ValueError(f"block {src_block.block_id} cannot point at itself")
         super().__init__()
         self.src      = src_block
         self.src_port = src_port
@@ -303,6 +348,9 @@ class ArrowItem(QGraphicsItem):
 class StimCanvas(QGraphicsView):
     block_selected = pyqtSignal(object)  # BlockItem or None
     starts_changed = pyqtSignal(int)     # count of blocks stuck without a start
+    #: Emitted on every structural change (block or arrow added or removed,
+    #: flag toggled, load, clear) so the window can track unsaved work.
+    modified = pyqtSignal()
 
     def __init__(self):
         scene = QGraphicsScene()
@@ -330,14 +378,43 @@ class StimCanvas(QGraphicsView):
     # ── background ────────────────────────────────────────────────────────────
     def drawBackground(self, painter: QPainter, rect: QRectF):
         painter.fillRect(rect, QColor("#111820"))
+        # The grid is one point per 20-unit intersection of the exposed rect,
+        # so it is drawn as a single drawPoints call and skipped once the view
+        # is zoomed out far enough that the points would be denser than pixels.
+        if self.zoom() < GRID_MIN_ZOOM:
+            return
         painter.setPen(QPen(QColor("#1e2a38"), 1))
-        x = int(rect.left()  // GRID) * GRID
-        while x <= rect.right():
-            y = int(rect.top() // GRID) * GRID
-            while y <= rect.bottom():
-                painter.drawPoint(int(x), int(y))
-                y += GRID
-            x += GRID
+        x0 = int(rect.left() // GRID) * GRID
+        y0 = int(rect.top() // GRID) * GRID
+        pts = QPolygonF([
+            QPointF(x, y)
+            for x in range(x0, int(rect.right()) + 1, GRID)
+            for y in range(y0, int(rect.bottom()) + 1, GRID)
+        ])
+        painter.drawPoints(pts)
+
+    def zoom(self) -> float:
+        """Current uniform view scale."""
+        return self.transform().m11()
+
+    def zoom_by(self, factor: float):
+        """Scale the view by factor, clamped to [MIN_ZOOM, MAX_ZOOM]."""
+        target = min(MAX_ZOOM, max(MIN_ZOOM, self.zoom() * factor))
+        self.scale(target / self.zoom(), target / self.zoom())
+
+    def fit_to_content(self):
+        """Bring every block into view, or reset the view on an empty canvas."""
+        blocks = self.blocks()
+        if not blocks:
+            self.resetTransform()
+            self.centerOn(0, 0)
+            return
+        rect = blocks[0].sceneBoundingRect()
+        for b in blocks[1:]:
+            rect = rect.united(b.sceneBoundingRect())
+        self.fitInView(rect.adjusted(-50, -50, 50, 50), Qt.KeepAspectRatio)
+        if self.zoom() > MAX_ZOOM:
+            self.zoom_by(MAX_ZOOM / self.zoom())
 
     # ── snap helper ───────────────────────────────────────────────────────────
     def _find_snap_port(self, sp: QPointF,
@@ -476,12 +553,16 @@ class StimCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(factor, factor)
+        self.zoom_by(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
             self._delete_selected()
+            return
+        # Escape clears the selection and stops here. Left to propagate it
+        # reaches QDialog, whose default Escape handling hides the editor.
+        if event.key() == Qt.Key_Escape:
+            self.scene().clearSelection()
             return
         if event.modifiers() & Qt.ControlModifier:
             if event.key() == Qt.Key_C:
@@ -490,6 +571,9 @@ class StimCanvas(QGraphicsView):
             if event.key() == Qt.Key_V:
                 self._paste()
                 return
+        if event.key() == Qt.Key_Home:
+            self.fit_to_content()
+            return
         super().keyPressEvent(event)
 
     # ── selection signal ──────────────────────────────────────────────────────
@@ -520,6 +604,7 @@ class StimCanvas(QGraphicsView):
                 blk._is_start, blk._needs_start = s, n
                 blk.update()
         self.starts_changed.emit(len(needs))
+        self.modified.emit()
 
     def _component(self, blk: BlockItem) -> set[BlockItem]:
         """All blocks reachable from blk ignoring arrow direction."""
@@ -557,12 +642,29 @@ class StimCanvas(QGraphicsView):
 
     # ── block / arrow operations ──────────────────────────────────────────────
     def add_block(self, pin, freq, pw, dur) -> BlockItem:
-        existing = self.blocks()
         blk = BlockItem(pin, freq, pw, dur)
-        blk.setPos(len(existing) * (BW + 30), 0)
+        blk.setPos(self._free_spot())
         self.scene().addItem(blk)
+        self.ensureVisible(blk)
         self.refresh_starts()
         return blk
+
+    def _free_spot(self) -> QPointF:
+        """Grid-snapped position for a new block that overlaps nothing.
+
+        Starts at the centre of what the operator is looking at and steps
+        right until the slot is clear, so a new block never lands off-screen
+        or on top of another block.
+        """
+        c = self.mapToScene(self.viewport().rect().center())
+        x = round((c.x() - BW / 2) / GRID) * GRID
+        y = round((c.y() - BH / 2) / GRID) * GRID
+        occupied = [b.sceneBoundingRect() for b in self.blocks()]
+        for _ in range(1000):
+            if not any(QRectF(x, y, BW, BH).intersects(r) for r in occupied):
+                break
+            x += BW + 30
+        return QPointF(x, y)
 
     def _delete_selected(self):
         """Delete selected blocks and/or arrows cleanly with no ghost graphics."""
@@ -631,7 +733,15 @@ class StimCanvas(QGraphicsView):
                 })
         return blocks, edges
 
-    def load_workflow(self, blocks: list[dict], edges: list[dict]):
+    def load_workflow(self, blocks: list[dict], edges: list[dict]) -> int:
+        """Replace the canvas with a saved graph; returns the edges dropped.
+
+        An edge is dropped when either end is missing, when it points a block
+        at itself, or when its source already has an outgoing arrow. The
+        editor cannot draw those, but a hand-edited file can carry them, and
+        the compiler follows only one successor per block, so keeping them
+        would draw an arrow the firmware never runs.
+        """
         self.clear()
         by_id: dict[str, BlockItem] = {}
         for d in blocks:
@@ -642,16 +752,21 @@ class StimCanvas(QGraphicsView):
             blk.setPos(d["x"], d["y"])
             self.scene().addItem(blk)
             by_id[d["id"]] = blk
+        dropped = 0
         for e in edges:
             src = by_id.get(e["src"])
             dst = by_id.get(e["dst"])
-            if src and dst:
-                # Gracefully fall back to LEFT/RIGHT for old save files.
-                sp = e.get("src_port", ConnectorPort.RIGHT)
-                dp = e.get("dst_port", ConnectorPort.LEFT)
-                self.scene().addItem(
-                    ArrowItem(src, src.port(sp), dst, dst.port(dp)))
+            if src is None or dst is None or src is dst \
+                    or src.out_arrow is not None:
+                dropped += 1
+                continue
+            # Gracefully fall back to LEFT/RIGHT for old save files.
+            sp = e.get("src_port", ConnectorPort.RIGHT)
+            dp = e.get("dst_port", ConnectorPort.LEFT)
+            self.scene().addItem(
+                ArrowItem(src, src.port(sp), dst, dst.port(dp)))
         self.refresh_starts()
+        return dropped
 
     def clear(self):
         self.scene().clear()
@@ -683,14 +798,14 @@ class WaveformPreview(QWidget):
     def state(self) -> tuple[str, str]:
         """(kind, caption) — kind is low | train | constant | impossible."""
         f, pw = self._freq, self._pw
-        if f <= 0 or pw <= 0:
-            return "low", "pin held LOW"
-        period = 1000.0 / f
-        if pw > period * (1 + 1e-9):
-            return "impossible", f"pulse {pw:g} ms > period {period:g} ms"
-        if pw >= period * (1 - 1e-9):
-            return "constant", f"100% duty — constant ON, not {f:g} Hz"
-        return "train", f"{f:g} Hz · {pw:g} ms · {pw / period * 100:.0f}% duty"
+        kind, duty = block_mode(f, pw)
+        if kind == "low":
+            return kind, "pin held LOW"
+        if kind == "impossible":
+            return kind, f"pulse {pw:g} ms > period {1000.0 / f:g} ms"
+        if kind == "constant":
+            return kind, f"100% duty — constant ON, not {f:g} Hz"
+        return kind, f"{f:g} Hz · {pw:g} ms · {duty:.0f}% duty"
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -757,8 +872,11 @@ class WaveformPreview(QWidget):
 class _UploadWorker(QThread):
     done = pyqtSignal(bool, str)
 
-    def __init__(self, ino: str, port: str):
-        super().__init__()
+    def __init__(self, ino: str, port: str, parent=None):
+        # Parented to the window so the QThread is owned by Qt, not by the
+        # single Python reference the done slot drops; a QThread destroyed
+        # while its thread is still winding down aborts the process.
+        super().__init__(parent)
         self.ino = ino          # kept so the window can record what got flashed
         self._port = port
 
@@ -800,12 +918,18 @@ def _lbl(text, color="#aaa"):
 
 
 class StimulationWindow(QDialog):
+    #: True when an Apply starts flashing the board, False when it finishes
+    #: either way. The main window listens so it can grey out Record and
+    #: Calibrate for the flash, the same as for its own firmware operations.
+    uploading_changed = pyqtSignal(bool)
+
     def __init__(self, get_port: Callable[[], str],
                  get_output_dir: Callable[[], str],
                  get_fps: Callable[[], int] = lambda: 100,
                  is_busy: Callable[[], bool] = lambda: False,
+                 board_taken: Callable[[], bool] | None = None,
                  get_safe_pins: Callable[[], list] = lambda: list(
-                     stim_compiler.DEFAULT_SAFE_LOW_PINS),
+                     STANDALONE_SAFE_LOW_PINS),
                  get_trigger_pins: Callable[[], list] = lambda: [],
                  get_serial: Callable[[], object] = lambda: None,
                  release_serial: Callable[[], None] = lambda: None,
@@ -816,6 +940,16 @@ class StimulationWindow(QDialog):
         self._get_output_dir = get_output_dir
         self._get_fps        = get_fps
         self._is_busy        = is_busy
+        # True while something other than this editor holds the trigger
+        # board: an acquisition is RECORDING or CALIBRATING, or a firmware
+        # flash is in flight. _end_test skips its stop write only on this and
+        # never on the wider is_busy, because is_busy also covers camera work
+        # (a profile switch) that leaves the board untouched, and a looping
+        # Test that ends then has nothing else to stop the laser pin. Without
+        # the callback _end_test falls back to is_busy: safe against cutting
+        # a recording's triggers but over-broad, so main_window must supply
+        # it from its acquisition state and firmware worker.
+        self._board_taken    = board_taken
         self._get_safe_pins  = get_safe_pins
         # Needed to refuse a stim chain on a camera trigger line, which would
         # silently break cross-camera block-ID alignment. Defaults to empty so a
@@ -847,6 +981,12 @@ class StimulationWindow(QDialog):
         self._test_serial: TeensyController | None = None
         self._test_timer:  QTimer | None = None
         self._test_end_at: float | None = None
+        #: True once the canvas has changed since it was last saved or loaded.
+        #: Load asks before replacing a dirty canvas; closing the dialog only
+        #: hides it, so the canvas survives and close does not ask.
+        self._dirty = False
+        #: Kind of the status line currently shown; see _set_status.
+        self._status_kind = "info"
 
         self.setWindowTitle("Stimulation Editor")
         self.setMinimumSize(860, 560)
@@ -863,6 +1003,7 @@ class StimulationWindow(QDialog):
         self._canvas = StimCanvas()
         self._canvas.block_selected.connect(self._on_block_selected)
         self._canvas.starts_changed.connect(self._on_starts_changed)
+        self._canvas.modified.connect(self._on_canvas_modified)
         splitter.addWidget(self._canvas)
 
         # ── bottom panel ──────────────────────────────────────────────────────
@@ -1013,31 +1154,44 @@ class StimulationWindow(QDialog):
 
     @pyqtSlot(int)
     def _on_starts_changed(self, n_stuck: int):
-        if n_stuck:
-            self._set_status(
-                f"{n_stuck} block(s) form a loop with no start — select one "
-                f"and tick 'Starting'.", error=True)
+        """Recompute the canvas diagnostic shown in the status line.
+
+        The wording comes from _blocking_problem, the same text Apply, Test
+        and Record refuse with, so the status can never describe a problem
+        differently from the dialog that later blocks on it. Priority: a
+        canvas error beats everything; a notice about the board (from
+        invalidate_upload or a failed upload) survives canvas edits; the
+        end-time line and a stale diagnostic are replaced freely.
+        """
+        problem = self._blocking_problem()
+        if problem:
+            first = problem.split("\n\n")[0]
+            self._set_status(first, error=True, kind="diagnostic")
+            self._status_lbl.setToolTip(problem)
             return
+        self._status_lbl.setToolTip("")
         blocks, edges = self._canvas.get_workflow()
-        clash = stim_compiler.pin_conflicts(blocks, edges)
-        if clash:
-            self._set_status(
-                f"Pin {', '.join(str(p) for p in clash)} is driven by two chains "
-                f"at once — they will fight.", error=True)
-            return
-        if any(b.get("end") for b in blocks) and \
-                stim_compiler.end_time_s(blocks, edges) is None:
+        end_t = stim_compiler.end_time_s(blocks, edges)
+        if any(b.get("end") for b in blocks) and end_t is None:
             self._set_status(
                 "The 'Ending' block is not reachable from any start — the "
-                "recording will not stop on its own.", error=True)
+                "recording will not stop on its own.", error=True,
+                kind="diagnostic")
             return
-        end_t = stim_compiler.end_time_s(blocks, edges)
+        if self._status_kind == "notice":
+            return
         if end_t:
-            self._set_status(f"Recording will stop {end_t:g} s after start.")
-        elif self._status_lbl.text().startswith(("The 'Ending'", "Recording will",
-                                                 "Invalid", "Pin")) \
-                or "loop with no start" in self._status_lbl.text():
-            self._set_status("")
+            self._set_status(f"Recording will stop {end_t:g} s after start.",
+                             kind="diagnostic")
+        elif self._status_kind == "diagnostic":
+            self._set_status("", kind="diagnostic")
+
+    def _on_canvas_modified(self):
+        self._dirty = True
+
+    def has_unsaved_changes(self) -> bool:
+        """True when the canvas changed since it was last saved or loaded."""
+        return self._dirty and bool(self._canvas.blocks())
 
     def end_time_s(self) -> float | None:
         """Seconds after record start at which the paradigm's end block finishes."""
@@ -1065,28 +1219,57 @@ class StimulationWindow(QDialog):
             return "\n\n".join(
                 [f"Pin {p} cannot carry a stim waveform: {why}." for p, why in bad]
                 + ["Move the block to a free pin."])
+        # Numbers the firmware cannot execute as written, and graph shapes it
+        # cannot turn into chains. Asked here, between the pin check and the
+        # conflict check, because compile_ino refuses both with a ValueError:
+        # without this the refusal reaches the operator as the launcher's
+        # generic error box with a traceback in it, and every one of these is
+        # otherwise SILENT on the board — the sketch runs, the trace says the
+        # pin was driven, and the pin did something else.
+        params = stim_compiler.parameter_problems(blocks)
+        if params:
+            return "\n\n".join(
+                [f"Block {bid}: {why}." for bid, why in params]
+                + ["Correct the numbers, or delete the block."])
+        shape = stim_compiler.structural_problems(blocks, edges)
+        if shape:
+            return "\n\n".join(s[:1].upper() + s[1:] + "." for s in shape)
         clash = stim_compiler.pin_conflicts(blocks, edges)
         if clash:
             pins = ", ".join(str(p) for p in clash)
+            # One message, because a real merge never reaches here: a block two
+            # chains reach is named by structural_problems() above (as a fan-in,
+            # or as a block no chain reaches when the second source feeds a
+            # flagged start), and that check returns first. Counting incoming
+            # ARROWS here instead would misread the one shape that does get
+            # this far — a chain looping back onto its own lead-in, which has
+            # two incoming arrows and exactly one chain — and blame a merge for
+            # a conflict that is really with some other chain on the same pin.
             return (f"Pin {pins} is driven by more than one chain.\n\nChains run "
                     f"at the same time, so they would fight over the output and "
                     f"the waveform would be neither one. Give each chain its own "
-                    f"pin, or merge them into a single chain.")
+                    f"pin, or put them in sequence as a single chain.")
         return None
 
     def invalidate_upload(self, reason: str = ""):
         """Forget that this canvas is on the board, because it no longer is.
 
-        Called when something outside the editor reflashes the board. Without
-        it `provenance()` would keep reporting matches_uploaded_firmware: true
-        against firmware that no longer holds this paradigm, and a recording
-        made without re-applying would carry a confident but false record of
-        what the animal received. `None` — "unknown" — is the honest state.
+        Called when something outside the editor reflashes the board or fails
+        to. Test compares the canvas with `_uploaded_ino` to decide whether an
+        upload is needed, so a stale value lets Test drive a board whose
+        sketch has no chains and report nothing. `None` is the honest state.
+
+        The status names what each button does next rather than demanding a
+        re-Apply: the main window swaps sketches per acquisition on its own,
+        so Record needs no Apply unless the paradigm changed, while Test
+        always asks to upload once nothing is known to be on the board.
         """
         self._uploaded_ino = None
         self._set_status(
-            f"Board reflashed{' — ' + reason if reason else ''}. "
-            f"Press Apply again before recording.", error=True)
+            f"The board no longer holds this editor's last upload"
+            f"{' — ' + reason if reason else ''}. Record flashes the right "
+            f"sketch on its own; Test will ask to upload first.",
+            error=True, kind="notice")
 
     def is_uploading(self) -> bool:
         """True while arduino-cli is compiling/flashing the board.
@@ -1099,29 +1282,43 @@ class StimulationWindow(QDialog):
         return (self._upload_worker is not None
                 and self._upload_worker.isRunning())
 
-    def record_blocker(self) -> str | None:
-        """Reason a RECORDING must not start with this workflow, or None.
+    def is_testing(self) -> bool:
+        """True while a bench Test is driving the board.
 
-        Record does not compile anything — it runs whatever `_ensure_sketch_for`
-        put on the board — so this was never gated, and only `_on_apply` and
-        `_on_test` consulted _blocking_problem. But the canvas is what
-        `stim_paradigm.json` and `stim_trace.csv` describe, and a graph
-        containing a forbidden pin
-        means the .ino on the board may be driving a camera trigger line, which
-        silently breaks the block-ID identity every downstream consumer assumes.
-        CLAUDE.md already claims Record warns here; this makes that true.
-
-        A failed Apply also blocks. `stim_trace.csv` marks which frames were
-        stimulated by reading the CANVAS, not the board, so after a failed
-        upload it happily reports "900 frames with stimulation active" for a
-        session in which the board never received the paradigm and nothing
-        fired. Observed 2026-09-14: arduino-cli lost a race for the serial port,
-        the upload failed, and the recording went ahead and was labelled
-        stimulated. Data mislabelled as stimulated is worse than no data, so
-        refuse until an Apply succeeds. Only a KNOWN failure blocks -- a
-        paradigm Applied in a previous session is still on the board and stays
-        recordable, which is why this is a separate flag from `_uploaded_ino`.
+        A Test borrows the main window's serial link and arms a timer whose
+        expiry sends the board a stop. An acquisition started meanwhile would
+        have its triggers cut by that stop, so the main window refuses Record
+        and Calibrate while this is True.
         """
+        return self._test_timer is not None
+
+    def record_blocker(self) -> str | None:
+        """Reason an acquisition must not start with this workflow, or None.
+
+        Record does not compile anything; it runs whatever the main window put
+        on the board. The canvas is nevertheless what `stim_paradigm.json` and
+        `stim_trace.csv` describe, so the canvas is checked here for anything
+        that would make that description wrong or the recording unsafe:
+
+        - An upload in flight: arduino-cli holds the serial port, so opening
+          it for the acquisition fails or stalls the UI, and a second flash
+          on the same port leaves the board in an unknown state.
+        - A failed Apply: the board does not carry this canvas, so the trace
+          would label frames as stimulated when nothing fired. Only a known
+          failure blocks; `_uploaded_ino is None` does not, because the main
+          window clears it after every calibration while still holding the
+          applied paradigm it will flash back for the recording. Whether the
+          canvas matches that held paradigm is the main window's check, made
+          against `firmware_source()`.
+        - A forbidden or contested pin: a stim waveform on a camera trigger
+          line breaks the block-ID identity every downstream consumer assumes.
+        """
+        if self.is_uploading():
+            return ("A firmware upload is in progress (~30 s). Wait for it to "
+                    "finish.\n\narduino-cli holds the board's serial port until "
+                    "the flash completes; starting an acquisition now cannot "
+                    "open the port and a second flash on the same port would "
+                    "leave the board in an unknown state.")
         if self._apply_failed:
             return ("The last Apply FAILED, so the board does not carry this "
                     "paradigm.\n\nRecording now would produce a session "
@@ -1131,8 +1328,17 @@ class StimulationWindow(QDialog):
                     "using the board's serial port and retry.")
         return self._blocking_problem()
 
-    def provenance(self) -> dict:
-        """Everything needed to reconstruct what the animal actually received."""
+    def provenance(self, flashed_source: str | None = None) -> dict:
+        """Everything needed to reconstruct what the animal actually received.
+
+        `flashed_source` is the exact sketch text the main window put on the
+        board for this acquisition. `matches_uploaded_firmware` is then the
+        canvas compared with that sketch, which is the only comparison that
+        answers "did the animal receive what this file describes". Without
+        it the editor falls back to its own last successful upload, and to
+        None when it has none, because the editor cannot see what the main
+        window swapped onto the board.
+        """
         blocks, edges = self._canvas.get_workflow()
         # Must pass trigger_pins, same as _compile(). Otherwise the two compile
         # calls disagree: this one succeeds on a forbidden-pin graph while
@@ -1140,15 +1346,15 @@ class StimulationWindow(QDialog):
         # .ino beside it does not — a half-described session.
         ino = stim_compiler.compile_ino(blocks, edges, self._get_safe_pins(),
                                         self._get_trigger_pins())
-        # None = nothing was uploaded this session, so the GUI cannot know what
-        # the board is running (it survives app restarts).
-        matches = None if self._uploaded_ino is None else (ino == self._uploaded_ino)
+        reference = flashed_source if flashed_source is not None \
+            else self._uploaded_ino
+        matches = None if reference is None else (ino == reference)
         return {
             "saved_by": "Panopticon Stimulation Editor",
             "safe_low_pins": list(self._get_safe_pins()),
             "end_time_s": stim_compiler.end_time_s(blocks, edges),
             "matches_uploaded_firmware": matches,
-            "firmware_sha256": hashlib.sha256(ino.encode()).hexdigest(),
+            "firmware_sha256": stim_compiler.sketch_sha(ino),
             "chains": stim_compiler.describe(blocks, edges),
             "blocks": blocks,
             "edges": edges,
@@ -1157,39 +1363,65 @@ class StimulationWindow(QDialog):
     def firmware_source(self) -> str:
         return self._compile()
 
+    def _read_params(self, defaults: bool) -> tuple[int, float, float, float] | None:
+        """Parse the four parameter fields, or report why they are invalid.
+
+        With `defaults` a blank freq/pw reads as 0 and a blank duration as 1 s,
+        which is how Create fills in what the operator left out; an edit of
+        an existing block takes the fields as typed. The pin has no default
+        either way: coercing a blank pin to 0 puts a block on the Mega's UART
+        RX0 and garbles the link to the board. A duration must be positive,
+        because a zero-length step compiles to a chain that never advances;
+        a negative frequency or pulse width has no waveform. Each refusal
+        is a ``diagnostic`` status, so the next canvas refresh clears it
+        instead of leaving a stale error standing over a later accepted edit.
+        """
+        if not self._f_pin.text().strip():
+            self._set_status("Enter a pin number.", error=True,
+                             kind="diagnostic")
+            return None
+        try:
+            pin  = int(self._f_pin.text())
+            freq = float(self._f_freq.text() or ("0" if defaults else ""))
+            pw   = float(self._f_pw.text()   or ("0" if defaults else ""))
+            dur  = float(self._f_dur.text()  or ("1" if defaults else ""))
+        except ValueError:
+            self._set_status("Invalid parameters.", error=True,
+                             kind="diagnostic")
+            return None
+        if dur <= 0:
+            self._set_status("Invalid parameters: duration must be > 0 s.",
+                             error=True, kind="diagnostic")
+            return None
+        if freq < 0 or pw < 0:
+            self._set_status("Invalid parameters: frequency and pulse width "
+                             "cannot be negative.", error=True,
+                             kind="diagnostic")
+            return None
+        return pin, freq, pw, dur
+
     def _on_field_enter(self):
         """Enter edits the selected block, or creates one when nothing is selected."""
         if self._selected_block is None:
             self._on_create()
             return
-        try:
-            self._selected_block.pin  = int(self._f_pin.text())
-            self._selected_block.freq = float(self._f_freq.text())
-            self._selected_block.pw   = float(self._f_pw.text())
-            self._selected_block.dur  = float(self._f_dur.text())
-            self._selected_block.update()
-            self._set_status("")
-        except ValueError:
-            self._set_status("Invalid parameters.", error=True)
+        params = self._read_params(defaults=False)
+        if params is None:
+            return
+        blk = self._selected_block
+        blk.pin, blk.freq, blk.pw, blk.dur = params
+        blk.update()
+        # The edit can create or remove a pin conflict and moves the end time,
+        # so the diagnostics are recomputed the same as for any other edit.
+        # refresh_starts alone decides the status line: clearing it here
+        # first would downgrade a board notice to info and wipe it.
+        self._canvas.refresh_starts()
 
     # ── create ────────────────────────────────────────────────────────────────
     def _on_create(self):
-        try:
-            # No default for the pin. Coercing a blank field to "0" silently
-            # created a block on pin 0 = UART RX0, which garbles the link to the
-            # trigger board; and on a rig whose trigger pins start at 2 a
-            # mistyped pin is far better refused than guessed.
-            if not self._f_pin.text().strip():
-                self._set_status("Enter a pin number.", error=True)
-                return
-            pin  = int(self._f_pin.text())
-            freq = float(self._f_freq.text() or "0")
-            pw   = float(self._f_pw.text()   or "0")
-            dur  = float(self._f_dur.text()  or "1")
-        except ValueError:
-            self._set_status("Invalid parameters.", error=True)
-            return
-        self._canvas.add_block(pin, freq, pw, dur)
+        params = self._read_params(defaults=True)
+        if params is not None:
+            self._canvas.add_block(*params)
 
     def _on_clear(self):
         if QMessageBox.question(
@@ -1197,6 +1429,7 @@ class StimulationWindow(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         ) == QMessageBox.Yes:
             self._canvas.clear()
+            self._dirty = False
 
     # ── save ─────────────────────────────────────────────────────────────────
     def _on_save(self):
@@ -1205,31 +1438,54 @@ class StimulationWindow(QDialog):
             self, "Save Stimulus Config", default, "JSON (*.json)")
         if not path:
             return
+        # The file dialog already confirms an overwrite, so no second prompt.
+        # Written as UTF-8 to match the firmware beside it and the loader, and
+        # a write failure is reported by path rather than as a traceback.
         p = Path(path)
-        if p.exists():
-            if QMessageBox.question(
-                self, "Overwrite?", f"{p.name} already exists. Overwrite?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            ) != QMessageBox.Yes:
-                return
         blocks, edges = self._canvas.get_workflow()
-        p.write_text(json.dumps({"blocks": blocks, "edges": edges}, indent=2))
+        try:
+            p.write_text(json.dumps({"blocks": blocks, "edges": edges}, indent=2),
+                         encoding="utf-8")
+        except OSError as e:
+            self._set_status(f"Could not save {p.name}.", error=True)
+            QMessageBox.critical(
+                self, "Save failed", f"Could not write {p}:\n\n{e}")
+            return
+        self._dirty = False
         self._set_status(f"Saved to {p.name}")
 
     # ── load ─────────────────────────────────────────────────────────────────
     def _on_load(self):
+        # Load replaces the whole canvas, so unsaved work is asked about first,
+        # before the file dialog, the same as Clear asks.
+        if self.has_unsaved_changes():
+            if QMessageBox.question(
+                self, "Discard changes?",
+                "The canvas has changes that were not saved. Loading a file "
+                "replaces it.\n\nDiscard the unsaved changes?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Stimulus Config",
             str(self._get_output_dir()), "JSON (*.json)")
         if not path:
             return
         try:
-            data = json.loads(Path(path).read_text())
-            self._canvas.load_workflow(
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            dropped = self._canvas.load_workflow(
                 data.get("blocks", []), data.get("edges", []))
-            self._set_status(f"Loaded {Path(path).name}")
         except Exception as e:
             QMessageBox.critical(self, "Load failed", str(e))
+            return
+        self._dirty = False
+        if dropped:
+            self._set_status(
+                f"Loaded {Path(path).name} — dropped {dropped} invalid edge(s) "
+                f"(a block can have one outgoing arrow).", error=True,
+                kind="notice")
+        else:
+            self._set_status(f"Loaded {Path(path).name}")
 
     # ── apply (upload) ────────────────────────────────────────────────────────
     def _on_apply(self):
@@ -1255,20 +1511,29 @@ class StimulationWindow(QDialog):
         # arduino-cli needs the serial port to itself. NOT reopened lazily —
         # _on_upload_done retakes it immediately; see the comment there.
         self._release_serial()
-        self._upload_worker = _UploadWorker(ino, self._get_port())
+        self._upload_worker = _UploadWorker(ino, self._get_port(), parent=self)
         self._upload_worker.done.connect(self._on_upload_done)
         self._upload_worker.start()
+        self.uploading_changed.emit(True)
 
     @pyqtSlot(bool, str)
     def _on_upload_done(self, ok: bool, msg: str):
         self._apply_btn.setEnabled(True)
         self._test_btn.setEnabled(True)
-        ino = getattr(self._upload_worker, "ino", None)
-        self._upload_worker = None
+        worker, self._upload_worker = self._upload_worker, None
+        ino = getattr(worker, "ino", None)
+        if worker is not None:
+            # done is emitted from inside run(), so the thread is still
+            # winding down when this slot runs; wait for it before the object
+            # can be collected, because destroying a running QThread aborts.
+            worker.wait()
+            worker.deleteLater()
+        self.uploading_changed.emit(False)
         if not ok:
             self._test_after_upload = False
             self._apply_failed = True
-            self._set_status("Upload failed — see details.", error=True)
+            self._set_status("Upload failed — see details.", error=True,
+                             kind="notice")
             QMessageBox.critical(self, "Upload failed", msg)
             return
         self._apply_failed = False
@@ -1314,12 +1579,19 @@ class StimulationWindow(QDialog):
         ino = self._compile()
         if ino != self._uploaded_ino:
             # The sequence lives in the sketch, so an un-uploaded edit would
-            # silently test the previous paradigm.
+            # silently test the previous paradigm. The wording says which case
+            # applies: nothing known on the board, or a canvas that drifted.
+            if self._uploaded_ino is None:
+                text = ("Nothing has been uploaded from this editor since the "
+                        "board was last flashed, so it may hold a different "
+                        "paradigm or none at all.\n\nUpload and then test? "
+                        "(~30 s)")
+            else:
+                text = ("The workflow has changed since the last upload, so the "
+                        "board is still running the previous paradigm.\n\n"
+                        "Upload and then test? (~30 s)")
             if QMessageBox.question(
-                self, "Upload first?",
-                "The workflow has changed since the last upload, so the board is "
-                "still running the previous paradigm.\n\nUpload and then test? "
-                "(~30 s)",
+                self, "Upload first?", text,
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
             ) != QMessageBox.Yes:
                 return
@@ -1378,18 +1650,47 @@ class StimulationWindow(QDialog):
             return
         self._set_status(f"Testing — {left:.0f} s remaining.")
 
-    def _end_test(self, message: str):
+    def _board_is_taken(self) -> bool:
+        """True when the shared link a test borrowed is no longer this editor's to write to.
+
+        A closed link means a flash released it; the board_taken callback
+        means an acquisition or flash holds the board. Without the callback
+        the wider is_busy stands in. The link is inspected directly rather
+        than through get_serial, because the main window's get_serial opens
+        the port as a side effect and would fight arduino-cli mid-flash.
+        """
+        if not self._test_serial.is_open:
+            return True
+        if self._board_taken is not None:
+            return self._board_taken()
+        return self._is_busy()
+
+    def _end_test(self, message: str) -> bool:
+        """Stop a running test; returns False when the board did not confirm.
+
+        No stop is written when something else holds the board: a closed
+        shared link means a flash released it, so the write could only fail
+        and raise a false alarm; board_taken() means an acquisition's own
+        start replaced the test's configuration, and a stop now would cut
+        the recording's camera triggers. The main window being busy with a
+        camera operation is not a reason to skip: the board is untouched and
+        this write is the only thing that stops a looping chain.
+        """
         if self._test_timer is not None:
             self._test_timer.stop()
             self._test_timer = None
         stopped = True
+        superseded = False
         if self._test_serial is not None:
-            # The most laser-exposed stop in the application: a bench Test drives
-            # the stim pin with no cameras and no recording, and a looping chain
-            # has no end time — this single write is the ONLY thing that stops
-            # it. Reporting "Test stopped." when the write failed is worse than
-            # not reporting at all.
-            stopped = self._test_serial.stop_triggers([])
+            if not self._test_owns_serial and self._board_is_taken():
+                superseded = True
+            else:
+                # The most laser-exposed stop in the application: a bench Test
+                # drives the stim pin with no cameras and no recording, and a
+                # looping chain has no end time, so this single write is the
+                # ONLY thing that stops it. Reporting "Test stopped." when the
+                # write failed is worse than not reporting at all.
+                stopped = self._test_serial.stop_triggers([])
             if self._test_owns_serial:      # never close the main window's link
                 self._test_serial.close()
             self._test_serial = None
@@ -1397,9 +1698,12 @@ class StimulationWindow(QDialog):
         self._test_end_at = None
         self._test_btn.setText("Test")
         self._apply_btn.setEnabled(True)
-        if not stopped:
+        if superseded:
+            self._set_status("Test superseded — an acquisition or flash took "
+                             "the board, so no stop was sent.", error=True)
+        elif not stopped:
             self._set_status("STOP NOT CONFIRMED — stim may still be running.",
-                             error=True)
+                             error=True, kind="notice")
             QMessageBox.critical(
                 self, "Stim may still be running",
                 "The trigger board did not accept the stop command.\n\n"
@@ -1409,17 +1713,71 @@ class StimulationWindow(QDialog):
                 "continuing.")
         else:
             self._set_status(message)
+        return stopped
 
     def closeEvent(self, event):
-        if self._test_timer is not None:
-            self._end_test("Test stopped.")
-        super().closeEvent(event)
+        if not self._can_dismiss():
+            event.ignore()
+            return
+        # QDialog.closeEvent re-enters reject() and ignores the close while
+        # the dialog is still visible afterwards; with reject() routed to
+        # close() that nested call is a no-op and the dialog would never
+        # hide. done() is what reject() ends in: it hides and emits finished.
+        self.done(QDialog.Rejected)
+        event.accept()
 
-    def _set_status(self, text: str, error: bool = False):
+    def _set_status(self, text: str, error: bool = False, kind: str = "info"):
+        """Show text in the status line.
+
+        `kind` decides what may replace the text later: ``diagnostic`` is a
+        statement about the canvas and is recomputed on every edit; ``notice``
+        is a statement about the board (a reflash, a failed upload, a stop
+        that was not confirmed) and survives canvas edits until another
+        status is set explicitly; ``info`` is transient and yields to either.
+        """
         color = "#dd6666" if error else "#88aabb"
+        self._status_kind = kind
         self._status_lbl.setText(text)
         self._status_lbl.setStyleSheet(
             f"color: {color}; font-size: 11px; border: none;")
 
     def get_workflow(self) -> tuple[list[dict], list[dict]]:
         return self._canvas.get_workflow()
+
+    # ── dialog lifecycle ──────────────────────────────────────────────────────
+    def keyPressEvent(self, event):
+        # Escape never hides the editor. QDialog's default binds it to
+        # reject(), and a hidden editor with a test running has its only Stop
+        # control out of sight; here it only clears the canvas selection.
+        if event.key() == Qt.Key_Escape:
+            self._canvas.scene().clearSelection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def reject(self):
+        # Every way of dismissing the dialog goes through closeEvent, because
+        # QDialog.reject() hides without one and closeEvent is where a running
+        # test is stopped.
+        self.close()
+
+    def _can_dismiss(self) -> bool:
+        """Stop a running test and ask about unsaved work; False keeps the dialog.
+
+        Closing hides the dialog, so it acts as Stop Test; the dialog stays
+        up when the board did not confirm the stop, because the operator
+        must see the warning that stim may still be running. The dialog
+        outlives a close unless it is set to delete on close, in which case
+        the canvas goes with it and unsaved work is asked about.
+        """
+        if self.is_testing() and not self._end_test("Test stopped."):
+            return False
+        if self.testAttribute(Qt.WA_DeleteOnClose) and self.has_unsaved_changes():
+            if QMessageBox.question(
+                self, "Discard changes?",
+                "The canvas has changes that were not saved.\n\nClose and "
+                "discard them?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return False
+        return True

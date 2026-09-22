@@ -10,7 +10,18 @@ about these cameras; the comments are the point, not decoration.
 """
 from __future__ import annotations
 
-import pypylon.pylon as pylon
+try:
+    import pypylon.genicam as genicam
+    import pypylon.pylon as pylon
+except ImportError as _e:
+    # The SDK is imported exactly here so that a rig without it fails in ONE
+    # place with a message that says what to do, instead of a bare
+    # ModuleNotFoundError from whichever module happened to load the backend.
+    raise ImportError(
+        "The 'basler' camera backend needs pypylon, which is not importable "
+        f"in this environment ({_e}). Install pypylon into the project "
+        "environment, or set the profile's `camera_backend` field to another "
+        "backend registered in gui_app/backends/__init__.py.") from _e
 
 
 class BaslerBackend:
@@ -78,25 +89,40 @@ class BaslerBackend:
         alignment pass read the wrap as a camera running impossibly far ahead.
         `alignment._unwrap_blockids` is the software fallback and handles it
         either way, so this is an optimisation, not a requirement.
+
+        Two independent settings must BOTH take: the camera-side
+        GevGVSPExtendedIDMode makes the camera send 64-bit IDs, and the
+        stream-grabber-side UseExtendedIdIfAvailable makes pylon consume them.
+        The grabber flag alone changes nothing on the wire, so 'enabled' is
+        reported only when both succeeded; otherwise the log names the half
+        that failed, and the return value means 'actually negotiated'.
         """
-        ok = False
+        cam_ok = grabber_ok = False
         try:
             node = cam.GetNodeMap().GetNode("GevGVSPExtendedIDMode")
             if node is not None:
                 node.FromString("On")
-                ok = True
+                cam_ok = True
         except Exception as e:
             print(f"[cam{i+1}] GevGVSPExtendedIDMode unavailable: {e}", flush=True)
         try:
             node = cam.GetStreamGrabberNodeMap().GetNode("UseExtendedIdIfAvailable")
             if node is not None:
                 node.SetValue(True)
-                ok = True
+                grabber_ok = True
         except Exception as e:
             print(f"[cam{i+1}] UseExtendedIdIfAvailable unavailable: {e}", flush=True)
-        print(f"[cam{i+1}] extended (64-bit) block IDs: "
-              f"{'enabled' if ok else 'UNAVAILABLE — relying on software unwrap'}",
-              flush=True)
+        ok = cam_ok and grabber_ok
+        if ok:
+            status = "enabled"
+        else:
+            missing = [name for name, took in
+                       (("camera GevGVSPExtendedIDMode", cam_ok),
+                        ("grabber UseExtendedIdIfAvailable", grabber_ok))
+                       if not took]
+            status = ("UNAVAILABLE (" + ", ".join(missing) +
+                      " not set) — relying on software unwrap")
+        print(f"[cam{i+1}] extended (64-bit) block IDs: {status}", flush=True)
         return ok
 
     @staticmethod
@@ -137,16 +163,145 @@ class BaslerBackend:
         except Exception as e:
             print(f"[cam{i+1}] GigE driver selection skipped: {e}", flush=True)
 
+    # ------------------------------------------------------ GigE transport knobs
+    # Opt-in per-camera transport settings. Nothing applies them unless a
+    # profile field is set: the shipped .pfs values (GevSCFTD 0,
+    # BandwidthReserveMode Standard) are the rig-validated baseline and these
+    # exist so that baseline can be A/B'd from a profile rather than by
+    # editing the .pfs on every camera.
+
+    @classmethod
+    def set_transmission_delay(cls, cam, ticks: int) -> int:
+        """Write GevSCFTD (frame transmission delay) and return the value set.
+
+        The camera holds each frame back by `ticks` timestamp ticks
+        (GevTimestampTickFrequency, 125 MHz on ace GigE, so 1 tick = 8 ns)
+        before putting it on the wire. Basler documents this as the knob for
+        cameras "triggered simultaneously": staggering the start of each
+        camera's burst spreads the switch load without touching the exposure
+        or readout timer, which is what the trigger_rate_limit pacing costs.
+        The node is GigE-only; a camera without it raises, because a profile
+        that sets a delay for a camera that cannot honour it is a config
+        error, not something to skip in silence. A write error propagates for
+        the same reason.
+        """
+        node = cls._require_node(cam, "GevSCFTD")
+        node.SetValue(int(ticks))
+        return int(node.GetValue())
+
+    @classmethod
+    def set_bandwidth_reserve(cls, cam, percent=None, accumulation=None) -> dict:
+        """Write GevSCBWR (reserve percent) and/or GevSCBWRA (accumulation).
+
+        GevSCBWR is the share of the assigned bandwidth held back for packet
+        resends; GevSCBWRA multiplies how many resends can be pooled. Both
+        are only writable while BandwidthReserveMode is Manual, so that mode
+        is selected first when the camera offers it (the .pfs default is
+        Standard). More reserve lowers the assigned bandwidth GevSCBWA, which
+        is why this is opt-in per profile rather than a default. None leaves a
+        setting alone. Returns the values read back, plus GevSCBWA when
+        readable. Missing nodes and write errors raise (see
+        set_transmission_delay).
+        """
+        out = {}
+        if percent is None and accumulation is None:
+            return out
+        mode = cls._optional_node(cam, "BandwidthReserveMode")
+        if mode is not None:
+            mode.FromString("Manual")
+            out["BandwidthReserveMode"] = mode.ToString()
+        if percent is not None:
+            node = cls._require_node(cam, "GevSCBWR")
+            node.SetValue(int(percent))
+            out["GevSCBWR"] = int(node.GetValue())
+        if accumulation is not None:
+            node = cls._require_node(cam, "GevSCBWRA")
+            node.SetValue(int(accumulation))
+            out["GevSCBWRA"] = int(node.GetValue())
+        bwa = cls._optional_node(cam, "GevSCBWA")
+        if bwa is not None:
+            try:
+                out["GevSCBWA"] = bwa.GetValue()
+            except Exception:
+                pass
+        return out
+
+    @staticmethod
+    def _optional_node(cam, name):
+        """The camera node map's `name`, or None when absent/unimplemented."""
+        try:
+            node = cam.GetNodeMap().GetNode(name)
+        except genicam.LogicalErrorException:
+            return None
+        if node is None or not genicam.IsImplemented(node):
+            return None
+        return node
+
+    @classmethod
+    def _require_node(cls, cam, name):
+        """Like _optional_node, but a missing node is a configuration error."""
+        node = cls._optional_node(cam, name)
+        if node is None:
+            raise RuntimeError(
+                f"{name} is not available on this camera (a GigE Vision "
+                f"transport feature); remove the profile setting that asks "
+                f"for it or use a camera that implements it")
+        return node
+
     # ------------------------------------------------------------------- modes
+    #: Trigger selectors other than FrameStart that a .pfs may have armed.
+    #: Each is switched Off when the camera offers it, because any armed
+    #: trigger gates free-run just as FrameStart does.
+    OTHER_TRIGGER_SELECTORS = ("AcquisitionStart", "FrameBurstStart")
+
     def set_freerun(self, cam, fps: float = 30.0) -> None:
-        """Untriggered preview mode."""
+        """Untriggered preview mode.
+
+        TriggerMode is a per-selector value, so the selector is set to
+        FrameStart BEFORE TriggerMode is written (mirroring set_triggered).
+        Writing TriggerMode Off against whatever selector the .pfs left active
+        would leave FrameStart armed on a .pfs saved with another selector, and
+        the preview would then wait for a trigger that never comes: no frames,
+        no error. The other selectors the camera offers are disarmed as well,
+        best effort, and the selector is left on FrameStart.
+        """
         try:
             cam.StopGrabbing()
         except Exception:
             pass
+        cam.TriggerSelector.SetValue("FrameStart")
         cam.TriggerMode.SetValue("Off")
+        for sel in self._other_trigger_selectors(cam):
+            try:
+                cam.TriggerSelector.SetValue(sel)
+                cam.TriggerMode.SetValue("Off")
+            except Exception as e:
+                print(f"[cam] trigger selector {sel} could not be disarmed: {e}",
+                      flush=True)
+        cam.TriggerSelector.SetValue("FrameStart")
         cam.AcquisitionFrameRateEnable.SetValue(True)
         cam.AcquisitionFrameRate.SetValue(float(fps))
+
+    @classmethod
+    def _other_trigger_selectors(cls, cam) -> list:
+        """OTHER_TRIGGER_SELECTORS entries this camera's TriggerSelector offers.
+
+        The enumeration's symbolic list is consulted so a selector the camera
+        lacks is never written (which would raise). A camera that does not
+        publish the list yields nothing, keeping the FrameStart path the only
+        one that can fail.
+        """
+        try:
+            node = cam.GetNodeMap().GetNode("TriggerSelector")
+            if node is None:
+                return []
+            syms = getattr(node, "Symbolics", None)
+            if syms is None and hasattr(node, "GetSymbolics"):
+                syms = node.GetSymbolics()
+            offered = set(syms or ())
+        except Exception:
+            return []
+        return [s for s in cls.OTHER_TRIGGER_SELECTORS if s in offered]
 
     def set_triggered(self, cam, rate_limit: float = 165.0,
                       announce: bool = False) -> None:
@@ -184,63 +339,130 @@ class BaslerBackend:
                       "(exposure bounded by sensor readout only)", flush=True)
 
     # ------------------------------------------------------------ exposure/gain
+    #: Candidate node names per control, newest SFNC spelling first. The
+    #: names differ across pylon generations, so the first IMPLEMENTED one wins.
+    EXPOSURE_NODES = ("ExposureTime", "ExposureTimeAbs")
+    GAIN_NODES = ("Gain", "GainRaw")
+    #: Unit of each gain node. `Gain` is a float in dB (SFNC 2, ace2);
+    #: `GainRaw` is an INTEGER in sensor steps whose dB size is model-specific,
+    #: so the two are not interchangeable and no conversion is attempted here.
+    GAIN_UNITS = {"Gain": "dB", "GainRaw": "raw"}
+
+    @classmethod
+    def gain_unit(cls, cam):
+        """'dB', 'raw', or None when the camera has no gain control.
+
+        The caller decides what a dB-denominated profile value means on a
+        'raw' camera (refuse, or convert with the model's step), and states
+        the unit of the value it passes via set_exposure_gain(gain_unit=...)
+        so a mismatch is refused there; the baseline restore needs no
+        decision because it reads and writes the same node.
+        """
+        name, _ = cls._find_node(cam, cls.GAIN_NODES)
+        return cls.GAIN_UNITS.get(name)
+
+    @classmethod
+    def _find_node(cls, cam, names):
+        """(name, node) of the first implemented candidate, else (None, None).
+
+        Presence is probed here and ONLY here, so that a failure to write a node
+        that exists is never mistaken for the node being absent. The two mean
+        opposite things: an absent node is a camera without that control and
+        the caller gets None; a write that fails on a present node is a real
+        error (out of range, camera busy, access denied) and must propagate,
+        because a swallowed one lets a camera record at the wrong exposure with
+        nothing in the log.
+        """
+        for n in names:
+            node = cls._optional_node(cam, n)
+            if node is not None:
+                return n, node
+        return None, None
+
     @staticmethod
-    def get_exposure_gain(cam) -> tuple:
-        """(exposure_us, gain_db) as the .pfs left them, or (None, None).
+    def _clamp_to_node(node, v):
+        """Clamp v into the node's [Min, Max] when the node publishes them."""
+        lo = getattr(node, "Min", None)
+        hi = getattr(node, "Max", None)
+        if lo is None or hi is None:
+            return v
+        lo = lo.GetValue() if hasattr(lo, "GetValue") else lo
+        hi = hi.GetValue() if hasattr(hi, "GetValue") else hi
+        return max(lo, min(v, hi))
+
+    @classmethod
+    def get_exposure_gain(cls, cam) -> tuple:
+        """(exposure_us, gain) as the .pfs left them, or None per missing control.
 
         Read once at open so the recording settings can be RESTORED exactly
-        rather than reconstructed. Node names differ across pylon generations,
-        hence the fallbacks.
+        rather than reconstructed. A read failure on a present node propagates
+        for the same reason a write failure does (see _find_node).
         """
         exp = gain = None
-        for n in ("ExposureTime", "ExposureTimeAbs"):
-            try:
-                exp = getattr(cam, n).GetValue()
-                break
-            except Exception:
-                continue
-        for n in ("Gain", "GainRaw"):
-            try:
-                gain = getattr(cam, n).GetValue()
-                break
-            except Exception:
-                continue
+        _, node = cls._find_node(cam, cls.EXPOSURE_NODES)
+        if node is not None:
+            exp = node.GetValue()
+        _, node = cls._find_node(cam, cls.GAIN_NODES)
+        if node is not None:
+            gain = node.GetValue()
         return exp, gain
 
-    @staticmethod
-    def set_exposure_gain(cam, exposure_us=None, gain_db=None) -> tuple:
+    @classmethod
+    def set_exposure_gain(cls, cam, exposure_us=None, gain_db=None,
+                          gain_unit=None) -> tuple:
         """Apply exposure/gain. Returns what was actually set, for logging.
 
-        The caller is responsible for the exposure CEILING — in trigger mode the
+        A control the camera does not implement is skipped and reported as
+        None. A control it does implement is written exactly once, and any
+        error from that write PROPAGATES: the caller logs it per camera, and a
+        calibration exposure left on one camera would otherwise halve that
+        camera's frame rate in the next recording with no trace in the log.
+
+        The caller is responsible for the exposure CEILING: in trigger mode the
         frame-rate timer starts after exposure ends, so the minimum interval is
         `exposure + 1/AcquisitionFrameRate`, and exceeding the trigger period
         silently halves the frame rate rather than erroring.
+
+        Gain is written in the UNIT OF THE NODE FOUND (see gain_unit): a float
+        in dB to `Gain`, an integer step count to `GainRaw`, clamped into the
+        node's range. `gain_unit` names the unit the VALUE is in, so a value
+        in the wrong unit is refused instead of written:
+          - None: the value is in the node's own unit. This is the baseline
+            restore, which writes back what get_exposure_gain read from the
+            same node, so it is exact on either kind of camera.
+          - 'dB': a profile value such as calibration_gain_db. On a 'raw'
+            camera it raises ValueError BEFORE any write, because the step
+            size is model-specific and 6 dB written as 6 steps is a wrong
+            gain that nothing in the log would reveal.
+          - 'raw': a step count; refused on a 'dB' camera for the same reason.
+        The exposure is applied before the gain is checked, so a refused gain
+        never leaves the exposure unset.
         """
+        if gain_unit not in (None, "dB", "raw"):
+            raise ValueError(f"gain_unit must be None, 'dB' or 'raw', "
+                             f"not {gain_unit!r}")
         applied_exp = applied_gain = None
         if exposure_us is not None:
-            for n in ("ExposureTime", "ExposureTimeAbs"):
-                try:
-                    node = getattr(cam, n)
-                    lo = getattr(node, "Min", None)
-                    hi = getattr(node, "Max", None)
-                    v = float(exposure_us)
-                    if lo is not None and hi is not None:
-                        v = max(lo.GetValue() if hasattr(lo, "GetValue") else lo,
-                                min(v, hi.GetValue() if hasattr(hi, "GetValue") else hi))
-                    node.SetValue(v)
-                    applied_exp = node.GetValue()
-                    break
-                except Exception:
-                    continue
+            _, node = cls._find_node(cam, cls.EXPOSURE_NODES)
+            if node is not None:
+                node.SetValue(cls._clamp_to_node(node, float(exposure_us)))
+                applied_exp = node.GetValue()
         if gain_db is not None:
-            for n in ("Gain", "GainRaw"):
-                try:
-                    node = getattr(cam, n)
-                    node.SetValue(float(gain_db))
-                    applied_gain = node.GetValue()
-                    break
-                except Exception:
-                    continue
+            name, node = cls._find_node(cam, cls.GAIN_NODES)
+            if node is not None:
+                unit = cls.GAIN_UNITS.get(name)
+                if gain_unit is not None and gain_unit != unit:
+                    raise ValueError(
+                        f"gain value {gain_db!r} is in {gain_unit} but this "
+                        f"camera's {name} node takes {unit}; no dB<->raw "
+                        f"conversion exists because the step size is "
+                        f"model-specific")
+                if unit == "raw":
+                    v = int(round(float(gain_db)))
+                else:
+                    v = float(gain_db)
+                node.SetValue(cls._clamp_to_node(node, v))
+                applied_gain = node.GetValue()
         return applied_exp, applied_gain
 
     # ----------------------------------------------------------------- grabbing
@@ -314,6 +536,15 @@ class BaslerBackend:
                                    control first.
         Statistic_Failed_Packet_Count is NOT included: it reads absurd values on
         this hardware (tens of millions against 11 M total) and is untrustworthy.
+
+        The camera-side transport settings are read alongside, each only when
+        the camera implements it, so a session's network state is on record:
+          GevSCFJM   — frame jitter max: the read-only bound on how late a
+                       frame can START because of a resend burst, i.e. the
+                       camera's own estimate of resend-induced lateness.
+          GevSCFTD, GevSCBWR, GevSCBWRA, GevSCBWA — the transmission delay and
+                       bandwidth reserve knobs and the assigned bandwidth they
+                       produce (see set_transmission_delay / set_bandwidth_reserve).
         """
         out = {}
         try:
@@ -329,4 +560,20 @@ class BaslerBackend:
                     out[key.replace("Statistic_", "")] = node.GetValue()
         except Exception as e:
             out["error"] = str(e)
+        for key in self.TRANSPORT_NODES:
+            try:
+                node = self._optional_node(cam, key)
+                if node is not None:
+                    out[key] = node.GetValue()
+            except Exception as e:
+                out[key] = f"error: {e}"
         return out
+
+    #: Camera-side GigE transport nodes reported by stream_stats.
+    TRANSPORT_NODES = ("GevSCFJM", "GevSCFTD", "GevSCBWR", "GevSCBWRA", "GevSCBWA")
+
+
+#: Module-level spellings of the transport knobs, for callers that hold the
+#: module rather than a backend instance (probes, experiments).
+set_transmission_delay = BaslerBackend.set_transmission_delay
+set_bandwidth_reserve = BaslerBackend.set_bandwidth_reserve

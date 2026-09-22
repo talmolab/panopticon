@@ -41,7 +41,12 @@ away.
 
 Frames are downsampled 3x per axis in the grab thread (the per-camera thread
 that pulls frames out of the driver), so 1920x1200 becomes 640x400, and panes
-repaint on a 33 ms timer rather than per arriving frame. How many frames reach
+repaint on a timer rather than per arriving frame. The timer is 33 ms up to six
+cameras and then stretches with the count, 33 ms x n/6 and never slower than
+100 ms, so the total repaint work per second stays roughly flat however many
+cameras are open: 50 ms at nine. Repainting happens on the Qt main thread and
+its cost is linear in camera count, while the grab threads' deadline is fixed at
+one trigger period, so the preview is what gives way. How many frames reach
 the preview depends on the rig's state:
 
 | State | Camera mode | Frames sent to the preview |
@@ -77,8 +82,9 @@ you came in on.
 
 **3 — Live frame rate.**
 That camera's delivered frame rate, bottom-left of the pane. It is measured in
-the camera's own grab thread over the last ten frames and pushed to the label
-about three times a second, so it responds within a second of a change.
+the camera's own grab thread over the last ten frames and pushed to the label on
+every tenth repaint, so it refreshes about three times a second at six cameras
+and twice a second at nine — fast enough to show a change within a second or so.
 
 It should sit at whatever the cameras are doing: ~30 fps idle, the calibration
 rate while calibrating, the trigger rate while recording. One pane low while the
@@ -198,10 +204,17 @@ and refuses outright in four cases:
   pins, or a single pin driven by two chains at once.
 
 A tight disk is a warning, not a refusal, and every warning becomes a "Start
-anyway?" prompt. Existing data in the target folder prompts before it is
-overwritten; that check counts `blockids.npy`, `frametimes.npy` and
-`alignment.npz` as well as videos, so a folder whose mp4s were moved away for
-labelling is still recognised as holding data.
+anyway?" prompt. Existing data in the target folder is never overwritten
+silently: a dialog headed *Overwrite the existing data?* warns that the folder
+will be permanently deleted, and only on **Yes** is it removed and the
+acquisition recorded fresh under the same name. Cancel leaves everything where
+it is and the acquisition does not start. The delete happens only once the
+serial port has opened, so a start refused because the port is busy leaves the
+old data untouched. The check
+counts `blockids.npy`, `frametimes.npy` and `alignment.npz` as well as videos,
+so a folder whose mp4s were moved away for labelling is still recognised as
+holding data; zero-length files are not counted, so a start refused after
+opening its streams leaves nothing to move.
 
 Past the preflight, the next thing may be a wait. A recording runs under
 whichever firmware matches the session: the recording-only sketch if no
@@ -427,19 +440,26 @@ met the graph freezes and the caption reads `READY`. That is your cue to stop.
 
 The four figures below are rendered illustrations of particular states, not
 captures of one continuous session, which is why the elapsed timer reads `0:00`
-in all of them.
+in all of them. They were drawn on a six-camera rig whose profile set
+`calibration_min_per_cam_shared: 250` and `calibration_min_edge: 80`, and before
+the caption carried a `groups` segment at all, so read the shape of the graph
+from them and not their numerals. Your own rig prints
+`paired <worst>/<calibration_min_per_cam_shared>  grid <worst>/3  groups <n>/1`
+against your own profile's thresholds.
 
 | | |
 |---|---|
 | ![Coverage graph, nothing detected](images/calib_stage_1_start.png) | ![Coverage graph, partial coverage](images/calib_stage_2_partial.png) |
-| **Stage 1.** Nothing detected yet. Every edge is dark and thin, every node is dull. `paired 0/250  grid 0/3`. | **Stage 2.** Cameras 1 and 3 are lit — they can see the board right now. Edges have begun to thicken. `paired 60/250  grid 2/3`. |
+| **Stage 1.** Nothing detected yet. Every edge is dark and thin, every node is dull, and every count in the caption is zero. | **Stage 2.** Cameras 1 and 3 are lit — they can see the board right now. Edges have begun to thicken, and `paired` and `grid` are part way to their targets. |
 | ![Coverage graph, nearly ready](images/calib_stage_3_nearly.png) | ![Coverage graph, READY](images/calib_stage_4_ready.png) |
-| **Stage 3.** Nearly there. Camera 5 is lit, most edges are bright and thick, and the 1-4 edge is still thin — that pair has barely seen the board together. `paired 200/250  grid 3/3`. | **Stage 4.** Every condition met. The whole graph freezes solid white and the caption reads `READY — m:ss`, with the elapsed time stopped at the moment it got there. |
+| **Stage 3.** Nearly there. Camera 5 is lit, most edges are bright and thick, and the 1-4 edge is still thin — that pair has barely seen the board together. `grid` has reached 3/3 and `paired` is just short of its target. | **Stage 4.** Every condition met. The whole graph freezes solid white and the caption reads `READY — m:ss`, with the elapsed time stopped at the moment it got there. |
 
 Everything on the graph is counted in *detection ticks*. One tick is a single
-pass of the board detector across the current frame from every camera, repeated
-about 30 times a second, so a tick is a moment in time rather than a recorded
-frame.
+pass of the board detector across the current frame from every camera, so a tick
+is a moment in time rather than a recorded frame. The pass is sequential over
+the cameras and costs more the more texture a scene has, so the rate is best
+effort: typically 10-20 a second at nine cameras, and fewer when the arena is
+cluttered.
 
 - **A node lights up** (cyan, brighter rim) when that camera sees at least 4
   board markers in the current tick. The glow decays over about 0.4 s, so it
@@ -452,17 +472,29 @@ frame.
   coverage. Each detection's marker centroid is binned into one of four
   quadrants of that camera's field of view, and the cell turns green the first
   time it is hit.
-- **The caption** reads `<elapsed>  paired <worst>/250  grid <worst>/3`. Both
-  numbers are the worst camera, not an average, so they move only when the
-  camera furthest behind improves.
+- **The caption** reads
+  `<elapsed>  paired <worst>/<target>  grid <worst>/<cells>  groups <count>/1`.
+  The two worst-camera numbers are not averages, so they move only when the
+  camera furthest behind improves; the targets come from the profile fields
+  `calibration_min_per_cam_shared` and `calibration_min_grid_cells`, 120 and 3
+  on the reference rig. `groups` is the third condition, and it is the one the
+  other two numbers cannot show: while it reads more than `1`, an orange line
+  above the caption lists the groups, for example `{1,2,3} {4,5}`. Show the
+  board to one camera from each group at the same time until it reads `1/1`.
 
 **READY requires three things at once:**
 
-1. Every camera has at least **250** co-detection ticks: ticks where it and at
-   least one other camera both saw the board.
-2. Every camera has hit at least **3 of its 4** field-of-view quadrants.
-3. The graph is **connected** through edges of at least **80** shared ticks, so
-   every camera is linked to every other directly or through a chain.
+1. Every camera has at least `calibration_min_per_cam_shared` co-detection
+   ticks — **120** on the reference rig — meaning ticks where it and at least
+   one other camera both saw the board.
+2. Every camera has hit at least `calibration_min_grid_cells` of its 4
+   field-of-view quadrants, **3** on the reference rig.
+3. The graph is **connected** through edges of at least `calibration_min_edge`
+   shared ticks, **20** on the reference rig, so every camera is linked to every
+   other directly or through a chain.
+
+All three targets are profile fields, so a rig sets how much waving it wants in
+its own YAML; the caption always shows the target it is testing against.
 
 The quadrant condition exists because waving the board in one spot in front of
 all the cameras satisfies the first and third. That gives poorly constrained
@@ -508,6 +540,10 @@ The graph itself. Drag blocks to arrange them; each carries four connector ports
   **Drag on empty space** for a rubber-band selection, shift-drag to add to it.
 - **Delete** removes the selected blocks and arrows. **Ctrl+C / Ctrl+V** copies
   and pastes blocks at the cursor. **Middle-drag** pans, **scroll** zooms.
+  **Home** fits the whole graph in view. **Escape** clears the selection and
+  nothing else: it deliberately does not close the editor, because a hidden
+  editor with a bench test running would put its only Stop button out of sight.
+  **There is no undo.** Delete is final, so Save the graph before a large edit.
 - Each block shows its pin in the header, then its frequency, pulse width,
   duration, and the resulting mode: `10% duty`, `constant ON`, or `pin LOW`.
   Blocks are tinted by pin number.
@@ -571,8 +607,12 @@ canvas, and like Starting it is disabled until exactly one block is selected.
 It stops the *recording*, not the chain. A looping chain runs until the
 recording ends, so bound a loop either with an Ending block or with a parallel
 timer chain that carries one. The countdown is armed on the host when Record
-starts and the board is never asked to report back; when the time is up, the
-host turns Record off exactly as a hand would.
+starts, from the canvas's own end time, and the board is never asked to report
+back; when the time is up, the host turns Record off exactly as a hand would.
+Reading the end time off the canvas is safe because Record refuses to start when
+the canvas holds a paradigm that has never been Applied, or one edited since the
+last Apply — in both cases the board would run something other than what the
+canvas describes.
 
 **9 — Status line.**
 What the current graph would do, and what is wrong with it. In normal use, the
@@ -616,8 +656,11 @@ reload, while the board only ever holds what was last uploaded.
 
 A recording started with blocks on the canvas also writes `stim_paradigm.json`
 and `stim_paradigm.ino` into the recording folder, with the firmware hash and
-whether it matches what was uploaded this session, so a session describes the
-stimulation it delivered without the editor.
+`matches_uploaded_firmware`, so a session describes the stimulation it delivered
+without the editor. Read that flag first: the files describe the *canvas*, and
+only `matches_uploaded_firmware: true` says the canvas is what the board was
+carrying. `false` means it is not, and `null` means nothing was uploaded in that
+GUI session, so the board's contents are unknown rather than wrong.
 
 ---
 

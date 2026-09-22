@@ -10,7 +10,6 @@ __pycache__/
 # line of defence, because that failure is invisible to `git add`.
 /_*.py
 !**/__init__.py
-campy/.git/
 .venv/
 probe_out/
 

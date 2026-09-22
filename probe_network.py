@@ -168,8 +168,16 @@ def pick_profile(explicit: str | None):
     return profiles[0][1]
 
 
-def sweep(serial_filter: int | None, profile_name: str | None) -> int:
+def sweep(serial_filter: int | None, profile_name: str | None,
+          force: bool = False) -> int:
     from gui_app.backends import load_backend
+    from gui_app.probe_guard import refuse_if_panopticon_running
+
+    # The sweep opens cameras and applies the profile's .pfs, so it must
+    # not run beside a session that already holds them. Discovery above is
+    # a UDP query and stays unguarded, which is why probe_network.py is
+    # not itself a marker in probe_guard.PANOPTICON_MARKERS.
+    refuse_if_panopticon_running(force=force)
 
     profile = pick_profile(profile_name)
     if profile is None:
@@ -235,6 +243,8 @@ def main() -> int:
     ap.add_argument("--profile", default=None,
                     help="rig profile whose .pfs --sweep applies "
                          "(default: the one the GUI last used)")
+    from gui_app.probe_guard import add_force_argument
+    add_force_argument(ap)
     args = ap.parse_args()
 
     interfaces = host_camera_interfaces()
@@ -300,7 +310,7 @@ def main() -> int:
 
     rc = 0
     if args.sweep:
-        rc = sweep(args.cam, args.profile)
+        rc = sweep(args.cam, args.profile, force=args.force)
     else:
         print("\n  (add --sweep to test whether the paths carry 9000-byte packets)")
     return 1 if stranded else rc

@@ -4,8 +4,9 @@ How Panopticon gets from photons to files, in enough detail to fix it, port it,
 or run it on hardware that is not the reference rig. To run a session,
 [WORKFLOW.md](WORKFLOW.md) walks through one.
 
-Numbers from the reference rig (6x Basler a2A1920-165g5m GigE, 1920x1200 mono8,
-100 fps) are examples of the arithmetic, not requirements. Each derives from
+Numbers from the reference rig (9x Basler a2A1920-165g5m GigE, 1920x1200 mono8,
+100 fps, six trigger pins fanned out across them) are examples of the
+arithmetic, not requirements. Each derives from
 resolution, frame rate and camera count, and the derivation is given so you can
 redo it for your rig.
 
@@ -64,19 +65,30 @@ The code follows that shape, so the module map doubles as a map of the diagram:
 |---|---|
 | `gui_app/backends/__init__.py` | The camera-backend contract, and the grab-result duck type |
 | `gui_app/backends/basler.py` | The only module that knows what a Basler camera is |
+| `gui_app/backends/sim.py`, `sim_board.py` | A simulated rig — cameras paced by a virtual trigger clock, and the board that paces them. Selected by `camera_backend: sim` |
 | `gui_app/camera_manager.py` | Vendor-neutral orchestration: open, describe, mode switches, start/stop |
 | `gui_app/grab_thread.py` | The per-camera hot loop, the NV12 ring, and the encoder drain thread |
+| `gui_app/cpu_affinity.py` | Thread placement on a hybrid CPU. Windows-only, and a no-op elsewhere |
 | `gui_app/frame_sync.py` | Cross-camera release logic. Pure integers, no Qt, no SDK |
 | `gui_app/sync_encode.py` | Router: owns the coordinator, the encoders, and the recorded metadata |
+| `gui_app/encoders.py` | The encoder seam: the factory protocol every encode path is resolved through |
 | `gui_app/nvenc.py` | PyNvVideoCodec loader, encoder factory, session probe |
+| `gui_app/cpu_encode.py` | The libx264 encoder behind that seam, one ffmpeg child per camera |
 | `gui_app/encode_worker.py` | Post-stop remux and the raw-mode encode pool |
+| `gui_app/ffmpeg_cmd.py` | Every ffmpeg command line, in one place, so no writer can lose `-g` or `+faststart` |
 | `gui_app/alignment.py` | Block-ID unwrap, intersection, post-hoc re-encode |
+| `gui_app/hardware_check.py` | The launch screen and the per-acquisition capacity preflight |
+| `gui_app/session_config.py`, `rig_setup.py`, `settings.py` | The rig profile and one session on it; the two calls that configure a manager from a profile; per-machine preferences |
 | `gui_app/serial_controller.py` | Trigger-board link and the RDY handshake |
 | `gui_app/stim_compiler.py` | Stim graph to Arduino sketch, including the trigger loop |
 | `gui_app/stim_trace.py` | Per-frame model of what the paradigm delivered |
-| `gui_app/board_detector.py`, `coverage_worker.py` | Live ChArUco coverage during calibration |
+| `gui_app/board_detector.py`, `coverage_worker.py`, `charuco.py` | Live ChArUco coverage during calibration, and the shared board construction the solve uses too |
+| `gui_app/ui_workers.py`, `calibration_worker.py`, `align_worker.py` | Blocking work off the Qt main thread: any callable, the solve, the alignment pass |
+| `gui_app/main_window.py`, `gui_app/widgets/` | The window's state machine, and the sidebar, camera grid, coverage graph and stimulation editor |
+| `gui_app/probe_guard.py` | Refuses to let a probe open the rig while a Panopticon is running |
+| `gui_app/mp_framesync.py` | A multi-process coordinator. **Not wired into the application**; kept with its own test |
 | `1_calibrate.py` | The calibration solve — a standalone script, run through `uv run` in the project environment |
-| `2_align.py`, `3_stim_trace.py` | Standalone equivalents of the in-app passes; these two are PEP 723 scripts, carrying their dependencies in an inline header |
+| `2_align.py`, `3_stim_trace.py` | Standalone equivalents of the in-app passes. Like `1_calibrate.py` they run in the project environment (`uv run python 2_align.py …`) and carry no inline dependency header, so a rig with no network can still run them |
 
 ---
 
@@ -118,19 +130,20 @@ the trigger instant is half a period after `FRAME_START`.
 `camsHigh()` and `camsLow()` write every trigger pin inside a
 `noInterrupts()`/`interrupts()` pair, so skew between pins is bounded by the
 write loop and cannot be stretched by an interrupt landing mid-loop. The design
-comes from campy, by Kyle Severson (`campy/campy/trigger/trigger.ino`), which
-documents ±0.35 µs inter-frame interval precision and roughly 30 ns synchronicity
-between pins.
+comes from campy, by Kyle Severson (`trigger.ino` in the upstream repository,
+<https://github.com/ksseverson57/campy>), which documents ±0.35 µs inter-frame
+interval precision and roughly 30 ns synchronicity between pins.
 
 And nothing on the host is in the timing path. The host names the pins and the
 rate; after that the board is on its own.
 
-On the reference rig the pins are `[2, 4, 6, 8, 10, 12]` (profile field
-`trigger_pins`), one per camera, each wired to that camera's `Line1`, all written
-inside the same `noInterrupts()` block. One fanned-out line is electrically
-equivalent provided the output can source every input. The sketch drives whatever
-pin count the serial command carries, so adding a camera means adding a pin to
-the profile.
+On the reference rig those six pins `[2, 4, 6, 8, 10, 12]` (profile field
+`trigger_pins`) drive nine cameras: some of them feed more than one `Line1`, and
+all are written inside the same `noInterrupts()` block. A fanned-out line is
+electrically equivalent to one pin per camera provided the output can source
+every input's current, which is the only thing that limits it. The sketch drives
+whatever pin count the serial command carries, so a camera hung off an existing
+pin needs no profile change at all, and one on a new pin needs that pin listed.
 
 ### Why the same board owns stimulation
 
@@ -189,7 +202,12 @@ letting it burn its one-second timeout.
 
 The sketch replies `RDY <n_cams> <fps>` from `announceReady()`, called from both
 config paths (`setup()` and the `loop()` reconfigure branch) and printed before
-`FRAME_START` is set, so the print latency cannot skew the clock.
+`FRAME_START` is set, so the print latency cannot skew the clock. Firmware that
+knows its own build appends an eight-hex sketch identity, `RDY <n_cams> <fps>
+<id>`. The host matches the whole stripped line rather than searching inside it:
+the ack exists to prove the board printed exactly this line, so `RDY 6 1000`
+cannot satisfy a request for 100 fps and a boot message run into the token is a
+garbled ack, not a confirmed start.
 
 ### The RDY handshake
 
@@ -226,11 +244,37 @@ pyserial, so it needs no board.
 
 `ACK_TIMEOUT` is 4 s because the sketch's `readFPS()` can burn a one-second
 `parseFloat()` timeout followed by `delay(500)`; a legitimate ack takes about
-1.5 s. `stop_triggers()` returns whether the board accepted the command, and the
-caller surfaces a failure loudly: a looping stim chain never ends on its own, so
-an unacknowledged stop can leave a laser driven with the UI showing IDLE.
-`pyserial`'s `is_open` stays True after the USB device disappears, so port state
-is not evidence that the board is there.
+1.5 s.
+
+The **stop** is acked too, for a stronger reason than the start. The reconfigure
+branch is what ends a paradigm — `camsLow(); allStimLow(); FPS_OUT = 0` — and a
+looping stim chain never ends on its own, so an unacknowledged stop can leave a
+laser driven while the window reads IDLE. A write leaving the host proves
+nothing: a wedged sketch, a board still in its bootloader after an upload, and
+foreign firmware all accept the bytes and stop nothing. So `stop_triggers()`
+writes the config with `fps = -1`, waits up to `STOP_ACK_TIMEOUT` (3 s) for
+`RDY <n_pins> 0` — `readFPS()` clamps the -1 to 0 — and returns False if it
+does not arrive, which the caller turns into a dialog. Firmware that has never
+spoken RDY is exempt, so a stock `trigger.ino` rig is not shown a warning it
+cannot act on. Waiting also serialises stop against the next start: the sketch
+drains its input for about 1.5 s before acking, and a start written into that
+window is swallowed, times out and forces the port reset that the long-lived
+connection exists to avoid. `pyserial`'s `is_open` stays True after the USB
+device disappears, so port state is not evidence that the board is there.
+
+**Which sketch the board is carrying** is decided by that identity, in
+preference to the per-machine record of what was last uploaded. The record says
+what this host last wrote onto whatever was on the port, so a board flashed from
+the Arduino IDE, swapped for another, or shared with a second rig would be
+trusted as stimulation-free while carrying a paradigm — which is the case the
+launch-time flash exists to cover. The identity is obtained by standing the
+board down, because the sketch prints its RDY line only in answer to a config
+and a stop is the one config that is always safe to send: it drives the camera
+pins and every stim pin LOW, which is also the right state for a board found
+running a paradigm. A board reporting anything other than the recording-only
+sketch's identity is reflashed, at most once per launch. Firmware that reports
+no identity falls back to the stored hash, and the log says that is what
+happened.
 
 ---
 
@@ -471,8 +515,12 @@ The profile's `max_num_buffer` sets the driver-side buffers per camera, applied
 at open (`camera_manager.MAX_NUM_BUFFER = 1000` is only the default for callers
 that do not pass one). At 1920x1200 mono8 each buffer is 2.3 MB, so the pool is
 `n_cameras x max_num_buffer x 2.3 MB` — 19.3 GiB at nine cameras and 1000
-buffers, which is why the reference rig runs 250 instead: 4.8 GiB, and still
-2.5 s of slack at 100 fps. This is the pool half of the RAM budget in
+buffers, which is why the reference rig runs 600 instead: 11.6 GiB, and still
+6 s of slack at 100 fps. The pool is also floored by the coordinator: it must be
+at least `kick_max_lag` deep, or the driver reuses a buffer holding a frame the
+coordinator is still waiting on, and a recoverable lag becomes a lost one (the
+rule is stated on `ENCODE_QUEUE_DEPTH` in `gui_app/grab_thread.py`). This is the
+pool half of the RAM budget in
 [INSTALLATION.md](INSTALLATION.md). `GrabStrategy_OneByOne` delivers oldest-first.
 
 Deep slack absorbs network jitter, and it hides a per-frame deficit. A grab loop
@@ -592,8 +640,9 @@ it collapses. Hence the criterion:
 
 **Acceptance criterion for any hot-path change: ≤300 µs of GIL-held work per
 thread per frame is safe even at 17 threads; ~1000 µs blows a 10 ms budget at
-11.** Reproduce the boundary with `probe_gil_wait.py`, and A/B a specific access
-route on a live camera with `probe_zerocopy.py`.
+11.** Reproduce the boundary with `tools/experiments/probe_gil_wait.py`, and A/B
+a specific access route on a live camera with
+`tools/experiments/probe_zerocopy.py`.
 
 Moving the six-camera reference rig onto the zero-copy view on 2026-09-03 took
 mean loop `cycle` from 12.0 ms to exactly 10.00 ms, the trigger period. It took
@@ -637,6 +686,32 @@ a first-touch page fault (~0.4 ms) back on the hot path.
 
 `MemoryError` at allocation is caught and retires the camera rather than escaping
 `run()` and taking the GUI with it.
+
+### Thread placement
+
+On a hybrid CPU the loop's deadline is decided partly by which core it runs on.
+Nine cameras is about nineteen busy threads against eight performance cores, so
+the scheduler must place most of them on efficiency cores and it chooses
+differently every launch. A grab thread there executes the same work more
+slowly, and the loop cannot make that up, because it retrieves at exactly the
+rate frames arrive: the result is one camera per session behind the others, a
+different camera each time.
+
+`gui_app/cpu_affinity.py` holds the placement calls, driven by four profile
+fields. `pin_capture_threads` gives each grab thread one performance core and
+raises its priority — fixed placement, rather than handing the scheduler a set,
+because migration costs cache locality. `capture_core_exclude` removes cores
+from that pool, for the cores carrying the NIC's deferred-procedure-call work.
+`encoder_pcores` and `pin_encoder_threads` place the encoder threads and ship
+off, because both measured worse than leaving the encoders where Windows puts
+them.
+
+The performance cores are not the first N logical CPUs — they interleave with
+the efficiency cores — so the set is read from the OS rather than assumed, with
+`GetSystemCpuSetInformation`. Every entry point is guarded by a Windows check
+and returns without raising elsewhere: failing to pin is a performance
+regression, and must never take a recording down. On a non-hybrid CPU, or off
+Windows, all four fields do nothing.
 
 ### Instrumentation
 
@@ -778,16 +853,14 @@ drops are counted and attributed in `forced_by[]`, and the router logs
 `lag_behind_leader[...] forced=... forced_by[...]` about every five seconds. Read
 that line when a session is losing frames: it names the camera responsible.
 
-`max_lag` trades against RAM, and it has been measured. A clean A/B on 2026-08-11
-over 100,968 frames and 17 minutes, identical camera settings and only the cap
-differing, gave **87.68 fps released and 12.34% loss at 240, against 99.14 fps
-and 0.88% loss at 480**, which is why the reference profile ships 480. The cost
-is linear: `max_lag + queue + 64` NV12 buffers per camera, about 2.39 GiB each at
-480. Bigger is not automatically better, and 1000 **starved capture outright**,
-at 24% loss on 2026-06-17. Since the grab-loop fix of 2026-09-03 the observed
-cross-camera lag is median 0, p95 1, max 2 frames, so the current headroom buys
-nothing in practice and 240 would very likely do. Lowering it is deferred pending
-a rig A/B rather than being wrong.
+`max_lag` trades against RAM, and the cost is linear: `max_lag + queue + 64`
+NV12 buffers per camera, about 2.39 GiB each at 480. Bigger is not automatically
+better — a cap large enough to outgrow the machine has starved capture outright
+— and a cap below the lag the rig really shows force-drops triggers every camera
+captured. `max_num_buffer` must stay at or above it, so the pool outlasts the
+coordinator's patience. The reference profile ships 480; the comment on
+`kick_max_lag` in `profiles/3dpose.yaml` is the single source for why, and for
+the condition under which another value would be right.
 
 Two smaller pieces complete the coordinator. `retire(cam, reason)` drops a camera
 from the alignment set, clears its pending deque, and records the reason so it
@@ -918,8 +991,18 @@ rejects a genuinely unsupported keyword, but treats the codes in `_NVENC_FATAL`
 (1, 2, 4, 5, 10, 21) as fatal after a single GC retry. Descending the ladder on a
 session-limit error is actively harmful: if a slot frees part-way down, a later
 rung succeeds with a reduced configuration and the recording quietly gets encoder
-settings nobody chose. Every rung carries `gopLength`/`idrPeriod` regardless, and
-the code says loudly when a reduced configuration was used.
+settings nobody chose. Every rung carries the GOP keys regardless, and the code
+says loudly when a reduced configuration was used.
+
+The GOP keys are lowercase `gop` and `idrperiod`, and the only proof they took
+effect is the encoded bitstream. PyNvVideoCodec accepts an unrecognised keyword
+without complaint, so the ladder's earlier `gopLength`/`idrPeriod` were dropped
+silently: measured, they produce output byte-identical to passing no GOP at all.
+Every real-time recording therefore held one IDR for its whole length, which is
+what makes a finished video take minutes to scrub. `-g <fps>` on the ffmpeg
+writers does not cover this path, because the default remux is a stream copy and
+copies whatever GOP NVENC wrote. `nvenc.gop_is_honoured()` encodes two GOPs and
+counts IDRs; the launch preflight runs it so a renamed keyword is loud.
 
 `hardware_check.nvenc_session_capacity()` caches the probe but records whether
 the answer was a refusal (the real ceiling) or the probe's own limit (a lower
@@ -980,8 +1063,8 @@ are easy to forget when adding an encode path, and neither failure is loud.
   1 MB pieces from byte 0 and stops when moov parses, so moov-at-end forces a
   read of the entire file, per camera, before frame 1 appears.
 
-The mp4 writers are `encode_worker._cmd()` (both branches), `acquire._encode_raw()`
-and `alignment.extract_aligned()`. That last one **replaces** the session
+The mp4 writers are `encode_worker._cmd()` (both branches) and
+`alignment.extract_aligned()`. That last one **replaces** the session
 recording, so it needs both flags too. `_append_raw_tail()` and the in-capture
 encoders emit Annex-B `.h264` and are exempt; the remux supplies the container.
 
@@ -1070,11 +1153,21 @@ are triggered, encoded and aligned by the same path as a recording.
 
 ### Live coverage
 
-`board_detector.BoardDetector` runs on full-resolution frames at ~30 Hz from
+`board_detector.BoardDetector` runs on full-resolution frames from
 `coverage_worker.CoverageWorker`, off the UI thread (`GrabThread.set_keep_full`
 enables the full-res copy; six ChArUco detections per UI tick would stutter the
 preview). Full resolution matters for obliquely mounted cameras, the same
 requirement the solve has.
+
+The tick rate is **best effort**, not a fixed 30 Hz. The worker's 33 ms interval
+is a floor on the period, and detection runs sequentially over the cameras at
+6-250 ms each depending on how much texture the scene offers a marker detector,
+so nine cameras land at typically 10-20 Hz and near 1 Hz when several cameras
+see clutter. Every threshold below is therefore a count of ticks whose wall-clock
+worth varies with camera count and scene: the error is in the safe direction,
+since a slower tick means more frames behind each count, but do not read a
+threshold as a number of seconds. The measured rate is published as
+`ticks_per_s` and logged as `[hud] coverage ticks/s:` every 30 seconds.
 
 Per detection tick, per camera, it counts **ArUco markers**, not interpolated
 ChArUco corners:
@@ -1084,9 +1177,14 @@ ChArUco corners:
 | `glow_threshold` | 4 markers | Camera node pulses in the HUD |
 | `edge_threshold` | 5 markers | Counts as "this camera saw the board this tick" |
 | `optimal_shared` | 200 | Edge-thickness scale in the HUD |
-| `min_edge` | 80 co-detection ticks | A pair counts as connected |
-| `min_per_cam_shared` | 250 co-detection ticks | Per-camera floor |
-| `MIN_GRID_CELLS` | 3 of 4 | Spatial spread, see below |
+| `min_edge` | profile field `calibration_min_edge`, default 40, shipped 20 | A pair counts as connected |
+| `min_per_cam_shared` | profile field `calibration_min_per_cam_shared`, default 120, shipped 120 | Per-camera floor |
+| `MIN_GRID_CELLS` | profile field `calibration_min_grid_cells`, default 3, shipped 3, out of 4 | Spatial spread, see below |
+
+The bottom three are constructor arguments `main_window` fills from the profile,
+so a rig tunes how long the board is waved for by editing its own YAML; the two
+above them are code constants. The caption under the graph shows the target it
+is actually testing against, so it reads `paired N/120` on a rig that ships 120.
 
 A tick with two or more cameras above `edge_threshold` increments each
 participating camera's `per_cam_covis`, increments every participating pair's
@@ -1395,7 +1493,7 @@ It sets no repair in motion. The alignment pass removes frames one camera has an
 another lacks; a camera that ignored triggers has none, so the pass finds the
 recording already aligned and returns without rewriting a video. That is right:
 these frames are misdated rather than missing, and trimming cannot re-date a
-frame. Nor can anything else. `uv run 2_align.py <recording_dir>` re-derives the
+frame. Nor can anything else. `uv run python 2_align.py <recording_dir>` re-derives the
 warning from a recording on disk, useful for confirming the diagnosis weeks
 later. So when the warning names one camera, meaning a camera really skipping
 triggers rather than the uniform offset above, **that recording cannot be
@@ -1546,7 +1644,8 @@ what each becomes on Linux:
 | Serial port names | Profiles carry `COM3` | A device path works as well; the code passes the string through |
 | `configure_nic.ps1` | RSS receive queues via `Set-NetAdapterRss` | Linux equivalents are `ethtool -L`/`-X` and IRQ affinity |
 | `make_shortcut.ps1` | Desktop shortcut creation | Cosmetic |
-| `QueryThreadCycleTime` | Used by `probe_gil_wait.py` to separate executing from waiting | Linux equivalent is per-thread CPU clock via `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` |
+| `QueryThreadCycleTime` | Used by `tools/experiments/probe_gil_wait.py` to separate executing from waiting | Linux equivalent is per-thread CPU clock via `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` |
+| `gui_app/cpu_affinity.py` | Every entry point — core classification, pinning, thread priority, timer resolution — is guarded by a Windows check and returns without raising elsewhere, so `pin_capture_threads` and its three companions silently do nothing | `os.sched_setaffinity` and `os.nice` cover pinning and priority; the P-core/E-core split comes from sysfs rather than `GetSystemCpuSetInformation` |
 | `arduino-cli` upload | Invoked for firmware upload | Cross-platform, but the port name and reset behaviour differ |
 
 pypylon, PyQt5, numpy, OpenCV, PyNvVideoCodec and the trigger firmware toolchain
@@ -1560,6 +1659,9 @@ rigs, so nothing rig-specific belongs in code (notably not stim pin numbers).
 
 | Field | Effect |
 |---|---|
+| `camera_backend` | Which module in `gui_app/backends/` is loaded. `sim` is a full hardware-free rig |
+| `encoder` | Which H.264 encoder a recording asks for. Validated here, not yet consumed by a recording |
+| `metadata_defaults` | Sidebar pre-fill written into `session_metadata.json`; the one home for a lab's own operator and assay strings |
 | `frame_width`, `frame_height`, `frame_rate` | Must match the `.pfs`; drive every capacity calculation |
 | `calibration_frame_rate` | Trigger rate for the calibration acquisition, and its exposure budget |
 | `quality` | NVENC constant quantiser (`-qp`) |
@@ -1569,13 +1671,20 @@ rigs, so nothing rig-specific belongs in code (notably not stim pin numbers).
 | `kick_max_lag` | Coordinator depth in frames. Ring RAM scales linearly with it |
 | `max_num_buffer` | Driver-side buffers per camera. Pool RAM scales linearly with it, and it is usually the larger of the two |
 | `n_cameras` | Refuse to start unless exactly this many cameras enumerate |
+| `camera_serials` | The serials this rig is made of. Opens only these and refuses a missing one, so a failed enumeration cannot rename the cameras after it. Ascending, unique, and the same length as `n_cameras`, or the profile is refused |
 | `gige_driver` | `socket`, `filter` or `auto` |
+| `gev_bandwidth_reserve_pct`, `gev_bandwidth_reserve_accum` | `GevSCBWR` and `GevSCBWRA`, written through the backend at open when set: link bandwidth held back for packet resends, and how many reserve slots may pool |
 | `trigger_rate_limit` | `AcquisitionFrameRate` in trigger mode; sets the exposure ceiling and paces readout |
 | `pfs_path` | Camera settings file: exposure, gain, ROI, pixel format, packet size, `GevSCPD` |
+| `output_dir`, `name` | Where sessions are written, and the label in the profile dropdown. The sidebar's directory button overrides `output_dir` per machine |
 | `board_config` | ChArUco geometry and `board_legacy` |
 | `serial_port`, `trigger_pins` | Trigger board location and pin map |
 | `stim_safe_pins` | Pins driven LOW before the serial handshake |
 | `calibration_exposure_us`, `calibration_gain_db` | Calibration-only overrides; `0` / `-1` mean "leave the `.pfs` value alone" |
+| `calibration_min_per_cam_shared`, `calibration_min_edge`, `calibration_min_grid_cells` | The three coverage-HUD READY thresholds. Profile fields, not code constants |
+| `pin_capture_threads`, `capture_core_exclude` | Grab-thread placement on a hybrid CPU, and the cores to keep them off |
+| `encoder_pcores`, `pin_encoder_threads` | Encoder-thread placement. Both off: measured regressions, kept for a rig with more cameras than performance cores |
+| `thermal_poll_s` | Seconds between camera temperature polls while acquiring; `0` disables |
 
 ### Preflight arithmetic
 
@@ -1586,7 +1695,7 @@ warns. Redo this arithmetic for a different rig:
 frame_bytes  = width * height                      # mono8
 nv12_bytes   = width * (height * 3 // 2)
 ring_n       = kick_max_lag + 200 + 64             # kick mode
-pool_bytes   = n_cams * MAX_NUM_BUFFER * frame_bytes
+pool_bytes   = n_cams * max_num_buffer * frame_bytes
 ring_bytes   = n_cams * ring_n * nv12_bytes        # real-time only
 disk_per_s   = n_cams * fps * (4600 if realtime else frame_bytes)
 ```
@@ -1599,19 +1708,52 @@ here.
 
 ### Tests and probes
 
-Plain scripts, no pytest. Run them directly.
+Plain scripts, no pytest: each prints a `PASS` line per case, ends with one
+`ALL ... PASS` line and exits non-zero on the first failure. Run them directly.
+This table is the canonical inventory; the other pages point here rather than
+listing a subset.
+
+**Hardware-free suites.** Every one of these runs on a machine with no cameras,
+no trigger board and no GPU, which is what makes them the acceptance run for a
+fresh install. The whole set is
+`Get-ChildItem test_*.py -Exclude test_sync_router.py | ForEach-Object { uv run python $_ }`,
+with `$env:QT_QPA_PLATFORM = "offscreen"` set first for the Qt ones. The
+exclusion is the one suite below that needs a GPU. The third column names what
+each suite needs on top of a bare python; every one of those is a core
+`[project]` dependency, so `uv sync` installs the lot and the only thing a
+headless host adds is the offscreen Qt platform.
+
+| Suite | Covers | Needs beyond a bare python |
+|---|---|---|
+| `test_frame_sync.py` | Coordinator equals post-hoc intersection; group integrity; wrap; retirement; drop attribution; the block-ID rate check | Nothing |
+| `test_grab_failure.py` | Every path out of `GrabThread.run()` retires the camera, with the SDK absent from `sys.modules` | Qt, offscreen |
+| `test_serial_handshake.py` | The four handshake outcomes, and the stop ack | Nothing; pyserial is stubbed |
+| `test_stim_compiler.py` | Graph to sketch: start resolution, cycle-safe chains, integer µs, safe-pin boot order, pin conflicts, sketch structure, the RDY ack, the per-frame trace | numpy for the later cases |
+| `test_stim_guard.py` | A failed or unapplied Apply must block Record, and the editor's test lifecycle | Qt, offscreen |
+| `test_board_coverage.py` | Calibration coverage: partner-weighted co-visibility, connected components, the three READY conditions, `bridge_hint`, plus a regression from a real session that split into three groups | numpy |
+| `test_calibrate.py` | The solve: largest-component choice, edge weights, quality metadata, failure codes, the GUI workers, an end-to-end synthetic solve | numpy, OpenCV, Qt |
+| `test_alignment.py` | The post-hoc pipeline: alignment, `encode_worker`, `ffmpeg_cmd`, `stim_trace` and the two CLIs, against a stub ffmpeg | numpy, Qt |
+| `test_camera_manager.py` | The cold path: geometry agreement, naming by serial, exposure logging per camera | Nothing |
+| `test_session_config.py` | Every way a profile or a session field can be wrong must raise `ProfileError` rather than take a default | Nothing |
+| `test_hardware_check.py` | The preflight's branches with every hardware probe stubbed | Nothing |
+| `test_cpu_encode.py` | The libx264 fallback: command invariants, a router round trip, teardown | numpy, the bundled ffmpeg |
+| `test_cpu_affinity.py` | Hybrid-CPU class detection and the Basler backend's node handling, both fed recorded data | Nothing |
+| `test_sim_backend.py` | The simulated rig reproduces the loss modes the capture path guards for | Qt, offscreen |
+| `test_main_window_start.py` | Start, refuse, roll back and quit, driven against the simulated rig | Qt, offscreen |
+| `test_sync_router_offline.py` | `blockids.npy` claims only persisted frames, without a GPU | numpy, Qt |
+| `test_thermal_watch.py` | The temperature poll, its thresholds read from the camera, and the warning path | Nothing |
+| `test_mp_framesync.py` | The multi-process coordinator, which is not wired into the application | numpy |
+| `test_probe_guard.py` | The probe guard fails closed when the process table cannot be read | Nothing |
+| `test_widgets.py` | Sidebar and camera-grid behaviour: toggle exclusion, grid layout, preview painting | numpy, Qt |
+
+**Needing hardware.**
 
 | Command | Covers | Needs |
 |---|---|---|
-| `uv run python test_frame_sync.py` | Coordinator equals post-hoc intersection; group integrity; wrap; retirement; drop attribution; the block-ID rate check | Nothing |
-| `uv run python test_grab_failure.py` | Every path out of `GrabThread.run()` retires the camera | Qt only, offscreen |
-| `uv run python test_serial_handshake.py` | The four handshake outcomes | Nothing; pyserial is stubbed |
-| `uv run python test_stim_compiler.py` | Graph to sketch: start resolution, cycle-safe chains, integer µs, safe-pin boot order, pin conflicts, sketch structure, the RDY ack, the per-frame trace | numpy for the later cases |
-| `uv run python test_board_coverage.py` | Calibration coverage: partner-weighted co-visibility, connected components, the three READY conditions, `bridge_hint`, plus a regression from a real session that split into three groups | numpy |
 | `uv run python test_sync_router.py` | Router smoke test | NVENC |
-| `uv run probe_lag.py --seconds 120` | The real capture path headlessly, with a per-camera lag trace | Cameras |
-| `uv run python probe_zerocopy.py` | A/B of frame-access routes on a live camera | A camera |
-| `uv run python probe_gil_wait.py` | GIL-held work versus thread count, executing separated from waiting | Nothing |
+| `uv run probe_lag.py --seconds 120` | The real capture path headlessly, with a per-camera lag trace | Cameras and the trigger board |
+| `uv run python tools/experiments/probe_zerocopy.py` | A/B of frame-access routes on a live camera | A camera |
+| `uv run python tools/experiments/probe_gil_wait.py` | GIL-held work versus thread count, executing separated from waiting | Windows (`QueryThreadCycleTime`) |
 | `uv run probe_network.py [--sweep]` | Which switch each camera is on (GVCP discovery, so it sees cameras pylon hides for being out-of-subnet), and whether each path carries 9000-byte packets | Cameras; `--sweep` opens them |
 
 Run `test_serial_handshake.py` after touching `serial_controller.py`; it is the

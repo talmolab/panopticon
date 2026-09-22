@@ -1,10 +1,35 @@
 [project]
 name = "panopticon"
 version = "0.1.0"
-description = "Multi-camera acquisition GUI for 3D pose estimation"
+description = "Multi-camera hardware-synchronised video acquisition for 3D animal pose estimation"
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Isaac Tang", email = "itang@salk.edu" },
+    { name = "Kay Tye" },
+    { name = "Talmo Pereira" },
+]
 requires-python = ">=3.10,<3.13"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+# Hardware-neutral dependencies only. The vendor SDKs live in the `rig` group
+# below so that a machine without Basler cameras or an NVIDIA GPU can install
+# and run the offline test suites.
 dependencies = [
-    "pypylon>=26.0",
     "PyQt5>=5.15",
     "PyQt5-Qt5==5.15.2",
     "numpy>=2.0",
@@ -19,9 +44,25 @@ dependencies = [
     # Reprojection-error histogram in 1_calibrate.py. Skipped if absent,
     # but included so a fresh install can produce it offline.
     "matplotlib>=3.5",
+]
+
+[project.urls]
+Repository = "https://github.com/talmolab/panopticon"
+
+# PEP 735 dependency groups. The project is not packaged (no build backend), so
+# groups, not extras, are the mechanism uv can install.
+[dependency-groups]
+# Vendor SDKs the acquisition rig needs: the Basler camera driver and the NVENC
+# encoder with its CUDA runtime. `uv sync --no-group rig` installs without them.
+rig = [
+    "pypylon>=26.0",
     "pynvvideocodec>=2.1.0",
     "nvidia-cuda-runtime-cu12>=12.9.79",
 ]
+dev = [
+    "pytest>=8.0",
+]
 
-[project.scripts]
-panopticon = "gui:main"
+[tool.uv]
+# Both groups install by default so a plain `uv sync` on the rig is unchanged.
+default-groups = ["dev", "rig"]
