@@ -13,20 +13,12 @@ Launch: `uv run gui.py` (or `conda run -n 3dpose python gui.py`).
 
 ## Conventions
 
-- Run the matching test after touching a module (plain scripts, no pytest):
-  - `test_stim_compiler.py` after `stim_compiler.py` or `stim_trace.py` — graph → sketch,
-    start resolution, cycle-safe chains, integer-µs encoding, safe-pin boot order, pin
-    conflicts, RDY ack, per-frame trace. Tests 10-13 need numpy.
-  - `test_serial_handshake.py` after `serial_controller.py` — the four handshake outcomes;
-    the guard against silently recording zero frames. Stubs pyserial, needs no COM port.
-  - `test_frame_sync.py` after `frame_sync.py` — kick-out == post-hoc intersection, plus
-    the block-ID rate check.
-  - `test_grab_failure.py` after `grab_thread.py` — the ways a grab thread must fail loudly
-    (padding, re-arm exhaustion, retirement). Needs PyQt5.
-  - `test_board_coverage.py` after `board_detector.py` — co-visibility counting, connected
-    components, the three READY conditions. Needs numpy only.
-  - `test_sync_router.py` / `test_sync_router_offline.py` — encoder router (the first needs
-    NVENC; the second is offline).
+- Run the matching test after touching a module (plain scripts, no pytest; `CONTRIBUTING.md`
+  has the full map): `test_stim_compiler.py` after `stim_compiler.py`/`stim_trace.py`,
+  `test_serial_handshake.py` after `serial_controller.py` (the guard against recording zero
+  frames), `test_frame_sync.py` after `frame_sync.py`, `test_grab_failure.py` after
+  `grab_thread.py`, `test_board_coverage.py` after `board_detector.py`,
+  `test_sync_router[_offline].py` for the encoder router.
 - `.gitignore` anchors `/_*.py` to the repo root — do **not** unanchor it. A bare `_*.py`
   also matches `__init__.py` and silently keeps a package out of every commit, breaking a
   fresh clone. `!**/__init__.py` is a second line of defence; after adding a package, verify
