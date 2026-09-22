@@ -20,7 +20,7 @@ quality: 21
 encode_parallel: 3           # concurrent NVENC jobs (raw mode) / .h264->mp4 remux jobs (realtime mode)
 realtime_encode: true        # GPU H.264 encode during capture (no raw.bin, no post-hoc pass). Set false for the raw fallback.
 realtime_kick: true          # default: real-time cross-camera frame kick-out — only frames every camera caught are encoded, so videos come out trigger-aligned with no post-hoc re-encode.
-# Driver-side buffers per camera. RAM = n_cameras x this x 2.304 MB (12.4 GiB at
+# Driver-side buffers per camera. RAM = n_cameras x this x 2.304 MB (11.6 GiB at
 # 9 x 600). Must be at least as deep as kick_max_lag, or the pool empties before
 # the coordinator gives up on a laggard and a recoverable lag becomes lost frames.
 # Buffer depth is not monotonically good — too deep and the capacity preflight

@@ -76,7 +76,7 @@ until someone opens it.
 - **Every mp4 the rig writes needs `-g <fps>` AND `-movflags +faststart`**, so recordings
   load and seek in the browser labeler (LUC3D): without `-g` the GOP can be one IDR per file
   (unseekable); without `+faststart` moov-at-end forces a full-file read per camera before
-  frame 1. Applies to the mp4 writers (`encode_worker._cmd`, `acquire._encode_raw`,
+  frame 1. Applies to the mp4 writers (`encode_worker._cmd` and
   `alignment.extract_aligned`), not to the Annex-B `.h264` streams the remux later wraps.
 - **BlockID == trigger ordinal is an AXIOM, guarded because one failure mode falsifies it
   silently.** A BlockID counts frames a camera *acquired*, not triggers *fired*: a camera
@@ -127,7 +127,7 @@ until someone opens it.
 - **`board_legacy: true`** in the board config: the physical 3dpose board uses the
   pre-OpenCV-4.6 ChArUco layout, and without `setLegacyPattern(True)` the ≥4.7
   `CharucoDetector` returns 0 corners silently. Both call sites go through
-  `_apply_legacy_pattern()`, which raises rather than skip. Defaults false for other boards.
+  `apply_legacy_pattern()`, which raises rather than skip. Defaults false for other boards.
 - **`opencv-contrib-python>=4.7` is pinned in `pyproject.toml`** (never a PEP 723 header on
   `1_calibrate.py`): OpenCV moved `chessboardCorners` to `getChessboardCorners()` across the
   4.6/4.7 line, and the solve must run in the project env so an offline rig never needs a
@@ -213,7 +213,7 @@ Arduino sketch: `gui_app/widgets/stimulation_window.py` (canvas + UI),
   the TTL toggle (analog mode maps 0-5 V onto power).
 - **Never flash `campy/campy/trigger/trigger.ino`** to the rig board: it has no
   `stim_safe_pins` boot guard, so it drops laser safety and all stim. It exists only for the
-  legacy `acquire.py` path.
+  legacy `campy` capture path.
 
 ## Network
 
