@@ -1,11 +1,10 @@
 """Does `result.Release()` hold the GIL?
 
-Backlog item 3, open since 2026-09-03 and never measured: if Release() holds the
-GIL for ~1 ms, then nine cameras need 9 ms of a 10 ms window on that call alone
-and the pipeline saturates on it, independently of everything else. The
-supporting hint is that in both 2026-09-10 laggard episodes the laggard's `rel`
-ran 3-4 ms against ~1 ms on healthy cameras -- the largest per-camera divergence
-in the instrumentation block.
+Hypothesis: if Release() holds the GIL for ~1 ms, then nine cameras need 9 ms of
+a 10 ms window on that call alone and the pipeline saturates on it, independently
+of everything else. The supporting hint is that in laggard episodes the laggard's
+`rel` has run 3-4 ms against ~1 ms on healthy cameras -- the largest per-camera
+divergence in the instrumentation block. (See docs/HISTORY.md, phase 6.)
 
 Two measurements, because neither alone is conclusive:
 

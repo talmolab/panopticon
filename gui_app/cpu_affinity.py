@@ -18,12 +18,9 @@ Two further facts make it worse here than the raw ratio suggests:
   - the P-cores are **not** logicals 0-7. On this part they are
     [0, 1, 10, 11, 12, 13, 22, 23], interleaved with E-cores, so any hand-rolled
     "first 8 CPUs" mask would pin threads onto E-cores while looking correct;
-  - `docs/PERF_EXPERIMENTS.md` E5 measured cores 0 and 1 at ~46% DPC time from
-    NIC receive processing. Those two are P-cores, so the effective P-core
-    budget for capture is closer to six than eight.
-
-Nothing in this codebase touched affinity, thread priority or timer resolution
-before 2026-09-11. Every prior optimisation attacked the GIL or the network.
+  - cores 0 and 1 carry ~46% DPC time from NIC receive processing (docs/HISTORY.md,
+    phase 5). Those two are P-cores, so the effective P-core budget for capture is
+    closer to six than eight.
 
 Everything here degrades to a no-op off Windows and never raises: a failure to
 pin is a performance regression, not a correctness one, and must never take a
@@ -374,8 +371,8 @@ def capture_core_pool(exclude=None) -> list[int]:
     receive, and because the loop retrieves at the rate frames arrive it can
     never catch the deficit up.
 
-    Measured 2026-09-14, nine cameras, 90 s, grab threads pinned, lag behind
-    the leader as median/p95/max. The victim followed the CORE, not the camera:
+    Measured at nine cameras with grab threads pinned (lag behind the leader,
+    median/p95/max). The victim follows the CORE, not the camera:
 
       default order, cam1 on CPU 0    cam1 0/6/12    cam7 0/1/1
       rotated,       cam7 on CPU 0    cam1 0/0/1     cam7 0/3/12
@@ -404,10 +401,10 @@ def place_capture_thread(slot: int, priority: int | None = None) -> dict:
     only while there are at least as many P-cores as cameras. At nine cameras
     on eight P-cores it pins cam1 and cam9 to the SAME core, both at
     GRAB_THREAD_PRIORITY, and that core is CPU 0 -- which on this part also
-    carries the largest share of NIC DPC. Measured 2026-09-11 in a GUI
-    recording: cam1 accumulated lag monotonically (67 -> 96 -> 153 -> 173
-    frames) while the other eight sat at 0-4, with resends at 9-15 and zero
-    buffer underruns, so it was pure CPU contention and not the network.
+    carries the largest share of NIC DPC. Two grab threads on one such core at
+    GRAB_THREAD_PRIORITY give monotonic lag on one camera (67 -> 173 frames)
+    while the other eight sit at 0-4, with resends at 9-15 and zero buffer
+    underruns: pure CPU contention, not the network.
 
     Two whole-rig alternatives were already measured and rejected: confining
     every thread to the P-core set was worse than baseline, and reordering the
@@ -478,9 +475,9 @@ def pin_to_efficiency_core(slot: int) -> dict:
     there is one per camera, so left unpinned they compete with the grab
     threads for the eight P-cores, which would undo the grab-thread pinning.
 
-    **Measured 2026-09-11: pinning each encoder to ONE E-core is much worse
-    than not pinning them at all** — cam9 blew out to 321 frames behind and
-    avg_proc went 2.19 -> 3.48 ms. A single E-core cannot sustain encode
+    **Never pin an encoder to ONE E-core: it is much worse than not pinning
+    them at all** — a camera blew out to 321 frames behind and avg_proc went
+    2.19 -> 3.48 ms. A single E-core cannot sustain encode
     submission for one 1920x1200 stream at 100 fps, so the encoder backs up and
     drags its camera with it. The set keeps them off the P-cores while letting
     the scheduler move them freely among the sixteen E-cores.

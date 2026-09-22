@@ -8,9 +8,8 @@ camera whose IP is outside the host adapter's subnet, so a camera moved to a
 different switch looks *identical to a dead one*: absent from pylon Viewer,
 absent from the GUI, no error anywhere. A raw GVCP discovery broadcast is
 answered by every camera on the layer-2 segment regardless of its address, so
-sending one per adapter tells you where each camera physically is. That is how
-two "missing" cameras were found in ten seconds on 2026-09-10 after being
-plugged back into each other's switches.
+sending one per adapter tells you where each camera physically is, including a
+camera plugged into the wrong switch.
 
 **Does the path carry 9000-byte packets?** A switch left at the default
 1500-byte MTU discards every GVSP data packet while link, enumeration and ICMP

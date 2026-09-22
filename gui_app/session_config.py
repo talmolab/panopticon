@@ -93,8 +93,8 @@ class RigProfile:
     kick_max_lag: int = 240
     # GigE receive driver: "socket" (user-space, robust packet resends — the
     # proven path), "filter" (in-kernel pylon GigE Vision driver, less CPU but
-    # measured 2026-06-12 silently dropping ~23% of frames with default resend
-    # settings), or "auto" (leave pylon's default).
+    # measured silently dropping ~23% of frames with default resend settings),
+    # or "auto" (leave pylon's default).
     gige_driver: str = "socket"
     # Camera backend NAME, resolved by gui_app.backends.load_backend. The
     # profile selects the vendor so no code changes when a rig ports; the
@@ -145,10 +145,9 @@ class RigProfile:
     n_cameras: int = 0
     # Driver-side buffers queued per camera. THE LARGEST SINGLE RAM CONSUMER:
     # n_cams x max_num_buffer x width x height bytes, so 1000 buffers is 20.7 GiB
-    # at nine 1920x1200 cameras, before the NV12 ring is counted at all. It was
-    # hardcoded at 1000 in camera_manager until 2026-09-10, which made the
-    # capacity preflight's own advice ("Lower MaxNumBuffer or kick_max_lag")
-    # impossible to follow.
+    # at nine 1920x1200 cameras, before the NV12 ring is counted at all. It is a
+    # profile field (not a camera_manager constant) so the capacity preflight's
+    # own advice ("Lower MaxNumBuffer or kick_max_lag") can be followed.
     #
     # Deep slack absorbs genuine GigE jitter, and it is also what let a 1.5%
     # per-frame deficit hide for ~11 minutes before anything went wrong: nothing
@@ -163,9 +162,9 @@ class RigProfile:
     # stereo at 30 shared frames per pair; everything beyond those caps is
     # discarded, contributing only a slightly richer pool to sample from. The
     # defaults therefore sit at roughly 2x and 1.3x the caps, which is margin,
-    # not stinginess. They were 250/80 until 2026-09-10, i.e. ~4x and ~2.7x the
-    # caps, which made a 9-camera calibration take far longer than the data
-    # could be used for. Raise them if calibrations come out marginal; the
+    # not stinginess; ~4x and ~2.7x the caps just makes a 9-camera calibration
+    # take far longer than the data can be used for. Raise them if calibrations
+    # come out marginal; the
     # per-pair chart in reprojection_error_histogram.png is the evidence.
     calibration_min_per_cam_shared: int = 120
     calibration_min_edge: int = 40
@@ -198,8 +197,8 @@ class RigProfile:
     # Leaving encoders unpinned is not neutral: Windows is then free to place
     # one on an E-core, and _EncoderThread.run's own note is that a single
     # E-core cannot sustain encode submission for one 1920x1200 stream at
-    # 100 fps. Measured 2026-09-14 in one GUI process running
-    # recording -> calibration -> solve -> recording: the first recording held
+    # 100 fps. In one GUI process running a MIXED sequence
+    # (recording -> calibration -> solve -> recording), the first recording held
     # every camera at 0 with qsize 0-1, and the second, with identical
     # grab-thread affinity, filled the encode queue (qsize 183-204 against
     # ENCODE_QUEUE_DEPTH 200) and ran 3-6x slower on every operation as the
@@ -211,9 +210,9 @@ class RigProfile:
     # Logical CPUs that capture threads are kept OFF, when pinning is enabled.
     # CPU 0 is the Windows boot processor and the default target for timer and
     # DPC work, so a grab thread pinned there is descheduled by exactly the
-    # network traffic it is trying to receive. Measured 2026-09-14, nine
-    # cameras, 90 s, pinned, lag behind leader as median/p95/max -- the victim
-    # followed the CORE, not the camera:
+    # network traffic it is trying to receive. With grab threads pinned, lag
+    # behind the leader as median/p95/max -- the victim follows the CORE, not
+    # the camera:
     #   exclude nothing (cam1 on CPU 0)   cam1 0/6/12, others 0/1/1
     #   exclude [0]     (cam1 on CPU 1)   cam1 0/3/4,  others 0/1/1
     #   exclude [0, 1]                    ALL NINE 0/1/1
@@ -221,8 +220,8 @@ class RigProfile:
     # camera diverged to kick_max_lag (480) and was force-dropped.
     capture_core_exclude: list = field(default_factory=lambda: [0])
     # Confine ENCODER threads to the E-core set. Separate from the above, and
-    # default OFF because it MEASURED WORSE. 2026-09-11, nine cameras, grab
-    # threads pinned in every arm:
+    # default OFF because it measures WORSE at nine cameras with grab threads
+    # pinned in every arm:
     #   encoders unpinned          avg_proc 2.19 ms  slack 7.03  worst lag 10
     #   encoders on the E-core set          2.53        6.62               10
     #   encoders one per E-core             3.48        5.52              321

@@ -34,9 +34,8 @@ sys.path.insert(0, str(REPO))
 import numpy as np
 
 # GrabThread is a QThread and CameraManager emits pyqtSignals. Without a
-# QApplication the thread machinery wedges partway through a recording (observed
-# 2026-08-11), so create an offscreen one --- this also keeps the probe faithful to
-# how the GUI actually runs.
+# QApplication the thread machinery wedges partway through a recording, so create
+# an offscreen one --- this also keeps the probe faithful to how the GUI runs.
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QApplication
@@ -71,10 +70,9 @@ def main():
                          "QPixmap -> setPixmap for all cameras) so its main-thread "
                          "cost is present; the plain probe has none")
     ap.add_argument("--label", default="run")
-    # PRODUCTION SETS 0.001 (gui.py:97) and this probe did not, which silently
-    # invalidated a 2026-09-10 threads-vs-processes comparison: the default 5 ms
-    # punishes an 18-thread interpreter far harder than a 6-thread one, so the
-    # single-process arm was measured with its own mitigation switched off.
+    # Match production's 0.001 switch interval (gui.py:97): the default 5 ms
+    # punishes an 18-thread interpreter far harder than a 6-thread one, so any
+    # comparison without it measures the mitigation, not the design.
     # Always state the interval when quoting a number from this probe.
     ap.add_argument("--switch-interval", type=float, default=0.001,
                     help="sys.setswitchinterval; 0.001 matches gui.py")
@@ -176,8 +174,8 @@ def main():
 
     # PyNvVideoCodec's Encode() does a lazy import on first call. Six encoder
     # threads hitting that simultaneously wedges on the import machinery
-    # (observed 2026-08-11: whole process stalled, one thread parked in
-    # find_spec under Encode()). Force it once, single-threaded, first.
+    # (the whole process stalls, one thread parked in find_spec under
+    # Encode()). Force it once, single-threaded, first.
     if prof.realtime_encode:
         try:
             from gui_app import nvenc

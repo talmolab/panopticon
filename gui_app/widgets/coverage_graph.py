@@ -177,12 +177,11 @@ class CoverageGraphWidget(QWidget):
             if len(comps) > 1:
                 # The group list stays -- it is what caught a nine-camera
                 # session solving only four cameras while every per-camera
-                # number read as satisfied. The per-pair "show board to camX +
-                # camY together" instruction that used to sit above it was
-                # removed at Isaac's request on 2026-09-14: it nagged on every
-                # repaint and named a pair that was often not the one he was
-                # working on. `groups N/1` in the line below carries the same
-                # information without telling the operator what to do.
+                # number read as satisfied. There is no per-pair "show board to
+                # camX + camY together" instruction here: it repaints every tick
+                # and names a pair the operator is often not working on. `groups
+                # N/1` in the line below carries the same information without
+                # telling the operator what to do.
                 groups = "  ".join(
                     "{" + ",".join(str(i + 1) for i in sorted(g)) + "}"
                     for g in comps[:4])

@@ -28,7 +28,7 @@ across nine cameras at 100 fps is 6,300 calls/s ≈ 0.4 ms of CPU per second —
 invariants a wrapper tends to quietly break: the frame view must not outlive
 `Release()`, and it must not be copied on the way through (a hidden copy here is
 exactly the 2.3 MB GIL-held memcpy that cost this project years of frame loss —
-see docs/PERF_EXPERIMENTS.md E3). A documented duck-type contract keeps those
+see docs/HISTORY.md, phase 5). A documented duck-type contract keeps those
 invariants visible at the point they matter.
 
 WRITING A NEW BACKEND

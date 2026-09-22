@@ -1,7 +1,7 @@
 """Cross-process frame synchronisation for the multi-process acquisition split.
 
-WHY. Splitting acquisition across processes is worth ~2.8x on grab-loop headroom
-(measured 2026-09-11), because nine grab threads plus nine encoder threads in one
+WHY. Splitting acquisition across processes is worth ~2.8x on grab-loop headroom,
+because nine grab threads plus nine encoder threads in one
 interpreter contend for one GIL. The blocker is that kick-out needs a GLOBAL
 decision: trigger T is released only once every active camera has it, and
 force-dropped once the fastest camera is `max_lag` ahead of the slowest. Split

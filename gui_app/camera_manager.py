@@ -76,7 +76,7 @@ class AcquisitionStartRefused(RuntimeError):
 #: Depth is not monotonically good and must not be changed without a rig A/B.
 #: A deep pool absorbs GigE jitter, but it also hides a per-frame deficit for
 #: minutes (nothing errors: the pool fills and every frame retrieved gets
-#: staler), and too deep starves capture outright. See docs/PERF_EXPERIMENTS.md.
+#: staler), and too deep starves capture outright. See docs/HISTORY.md.
 MAX_NUM_BUFFER = 1000
 
 
@@ -903,8 +903,8 @@ class CameraManager(QObject):
         each thread writes a 2.57 GiB NV12 ring at nine cameras, and frames
         delivered during that allocation queue in the driver. The grab loop
         retrieves at exactly the arrival rate, so a backlog created here is
-        never recovered -- on 2026-09-14 one camera began 124 frames behind and
-        rode kick_max_lag for the whole session, force-dropping 2,036 frames.
+        never recovered -- a camera that starts 124 frames behind rides kick_max_lag
+        for the whole session and force-drops thousands of frames for everyone.
 
         A timeout is not fatal: a thread that cannot become ready sets its event
         anyway, and the coordinator retires a camera that never publishes, so

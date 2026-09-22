@@ -102,9 +102,9 @@ class TeensyController:
             try:
                 # NOTE: this pulses DTR and resets the board. That reset is
                 # LOAD-BEARING — it returns the sketch to setup() with a cleared
-                # serial RX buffer. Suppressing it (dtr=False before open) was
-                # tried on 2026-07-26 and silently broke recording: zero triggers,
-                # Total_Packet_Count 0 on all six cameras. Do not do that again.
+                # serial RX buffer. Never suppress it (dtr=False before open):
+                # the board then ignores the config and emits zero triggers
+                # (Total_Packet_Count 0 on every camera).
                 # The laser flash it causes is a hardware problem; the fix is to
                 # keep this connection open rather than to defeat the reset.
                 # write_timeout matters for safety, not just tidiness: without it

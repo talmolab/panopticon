@@ -1,12 +1,13 @@
-"""E2: separate "time executing" from "time waiting for the GIL", and test whether
+"""Separate "time executing" from "time waiting for the GIL", and test whether
 GIL contention alone can inflate a 0.08 ms copy into the 2.7 ms production reading.
+(Findings and the acceptance budget: docs/HISTORY.md, phase 5.)
 
 WHY THIS EXISTS
-The production grab loop timed `nv12_buf[:H,:] = gray` at 2.7 ms/frame. E1 showed the
-copy is ~0.080 ms on a warm ring and that numpy RELEASES the GIL for it. E1a showed the
-production ring is already warm (np.full writes every byte), so page faults are ruled
-out, and 9 cameras need only 2.76 GB/s against a ~24 GB/s bandwidth ceiling, so
-bandwidth is ruled out. The surviving explanation is that numpy releases the GIL for the
+The production grab loop timed `nv12_buf[:H,:] = gray` at 2.7 ms/frame. The copy is
+~0.080 ms on a warm ring and numpy RELEASES the GIL for it; the production ring is
+already warm (np.full writes every byte), so page faults are ruled out, and 9 cameras
+need only 2.76 GB/s against a ~24 GB/s bandwidth ceiling, so bandwidth is ruled out.
+The surviving explanation is that numpy releases the GIL for the
 memcpy and must RE-ACQUIRE it before returning -- and that wait sits inside the
 perf_counter bracket, so waiting was reported as working. This experiment tests that
 directly instead of by elimination.
