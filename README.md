@@ -104,7 +104,7 @@ exist to catch.
 | **[docs/INTERNALS.md](docs/INTERNALS.md)** | How it works underneath: the grab loop, GPU encoding, frame alignment, tuning and porting. |
 | **[docs/CPU_ENCODE.md](docs/CPU_ENCODE.md)** | The libx264 encode path for a machine whose GPU cannot serve every camera, and exactly how much of it is wired up. |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to set up, which suite to run after touching which module, and what a hot-path change has to prove. |
-| `docs/PERF_EXPERIMENTS.md` | The engineering notebook behind the performance numbers quoted in these pages. Kept on the rig machine and deliberately not published, so a clone does not carry it. |
+| **[docs/HISTORY.md](docs/HISTORY.md)** | The engineering ledger: the dated decisions, measurements and dead ends behind every number in these pages and the code. |
 
 ---
 
@@ -261,7 +261,7 @@ Panopticon's own settings. This is the file to copy and edit for a new rig.
 | `encoder_pcores` | `false` | Confine encoder threads to the performance-core set (default `false`) | On the reference rig this measured a regression: nine encoders sharing eight performance cores with nine pinned grab threads raised the grab threads' copy time several-fold. Kept as a knob for a rig with more cameras than performance cores |
 | `pin_encoder_threads` | not set, so `false` | Pin one encoder thread per efficiency core (default `false`) | Measured far worse than leaving encoders unpinned: a single efficiency core cannot sustain encode submission for one 1920×1200 stream at 100 fps, so that camera backs up and drags its grab thread with it |
 | `thermal_poll_s` | 0 | Seconds between camera temperature polls while acquiring; `0` disables (default 20.0) | Every threshold is read from the camera itself, never from this file, so it works on any model. With polling off, a camera that reaches its shutdown temperature stops delivering mid-session and nothing says so until the recording ends |
-| `trigger_rate_limit` | 165 | Value written to `AcquisitionFrameRate` in triggered mode | **Do not set 0.** Disabling the limiter does remove the exposure ceiling, but it was tried and reverted the same day: delivery fell to 85–92% from 99.98%. The limiter paces each frame's readout across 6.06 ms; without it every camera bursts at once after the shared trigger and marginal links drop packets |
+| `trigger_rate_limit` | 165 | Value written to `AcquisitionFrameRate` in triggered mode | **Do not set 0.** Disabling the limiter removes the exposure ceiling but costs 8–15% of frames in transmission (delivery 85–92% instead of 99.98%): the limiter paces each frame's readout across 6.06 ms, and without it every camera bursts at once after the shared trigger and marginal links drop packets |
 
 ### Camera registers — `configs/mono8_1920x1200.pfs`
 

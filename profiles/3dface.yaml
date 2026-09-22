@@ -37,11 +37,9 @@ trigger_pins: [2, 4, 6, 8, 10, 12]
 stim_safe_pins: []
 
 # --- Calibration coverage HUD -----------------------------------------------
-# PINNED EXPLICITLY 2026-09-11. These were 250/80 by code default; on 2026-09-10
-# the defaults moved to 120/40 for the 9-camera 3dpose rig and this profile
-# would have inherited the change silently, lowering its bar with no
-# measurement on this rig's cameras, optics or lighting. Keep the old values
-# until someone actually validates lower ones here.
+# Pinned explicitly so a change to the code defaults (which are tuned on the
+# 3dpose rig) cannot lower this rig's bar without a measurement on its own
+# cameras, optics and lighting. Keep these until someone validates lower ones here.
 calibration_min_per_cam_shared: 250
 calibration_min_edge: 80
 calibration_min_grid_cells: 3
