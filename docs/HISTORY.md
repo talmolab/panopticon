@@ -196,6 +196,9 @@ Dead ends, do not retry:
 - 2026-09-11 — `pin_capture_threads` enabled: a grab thread on an E-core runs a few percent
   slow; two grab threads on one core carrying NIC DPC gave monotonic lag on one camera
   (67 → 173 frames) with zero underruns — pure CPU contention.
+- 2026-09-11 — thread-placement flags moved into the shared `rig_setup` path: the GUI had run
+  unpinned while every probe read as pinned, because the preview grab threads pin as they
+  start and a flag applied after `open_all` reached only the recording threads.
 - 2026-09-11 — thermal watch added: four of nine cameras sit above the 76 C `Critical`
   threshold by installation (cam6 peaked 80 C), so `warn_temp_c` is set to 0 until
   heatsinks; temperatures still go into session metadata.
