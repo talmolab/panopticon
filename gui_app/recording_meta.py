@@ -8,14 +8,80 @@ value from the same file in the same order.
 No Qt and no numpy, so every CLI can import it.
 """
 import json
+import os
 from pathlib import Path
 
 from gui_app.session_config import METADATA_FILENAME
+
+#: Written into a camera's directory when that camera was retired during the
+#: acquisition. 2_align.py leaves such a camera out of the alignment by
+#: default, so a camera that stopped early cannot cut the cameras that kept
+#: recording down to its length.
+RETIRED_NAME = "RETIRED.json"
 
 #: The session_metadata.json keys acquisition_params() reads as-is, from the
 #: acquisition's own file first and the session-level copy second.
 _PLAIN_KEYS = ("quality", "encoder", "resolution", "date", "session_id")
 _SESSION_KEYS = ("date", "session_id")
+
+
+def camera_sort_key(name: str) -> tuple:
+    """Sort key that orders camera names by number: cam2 before cam10.
+
+    A string sort puts cam10 between cam1 and cam2, so on a rig with ten or
+    more cameras every per-camera list built from it (the alignment index
+    rows, the stim-trace columns, the calibration sections) stops following
+    the camera numbering. Names with no number after ``cam`` sort after the
+    numbered ones, by name.
+    """
+    tail = name[3:] if name.startswith("cam") else name
+    if tail.isascii() and tail.isdigit():
+        return (0, int(tail), name)
+    return (1, 0, name)
+
+
+def write_retired(cam_dir, reason: str, **extra) -> Path:
+    """Record in ``cam_dir/RETIRED.json`` that the camera was retired.
+
+    The file holds a JSON object with ``reason`` plus the ``extra`` keys
+    (any further JSON-serialisable detail, for example the last block ID the
+    camera recorded); readers need only ``reason``. It is written through a
+    temporary file, so a reader never sees half a record.
+    """
+    path = Path(cam_dir) / RETIRED_NAME
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({**extra, "reason": str(reason)}, indent=2),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def retired_cameras(rec_dir) -> dict:
+    """camera name -> retirement reason, for each cam*/ holding RETIRED.json.
+
+    In camera-number order. A record that cannot be read still marks its
+    camera as retired, with the read error as the reason: leaving a camera
+    out of an alignment never touches its files, so that is the reading that
+    cannot lose data.
+    """
+    rec_dir = Path(rec_dir)
+    if not rec_dir.is_dir():
+        return {}
+    out = {}
+    cams = sorted((d for d in rec_dir.iterdir()
+                   if d.is_dir() and d.name.startswith("cam")
+                   and (d / RETIRED_NAME).exists()),
+                  key=lambda d: camera_sort_key(d.name))
+    for d in cams:
+        problems: list[str] = []
+        data = _read_json(d / RETIRED_NAME, problems)
+        if data is not None and data.get("reason"):
+            out[d.name] = str(data["reason"])
+        elif problems:
+            out[d.name] = f"its {RETIRED_NAME} is unreadable ({problems[0]})"
+        else:
+            out[d.name] = f"{RETIRED_NAME} gives no reason"
+    return out
 
 
 def _read_json(path: Path, warnings: list):
@@ -63,11 +129,11 @@ def acquisition_params(rec_dir) -> dict:
     directories) is read first. The session-level copy one directory up is
     read only for keys the acquisition's file lacks, and every value taken
     from it, except the date and session id, adds a warning. The
-    session-level copy is written once, by the
-    session's first acquisition, and never updated, so it can describe a
-    different acquisition type or an earlier profile. For the same reason its
-    ``acq_fps`` is never used: the rate comes from ``frame_rate`` or
-    ``calibration_frame_rate``, chosen by the directory name.
+    session-level copy is written once, by the session's first acquisition,
+    and never updated, so it can describe a different acquisition type or an
+    earlier profile. For the same reason its ``acq_fps`` is never used: the
+    rate comes from ``frame_rate`` or ``calibration_frame_rate``, chosen by
+    the directory name.
     """
     rec_dir = Path(rec_dir)
     warnings: list[str] = []

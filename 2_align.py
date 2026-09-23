@@ -1,14 +1,14 @@
-"""Align multi-camera recordings by GigE block ID (trigger ordinal).
+"""Align multi-camera recordings by block ID (trigger ordinal).
 
-At 6x100 fps over GigE the host/network occasionally drops a frame, which
-breaks the assumption that frame *i* is the same trigger across cameras: after
-the first dropped frame every later frame is off by one or more, so naive
-frame-by-frame use silently compares different moments in time.
+The host or the network occasionally drops a frame, which breaks the
+assumption that frame *i* is the same trigger across cameras: after the first
+dropped frame every later frame is off by one or more, so frame-by-frame use
+compares different moments in time.
 
-Each camera's ``blockids.npy`` records the GigE block ID (trigger ordinal) of
-every recorded frame. The block IDs common to ALL cameras are the triggers
-every camera captured, and the hardware trigger fires all cameras at once — so
-those frames are a synchronized, equal-length set.
+Each camera's ``blockids.npy`` records the block ID (trigger ordinal) of every
+recorded frame. The block IDs common to all the aligned cameras are the
+triggers every one of them captured, and the hardware trigger fires all
+cameras at once, so those frames are a synchronized, equal-length set.
 
 Runs in the project environment (it imports ``gui_app``), so use the
 project's interpreter rather than an isolated script environment:
@@ -24,6 +24,18 @@ the k-th synchronized sample). With --replace, each camera's mp4 is re-encoded
 to only the common frames and atomically replaces the original, and that
 camera's blockids.npy + frametimes.npy are rewritten to match.
 
+A replace overwrites each camera's only copy, and a camera that ended early
+or started late (a retirement, a truncated tail) cuts every other camera to
+its length. --replace therefore refuses while such a camera takes part, names
+it, and changes no video. Then choose one:
+
+  --exclude cam3            align the other cameras; cam3's files stay as recorded
+  --truncate-to-shortest    cut every camera to the common triggers anyway
+
+A camera the GUI retired during the recording has a RETIRED.json in its
+directory and is excluded by default; --include-retired aligns it with the
+others.
+
 The frame rate and the re-encode quality default to the values the acquisition
 recorded in its own ``session_metadata.json`` (inside ``<recording_dir>``). A
 recording without one falls back to the session-level copy one directory up,
@@ -31,15 +43,15 @@ with a warning, because that copy describes the session's first acquisition.
 The rate stamps the re-encoded videos and is the reference for the block-rate
 check, so a wrong rate mis-stamps every video and flags every camera at once.
 
-Exit status: 0 on success; 1 on an error or when --replace left any camera
-unreplaced; 2 when the only problem is a block-rate warning (a camera whose
-block IDs did not advance at the trigger rate, i.e. it ignored triggers).
+Exit status: 0 on success; 1 on an error, a refused replace, or when --replace
+left any camera unreplaced; 2 when the only problem is a block-rate warning (a
+camera whose block IDs did not advance at the trigger rate, i.e. it ignored
+triggers).
 
-The GUI runs this automatically after a realtime recording; this CLI is for
-reprocessing existing sessions.
+In post-hoc mode (``realtime_kick: false``) the GUI runs this alignment itself
+after each recording; this CLI is for reprocessing existing sessions.
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -76,15 +88,24 @@ def session_defaults(rec_dir: Path) -> tuple:
 def print_table(an: alignment.Analysis) -> None:
     print(f"Recording: {an.rec_dir}")
     print(f"Cameras:   {', '.join(an.names)}")
+    for nm, why in an.excluded.items():
+        print(f"Excluded:  {nm} ({why}); its files stay as recorded")
     print(f"Trigger span (union): {an.full_span}")
     print(f"Common (aligned) frames: {an.common.size}\n")
-    print(f"{'cam':6} {'recorded':>9} {'dropped':>8} {'%drop':>7}")
+    print(f"{'cam':6} {'recorded':>9} {'dropped':>8} {'%drop':>7} "
+          f"{'first':>8} {'last':>8}")
     for nm, pc in an.per_camera().items():
+        mark = "  short" if nm in an.short_cams else ""
         print(f"{nm:6} {pc['recorded']:>9} {pc['dropped']:>8} "
-              f"{100 * pc['dropped'] / an.full_span:>6.2f}%")
+              f"{100 * pc['dropped'] / an.full_span:>6.2f}% "
+              f"{pc['first_trigger']:>8} {pc['last_trigger']:>8}{mark}")
+    for nm in an.empty_cams:
+        print(f"{nm:6} {0:>9} {'-':>8} {'-':>7} {'-':>8} {'-':>8}  no frames")
     total_drop = an.full_span - an.common.size
     print(f"\nAligned set keeps {an.common.size} of {an.full_span} triggers; drops "
           f"{total_drop} ({100 * total_drop / an.full_span:.2f}%) any camera missed.")
+    for nm, why in an.short_cams.items():
+        print(f"Short camera {nm}: {why}")
     print()
     if an.rate_checked:
         print(f"Block-rate check judged: {', '.join(an.rate_checked)}")
@@ -96,6 +117,23 @@ def print_table(an: alignment.Analysis) -> None:
               file=sys.stderr)
     for msg in an.rate_warnings:
         print(f"\nWARNING (block rate): {msg}", file=sys.stderr)
+
+
+def exclusions(rec_dir: Path, requested: list, include_retired: bool) -> dict:
+    """camera -> reason for every camera this run leaves out.
+
+    The cameras named on the command line, plus every camera with a
+    RETIRED.json unless ``include_retired``.
+    """
+    out = {}
+    if not include_retired:
+        for nm, why in recording_meta.retired_cameras(rec_dir).items():
+            out[nm] = f"retired during the recording: {why}"
+    for item in requested:
+        for nm in (x.strip() for x in item.split(",")):
+            if nm:
+                out[nm] = "excluded on the command line"
+    return out
 
 
 def main() -> int:
@@ -117,6 +155,16 @@ def main() -> int:
                          "for a machine without an NVIDIA GPU)")
     ap.add_argument("--parallel", type=int, default=3,
                     help="cameras re-encoded concurrently with --replace")
+    ap.add_argument("--exclude", action="append", default=[], metavar="CAM",
+                    help="leave this camera out of the alignment; its files "
+                         "stay as recorded (repeat, or separate with commas)")
+    ap.add_argument("--truncate-to-shortest", action="store_true",
+                    help="with --replace, cut every camera to the common "
+                         "triggers even when a camera ended early or started "
+                         "late")
+    ap.add_argument("--include-retired", action="store_true",
+                    help="align cameras that have a RETIRED.json with the "
+                         "others instead of excluding them")
     ap.add_argument("--dry-run", action="store_true",
                     help="report only (including the block-rate check); write nothing")
     args = ap.parse_args()
@@ -139,12 +187,17 @@ def main() -> int:
               f"quality {quality} (the default: no session_metadata.json "
               f"records one; pass --quality to change it)")
 
+    excluded = exclusions(args.recording_dir, args.exclude,
+                          args.include_retired)
     try:
-        an = alignment.analyse(args.recording_dir, fps)
+        an = alignment.analyse(args.recording_dir, fps, exclude=excluded)
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print_table(an)
+    would_refuse = alignment.refusal_reason(an, args.truncate_to_shortest)
+    if would_refuse and not args.replace:
+        print(f"\nNOTE: --replace would be refused. {would_refuse}")
 
     if args.dry_run:
         return 2 if an.rate_warnings else 0
@@ -160,7 +213,8 @@ def main() -> int:
         summary = alignment.align_recording(
             args.recording_dir, fps=fps, quality=quality,
             replace=args.replace, parallel=args.parallel, progress=_progress,
-            backend=args.encoder, analysis=an)
+            backend=args.encoder, analysis=an, exclude=excluded,
+            truncate_to_shortest=args.truncate_to_shortest)
     except Exception as e:
         print(f"ERROR: alignment failed: {e}", file=sys.stderr)
         return 1
@@ -173,10 +227,18 @@ def main() -> int:
         print(f"\nERROR: {summary['index_error']} (the aligned/ index is "
               f"derived data; the videos and metadata are as reported below)",
               file=sys.stderr)
-    if args.replace and summary["needed"]:
-        if summary["replaced"]:
+    if summary.get("refused"):
+        rc = 1
+        print(f"\nERROR: {summary['refused']}", file=sys.stderr)
+        print("Wrote the aligned/ index only; no video was changed.")
+    elif args.replace and summary["needed"]:
+        if summary["replaced"] and not excluded:
             print(f"\nReplaced all videos with {summary['common_frames']}-frame "
                   "aligned versions.")
+        elif summary["replaced"]:
+            print(f"\nReplaced the videos of {', '.join(summary['replaced_cams'])} "
+                  f"with {summary['common_frames']}-frame aligned versions. "
+                  f"Left as recorded: {', '.join(excluded)}.")
         else:
             rc = 1
             print(f"\nERROR: {len(summary['failed_cams'])} camera(s) NOT replaced "
@@ -189,7 +251,8 @@ def main() -> int:
                 print(f"Replaced: {', '.join(summary['replaced_cams'])}",
                       file=sys.stderr)
     elif not summary["needed"]:
-        print("\nNo loss — videos already aligned, nothing re-encoded.")
+        print("\nNo loss — videos already aligned, nothing re-encoded."
+              + (f" Left out: {', '.join(excluded)}." if excluded else ""))
     else:
         print(f"\nWrote aligned/ index ({summary['common_frames']} common "
               "frames). Re-run with --replace to trim the videos.")

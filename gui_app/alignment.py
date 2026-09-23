@@ -1,11 +1,18 @@
 """Block-ID alignment core, shared by the GUI (align_worker) and 2_align.py.
 
-At 6x100 fps over GigE the host/network occasionally drops a frame, so frame
-*i* is not the same trigger across cameras. Each camera's ``blockids.npy``
-records the GigE block ID (trigger ordinal) of every recorded frame; the block
-IDs common to ALL cameras are the triggers every camera captured, and the
-hardware trigger fires all cameras simultaneously — so those frames are a
-synchronized, equal-length set.
+The host or the network occasionally drops a frame, so frame *i* is not the
+same trigger across cameras. Each camera's ``blockids.npy`` records the block
+ID (trigger ordinal) of every recorded frame; the block IDs common to all the
+aligned cameras are the triggers every one of them captured, and the hardware
+trigger fires all cameras at once, so those frames are a synchronized,
+equal-length set.
+
+A camera that stopped early (retired, or a truncated tail) or started late
+holds only part of the recording, and the common set is then cut to its
+length. Replacing the videos would destroy the other cameras' only copies of
+everything outside it, so ``align_recording`` refuses to replace while such a
+camera takes part, unless the caller excludes it (its files stay as recorded)
+or asks for ``truncate_to_shortest``.
 
 Imports are limited to numpy + (lazily) imageio-ffmpeg, both project
 dependencies, so this module is importable from the GUI venv and from the
@@ -27,6 +34,7 @@ from gui_app.frame_sync import (BLOCK_RATE_MIN_FRAMES, BLOCK_RATE_MIN_SECONDS,
                                 BLOCKID_WRAP)
 from gui_app.frame_sync import block_rate_warnings as _block_rate_warnings
 from gui_app import ffmpeg_cmd
+from gui_app.recording_meta import camera_sort_key
 
 # Name of the per-camera re-encode target. It sits beside the real mp4 while
 # ffmpeg writes it, so every mp4 lookup must exclude it and every run must
@@ -95,21 +103,6 @@ def _unwrap_blockids(b: np.ndarray, period: int = BLOCKID_WRAP) -> np.ndarray:
     return b
 
 
-def camera_sort_key(name: str) -> tuple:
-    """Sort key that orders camera names by number: cam2 before cam10.
-
-    A string sort puts cam10 between cam1 and cam2, so on a rig with ten or
-    more cameras every per-camera list built from it (the alignment index
-    rows, the stim-trace columns, the calibration sections) stops following
-    the camera numbering. Names with no number after ``cam`` sort after the
-    numbered ones, by name.
-    """
-    tail = name[3:] if name.startswith("cam") else name
-    if tail.isascii() and tail.isdigit():
-        return (0, int(tail), name)
-    return (1, 0, name)
-
-
 def camera_dirs(rec_dir: Path) -> list[Path]:
     """The cam*/ directories of an acquisition, in camera-number order."""
     return sorted((d for d in Path(rec_dir).iterdir()
@@ -145,33 +138,87 @@ def video_for(cam_dir: Path, acq_type: str | None = None):
     return cands[0] if cands else None
 
 
-def load_blockids(rec_dir: Path):
-    """Return (cam_names, [blockids], [video paths]). Raises if any missing."""
+def _exclusions(exclude) -> dict:
+    """``exclude`` as a dict of camera name -> reason.
+
+    Accepts a mapping (the reasons are kept) or an iterable of names.
+    """
+    if not exclude:
+        return {}
+    if isinstance(exclude, dict):
+        return {str(k): str(v) for k, v in exclude.items()}
+    if isinstance(exclude, str):
+        exclude = [exclude]
+    return {str(nm): "excluded by the caller" for nm in exclude}
+
+
+def _load_cameras(rec_dir: Path, excluded: dict):
+    """(names, blocks, videos, empty) for the cameras not in ``excluded``.
+
+    ``empty`` maps each camera that recorded no frames to the reason. A
+    camera directory without ``blockids.npy`` is a camera that recorded no
+    frames when another camera has one (a camera retired before its first
+    frame writes none); when no camera has one, the recording predates
+    block-ID logging.
+    """
     cam_dirs = camera_dirs(rec_dir)
     if not cam_dirs:
         raise FileNotFoundError(f"No cam*/ directories in {rec_dir}")
-    names, blocks, videos = [], [], []
+    present = [cd.name for cd in cam_dirs]
+    unknown = sorted(set(excluded) - set(present), key=camera_sort_key)
+    if unknown:
+        raise ValueError(f"cannot exclude {', '.join(unknown)}: {rec_dir} has "
+                         f"no such camera directory (it has "
+                         f"{', '.join(present)})")
+    if not any((cd / "blockids.npy").exists() for cd in cam_dirs):
+        raise FileNotFoundError(
+            f"no camera directory in {rec_dir} has a blockids.npy: the "
+            f"recording predates block-ID logging and cannot be block-ID "
+            f"aligned.")
+    names, blocks, videos, empty = [], [], [], {}
     for cd in cam_dirs:
+        if cd.name in excluded:
+            continue
         bpath = cd / "blockids.npy"
         if not bpath.exists():
-            raise FileNotFoundError(
-                f"{bpath} missing — recording predates block-ID logging, "
-                "cannot be block-ID aligned.")
+            empty[cd.name] = ("recorded no frames: it has no blockids.npy "
+                              "while other cameras do")
+            continue
         b = np.load(bpath)
         if b.ndim != 1:
             raise ValueError(f"{bpath}: expected 1-D block IDs, got {b.shape}")
-        # A camera with no recorded frames has no common set with anyone, so
-        # aligning would trim every other camera to zero frames. It is refused
-        # here with the camera named rather than surfacing later as an
-        # IndexError on the empty array.
         if b.size == 0:
-            raise ValueError(f"{bpath}: no frames recorded (empty block-ID "
-                             f"array); {cd.name} cannot be aligned and the "
-                             f"recording has no common frames")
-        b = _unwrap_blockids(b)  # undo 16-bit wrap so IDs are globally monotonic
+            empty[cd.name] = "recorded no frames: its blockids.npy is empty"
+            continue
+        try:
+            b = _unwrap_blockids(b)  # undo 16-bit wrap: globally monotonic IDs
+        except ValueError as e:
+            raise ValueError(f"{bpath}: {e}") from e
         names.append(cd.name)
         blocks.append(b)
         videos.append(video_for(cd))
+    if not names:
+        if empty:
+            raise ValueError(
+                "no camera recorded any frames: "
+                + "; ".join(f"{nm} {why}" for nm, why in empty.items()))
+        raise ValueError(f"every camera in {rec_dir} is excluded")
+    return names, blocks, videos, empty
+
+
+def load_blockids(rec_dir: Path):
+    """Return (cam_names, [blockids], [video paths]) for every camera.
+
+    Raises when a camera recorded no frames, naming it: the recording has no
+    frame common to every camera, and aligning would cut every other camera
+    to nothing. ``Analysis(exclude=...)`` is how a caller aligns the others.
+    """
+    names, blocks, videos, empty = _load_cameras(Path(rec_dir), {})
+    if empty:
+        raise ValueError(
+            "; ".join(f"{nm} {why}" for nm, why in empty.items())
+            + ". Such a camera cannot be aligned, and the recording has no "
+              "frames common to every camera; exclude it to align the others.")
     return names, blocks, videos
 
 
@@ -271,32 +318,82 @@ def needs_alignment(blocks: list[np.ndarray]) -> bool:
     return any(b.size > common.size for b in blocks)
 
 
+def _short_cameras(names, blocks, margin: int) -> dict:
+    """camera -> reason, for each camera that holds only part of the recording.
+
+    A camera ended early when its last block ID is more than ``margin``
+    triggers before the latest last block ID of any camera, and started late
+    when its first is more than ``margin`` after the earliest first. Cameras
+    triggered together end within a few frames of each other, so a larger gap
+    is a camera that stopped recording, not one that dropped frames.
+    """
+    if len(blocks) < 2:
+        return {}
+    last_max = max(int(b[-1]) for b in blocks)
+    first_min = min(int(b[0]) for b in blocks)
+    out = {}
+    for nm, b in zip(names, blocks):
+        why = []
+        early = last_max - int(b[-1])
+        late = int(b[0]) - first_min
+        if early > margin:
+            why.append(f"ended early: its last trigger is {int(b[-1])}, "
+                       f"{early} before the last one another camera "
+                       f"recorded ({last_max})")
+        if late > margin:
+            why.append(f"started late: its first trigger is {int(b[0])}, "
+                       f"{late} after the first one another camera recorded "
+                       f"({first_min})")
+        if why:
+            out[nm] = "; ".join(why)
+    return out
+
+
 class Analysis:
     """Everything the read-only half of an alignment knows about a recording.
 
     Built once per run so the CLI's pre-flight table, the dry-run report and
     ``align_recording`` all print from the same numbers instead of each
     loading and intersecting the block IDs again.
+
+    ``exclude`` (camera names, or a dict of name -> reason) leaves cameras
+    out of the intersection; their files are never touched. ``short_cams``
+    maps each remaining camera that ended early, started late or recorded no
+    frames to the reason, with ``short_margin`` triggers of tolerance (default
+    one second of triggers).
     """
 
-    def __init__(self, rec_dir, fps: int):
+    def __init__(self, rec_dir, fps: int, exclude=(), short_margin=None):
         self.rec_dir = Path(rec_dir)
         self.fps = int(fps)
-        self.names, self.blocks, self.videos = load_blockids(self.rec_dir)
+        self.excluded = _exclusions(exclude)
+        (self.names, self.blocks, self.videos,
+         self.empty_cams) = _load_cameras(self.rec_dir, self.excluded)
+        self.short_margin = (int(short_margin) if short_margin is not None
+                             else max(1, self.fps))
         self.common, self.frame_index = compute_alignment(self.blocks)
         self.full_span = int(max(int(b[-1]) for b in self.blocks)
                              - min(int(b[0]) for b in self.blocks) + 1)
         self.needed = any(b.size > self.common.size for b in self.blocks)
+        short = _short_cameras(self.names, self.blocks, self.short_margin)
+        short.update(self.empty_cams)
+        self.short_cams = dict(sorted(short.items(),
+                                      key=lambda kv: camera_sort_key(kv[0])))
         # Runs on every path, including the ones that report "already aligned":
         # a camera ignoring triggers keeps its block IDs gapless, so the
         # intersection is total and nothing else here looks wrong.
         (self.rate_warnings, self.rate_checked,
          self.rate_skipped) = block_rate_check(self.rec_dir, self.names,
                                                self.blocks, self.fps)
+        for nm in self.excluded:
+            self.rate_skipped[nm] = "excluded from this alignment"
+        for nm in self.empty_cams:
+            self.rate_skipped[nm] = "recorded no frames"
 
     def per_camera(self) -> dict:
         return {nm: dict(recorded=int(b.size),
-                         dropped=int(self.full_span - b.size))
+                         dropped=int(self.full_span - b.size),
+                         first_trigger=int(b[0]), last_trigger=int(b[-1]))
                 for nm, b in zip(self.names, self.blocks)}
 
     def summary(self) -> dict:
@@ -305,13 +402,58 @@ class Analysis:
                     trigger_span=self.full_span,
                     common_frames=int(self.common.size), needed=self.needed,
                     per_camera=self.per_camera(),
+                    excluded=dict(self.excluded),
+                    short_cams=dict(self.short_cams),
+                    short_margin=self.short_margin,
                     rate_warnings=list(self.rate_warnings),
                     rate_checked=list(self.rate_checked),
                     rate_skipped=dict(self.rate_skipped))
 
 
-def analyse(rec_dir, fps: int = 100) -> Analysis:
-    return Analysis(rec_dir, fps)
+def analyse(rec_dir, fps: int = 100, exclude=(), short_margin=None) -> Analysis:
+    return Analysis(rec_dir, fps, exclude=exclude, short_margin=short_margin)
+
+
+def _them(names) -> str:
+    return "it" if len(names) == 1 else "them"
+
+
+def refusal_reason(an: Analysis, truncate_to_shortest: bool = False):
+    """Why a replace of this analysis must not run, or None when it may.
+
+    A replace re-encodes every aligned camera down to the common triggers and
+    overwrites its only copy. That destroys data when the common set is cut
+    short by one camera, so a camera that ended early or started late blocks
+    the replace unless the caller asked for ``truncate_to_shortest``, and a
+    camera with no frames, or a recording with no common trigger, blocks it
+    always. The text names the cameras and the remedy.
+    """
+    if an.empty_cams:
+        names = list(an.empty_cams)
+        return ("Not replacing any video: "
+                + "; ".join(f"{nm} {why}" for nm, why in an.empty_cams.items())
+                + ". Aligning with a camera that has no frames would leave "
+                  "every video empty. Run 2_align.py with --exclude "
+                + ",".join(names) + " to align the other cameras and leave "
+                + _them(names) + " as recorded.")
+    if an.needed and an.common.size == 0:
+        return ("Not replacing any video: no trigger is common to every "
+                "camera, so every aligned video would be empty. Exclude the "
+                "cameras that do not overlap the others.")
+    short = {nm: why for nm, why in an.short_cams.items()
+             if nm not in an.empty_cams}
+    if an.needed and short and not truncate_to_shortest:
+        names = list(short)
+        return ("Not replacing any video: "
+                + "; ".join(f"{nm} {why}" for nm, why in short.items())
+                + f". Aligning every camera to {_them(names)} would cut the "
+                  f"others to the {an.common.size} of {an.full_span} triggers "
+                  f"they share. Run 2_align.py with --exclude "
+                + ",".join(names) + " to align the other cameras and leave "
+                + _them(names) + " as recorded, or with --truncate-to-shortest "
+                  f"to cut every camera to the {an.common.size} common "
+                  f"triggers.")
+    return None
 
 
 def _ffmpeg_exe() -> str:
@@ -522,7 +664,9 @@ def clear_stale_tmp(rec_dir: Path) -> list[Path]:
 def align_recording(rec_dir, fps: int = 100, quality: int = 21,
                     replace: bool = False, parallel: int = 3,
                     progress=None, backend: str | None = None,
-                    should_stop=None, analysis: Analysis | None = None) -> dict:
+                    should_stop=None, analysis: Analysis | None = None,
+                    exclude=(), truncate_to_shortest: bool = False,
+                    short_margin=None) -> dict:
     """Align a recording by block ID.
 
     Always writes ``aligned/alignment.{npz,json}`` (the lossless index). When
@@ -531,6 +675,13 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
     rewrites that camera's blockids.npy + frametimes.npy to match — video
     first, because a locked mp4 (open in a player) must not leave metadata
     describing frames the video does not have.
+
+    ``exclude`` (names, or a dict of name -> reason) leaves cameras out: they
+    take no part in the intersection and their files are not touched. A
+    replace is refused while ``short_cams`` is non-empty (see
+    ``refusal_reason``) unless ``truncate_to_shortest``; a refused replace
+    changes no video, writes the index only, and reports the reason in
+    ``refused`` and in ``failures``/``warnings``.
 
     Every camera is attempted and every outcome recorded: the summary carries
     ``failures`` (per-camera messages), ``replaced_cams``, ``failed_cams`` and
@@ -552,7 +703,7 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
     ``analysis`` lets a caller that already built the ``Analysis`` for this
     recording (the CLI prints its table from one) pass it in, so the block
     IDs are loaded and intersected once per run; it must describe the same
-    recording at the same fps.
+    recording at the same fps with the same exclusions.
 
     ``progress(done, total, msg)`` is called as cameras complete (thread-safe).
     ``should_stop()`` returning True skips cameras not yet started and aborts
@@ -561,20 +712,28 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
     rec_dir = Path(rec_dir)
     clear_stale_tmp(rec_dir)
     if analysis is None:
-        an = analyse(rec_dir, fps)
+        an = analyse(rec_dir, fps, exclude=exclude, short_margin=short_margin)
     else:
         an = analysis
         if Path(an.rec_dir).resolve() != rec_dir.resolve() or an.fps != int(fps):
             raise ValueError(
                 f"analysis describes {an.rec_dir} at {an.fps} fps, not "
                 f"{rec_dir} at {fps} fps")
+        if set(an.excluded) != set(_exclusions(exclude)):
+            raise ValueError(
+                f"analysis describes {an.rec_dir} excluding "
+                f"{sorted(an.excluded) or 'no camera'}, not "
+                f"{sorted(_exclusions(exclude)) or 'no camera'}")
     names, blocks, videos = an.names, an.blocks, an.videos
     common, frame_index = an.common, an.frame_index
     need = an.needed
     stop = should_stop or (lambda: False)
+    refused = refusal_reason(an, truncate_to_shortest) if replace else None
 
     for msg in an.rate_warnings:
         print(f"[align] WARNING: {msg}", flush=True)
+    if refused:
+        print(f"[align] WARNING: {refused}", flush=True)
 
     total = len(names)
     failures: list[str] = []
@@ -628,7 +787,11 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
             replaced_cams.append(nm)
         _finish(nm, f"{nm} aligned")
 
-    if need and replace:
+    if refused:
+        failures.append(refused)
+        if progress:
+            progress(total, total, "not replaced")
+    elif need and replace:
         workers = max(1, min(parallel or total, total))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(_one, range(total)))
@@ -647,7 +810,8 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
         failures=list(failures), replaced_cams=list(replaced_cams),
         failed_cams=list(failed_cams), stopped=bool(stop()),
         warnings=list(an.rate_warnings) + list(failures),
-        index_error=None,
+        index_error=None, refused=refused,
+        truncate_to_shortest=bool(truncate_to_shortest),
     )
     for nm, flag in zip(names, replaced_flags):
         summary["per_camera"][nm]["video_is_common"] = bool(flag)
