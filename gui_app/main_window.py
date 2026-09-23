@@ -2918,8 +2918,9 @@ class MainWindow(QMainWindow):
         self._calib_worker.start()
 
     def _on_calibration_done(self, success: bool, msg: str):
-        # finished_solve is the last thing run() does, so the thread is
-        # ending; joining it lets _toggles_permitted() see the solve as over.
+        # finished_solve is one of run()'s last two emits (finished follows
+        # it), so the thread is ending; joining it lets _toggles_permitted()
+        # see the solve as over.
         worker = self._calib_worker
         if worker is not None and worker.isRunning():
             worker.wait(5000)
