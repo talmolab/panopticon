@@ -21,9 +21,10 @@ A source file is deleted only after its mp4 is verified, as in the GUI. A
 camera with an mp4 and no capture file is already done and is skipped, and so
 is a camera that recorded no frames.
 
-The frame rate, frame size, quality, date and session id come from the
-acquisition's own ``session_metadata.json``, then from the session-level copy
-with a warning; the options below override them. Without a frame rate the
+The frame rate, frame size, quality, encoder, date and session id come from
+the acquisition's own ``session_metadata.json``, then from the session-level
+copy with a warning; the options below override them, and each value the run
+uses is printed with its source or as the default. Without a frame rate the
 script refuses, because the remux stamps it into every mp4.
 
 Run ``2_align.py`` on the directory afterwards: it checks the block-ID rate,
@@ -152,8 +153,10 @@ def main() -> int:
                     help="QP for raw.bin and raw_tail.bin encodes (default: "
                          f"session_metadata.json, else {DEFAULT_QUALITY})")
     ap.add_argument("--encoder", choices=ffmpeg_cmd.BACKENDS, default=None,
-                    help="H.264 encoder for raw.bin and raw_tail.bin (default "
-                         "nvenc; x264 for a machine without an NVIDIA GPU)")
+                    help="H.264 encoder for raw.bin and raw_tail.bin (default: "
+                         "the encoder session_metadata.json records when it "
+                         "is nvenc or x264, else nvenc; x264 for a machine "
+                         "without an NVIDIA GPU)")
     ap.add_argument("--parallel", type=int, default=3,
                     help="cameras processed at once; each raw encode holds one "
                          "NVENC session")
@@ -185,11 +188,25 @@ def main() -> int:
         print(f"fps {fps} from {params['sources']['acq_fps']}")
     quality = args.quality
     if quality is None:
+        recorded = params["quality"]
         try:
-            quality = int(params["quality"])
+            quality = int(recorded)
             print(f"quality {quality} from {params['sources']['quality']}")
         except (TypeError, ValueError):
             quality = DEFAULT_QUALITY
+            if recorded is None:
+                print(f"quality {quality} (the default: no session_metadata.json "
+                      f"records one; pass --quality to change it)")
+            else:
+                print(f"WARNING: quality {recorded!r} in "
+                      f"{params['sources']['quality']} is not a number; using "
+                      f"{quality}", file=sys.stderr)
+    # The recorded encoder counts only when it names an ffmpeg backend: "auto"
+    # and "raw" name none, and the raw encode then uses the default.
+    encoder = args.encoder
+    if encoder is None and params["encoder"] in ffmpeg_cmd.BACKENDS:
+        encoder = params["encoder"]
+        print(f"encoder {encoder} from {params['sources']['encoder']}")
     size = _resolution(params["resolution"])
     w = args.width if args.width is not None else (size[0] if size else None)
     h = args.height if args.height is not None else (size[1] if size else None)
@@ -220,7 +237,7 @@ def main() -> int:
     worker = EncodeWorker(video_dir, todo, acq_type, w or 0, h or 0, fps,
                           quality, str(date), str(session_id),
                           max_parallel=max(0, args.parallel), realtime=True,
-                          backend=args.encoder)
+                          backend=encoder)
     results = []
     worker.progress.connect(lambda d, t: print(f"  [{d}/{t}]", flush=True))
     worker.finished_all.connect(results.extend)

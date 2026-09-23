@@ -42,8 +42,9 @@ A camera the GUI retired during the recording has a RETIRED.json in its
 directory and is excluded by default; --include-retired aligns it with the
 others.
 
-The frame rate and the re-encode quality default to the values the acquisition
-recorded in its own ``session_metadata.json`` (inside ``<recording_dir>``). A
+The frame rate, the re-encode quality and the encoder (when the recorded one is
+nvenc or x264) default to the values the acquisition recorded in its own
+``session_metadata.json`` (inside ``<recording_dir>``). A
 recording without one falls back to the session-level copy one directory up,
 with a warning, because that copy describes the session's first acquisition.
 The rate stamps the re-encoded videos and is the reference for the block-rate
@@ -71,10 +72,14 @@ DEFAULT_QUALITY = 21
 
 
 def session_defaults(rec_dir: Path) -> tuple:
-    """(fps, quality, fps_source, quality_source, warnings) for a recording.
+    """(fps, quality, fps_source, quality_source, warnings, encoder,
+    encoder_source) for a recording.
 
     Values come from ``recording_meta.acquisition_params``; a value no file
     records is the fallback here, with source None so the run can say so.
+    ``encoder`` is the recorded encoder only when it names an ffmpeg backend
+    (``ffmpeg_cmd.BACKENDS``); "auto" and "raw" name none, and the re-encode
+    then uses the default backend (None).
     """
     params = recording_meta.acquisition_params(rec_dir)
     fps = params["acq_fps"]
@@ -86,11 +91,13 @@ def session_defaults(rec_dir: Path) -> tuple:
             f"quality {quality!r} in session_metadata.json is not a number; "
             f"using {DEFAULT_QUALITY}")
         quality = None
+    encoder = params["encoder"] if params["encoder"] in ffmpeg_cmd.BACKENDS else None
     return (int(round(fps)) if fps else DEFAULT_FPS,
             quality if quality is not None else DEFAULT_QUALITY,
             params["sources"].get("acq_fps") if fps else None,
             params["sources"].get("quality") if quality is not None else None,
-            params["warnings"])
+            params["warnings"],
+            encoder, params["sources"].get("encoder") if encoder else None)
 
 
 def print_table(an: alignment.Analysis) -> None:
@@ -159,8 +166,10 @@ def main() -> int:
                          "block-rate reference (default: the acquisition's "
                          "session_metadata.json, else 100 with a warning)")
     ap.add_argument("--encoder", choices=ffmpeg_cmd.BACKENDS, default=None,
-                    help="H.264 encoder for --replace (default nvenc; x264 "
-                         "for a machine without an NVIDIA GPU)")
+                    help="H.264 encoder for --replace (default: the encoder "
+                         "session_metadata.json records when it is nvenc or "
+                         "x264, else nvenc; x264 for a machine without an "
+                         "NVIDIA GPU)")
     ap.add_argument("--parallel", type=int, default=3,
                     help="cameras re-encoded concurrently with --replace")
     ap.add_argument("--exclude", action="append", default=[], metavar="CAM",
@@ -177,10 +186,11 @@ def main() -> int:
                     help="report only (including the block-rate check); write nothing")
     args = ap.parse_args()
 
-    (meta_fps, meta_quality, fps_source, quality_source,
-     meta_warnings) = session_defaults(args.recording_dir)
+    (meta_fps, meta_quality, fps_source, quality_source, meta_warnings,
+     meta_encoder, encoder_source) = session_defaults(args.recording_dir)
     fps = args.fps if args.fps is not None else meta_fps
     quality = args.quality if args.quality is not None else meta_quality
+    encoder = args.encoder if args.encoder is not None else meta_encoder
     for w in meta_warnings:
         print(f"WARNING: {w}", file=sys.stderr)
     if args.fps is None:
@@ -194,6 +204,8 @@ def main() -> int:
         print(f"quality {quality} from {quality_source}" if quality_source else
               f"quality {quality} (the default: no session_metadata.json "
               f"records one; pass --quality to change it)")
+    if args.replace and args.encoder is None and encoder:
+        print(f"encoder {encoder} from {encoder_source}")
 
     excluded = exclusions(args.recording_dir, args.exclude,
                           args.include_retired)
@@ -221,7 +233,7 @@ def main() -> int:
         summary = alignment.align_recording(
             args.recording_dir, fps=fps, quality=quality,
             replace=args.replace, parallel=args.parallel, progress=_progress,
-            backend=args.encoder, analysis=an, exclude=excluded,
+            backend=encoder, analysis=an, exclude=excluded,
             truncate_to_shortest=args.truncate_to_shortest)
     except Exception as e:
         print(f"ERROR: alignment failed: {e}", file=sys.stderr)
