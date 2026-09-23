@@ -427,6 +427,18 @@ class MainWindow(QMainWindow):
                 and not (self._stim_window is not None
                          and self._stim_window.is_uploading()))
 
+    def _reset_toggles(self):
+        """Both toggles off, with the shared gate set from every owner.
+
+        RULE: the one way this window resets the toggles. REASON: the
+        sidebar's reset used to force the gate open, which reopened Record
+        and Calibrate in the middle of an editor flash whenever an encode, an
+        alignment or a refused start happened to finish during it; the start
+        path still refused, but only through a dialog on a control that
+        should not have been live.
+        """
+        self._sidebar.reset_toggles(self._toggles_permitted())
+
     def _begin_busy(self, text: str):
         self._busy = True
         self._display_timer.stop()
@@ -1010,14 +1022,14 @@ class MainWindow(QMainWindow):
                 self, "Cannot start",
                 "\n\n".join(blocking)
                 + ("\n\nWarnings:\n- " + "\n- ".join(warnings) if warnings else ""))
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             return
         if warnings:
             reply = QMessageBox.warning(
                 self, "Proceed?", "\n\n".join(warnings) + "\n\nStart anyway?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.No:
-                self._sidebar.reset_toggles()
+                self._reset_toggles()
                 return
         # Firmware, then the port, then everything with a side effect:
         # arduino-cli needs the port to itself, and both have to be settled
@@ -1036,7 +1048,7 @@ class MainWindow(QMainWindow):
         """
         print(f"[acq] refusing start: {title}", flush=True)
         QMessageBox.critical(self, title, message)
-        self._sidebar.reset_toggles()
+        self._reset_toggles()
         return False
 
     def _stim_refusal(self, acq_type: str):
@@ -1233,7 +1245,7 @@ class MainWindow(QMainWindow):
         if self._worker_busy(self._cap_op):
             print("[acq] a capacity check is still running; not starting",
                   flush=True)
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             return
         # The rest of the start continues in _on_capacity_checked: the
         # capacity answer can cost an NVENC session probe, which is a child
@@ -1272,7 +1284,7 @@ class MainWindow(QMainWindow):
         config = self._config
         video_dir = config.video_dir(acq_type)
         if not self._confirm_overwrite(video_dir):
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             return
 
         self._video_dir = video_dir
@@ -1309,7 +1321,7 @@ class MainWindow(QMainWindow):
         if self._worker_busy(self._cam_op):
             print("[acq] a camera operation is still running; not starting",
                   flush=True)
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             return
         self._begin_busy("Starting...")
         self._cam_op = CallableWorker(
@@ -1727,7 +1739,7 @@ class MainWindow(QMainWindow):
             self._video_dir = None
             self._state = State.IDLE
             self._sidebar.set_status("IDLE", "#888")
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             if result.get("cameras_closed"):
                 self._camera_grid.setup_grid(0)
                 self._camera_names = []
@@ -2003,7 +2015,7 @@ class MainWindow(QMainWindow):
                 self, "Cannot prepare the trigger board",
                 f"Could not build the firmware for this acquisition, so the "
                 f"board cannot be put into a known state:\n\n{e}")
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             return False
 
         if not needs_flash:
@@ -2017,7 +2029,7 @@ class MainWindow(QMainWindow):
                 self, "Firmware upload in progress",
                 "The trigger board is already being flashed. Wait for that to "
                 "finish and start again.")
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             return False
         self._begin_busy(f"Flashing {label} firmware…")
         port = self._profile.serial_port
@@ -2050,7 +2062,7 @@ class MainWindow(QMainWindow):
                     f"firmware, so what it is running is unknown. The "
                     f"{acq_type} has not been started.\n\nKey off the laser and "
                     f"check the board, then retry.\n\n{msg}")
-                self._sidebar.reset_toggles()
+                self._reset_toggles()
                 return
             # Retake the port BEFORE recording what was flashed: a reclaim
             # that finds the controller on another port forgets the hint, and
@@ -2505,8 +2517,7 @@ class MainWindow(QMainWindow):
                       flush=True)
             self._state = State.IDLE
             self._sidebar.set_status("IDLE", "#888888")
-            self._sidebar.set_toggles_enabled(True)
-            self._sidebar.reset_toggles()
+            self._reset_toggles()
             # abandon() closed every camera, so the preview is dead and the
             # next start would be refused with "No cameras are open". Say so,
             # and give the fields back: the dialog tells the operator to record
@@ -2836,8 +2847,10 @@ class MainWindow(QMainWindow):
                 print(f"[hud] could not stamp the co-detection hints: {e}",
                       flush=True)
         self._sidebar.set_fields_editable(True)
-        self._sidebar.reset_toggles()
+        # IDLE first: the gate is computed from the state, and unchecking the
+        # toggles emits into handlers that act only on RECORDING/CALIBRATING.
         self._state = State.IDLE
+        self._reset_toggles()
         self._sidebar.set_status("IDLE", "#888")
 
     def _on_run_calibration(self):
@@ -2900,7 +2913,12 @@ class MainWindow(QMainWindow):
         self._calib_worker.start()
 
     def _on_calibration_done(self, success: bool, msg: str):
-        self._sidebar.set_toggles_enabled(True)
+        # finished_solve is the last thing run() does, so the thread is
+        # ending; joining it lets _toggles_permitted() see the solve as over.
+        worker = self._calib_worker
+        if worker is not None and worker.isRunning():
+            worker.wait(5000)
+        self._sidebar.set_toggles_enabled(self._toggles_permitted())
         self._sidebar.set_solve_enabled(True)
         self._sidebar.set_fields_editable(True)
         self._sidebar.set_status("IDLE", "#888")

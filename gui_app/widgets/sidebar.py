@@ -543,7 +543,7 @@ class SidebarWidget(QWidget):
 
     def set_toggles_enabled(self, enabled: bool):
         """Gate both toggles for the ENCODING/ALIGNING/solve phases. The gate
-        survives a set_busy cycle; reset_toggles() reopens it."""
+        survives a set_busy cycle; reset_toggles() sets it as well."""
         self._toggles_gate = enabled
         self._apply_enablement()
 
@@ -607,13 +607,19 @@ class SidebarWidget(QWidget):
         else:
             self.record_toggled.emit(False)
 
-    def reset_toggles(self):
-        """Return both toggles to off and reopen the toggles gate: the IDLE
-        entry point after an acquisition, an alignment or a refused start.
-        Unchecking emits like a click, so a live stop path still runs."""
+    def reset_toggles(self, enabled: bool = True):
+        """Return both toggles to off and set the toggles gate to ``enabled``:
+        the IDLE entry point after an acquisition, an alignment or a refused
+        start. Unchecking emits like a click, so a live stop path still runs.
+
+        RULE: a caller that shares the gate passes what every owner permits.
+        REASON: the gate is one switch shared by the state machine, a solve
+        and a firmware upload, and forcing it open here reopened Record and
+        Calibrate in the middle of an editor flash that an encode or a solve
+        happened to finish during."""
         self._calibrate_toggle.setChecked(False)
         self._record_toggle.setChecked(False)
-        self._toggles_gate = True
+        self._toggles_gate = bool(enabled)
         self._apply_enablement()
 
     # --- calibration coverage graph ---
