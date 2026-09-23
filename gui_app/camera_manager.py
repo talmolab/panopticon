@@ -1,6 +1,7 @@
 """Manages the camera set — opening, closing, and switching between free-run and
 trigger modes. The count comes from the profile (`n_cameras`) and is enforced
 by `open_all(expect_cameras=...)`, not hardcoded here."""
+import gc
 import inspect
 import time
 import numpy as np
@@ -1416,6 +1417,13 @@ class CameraManager(QObject):
                 f"CameraManager.last_results before abandoning.",
                 results, stuck)
         self._grab_threads.clear()
+        # RULE: collect every generation once the acquisition is over.
+        # REASON: whatever a recording leaves in a reference cycle stays
+        # allocated until the collector's oldest generation runs, which in a
+        # quiet GUI can be never; the grab threads and the sinks drop their
+        # rings explicitly, and this frees the rest. Every grab thread has
+        # exited by here, so the pause costs no capture time.
+        gc.collect()
         return results
 
     #: What a post-stop read of backend.stream_stats() may be believed for.

@@ -1525,6 +1525,15 @@ class GrabThread(QThread):
                 self._camera.StopGrabbing()
             except Exception:
                 pass
+            # RULE: this thread lets go of its NV12 ring when the loop ends.
+            # REASON: the ring is the largest allocation in the program, and
+            # this thread, the router and the encoder threads refer to one
+            # another, so whichever of them outlives the stop would keep the
+            # ring until a full garbage collection, which a quiet GUI may not
+            # run for the rest of the session; the next acquisition then finds
+            # no RAM. A frame still queued for its encoder keeps its own slot.
+            self._nv12_ring = None
+            self._free_slots = None
 
     def _finish_encoder(self, enc_thread: _EncoderThread) -> bool:
         """End the decoupled encoder and reconcile this camera's bookkeeping.
