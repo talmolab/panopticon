@@ -39,13 +39,14 @@ from pathlib import Path
 #: pass sends a UDP query and opens nothing, so listing it would let a harmless
 #: run block every other probe.
 #:
-#: RULE: a marker matches an argument whose whole file name is the marker (a
-#: bare name such as ``panopticon`` also matches with an extension), never a
-#: fragment of the command line. REASON: the repository is usually cloned
-#: into a folder named panopticon, so every program run from its virtual
-#: environment carries that word in its interpreter path, and test_sim_gui.py
-#: or labelgui.py end in gui.py; matching fragments refuses a probe beside
-#: any of them.
+#: RULE: a script marker matches only an argument of a Python interpreter or
+#: of uv whose whole file name is the marker, and a bare marker such as
+#: ``panopticon`` matches only the program itself (is_panopticon_command).
+#: REASON: the repository is usually cloned into a folder named panopticon,
+#: so every program run from its virtual environment carries that word in
+#: its interpreter path; test_sim_gui.py and labelgui.py end in gui.py; and a
+#: shell that starts a probe names it in its own command line. Matching
+#: fragments refuses a probe beside any of them.
 PANOPTICON_MARKERS = ("gui.py", "probe_seq.py", "probe_lag.py", "probe_mp.py",
                       "probe_flir.py", "probe_abuse.py", "probe_multiproc.py",
                       "probe_release_gil.py", "probe_zerocopy.py",
@@ -113,7 +114,8 @@ def _process_table() -> list[tuple[int, int, str]] | None:
             pid = int(info["pid"])
             if argv and pid == os.getpid():
                 own_cmdline = True
-            cmd = " ".join(argv) if argv else (info.get("name") or "")
+            cmd = CommandLine(" ".join(argv) if argv else (info.get("name") or ""))
+            cmd.argv = [str(a) for a in argv]
             rows.append((pid, int(info.get("ppid") or 0), cmd))
     except Exception as exc:
         print(f"[guard] could not read the process table: {exc}", flush=True)
@@ -137,24 +139,59 @@ def _own_lineage(rows: list[tuple[int, int, str]]) -> set[int]:
     return mine
 
 
-def _file_names(cmd: str):
-    """Each argument of a command line as a lower-case file name."""
-    for tok in re.split(r"[\s\"']+", cmd or ""):
-        if tok:
-            yield ntpath.basename(tok).lower()
+class CommandLine(str):
+    """A process's command line as text, with its arguments in `argv`.
+
+    The text is what a refusal prints. The matching rules need the
+    arguments themselves, because the path of an interpreter installed under
+    a folder whose name has a space in it splits into two words in the text.
+    """
+
+    argv: list = []
 
 
-def is_panopticon_command(cmd: str) -> bool:
-    """Whether a command line runs a Panopticon entry point (see
-    PANOPTICON_MARKERS for the matching rule)."""
-    marks = {m.lower() for m in PANOPTICON_MARKERS}
-    for name in _file_names(cmd):
-        if name in marks:
-            return True
-        stem = name.rsplit(".", 1)[0] if "." in name else name
-        if stem in marks and stem != name:
-            return True
-    return False
+def _argv(cmd) -> list:
+    """The arguments of `cmd`: exact when the process table supplied them,
+    otherwise the text split on whitespace and quotes."""
+    argv = getattr(cmd, "argv", None)
+    if argv:
+        return list(argv)
+    return [t for t in re.split(r"[\s\"']+", str(cmd or "")) if t]
+
+
+def _file_name(arg: str) -> str:
+    return ntpath.basename(arg.strip("\"'")).lower()
+
+
+def _is_launcher(name: str) -> bool:
+    """A Python interpreter (python, python3.12, pythonw, py) or uv."""
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name in ("py", "uv") or name.startswith("python")
+
+
+def is_panopticon_command(cmd) -> bool:
+    """Whether a command line runs a Panopticon entry point.
+
+    RULE: an entry script counts only as an argument of an interpreter or of
+    uv, and only by its whole file name; a bare marker (panopticon) counts
+    as the program itself, with or without an extension. REASON: a shell
+    that runs a probe (`bash -c "... probe_lag.py ..."`) carries the
+    probe's name in its own command line without running it, and a folder
+    named panopticon or a file named labelgui.py is not a Panopticon (see
+    PANOPTICON_MARKERS).
+    """
+    argv = _argv(cmd)
+    if not argv:
+        return False
+    scripts = {m.lower() for m in PANOPTICON_MARKERS if m.lower().endswith(".py")}
+    bare = {m.lower() for m in PANOPTICON_MARKERS if "." not in m}
+    prog = _file_name(argv[0])
+    if prog in bare or prog.rsplit(".", 1)[0] in bare:
+        return True
+    if not _is_launcher(prog):
+        return False
+    return any(_file_name(a) in scripts for a in argv[1:])
 
 
 def spawn_parent(cmd: str) -> int | None:
