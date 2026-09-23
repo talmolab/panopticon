@@ -15,10 +15,12 @@ Each camera is a small job that moves through stages (optional tail encode,
 then remux/encode), and every stage is one ffmpeg process scheduled through
 the same ``max_parallel`` slots, so NVENC use is bounded and progress moves.
 For the raw branch that concurrency is bounded by disk read bandwidth and the
-NVENC concurrent-session limit rather than the CPU. That limit is REAL and
-finite -- measured 12 on this rig's driver, and NVIDIA has moved it
-(2 -> 3 -> 5 -> 8 -> 12), so probe it via nvenc.probe_max_sessions rather than
-assuming a number.
+NVENC concurrent-session limit rather than the CPU. The driver sets that
+limit and it differs between driver versions, so probe it with
+nvenc.probe_max_sessions rather than assuming a number.
+
+``0_encode.py`` runs the same job without the GUI, for an acquisition whose
+encode step did not finish.
 
 Every ffmpeg command is assembled from ``gui_app.ffmpeg_cmd`` so ``-g <fps>``
 and ``-movflags +faststart`` cannot be dropped from any mp4 this file writes.
@@ -47,8 +49,9 @@ from gui_app import ffmpeg_cmd
 # encoder that died still accepted frames that were never coded, so the fed
 # count over-claims by whatever was in flight, and truncating the metadata to
 # it would map the mp4's frames onto the wrong triggers, which is the silent
-# failure this file exists to refuse. grab_thread.write_split_point is what
-# writes it; the key keeps its name because this reader already had it.
+# failure this file exists to refuse. grab_thread.write_split_point writes
+# it. The key is spelled "encoded" so that recordings already on disk keep
+# reading correctly; its value is the coded count.
 ENCODED_JSON = "encoded.json"
 
 # Below this size a file cannot be an mp4 with a moov atom and one frame, so a
@@ -57,7 +60,11 @@ MIN_MP4_BYTES = 1024
 
 
 def _read_encoded_count(cam_dir: Path):
-    """Frames in stream.h264 according to the capture router, or None."""
+    """The coded-picture count encoded.json records for stream.h264, or None.
+
+    That is the number of frames the mp4 made from stream.h264 holds, and the
+    count the metadata is cut to when the raw tail cannot be merged.
+    """
     p = cam_dir / ENCODED_JSON
     if not p.exists():
         return None
