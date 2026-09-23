@@ -75,10 +75,15 @@ class TeensyController:
         # pre-RDY firmware: the legacy exemption exists only for boards that
         # never speak RDY at all.
         self._speaks_rdy = False
-        #: Sketch identity (8 hex characters) from the most recent ack, or None
-        #: when the firmware does not report one. Lets the host tell which
-        #: sketch the board actually runs instead of trusting a per-machine
-        #: record of what was last uploaded.
+        #: Sketch identity (8 hex characters) carried by the most recent ack, or
+        #: None when that ack carried none or did not arrive. Lets the host
+        #: tell which sketch the board actually runs instead of trusting a
+        #: per-machine record of what was last uploaded.
+        #:
+        #: RULE: cleared by every open() and at the start of every ack wait.
+        #: REASON: an id kept across a reopen or a missed ack names the sketch
+        #: the board ran BEFORE, typically the one a flash just replaced, and
+        #: the host then decides on the wrong firmware.
         self.board_id: str | None = None
 
     @property
@@ -96,6 +101,8 @@ class TeensyController:
         and the two need different actions from the operator.
         """
         self.last_error = None
+        # Opening resets the board, so whatever it said before is history.
+        self.board_id = None
         if is_sim_port(self._port):
             return self._open_sim()
         for _ in range(retries):
@@ -211,11 +218,17 @@ class TeensyController:
         """
         want_n, want_fps = int(n_pins), max(int(fps), 0)
         want = f"RDY {want_n} {want_fps}"
+        # The identity is whatever THIS ack says; a missed ack leaves none.
+        self.board_id = None
+        ser = self._ser
+        if ser is None:
+            print(f"[teensy] wanted {want!r}, but the link is closed", flush=True)
+            return False
         deadline = time.monotonic() + (self.ACK_TIMEOUT if timeout is None else timeout)
         buf = ""
         while time.monotonic() < deadline:
             try:
-                chunk = self._ser.read(64)
+                chunk = ser.read(64)
             except (serial.SerialException, OSError) as e:
                 print(f"[teensy] read failed: {e}", flush=True)
                 return False
@@ -320,10 +333,13 @@ class TeensyController:
         pins and every stim pin LOW, which is also the right state for a board
         found carrying a previous session's paradigm.
 
-        Returns ``board_id`` — None when the link is down or the firmware
-        prints no identity.
+        Returns ``board_id`` — None when the link is down, when the stop's ack
+        did not arrive, or when the firmware prints no identity. An id from an
+        earlier exchange is never returned, because after a reflash it names
+        the sketch the flash replaced.
         """
         pins = list(pins)
+        self.board_id = None
         self.stop_triggers(pins)
         if self._ser and not self._speaks_rdy:
             # readFPS() clamps the stop's -1 to 0, so the board acks it as
