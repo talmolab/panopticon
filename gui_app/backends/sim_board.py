@@ -12,6 +12,10 @@ profile's `serial_port` is `sim`. It speaks the sketch's line protocol
 ack and the board-identity check all run unchanged, and the command that
 would start the real board starts this clock.
 
+`SimExternalClock` drives the same clock with no serial link at all. It
+stands in for a lab's own TTL source (a profile with `trigger_source:
+external`), which the host can neither start, confirm nor stop.
+
 Nothing here opens a port, imports a vendor SDK or touches hardware.
 
 VIRTUAL TIME
@@ -456,6 +460,86 @@ def reset_board(speed: float = DEFAULT_SPEED) -> SimBoard:
     with _SHARED_LOCK:
         _SHARED = SimBoard(speed=speed)
         return _SHARED
+
+
+class SimExternalClock:
+    """A trigger source that runs on its own, as a lab's pulse generator does.
+
+    It drives a SimBoard's pulse train directly, so the simulated cameras
+    receive its pulses as they receive the board's. Nothing on the
+    serial link reaches it: no SimSerial command starts or stops it, and it
+    prints no RDY line. That is the rig a profile with `trigger_source:
+    external` describes, where only the operator starts and stops the
+    triggers.
+
+    `start(fps, triggers=None)` begins a pulse train. With `triggers` set, the
+    train ends by itself after that many pulses, which models a source that
+    stops in the middle of a recording; `stop()` can then only bring the end
+    forward. A train started before the cameras are armed is what the
+    external-source arm check refuses: each simulated camera counts from the
+    first pulse after its own StartGrabbing, as a real camera does.
+    """
+
+    def __init__(self, board: SimBoard | None = None):
+        self._board = board or shared_board()
+
+    @property
+    def board(self) -> SimBoard:
+        """The clock this source drives."""
+        return self._board
+
+    @property
+    def running(self) -> bool:
+        """True while pulses are still due: started, not stopped, and short
+        of its trigger count."""
+        brd = self._board
+        st = brd.state()
+        return st.running and (st.stop_v is None
+                               or brd.virtual_now() <= st.stop_v)
+
+    def pulses_fired(self) -> int:
+        """Pulses the current train has put on the wire so far."""
+        brd = self._board
+        st = brd.state()
+        if st.fps <= 0:
+            return 0
+        end = brd.virtual_now() if st.running else (st.stop_v or st.epoch_v)
+        if st.stop_v is not None:
+            end = min(end, st.stop_v)
+        return max(0, int((end - st.epoch_v) * st.fps))
+
+    def start(self, fps: float, triggers: int | None = None) -> float:
+        """Begin a pulse train at `fps`; returns the rate the board runs.
+
+        With `triggers`, the train's end is fixed at start, half a period
+        after its last pulse, so the pulse count is the same whenever the
+        caller stops it.
+        """
+        brd = self._board
+        if isinstance(brd, SharedSimBoard):
+            brd.trigger_limit = None if triggers is None else int(triggers)
+            return brd.start(fps)
+        with brd._lock:
+            rate = brd.start(fps)
+            if triggers is not None and brd._running and rate > 0:
+                brd._stop_v = brd._epoch_v + (int(triggers) + 0.5) / rate
+            return rate
+
+    def stop(self) -> None:
+        """End the pulse train now, or keep the earlier end a trigger count
+        already fixed. Moving the end later would deliver pulses that never
+        fired."""
+        brd = self._board
+        if isinstance(brd, SharedSimBoard):
+            brd.stop()
+            return
+        with brd._lock:
+            if brd._running:
+                now = brd.virtual_now()
+                brd._stop_v = (now if brd._stop_v is None
+                               else min(brd._stop_v, now))
+                brd._running = False
+                brd.stops += 1
 
 
 def accept_upload(ino_content: str, board: SimBoard | None = None) -> str | None:

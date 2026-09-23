@@ -187,6 +187,12 @@ class CameraManager(QObject):
     #: or failed during the last recording. The main window invalidates the
     #: NVENC session count the preflight cached when this is not empty.
     last_encoder_failures: list = []
+    #: What starts the triggers, the profile's trigger_source ("board" or
+    #: "external"). It picks the wording of the stop warning for a camera
+    #: still receiving frames, because an external source is stopped by the
+    #: operator, not by a command from this host. The window sets it at every
+    #: start.
+    trigger_source = "board"
 
     def __init__(self, backend: str = "basler"):
         # The only vendor-specific object in this class. Everything below is
@@ -351,6 +357,19 @@ class CameraManager(QObject):
     @property
     def frame_counts(self) -> list[int]:
         return [gt.frame_count for gt in self._grab_threads]
+
+    def results_received(self) -> list[int]:
+        """Per camera, grab results this acquisition has retrieved: the
+        frames it counted plus the grabs that failed.
+
+        A failed grab is a trigger the camera acquired and lost in
+        transmission, so it proves the trigger source is running even on a
+        camera none of whose frames arrive whole. An external trigger source
+        is judged started by this (trigger_source.ExternalTriggerSource).
+        Reads two counters the grab loop already keeps.
+        """
+        return [int(gt.frame_count) + int(getattr(gt, "failed_grabs", 0))
+                for gt in self._grab_threads]
 
     @property
     def frontier_lags(self) -> list:
@@ -1298,10 +1317,19 @@ class CameraManager(QObject):
         for i, gt in enumerate(threads):
             if not gt.isRunning() or gt.retrieve_loop_exited:
                 continue
-            msg = (f"{self._cn(i)}: its grab thread was still receiving frames "
-                   f"{STOP_NORMAL_EXIT_S:.0f} s after the trigger board was told "
-                   f"to stop; the board may still be triggering, or the camera "
-                   f"was not in trigger mode. The thread was stopped outright.")
+            if self.trigger_source == "external":
+                msg = (f"{self._cn(i)}: its grab thread was still receiving "
+                       f"frames {STOP_NORMAL_EXIT_S:.0f} s after the recording "
+                       f"was stopped, so the external trigger source was "
+                       f"still running, or the camera was not in trigger "
+                       f"mode. Panopticon stopped the thread, so this "
+                       f"camera's recording ends on a different pulse from "
+                       f"the others'.")
+            else:
+                msg = (f"{self._cn(i)}: its grab thread was still receiving frames "
+                       f"{STOP_NORMAL_EXIT_S:.0f} s after the trigger board was told "
+                       f"to stop; the board may still be triggering, or the camera "
+                       f"was not in trigger mode. The thread was stopped outright.")
             print(f"[acq] WARNING: {msg}", flush=True)
             warnings.append(msg)
             gt.stop()

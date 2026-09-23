@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 
 from PyQt5.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QApplication, QMessageBox
+from PyQt5.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QPalette, QColor, QIcon, QCursor
 
@@ -34,6 +35,9 @@ from gui_app import rig_setup
 from gui_app import settings
 from gui_app import stim_compiler
 from gui_app.session_config import SessionConfig, RigProfile
+from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S, STOP_WAIT_S,
+                                    ExternalTriggerSource,
+                                    make_trigger_source)
 from gui_app.widgets.camera_grid import CameraGridWidget
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.stimulation_window import StimulationWindow
@@ -87,6 +91,33 @@ def _has_capture_data(video_dir: Path) -> bool:
             except OSError:
                 continue
     return False
+
+
+class _TriggerPrompt(QDialog):
+    """The non-modal prompt of an external trigger source: one text and one
+    button, which rejects the dialog. The window keeps it, rewrites its text
+    while it counts down, and closes it itself when the cameras answer."""
+
+    def __init__(self, parent, title: str, text: str, button: str):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(False)
+        layout = QVBoxLayout(self)
+        self._label = QLabel(text)
+        self._label.setWordWrap(True)
+        layout.addWidget(self._label)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.button = QPushButton(button)
+        self.button.clicked.connect(self.reject)
+        row.addWidget(self.button)
+        layout.addLayout(row)
+
+    def setText(self, text: str) -> None:
+        self._label.setText(text)
+
+    def text(self) -> str:
+        return self._label.text()
 
 
 class State(Enum):
@@ -149,6 +180,30 @@ class MainWindow(QMainWindow):
     _thermal_shutdown_warnings: tuple | list = ()
     #: Cameras whose thermal-watch fallback has been logged this acquisition.
     _thermal_logged: frozenset | set = frozenset()
+    #: Where an acquisition on an external trigger source is in the
+    #: operator's part of the protocol: None outside one, "awaiting" from the
+    #: prompt to the first trigger, "running" while triggers arrive, and
+    #: "stopping" from Stop until every camera is silent.
+    _ext_phase: str | None = None
+    #: time.monotonic() at which the current phase stops waiting.
+    _ext_deadline = 0.0
+    #: The timer that watches the cameras during those phases, and the
+    #: prompt on screen, if any.
+    _ext_timer = None
+    _ext_prompt = None
+    #: Milliseconds between two looks at the cameras in those phases.
+    EXTERNAL_POLL_MS = 100
+    #: (holder, target) while an external-source start holds the session the
+    #: operator agreed to overwrite: moved out of the way into the hidden
+    #: directory ``holder``, not yet deleted. None outside that window
+    #: (_set_overwrite_aside).
+    _overwrite_aside: tuple | None = None
+    #: The last error the trigger-source watch printed, so a manager read
+    #: that fails on every tick is logged once, not ten times a second.
+    _ext_watch_error = ""
+    #: The trigger pins of the profile a switch left, for the stop a switch
+    #: to an external trigger source sends that profile's board.
+    _switch_from_pins: list | None = None
 
     def __init__(self):
         super().__init__()
@@ -680,6 +735,9 @@ class MainWindow(QMainWindow):
         # responding".
         self._begin_busy("Switching cameras…")
         self._switch_from_port = self._profile.serial_port
+        # The old board's own pins, for the stop a switch to an external
+        # trigger source sends it (_prepare_board_after_switch).
+        self._switch_from_pins = list(self._profile.trigger_pins)
         self._profile = profile
 
         def _switch():
@@ -720,7 +778,39 @@ class MainWindow(QMainWindow):
         a board holding a stimulation paradigm breaks "calibration can never
         activate stim". The old port's hint and board identity describe the
         other board and are forgotten first, so the flash runs.
+
+        A profile on an external trigger source uses no board. The previous
+        profile's board is sent a stop on its own trigger pins and its link
+        is closed (stop_and_close), and its hint is forgotten, so a later
+        switch back runs the launch check on it. The Stimulation editor is
+        closed, because nothing can run a paradigm now.
+
+        RULE: the stop goes out before the link closes, and a stop the board
+        does not confirm is shown. REASON: in this mode nothing talks to that
+        board again, not even the quit's stand-down, so this is the last
+        chance to drive its camera and stimulation pins low.
         """
+        if self._external_trigger():
+            if self._teensy is not None:
+                teensy, self._teensy = self._teensy, None
+                pins = list(self._switch_from_pins
+                            or self._profile.trigger_pins)
+                print(f"[acq] the profile takes its triggers from an external "
+                      f"source; stopping the trigger board on {teensy.port} "
+                      f"and closing its link", flush=True)
+                try:
+                    stood_down = teensy.stop_and_close(pins)
+                except Exception as e:
+                    print(f"[acq] standing the board down failed: {e}",
+                          flush=True)
+                    stood_down = False
+                settings.set_board_sketch_hint("")
+                self._board_id_stale = True
+                self._warn_if_not_stood_down(stood_down)
+            close = getattr(self._stim_window, "close", None)
+            if close is not None:
+                close()
+            return
         new_port = self._profile.serial_port
         if new_port == old_port:
             return
@@ -897,6 +987,11 @@ class MainWindow(QMainWindow):
             lags = list(self._camera_mgr.frontier_lags or [])
         except Exception:
             return None
+        if all_silent and self._external_trigger():
+            # Silence on every camera is how an external source's recording
+            # begins and ends, so it raises no alarm; the watch that ends the
+            # recording reads it (_poll_external_source).
+            return self._external_silence_text(max(secs) if secs else 0.0)
         if all_silent:
             worst = max(secs) if secs else 0.0
             self._raise_source_alarm(worst)
@@ -913,6 +1008,20 @@ class MainWindow(QMainWindow):
         silent.sort(reverse=True)
         names = ", ".join(self._camera_label(i + 1) for _s, i in silent)
         return f"NO FRAMES from {names} for {silent[0][0]:.0f} s"
+
+    def _external_silence_text(self, silent_s: float) -> str:
+        """The status line while every camera is silent on an external
+        trigger source: before the first trigger, while the operator is
+        asked to stop the source, or once it has stopped."""
+        left = max(0.0, self._ext_deadline - time.monotonic())
+        if self._ext_phase == "awaiting":
+            return (f"Waiting for the first trigger: start your trigger "
+                    f"source now ({left:.0f} s left)")
+        if self._ext_phase == "stopping":
+            return "Waiting for your trigger source to stop"
+        return (f"NO FRAMES FROM ANY CAMERA for {silent_s:.0f} s: the trigger "
+                f"source has stopped, so the {self._acq_label()} is "
+                f"finishing.")
 
     def _raise_source_alarm(self, silent_s: float):
         """One modal per silence: every camera stopped receiving frames.
@@ -1323,7 +1432,12 @@ class MainWindow(QMainWindow):
           comparison is against _session_stim_ino, NOT the editor's own last
           upload: a calibration invalidates that while the held paradigm is
           still what Record flashes back.
+
+        A profile on an external trigger source has its own check
+        (_external_stim_refusal): no paradigm can run there at all.
         """
+        if self._external_trigger():
+            return self._external_stim_refusal(acq_type)
         if self._stim_window is None:
             return None
         if self._stim_window.is_testing():
@@ -1365,6 +1479,42 @@ class MainWindow(QMainWindow):
                     "one.\n\nPress Apply in the Stimulation editor, or undo "
                     "the edit.")
         return None
+
+    def _external_stim_refusal(self, acq_type: str):
+        """(title, message) when a recording on an external trigger source
+        would carry a stimulation paradigm, or None.
+
+        A paradigm runs only on the trigger board, which this mode never
+        opens, so a canvas holding one would label a recording as stimulated
+        while nothing fired. Every recording with a paradigm on the canvas is
+        refused. A calibration never carries one, so it is not.
+        """
+        stim = self._stim_window
+        if stim is None:
+            return None
+        if stim.is_testing():
+            return ("Stop the stimulation test first",
+                    "A stimulation test is still running from the previous "
+                    "profile. Stop it in the Stimulation editor, then start "
+                    "again.")
+        if acq_type != "recording":
+            return None
+        try:
+            blocks, _edges = stim.get_workflow()
+        except Exception as e:
+            blocks, why = True, f"\n\nThe canvas could not be read: {e}"
+        else:
+            why = ""
+        if not blocks:
+            return None
+        return ("Stimulation needs the trigger board",
+                f"The Stimulation canvas holds a paradigm, but this profile "
+                f"takes its triggers from your own source (trigger_source: "
+                f"external). A paradigm runs only on Panopticon's trigger "
+                f"board, so none can run here, and the recording would be "
+                f"labelled as stimulated.\n\nSwitch to the profile the "
+                f"paradigm was made on, clear or save the canvas, then switch "
+                f"back and press Record again.{why}")
 
     def _empty_canvas_refusal(self):
         """(title, message) when the canvas is empty but the board would run a
@@ -1695,6 +1845,131 @@ class MainWindow(QMainWindow):
             print(f"[acq] could not put {', '.join(kept)} back into {target}: "
                   f"{e}; it is in {aside}", flush=True)
 
+    def _set_overwrite_aside(self):
+        """Move the session the operator agreed to overwrite out of the way.
+        Worker side, external trigger source only.
+
+        RULE: on an external trigger source the agreed session is renamed
+        into a hidden directory beside it, deleted only once the first
+        trigger arrives (_drop_overwrite_aside), and put back by every start
+        that ends before then (_restore_overwrite_aside). REASON: in this
+        mode the refusals after this point are routine: a source left
+        running, Cancel at the prompt, no pulse within the timeout. None of
+        them records anything, and a delete here would cost the earlier
+        session on each one. A rename on the same volume takes no time and
+        keeps the files' timestamps. The files in KEPT_ON_OVERWRITE are
+        copied into the new directory, so the session set aside stays whole
+        until it is dropped.
+
+        The guard is _overwrite_dir_if_agreed's: only the agreed directory,
+        and only one strictly inside the output directory. Raises OSError
+        when the rename or a copy fails; the start then refuses, and
+        _discard_refused_capture puts back a rename that did happen.
+        """
+        target = self._overwrite_dir
+        if target is None or target != self._video_dir or not target.exists():
+            return
+        try:
+            base = Path(self._sidebar.output_dir).resolve()
+            resolved = target.resolve()
+            inside = resolved.is_relative_to(base) and resolved != base
+        except (OSError, ValueError):
+            inside = False
+        if not inside:
+            raise OSError(f"refusing to overwrite {target}: outside the "
+                          f"output directory {self._sidebar.output_dir}")
+        kept = [name for name in KEPT_ON_OVERWRITE
+                if (target / name).is_file()]
+        holder = Path(tempfile.mkdtemp(prefix=f".{target.name}-overwritten-",
+                                       dir=target.parent))
+        try:
+            os.replace(target, holder / target.name)
+        except OSError as e:
+            try:
+                holder.rmdir()
+            except OSError:
+                pass
+            raise OSError(f"the earlier data in {target} could not be moved "
+                          f"aside for the overwrite ({e}). Close anything "
+                          f"that has a file in it open.") from e
+        self._overwrite_aside = (holder, target)
+        print(f"[acq] moved the earlier data in {target} aside into {holder}; "
+              f"it is deleted when the first trigger arrives", flush=True)
+        if kept:
+            target.mkdir(parents=True, exist_ok=True)
+            self._created_dirs.append(target)
+            for name in kept:
+                shutil.copy2(holder / target.name / name, target / name)
+
+    def _restore_overwrite_aside(self) -> tuple:
+        """Put back the session _set_overwrite_aside moved out of the way.
+
+        Returns (note, failed): the paragraph a refusal adds to its message,
+        "" when nothing was set aside, and whether the session is still out
+        of place. Call once this start's own directory is gone: the rename
+        back needs the path free.
+        """
+        aside, self._overwrite_aside = self._overwrite_aside, None
+        if aside is None:
+            return "", False
+        holder, target = aside
+        moved = holder / target.name
+        try:
+            os.replace(moved, target)
+        except OSError as e:
+            print(f"[acq] could not put the earlier data back into {target}: "
+                  f"{e}; it is in {moved}", flush=True)
+            return (f"The data that was in {target} before this start could "
+                    f"not be put back ({e}). None of it was deleted: it is in "
+                    f"{moved}. Move that folder back to {target} by hand.",
+                    True)
+        try:
+            holder.rmdir()
+        except OSError as e:
+            print(f"[acq] could not remove the empty {holder}: {e}",
+                  flush=True)
+        print(f"[acq] put the earlier data back into {target}", flush=True)
+        return (f"The data already in {target} is back in place: none of it "
+                f"was deleted.", False)
+
+    def _drop_overwrite_aside(self) -> None:
+        """Delete the session _set_overwrite_aside moved out of the way. UI
+        thread, at the first trigger: from there the start can no longer be
+        cancelled, so the overwrite the operator agreed to goes ahead.
+
+        Only a directory strictly inside the output directory is removed.
+        Whatever cannot be removed is logged and becomes a line of this
+        acquisition's WARNINGS.txt and its post-session dialog
+        (_sweep_warnings), because it holds the earlier data under a hidden
+        name beside this one.
+        """
+        aside, self._overwrite_aside = self._overwrite_aside, None
+        if aside is None:
+            return
+        holder, target = aside
+        try:
+            base = Path(self._sidebar.output_dir).resolve()
+            resolved = holder.resolve()
+            inside = resolved.is_relative_to(base) and resolved != base
+        except (OSError, ValueError):
+            inside = False
+        errors = []
+        if inside:
+            shutil.rmtree(holder, onerror=lambda _f, path, exc: errors.append(
+                f"{path}: {exc[1]}"))
+        else:
+            errors.append("it is outside the output directory")
+        if not holder.exists():
+            print(f"[acq] overwrote existing data in {target}", flush=True)
+            return
+        print(f"[acq] could not remove the earlier data set aside in {holder}: "
+              f"{errors[0] if errors else 'unknown error'}", flush=True)
+        self._sweep_warnings = list(self._sweep_warnings) + [
+            f"The earlier data this {self._acq_label()} replaced could not be "
+            f"deleted completely ({errors[0] if errors else 'unknown error'}). "
+            f"What is left is in {holder}, a hidden directory beside this "
+            f"one. It is not part of this take; delete it by hand."]
+
     def _remove_created_dirs(self):
         """Take back the empty directories a refused start created.
 
@@ -1723,8 +1998,15 @@ class MainWindow(QMainWindow):
         capture itself opens are removed - a leftover raw.bin or stream.h264
         from a start that was refused would otherwise be written into or
         appended to.
+
+        On an external trigger source the agreed session is moved aside
+        instead of deleted (_set_overwrite_aside), because the refusals that
+        follow are routine there.
         """
-        self._overwrite_dir_if_agreed()
+        if self._external_trigger():
+            self._set_overwrite_aside()
+        else:
+            self._overwrite_dir_if_agreed()
         if not self._video_dir.exists():
             self._created_dirs.append(self._video_dir)
         for cam in self._camera_names:
@@ -1811,13 +2093,28 @@ class MainWindow(QMainWindow):
 
         Runs on a worker thread and returns what _on_acquisition_started
         needs: {"ok": True}, or {"ok": False, "title", "message"} plus
-        "cameras_closed" when the rollback had to abandon them.
+        "cameras_closed" when the rollback had to abandon them. A profile on
+        an external trigger source takes _start_body_external instead, which
+        adds "await_trigger" to its {"ok": True}.
         """
+        external = self._external_trigger()
+        # The stop warnings name the source the operator has to check.
+        self._camera_mgr.trigger_source = "external" if external else "board"
         try:
+            if external:
+                return self._start_body_external(acq_type, raw_paths,
+                                                 display_every, realtime,
+                                                 kick, fps)
             return self._start_body_inner(acq_type, raw_paths, display_every,
                                           realtime, kick, fps)
         except Exception as e:
             traceback.print_exc()
+            if external:
+                # No start went anywhere, and the source may be running, so
+                # the cameras are cancelled rather than stopped.
+                return self._cancel_external_start(
+                    f"Starting the {acq_type} failed:\n\n"
+                    f"{type(e).__name__}: {e}")
             # Unknown ground: the cameras may be in trigger mode and the board
             # may already be triggering, so stand both down rather than leave
             # them running behind an IDLE window.
@@ -2003,8 +2300,11 @@ class MainWindow(QMainWindow):
                 return False
             return True
 
-        if not teensy.start_triggers(self._profile.trigger_pins, fps,
-                                     may_retry=may_retry):
+        # BoardTriggerSource forwards to this controller's start_triggers
+        # with the same arguments: the RDY ack, the reset-and-retry and the
+        # may_retry veto are the controller's.
+        if not make_trigger_source(self._profile, teensy).start_triggers(
+                self._profile.trigger_pins, fps, may_retry=may_retry):
             if self._quitting:
                 # The quit closed the link under this start; the board is
                 # already stood down.
@@ -2053,6 +2353,229 @@ class MainWindow(QMainWindow):
         self._camera_mgr.signal_triggers_started()
         print("[acq] start_acquisition done", flush=True)
         return {"ok": True}
+
+    def _start_body_external(self, acq_type, raw_paths, display_every,
+                             realtime, kick, fps) -> dict:
+        """The start sequence on an external trigger source. Worker thread.
+
+        The order is directories, cameras, readiness barrier, the arm check,
+        and no serial port at any point. Panopticon cannot start this source,
+        so the barrier holds only if the operator starts it after every
+        camera is armed. The arm check (ExternalTriggerSource.close_barrier)
+        refuses a start in which any camera received a frame first: the
+        source was already running, and each camera's block IDs then count
+        from a different pulse. Returns {"ok": True, "await_trigger": True}
+        once the cameras are armed and the barrier is closed; the prompt to
+        start the source and the wait for its first pulse run on the UI
+        thread (_begin_external_wait).
+
+        Every refusal after the cameras start cancels them instead of
+        stopping them, and removes what the start wrote
+        (_cancel_external_start): a source that is running would otherwise
+        keep a stop waiting and fill files that are not a recording.
+        """
+        rig = self._session_rig()
+        source = self._trigger_source()
+        action = "Calibrate" if acq_type == "calibration" else "Record"
+        if self._quitting:
+            return self._quit_during_start()
+        try:
+            self._create_capture_dirs()
+        except OSError as e:
+            # Nothing is armed yet, so what the start made is removed at once
+            # and an earlier session it had set aside goes back.
+            note, _failed = self._discard_refused_capture()
+            return {"ok": False,
+                    "title": "Could not create the session directories",
+                    "message": (
+                        f"{self._video_dir}\n\ncould not be created:\n\n{e}"
+                        f"\n\nNothing has been started and nothing has been "
+                        f"recorded. Check the output directory, then start "
+                        f"again." + (f"\n\n{note}" if note else ""))}
+
+        self._arm_encoder_record(rig)
+        try:
+            self._camera_mgr.start_acquisition(
+                raw_paths, display_every=display_every,
+                realtime=realtime, width=rig.frame_width,
+                height=rig.frame_height, quality=rig.quality,
+                fps=fps, realtime_kick=kick, kick_max_lag=rig.kick_max_lag,
+                exposure_us=(rig.calibration_exposure_us or None
+                             if acq_type == "calibration" else None),
+                gain_db=(rig.calibration_gain_db
+                         if acq_type == "calibration"
+                         and rig.calibration_gain_db >= 0 else None))
+        except AcquisitionStartRefused as e:
+            # The cameras are back in preview with nothing recorded, so what
+            # the start made goes, and an earlier session it set aside comes
+            # back.
+            failures = list(getattr(self._camera_mgr, "last_encoder_failures",
+                                    []) or [])
+            if failures:
+                invalidate_nvenc_cache("; ".join(failures))
+            note, _failed = self._discard_refused_capture()
+            return {"ok": False, "title": "Cannot start the acquisition",
+                    "message": str(e) + (f"\n\n{note}" if note else "")}
+
+        t_bar = time.perf_counter()
+        try:
+            n_ready, n_tot = self._camera_mgr.wait_until_ready(
+                self.READY_TIMEOUT_S)
+            late = list(self._camera_mgr.not_ready())
+        except Exception as e:
+            print(f"[acq] readiness barrier failed: {e}", flush=True)
+            return self._cancel_external_start(
+                f"The check that every camera is armed before your trigger "
+                f"source starts could not run:\n\n{type(e).__name__}: {e}"
+                f"\n\nNothing was recorded. Start again.")
+        waited = time.perf_counter() - t_bar
+        flag = "" if not late else "  *** NOT ALL READY ***"
+        print(f"[acq] grab threads ready {n_ready}/{n_tot} after "
+              f"{waited:.2f}s{flag}", flush=True)
+        if late:
+            names = ", ".join(self._camera_label(i + 1) for i in late)
+            return self._cancel_external_start(
+                f"{names} had not armed after {self.READY_TIMEOUT_S:.0f} s, "
+                f"so you were not asked to start your trigger source. A "
+                f"camera that arms after the first pulse counts its block IDs "
+                f"from a later trigger than the others, and nothing in the "
+                f"files shows it.\n\nNothing was recorded. Arming fills each "
+                f"camera's frame ring in memory first, so the usual cause is "
+                f"memory pressure: close other applications, or lower "
+                f"kick_max_lag or max_num_buffer in the rig profile, then "
+                f"start again.")
+        try:
+            print(self._camera_mgr.pinning_report(), flush=True)
+        except Exception as e:
+            print(f"[acq] pinning report unavailable: {e}", flush=True)
+        if self._quitting:
+            return self._quit_during_start()
+
+        refusal = source.close_barrier(self._camera_mgr, fps, action=action)
+        if self._quitting:
+            return self._quit_during_start()
+        if refusal:
+            print(f"[acq] refusing the start: frames arrived before every "
+                  f"camera was armed {self._camera_mgr.frames_before_barrier()}",
+                  flush=True)
+            return self._cancel_external_start(
+                refusal, title="The trigger was already running")
+        print(f"[acq] every camera is armed and none has received a frame; "
+              f"the operator starts the trigger source at {fps} Hz",
+              flush=True)
+        return {"ok": True, "await_trigger": True}
+
+    def _cancel_external_start(self, message: str,
+                               title: str = "Could not start the acquisition"
+                               ) -> dict:
+        """Undo an external-source start that must not record, and describe it
+        for the dialog. Worker thread.
+
+        No start was sent anywhere, so there is nothing to stand down: the
+        cameras are cancelled, what the start wrote is removed and a session
+        it set aside is put back (_cancel_capture, _discard_refused_capture).
+        """
+        result = {"ok": False, "title": title, "message": message}
+        if self._cancel_capture():
+            result["cameras_closed"] = True
+            result["message"] += (
+                "\n\nThe cameras could not be put back in preview and have "
+                "been closed. Switch profile and back (or restart "
+                "Panopticon) to reopen them.")
+        note, _failed = self._discard_refused_capture()
+        if note:
+            result["message"] += f"\n\n{note}"
+        return result
+
+    def _cancel_capture(self) -> bool:
+        """Return the cameras to preview without recording anything. Worker
+        thread. True when they had to be closed instead.
+
+        The recording grab threads are abandoned, not stopped. A trigger
+        source that is still running keeps a stop's grab threads receiving,
+        so the stop would wait out its bound and then drain every frame the
+        cameras took into files that are about to be removed. A manager with
+        no cancel_acquisition, or one whose cancel fails (a grab thread that
+        will not exit), is abandoned, which closes the cameras.
+        """
+        cancel = getattr(self._camera_mgr, "cancel_acquisition", None)
+        if cancel is not None:
+            try:
+                cancel()
+                return False
+            except Exception as e:
+                print(f"[acq] cancelling the acquisition failed: {e}",
+                      flush=True)
+        try:
+            self._camera_mgr.abandon()
+        except Exception as e:
+            print(f"[acq] abandon while cancelling failed: {e}", flush=True)
+        return True
+
+    def _discard_refused_capture(self) -> tuple:
+        """Remove what a refused external-source start wrote, and put back
+        the session it set aside. Worker thread, or the quit.
+
+        The start had armed its cameras, so it may have written frames a
+        running source delivered before the barrier, or empty streams when
+        no trigger came. Neither is a recording. A directory this start
+        created is removed whole, because nothing in it is older than the
+        start. In a camera directory that already existed, only raw.bin and
+        stream.h264 are removed: the start deleted both before it opened
+        them, so what is there now is its own. Nothing outside the output
+        directory is touched. An overwrite the operator agreed to has only
+        moved the earlier session aside, and it goes back once this start's
+        directory is gone (_restore_overwrite_aside).
+
+        Returns _restore_overwrite_aside's (note, failed).
+        """
+        self._remove_refused_capture()
+        return self._restore_overwrite_aside()
+
+    def _remove_refused_capture(self) -> None:
+        """The removal half of _discard_refused_capture."""
+        video_dir = self._video_dir
+        created = list(self._created_dirs)
+        self._created_dirs = []
+        if video_dir is None:
+            return
+        try:
+            base = Path(self._sidebar.output_dir).resolve()
+        except (OSError, ValueError):
+            base = None
+
+        def inside(path: Path) -> bool:
+            try:
+                resolved = path.resolve()
+                return (base is not None and resolved.is_relative_to(base)
+                        and resolved != base)
+            except (OSError, ValueError):
+                return False
+
+        def report(_func, path, exc_info):
+            print(f"[acq] could not remove {path}: {exc_info[1]}", flush=True)
+
+        made = set(created)
+        for cam in self._camera_names:
+            cam_dir = video_dir / cam
+            if cam_dir in made or not inside(cam_dir):
+                continue
+            for name in ("raw.bin", "stream.h264"):
+                try:
+                    (cam_dir / name).unlink(missing_ok=True)
+                except OSError as e:
+                    print(f"[acq] could not remove {cam_dir / name}: {e}",
+                          flush=True)
+        for path in sorted(created, key=lambda p: len(p.parts), reverse=True):
+            if not path.exists():
+                continue
+            if not inside(path):
+                print(f"[acq] refusing to remove {path}: outside the output "
+                      f"directory", flush=True)
+                continue
+            shutil.rmtree(path, onerror=report)
+        print(f"[acq] removed what the refused start wrote in {video_dir}",
+              flush=True)
 
     def _wrong_sketch_refusal(self, teensy, acq_type: str) -> str:
         """Why the board that just acked must not run this acquisition, or "".
@@ -2109,6 +2632,13 @@ class MainWindow(QMainWindow):
             result = {"ok": False, "title": "Could not start the acquisition",
                       "message": f"{type(result).__name__}: {result}"}
         if not result.get("ok"):
+            if self._overwrite_aside is not None:
+                # An external-source start that ended without putting back
+                # the session it set aside; its own refusals already have.
+                note, _failed = self._discard_refused_capture()
+                if note:
+                    result["message"] = (result.get("message", "")
+                                         + f"\n\n{note}")
             self._remove_created_dirs()
             self._video_dir = None
             self._state = State.IDLE
@@ -2137,6 +2667,373 @@ class MainWindow(QMainWindow):
             self._sidebar.set_status("RECORDING", "#ff4444")
             self._save_stim_paradigm()
             self._arm_stim_autostop()
+        if result.get("await_trigger"):
+            self._begin_external_wait()
+
+    # ── external trigger source ───────────────────────────────────────────────
+    def _external_trigger(self) -> bool:
+        """True when this profile's triggers come from the operator's own TTL
+        source (trigger_source: external) rather than the trigger board."""
+        return getattr(self._profile, "trigger_source", "board") == "external"
+
+    def _trigger_source(self):
+        """What starts and stops this rig's camera triggers
+        (trigger_source.make_trigger_source over the window's board link)."""
+        return make_trigger_source(self._profile, self._teensy)
+
+    def _acq_label(self) -> str:
+        return "calibration" if self._acq_type == "calibration" else "recording"
+
+    def _acq_action(self) -> str:
+        """The toggle that starts this acquisition, as a dialog names it."""
+        return "Calibrate" if self._acq_type == "calibration" else "Record"
+
+    def _begin_external_wait(self):
+        """Every camera is armed on an external source: prompt the operator
+        and watch for the first trigger. UI thread.
+
+        The acquisition is live from here: the first pulse is recorded. If
+        none reaches any camera within FIRST_TRIGGER_TIMEOUT_S the start is
+        cancelled (_no_trigger_received). That bound ends before the grab
+        loops' pre-trigger grace, so no camera is retired for silence the
+        operator has not ended yet.
+        """
+        self._ext_phase = "awaiting"
+        self._ext_deadline = time.monotonic() + FIRST_TRIGGER_TIMEOUT_S
+        self._sidebar.set_status("WAITING FOR TRIGGER", "#ffaa00")
+        self.statusBar().showMessage(
+            "Every camera is armed: start your trigger source now")
+        self._show_external_prompt(
+            "Start your trigger source",
+            ExternalTriggerSource.prompt_text(
+                self._acq_fps, FIRST_TRIGGER_TIMEOUT_S, self._acq_label()),
+            "Cancel")
+        self._start_external_watch()
+        print(f"[acq] every camera is armed; waiting up to "
+              f"{FIRST_TRIGGER_TIMEOUT_S:.0f} s for the external trigger "
+              f"source's first pulse", flush=True)
+
+    def _start_external_watch(self):
+        if self._ext_timer is None:
+            self._ext_timer = QTimer(self)
+            self._ext_timer.timeout.connect(self._poll_external_source)
+        self._ext_timer.start(self.EXTERNAL_POLL_MS)
+
+    def _stop_external_watch(self):
+        """Stop watching the cameras and take the prompt down."""
+        if self._ext_timer is not None:
+            self._ext_timer.stop()
+        self._close_external_prompt()
+
+    def _show_external_prompt(self, title: str, text: str, button: str):
+        """Show a non-modal prompt with one button; closing it by any means
+        is the button (_on_external_prompt_closed).
+
+        Non-modal, because the acquisition goes on underneath it: the
+        watch closes it when the cameras answer, and the operator may still
+        use the window.
+        """
+        self._close_external_prompt()
+        box = _TriggerPrompt(self, title, text, button)
+        box.finished.connect(
+            lambda _code, b=box: self._on_external_prompt_closed(b))
+        self._ext_prompt = box
+        box.show()
+
+    def _update_external_prompt(self, text: str):
+        box = self._ext_prompt
+        if box is not None:
+            box.setText(text)
+
+    def _close_external_prompt(self):
+        """Take the prompt down without it counting as the operator's
+        answer."""
+        box, self._ext_prompt = self._ext_prompt, None
+        if box is None:
+            return
+        try:
+            box.done(0)
+            box.deleteLater()
+        except Exception as e:
+            print(f"[acq] could not close the trigger prompt: {e}", flush=True)
+
+    def _on_external_prompt_closed(self, box):
+        """The operator dismissed a prompt. Before the first trigger that
+        cancels the acquisition; while the source is asked to stop, it
+        finishes the acquisition without waiting any longer."""
+        if box is not self._ext_prompt:
+            return                    # taken down by the window itself
+        self._ext_prompt = None
+        if self._ext_phase == "awaiting":
+            print("[acq] the operator cancelled before the first trigger",
+                  flush=True)
+            self._sidebar.clear_toggle_silently(self._acq_type)
+            self._stop_acquisition()
+        elif self._ext_phase == "stopping":
+            print("[acq] the operator asked to finish without waiting for the "
+                  "trigger source to stop", flush=True)
+            self._ext_phase = None
+            self._stop_external_watch()
+            self._stop_acquisition()
+
+    def _poll_external_source(self):
+        """One look at the cameras during an external-source acquisition.
+        UI thread, every EXTERNAL_POLL_MS.
+
+        awaiting: the first result on any camera starts the recording
+        proper; the deadline passing is "no trigger received". running:
+        every camera silent for end_silence_s means the operator stopped
+        the source, and the acquisition finishes through the normal stop.
+        stopping: every camera silent for stop_silence_s, or STOP_WAIT_S
+        gone, finishes it.
+
+        RULE: each deadline is checked whatever the manager read returns.
+        REASON: a read that raises on every tick would otherwise hold the
+        window in WAITING FOR TRIGGER, or in STOP YOUR TRIGGER SOURCE, until
+        the operator pressed a button. A failed read counts as no trigger
+        and no silence, so only the deadline ends the phase.
+        """
+        phase = self._ext_phase
+        if phase is None or self._quitting:
+            self._stop_external_watch()
+            return
+        mgr = self._camera_mgr
+        fps = self._acq_fps
+        now = time.monotonic()
+        try:
+            if phase == "awaiting":
+                if self._watch_read(
+                        lambda: ExternalTriggerSource.triggers_arrived(mgr)):
+                    self._external_source_started()
+                elif now >= self._ext_deadline:
+                    self._no_trigger_received()
+                else:
+                    self._update_external_prompt(
+                        ExternalTriggerSource.prompt_text(
+                            fps, self._ext_deadline - now, self._acq_label()))
+            elif phase == "running":
+                end_s = ExternalTriggerSource.end_silence_s(fps)
+                if self._watch_read(
+                        lambda: ExternalTriggerSource.source_stopped(mgr,
+                                                                     end_s)):
+                    print(f"[acq] every camera silent for over {end_s:g} s: "
+                          f"the external trigger source has stopped; "
+                          f"finishing the {self._acq_label()}", flush=True)
+                    self._end_external_acquisition()
+            elif phase == "stopping":
+                stop_s = ExternalTriggerSource.stop_silence_s(fps)
+                stopped = self._watch_read(
+                    lambda: ExternalTriggerSource.source_stopped(mgr, stop_s))
+                if stopped or now >= self._ext_deadline:
+                    if not stopped:
+                        print(f"[acq] WARNING: frames still arriving "
+                              f"{STOP_WAIT_S:.0f} s after Stop; finishing "
+                              f"anyway", flush=True)
+                    self._ext_phase = None
+                    self._stop_external_watch()
+                    self._stop_acquisition()
+                else:
+                    self._update_external_prompt(
+                        ExternalTriggerSource.stop_prompt_text(
+                            self._ext_deadline - now, self._acq_label()))
+        except Exception as e:
+            # A watch that raises in a timer slot would stop watching; one
+            # that reports and looks again next tick does not.
+            print(f"[acq] trigger-source watch failed: {type(e).__name__}: "
+                  f"{e}", flush=True)
+
+    def _watch_read(self, read) -> bool:
+        """``read()`` for the trigger-source watch, False when it raises.
+
+        The error is printed when it differs from the last one, so a read
+        that fails on every tick is logged once rather than ten times a
+        second.
+        """
+        try:
+            answer = bool(read())
+        except Exception as e:
+            text = f"{type(e).__name__}: {e}"
+            if text != self._ext_watch_error:
+                print(f"[acq] trigger-source watch could not read the "
+                      f"cameras: {text}", flush=True)
+                self._ext_watch_error = text
+            return False
+        self._ext_watch_error = ""
+        return answer
+
+    def _external_source_started(self):
+        """The first trigger reached a camera: the recording is under way.
+
+        The grab threads' stall detectors are armed now, as the board's ack
+        arms them on the board path: from here a camera that receives
+        nothing while the others do is a camera fault, not a source that has
+        not started. The previous run's reports are swept now too, and an
+        earlier session the operator agreed to overwrite is deleted now,
+        because until this moment the start could still be cancelled.
+        """
+        self._ext_phase = "running"
+        self._close_external_prompt()
+        try:
+            self._camera_mgr.signal_triggers_started()
+        except Exception as e:
+            print(f"[acq] could not arm the stall detectors: {e}", flush=True)
+        self._sweep_stale_diagnostics()
+        self._drop_overwrite_aside()
+        if self._state is State.CALIBRATING:
+            self._sidebar.set_status("CALIBRATING", "#4488ff")
+        else:
+            self._sidebar.set_status("RECORDING", "#ff4444")
+        self.statusBar().showMessage(
+            f"Triggers arriving: {self._acq_label()} under way. Stop your "
+            f"trigger source to finish.")
+        print("[acq] the first trigger arrived from the external source",
+              flush=True)
+
+    def _end_external_acquisition(self):
+        """Finish an acquisition whose source stopped, through the normal
+        stop path: the toggle goes off and _stop_acquisition runs, as a
+        click would."""
+        self._sidebar.clear_toggle_silently(self._acq_type)
+        self._stop_acquisition()
+
+    def _external_stop_deferred(self) -> bool:
+        """Answer a stop on an external source before the normal stop runs.
+        True when the stop is handled here or deferred.
+
+        Before the first trigger nothing has been recorded, so the attempt
+        is cancelled. While triggers are still arriving the operator is
+        asked to stop the source, and the stop runs once every camera is
+        silent (_poll_external_source): a stop that ran now would keep
+        receiving frames, stop every grab thread itself once its bound ran out,
+        and end each camera on a different pulse. Once every camera is
+        silent the normal stop runs, and its grab loops end on their first
+        retrieve timeout.
+        """
+        phase = self._ext_phase
+        if phase == "awaiting":
+            self._ext_phase = None
+            self._stop_external_watch()
+            self._end_external_attempt(
+                "Acquisition cancelled",
+                "No trigger had arrived, so nothing was recorded. The "
+                "cameras are back in preview.",
+                status=("IDLE", "#888"), dialog=False)
+            return True
+        if phase == "stopping":
+            return True
+        if phase == "running":
+            try:
+                stopped = ExternalTriggerSource.source_stopped(
+                    self._camera_mgr,
+                    ExternalTriggerSource.stop_silence_s(self._acq_fps))
+            except Exception as e:
+                print(f"[acq] could not read the cameras' silence: {e}",
+                      flush=True)
+                stopped = True
+            if not stopped:
+                self._ext_phase = "stopping"
+                self._ext_deadline = time.monotonic() + STOP_WAIT_S
+                self._sidebar.set_status("STOP YOUR TRIGGER SOURCE", "#ffaa00")
+                self._show_external_prompt(
+                    "Stop your trigger source",
+                    ExternalTriggerSource.stop_prompt_text(
+                        STOP_WAIT_S, self._acq_label()),
+                    "Finish now")
+                self._start_external_watch()
+                print("[acq] stop requested while triggers still arrive; "
+                      "waiting for the external source to stop", flush=True)
+                return True
+        self._ext_phase = None
+        self._stop_external_watch()
+        return False
+
+    def _no_trigger_received(self):
+        """No trigger reached any camera within FIRST_TRIGGER_TIMEOUT_S of the
+        prompt: cancel the start and show the "no trigger" state."""
+        self._ext_phase = None
+        self._stop_external_watch()
+        print(f"[acq] no trigger received within "
+              f"{FIRST_TRIGGER_TIMEOUT_S:.0f} s of the prompt; cancelling",
+              flush=True)
+        self._end_external_attempt(
+            "No trigger received",
+            ExternalTriggerSource.no_trigger_text(
+                self._acq_fps, FIRST_TRIGGER_TIMEOUT_S, self._acq_action()),
+            status=("NO TRIGGER", "#ff4444"), dialog=True)
+
+    def _end_external_attempt(self, title: str, message: str, status: tuple,
+                              dialog: bool):
+        """Cancel an external-source acquisition that recorded nothing, off
+        the UI thread, then return to IDLE showing ``status``."""
+        if self._quitting:
+            return          # the quit abandons the cameras and the directory
+        self._thermal_timer.stop()
+        self._cancel_stim_autostop()
+        self._stop_coverage_hud()
+        self._detector = None
+        self._sidebar.hide_coverage()
+        if self._worker_busy(self._cam_op):
+            # Only the start worker runs here, and it has delivered its
+            # result, so this is its thread finishing. The cancel waits for
+            # it rather than leaving the window in an acquisition state.
+            print("[acq] a camera operation is still running; cancelling "
+                  "once it ends", flush=True)
+            QTimer.singleShot(200, lambda: self._end_external_attempt(
+                title, message, status, dialog))
+            return
+        self._begin_busy("Cancelling…")
+        self._cam_op = CallableWorker(self._cancel_and_discard)
+        self._cam_op.done.connect(
+            lambda result: self._on_external_attempt_ended(
+                result, title, message, status, dialog))
+        self._cam_op.start()
+
+    def _cancel_and_discard(self) -> dict:
+        """Worker side of _end_external_attempt."""
+        closed = self._cancel_capture()
+        note, failed = self._discard_refused_capture()
+        return {"cameras_closed": closed, "note": note,
+                "restore_failed": failed}
+
+    def _on_external_attempt_ended(self, result, title: str, message: str,
+                                   status: tuple, dialog: bool):
+        if self._quitting:
+            QApplication.restoreOverrideCursor()
+            return
+        # IDLE before the toggles are reset, so their signal stops nothing.
+        self._state = State.IDLE
+        self._end_busy()
+        self._finalized = True
+        self._video_dir = None
+        self._sidebar.set_fields_editable(True)
+        self._reset_toggles()
+        self._sidebar.set_status(*status)
+        closed = not isinstance(result, dict) or result.get("cameras_closed")
+        if isinstance(result, dict):
+            note = result.get("note", "")
+            failed = bool(result.get("restore_failed"))
+        else:
+            message += (f"\n\nCancelling failed: {type(result).__name__}: "
+                        f"{result}")
+            # The worker may have stopped before it put back an earlier
+            # session the start had set aside.
+            note, failed = self._restore_overwrite_aside()
+        if closed:
+            self._camera_grid.setup_grid(0)
+            self._camera_names = []
+            message += ("\n\nThe cameras could not be put back in preview and "
+                        "have been closed. Switch profile and back (or "
+                        "restart Panopticon) to reopen them.")
+        if note:
+            message += f"\n\n{note}"
+        self.statusBar().showMessage(
+            f"{title}: nothing was recorded"
+            + ("; the earlier data is back in place" if note and not failed
+               else ""))
+        # A session that could not be put back is shown even for a Cancel:
+        # the operator has to move it back by hand.
+        if dialog or closed or failed:
+            QMessageBox.warning(self, title, message)
 
     def _save_stim_paradigm(self):
         """Write the stimulus paradigm beside the video.
@@ -2343,7 +3240,12 @@ class MainWindow(QMainWindow):
         carrying the right sketch. In the common order — calibrate, then set up
         stimulation, then record — the calibration finds the launch-time
         stimulation-free sketch already in place and costs nothing.
+
+        A profile on an external trigger source has no board to flash, so
+        the start continues at once.
         """
+        if self._external_trigger():
+            return True
         try:
             want, label = self._sketch_for(acq_type)
             want_sha = stim_compiler.sketch_sha(want)
@@ -2460,7 +3362,14 @@ class MainWindow(QMainWindow):
         calls this again when the two disagree.
 
         Runs BEFORE _warm_serial: arduino-cli needs the port to itself.
+
+        A profile on an external trigger source uses no board: nothing is
+        flashed and no port is opened.
         """
+        if self._external_trigger():
+            print("[acq] this profile takes its triggers from an external "
+                  "source: no trigger board is flashed or opened", flush=True)
+            return
         # Defer rather than run alongside anything: this fires 1.5 s after
         # the window becomes interactive, so an acquisition or another flash
         # can already be under way, and assigning over a running _fw_op drops
@@ -2567,9 +3476,12 @@ class MainWindow(QMainWindow):
         recording.
 
         None once the window is quitting: the quit has stood the board down,
-        and an open now would reset it while the process exits.
+        and an open now would reset it while the process exits. None on a
+        profile with an external trigger source, which opens no serial port.
         """
         if self._quitting:
+            return None
+        if self._external_trigger():
             return None
         self._forget_board_on_other_port()
         if self._teensy is None:
@@ -2749,6 +3661,10 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
 
     def _stop_acquisition(self):
+        # An external source's recording ends when the operator's source
+        # does, so its stop may be cancelled or deferred here first.
+        if self._external_trigger() and self._external_stop_deferred():
+            return
         # Stop the temperature poll FIRST. It is a register read on every
         # camera, made from the UI thread, and the finalize worker is about to
         # be inside the camera SDK on the same devices; two threads making
@@ -2761,10 +3677,11 @@ class MainWindow(QMainWindow):
         # Stop the triggers but KEEP the port open: reopening it would reset the
         # board at the start of the next recording and flash a connected laser.
         # This is the everyday stop — the one taken every session — so it is the
-        # path where a swallowed failure matters most, not least.
+        # path where a swallowed failure matters most, not least. The board's
+        # stop is TeensyController.stop_triggers, False with no link; an
+        # external source has nothing to send and has fallen silent already.
         self._warn_if_not_stood_down(
-            self._teensy is not None
-            and self._teensy.stop_triggers(self._profile.trigger_pins))
+            self._trigger_source().stop_triggers(self._profile.trigger_pins))
 
         self._stop_coverage_hud()
         self._detector = None
@@ -3742,6 +4659,13 @@ class MainWindow(QMainWindow):
             f"{result['out_dir']}{tail}")
 
     def _on_stimulation(self):
+        if self._external_trigger():
+            # The editor's Apply and Test drive the trigger board, which this
+            # profile never opens; say why instead of offering them.
+            QMessageBox.information(
+                self, "Stimulation needs the trigger board",
+                ExternalTriggerSource.no_stimulation_text(self._profile.name))
+            return
         if self._stim_window is None:
             self._stim_window = StimulationWindow(
                 get_port=lambda: self._profile.serial_port,
@@ -3926,6 +4850,10 @@ class MainWindow(QMainWindow):
         self._quitting = True
         self._display_timer.stop()
         self._thermal_timer.stop()
+        # An external source's watch and prompt end with the window; the
+        # source itself is the operator's to stop.
+        self._ext_phase = None
+        self._stop_external_watch()
         # No bound at close: the loop exits after at most one detection pass,
         # and there is no later moment at which a straggler could be joined.
         self._stop_coverage_hud(timeout_ms=0)
@@ -4052,6 +4980,14 @@ class MainWindow(QMainWindow):
                 self._camera_mgr.abandon()
             except Exception as e:
                 print(f"[quit] abandon failed: {e}", flush=True)
+        if self._overwrite_aside is not None:
+            # An external-source start that never reached its first trigger:
+            # it recorded nothing, and the session it was to replace is only
+            # set aside. What the start wrote goes, and that session comes
+            # back, whatever the state says.
+            note, _failed = self._discard_refused_capture()
+            print(f"[quit] {note}", flush=True)
+            return
         # Read the flag AFTER the waits: a finalize that completed inside them
         # has written the whole session, and deleting it then would destroy
         # exactly the data the wait was there to save.
