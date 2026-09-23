@@ -18,6 +18,9 @@ from datetime import datetime
 from pathlib import Path
 
 from gui_app.backends import KNOWN_BACKENDS
+# One definition of the Serial0 pins, shared with the stimulation compiler, so
+# the trigger-pin refusal and the stim-pin refusal can never disagree.
+from gui_app.stim_compiler import RESERVED_SERIAL_PINS
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -37,10 +40,6 @@ ENCODERS = ("auto", "nvenc", "x264", "raw")
 #: through as the QP, and libx264 clamps a value above the top of the range
 #: to it, so an out-of-range value would record at another quality.
 QUALITY_RANGE = (0, 51)
-
-#: Arduino pins a camera trigger may never occupy: 0 and 1 are Serial0, the
-#: link the sketch handshakes over, so driving them would sever the board.
-RESERVED_SERIAL_PINS = frozenset({0, 1})
 
 #: Metadata fields a profile may pre-fill through ``metadata_defaults``. The
 #: names match SessionConfig's fields so a profile cannot invent a key that
@@ -92,34 +91,34 @@ class RigProfile:
     # omits the key gets that path; false selects post-hoc alignment
     # (gui_app/alignment.py).
     realtime_kick: bool = True
-    # Kick-out coordinator buffer depth (frames). A camera may lag the others by
-    # this many frames before its missing triggers are force-dropped to keep the
-    # pipeline flowing. Higher = fewer late frames sacrificed, but more RAM held
-    # (the NV12 ring is max_lag + 264 buffers per camera). Observed cross-camera
-    # lag is 0-2 frames since the grab loop stopped copying with the GIL held, so
-    # the headroom the 3dpose profile carries is precautionary — see the note
-    # there before changing it either way.
+    # Kick-out coordinator depth, in frames: how far a camera may lag the
+    # others before its missing triggers are force-dropped to keep the pipeline
+    # flowing. Higher sacrifices fewer late frames and holds more RAM, because
+    # the NV12 ring is kick_max_lag + grab_thread.ENCODE_QUEUE_DEPTH +
+    # grab_thread.KICK_RING_SLACK frames per camera. validate() refuses a value
+    # above max_num_buffer: the lagging camera's backlog waits in the driver
+    # pool, so a shallower pool loses frames the coordinator would have waited
+    # for.
     kick_max_lag: int = 240
-    # GigE receive driver: "socket" (user-space, robust packet resends — the
-    # proven path), "filter" (in-kernel pylon GigE Vision driver, less CPU but
-    # measured silently dropping ~23% of frames with default resend settings),
-    # or "auto" (leave pylon's default).
+    # Basler GigE receive driver: "socket" (user-space, robust packet resends),
+    # "filter" (in-kernel pylon GigE Vision driver, less CPU, but with default
+    # resend settings it discards a frame on a lost packet), or "auto" (leave
+    # pylon's default).
     gige_driver: str = "socket"
-    # Camera backend NAME, resolved by gui_app.backends.load_backend. The
-    # profile selects the vendor so no code changes when a rig ports; the
-    # default is the only backend shipped.
+    # Camera backend name, resolved by gui_app.backends.load_backend and
+    # checked against gui_app.backends.KNOWN_BACKENDS at load. The profile
+    # selects the vendor, so porting a rig is a profile edit.
     camera_backend: str = "basler"
     # Serial numbers of the cameras this rig consists of, as quoted strings in
-    # ASCENDING order, or None to open every enumerated camera. When set,
+    # ascending order, or None to open every enumerated camera. When set,
     # open_all opens only these serials and refuses to start if any of them
     # is missing, so a replacement camera cannot slip into a session under a
-    # calibrated camera's name. Names remain positional over the backend's
-    # serial-sorted subset (cam1 is the smallest listed serial that
-    # enumerated), which is why validate() refuses any other order: an
-    # out-of-order list would name the cameras differently from the list and
-    # attach the calibration extrinsics to the wrong physical camera. An
-    # extra, unlisted device on the host still fails n_cameras, because that
-    # count is taken over the full enumeration before this list narrows it.
+    # calibrated camera's name. cam{i+1} is entry i of this list, and an
+    # enumerated device the list does not name is ignored. validate() requires
+    # ascending (string) order because that is the order the backend
+    # enumerates in: the list then names every camera exactly as the rig names
+    # it without the list, so adding or removing it never moves a calibration's
+    # extrinsics onto a different physical camera.
     # Serials must be quoted: YAML reads a bare leading-zero number as octal,
     # so an unquoted serial can load as a different number and validate.
     camera_serials: list | None = None
@@ -127,17 +126,17 @@ class RigProfile:
     # "nvenc", "x264" or "raw" (raw.bin + post-hoc encode). Declared here so
     # a rig without an NVIDIA GPU is a profile edit, not a code edit.
     encoder: str = "auto"
-    # GigE bandwidth reserve applied at open, or None to keep each camera's
-    # .pfs value. The percentage (GevSCBWR) is the share of link bandwidth
-    # held back for packet resends; the accumulation (GevSCBWRA) is how many
-    # reserve slots may pool. Both are per-rig network facts, so they belong
-    # here rather than in the shared camera file.
+    # Basler GigE bandwidth reserve applied at open, or None to keep each
+    # camera's .pfs value. The percentage (GevSCBWR) is the share of link
+    # bandwidth held back for packet resends; the accumulation (GevSCBWRA) is
+    # how many reserve slots may pool. Both are per-rig network facts, so they
+    # belong here rather than in the shared camera file.
     gev_bandwidth_reserve_pct: float | None = None
     gev_bandwidth_reserve_accum: int | None = None
     # Metadata fields the sidebar pre-fills for a new session. The code default
-    # is blank on purpose: an initials or assay string baked into code would
-    # be written into every session_metadata.json on any rig whose operator
-    # does not notice the field, so lab-specific values live in the profile.
+    # is blank so that no operator's initials or assay can be written into
+    # the session_metadata.json of a rig whose operator does not notice the
+    # field; lab-specific values live in the profile.
     metadata_defaults: dict = field(default_factory=_default_metadata)
     pfs_path: str = ""
     output_dir: str = ""
@@ -147,96 +146,91 @@ class RigProfile:
     # empty value fails at the first serial open instead of guessing.
     serial_port: str = ""
     trigger_pins: list = field(default_factory=lambda: [2, 4, 6, 8, 10, 12])
-    # Expected camera count. 0 = don't check. Nonzero makes open_all refuse a
-    # partial set: names are positional by serial order, so a camera that fails
-    # to ENUMERATE renames every camera after it and silently attaches the
-    # calibration extrinsics to the wrong physical cameras.
+    # Expected camera count. 0 = don't check. Nonzero makes open_all refuse any
+    # other number of cameras available to open, counted after camera_serials
+    # has filtered the enumeration. Without camera_serials the names follow
+    # enumeration order, so a camera that fails to enumerate would rename
+    # every camera after it and attach the calibration extrinsics to the wrong
+    # physical cameras.
     n_cameras: int = 0
-    # Driver-side buffers queued per camera. THE LARGEST SINGLE RAM CONSUMER:
-    # n_cams x max_num_buffer x width x height bytes, so 1000 buffers is 20.7 GiB
-    # at nine 1920x1200 cameras, before the NV12 ring is counted at all. It is a
-    # profile field (not a camera_manager constant) so the capacity preflight's
-    # own advice ("Lower MaxNumBuffer or kick_max_lag") can be followed.
+    # Driver-side buffers queued per camera, and the largest single RAM
+    # consumer: the pool alone is n_cameras x max_num_buffer x frame_width x
+    # frame_height bytes, before the NV12 ring is counted. It is a profile
+    # field (not a camera_manager constant) so the capacity preflight's advice
+    # ("Lower max_num_buffer or kick_max_lag") can be followed. In kick-out
+    # mode it must be at least kick_max_lag (see there).
     #
-    # Deep slack absorbs genuine GigE jitter, and it is also what let a 1.5%
-    # per-frame deficit hide for ~11 minutes before anything went wrong: nothing
-    # errors, the pool quietly fills, and every frame retrieved gets staler. So
-    # lower it for RAM, not for speed, and read Buffer_Underrun_Count afterwards
-    # — nonzero means the pool ran dry, i.e. the host could not keep up.
+    # A deep pool absorbs network jitter, and it also hides a host that is
+    # falling behind: nothing errors while the pool fills, and each frame
+    # retrieved is staler than the last. Lower it for RAM, not for speed, and
+    # read the buffer-underrun count in the session's stream statistics
+    # afterwards: nonzero means the pool ran dry because the host could not
+    # keep up.
     max_num_buffer: int = 1000
     # --- Calibration coverage HUD: when has enough board been captured? -------
     # These decide how long someone stands in the arena waving, so they are
-    # worth setting against what the SOLVE consumes rather than by feel.
+    # worth setting against what the solve consumes rather than by feel.
     # 1_calibrate.py caps intrinsics at 60 pose-diverse frames per camera and
     # stereo at 30 shared frames per pair; everything beyond those caps is
     # discarded, contributing only a slightly richer pool to sample from. The
-    # defaults therefore sit at roughly 2x and 1.3x the caps, which is margin,
-    # not stinginess; ~4x and ~2.7x the caps just makes a 9-camera calibration
-    # take far longer than the data can be used for. Raise them if calibrations
-    # come out marginal; the
-    # per-pair chart in reprojection_error_histogram.png is the evidence.
+    # defaults therefore sit at roughly 2x and 1.3x the caps, which is margin;
+    # about 4x and 2.7x the caps makes a many-camera calibration take far
+    # longer than the data can be used for. Raise them if calibrations come
+    # out marginal; the per-pair chart in reprojection_error_histogram.png is
+    # the evidence.
     calibration_min_per_cam_shared: int = 120
     calibration_min_edge: int = 40
     # Quadrants of its own field of view each camera must see the board in.
-    # This is the criterion that actually prevents degenerate intrinsics from
-    # waving the board in one spot, and it is cheap to satisfy, so it should be
-    # the LAST thing relaxed.
+    # This is the criterion that prevents the degenerate intrinsics of a board
+    # waved in one spot, and it is cheap to satisfy, so relax it last.
     calibration_min_grid_cells: int = 3
     # Pin each grab thread to a performance core and raise its priority.
-    # On a hybrid CPU (P-cores + E-cores) the scheduler must place most of our
-    # ~19 busy threads on E-cores at nine cameras, and picks differently each
-    # launch — which is the shape of the rotating laggard. See cpu_affinity.py.
+    # On a hybrid CPU (P-cores + E-cores) with many cameras the scheduler has
+    # to place most busy threads on E-cores, and picks differently each
+    # launch, which is the shape of the rotating laggard. See cpu_affinity.py.
     # No effect on a non-hybrid CPU or off Windows.
     pin_capture_threads: bool = False
-    # Seconds between temperature polls while acquiring; 0 disables the check.
-    # These cameras have no fan and cool by conduction through the mount, so
-    # temperature is a property of the INSTALLATION: on the reference rig four
-    # of nine cameras sit above the vendor's Critical threshold and one peaked
-    # 1 C below thermal shutdown, while three others never pass 73 C. A camera
-    # that reaches shutdown stops delivering mid-session, and until now the GUI
-    # read temperatures only AFTER the recording -- too late to act on. The
-    # thresholds are never hardwired here: every Basler camera reports its own
-    # BslTemperatureStatus, BsliCriticalTemperature and BsliOverTemperature, so
-    # this works on any model. A GVCP register read is a cold path, hence the
-    # slow default rather than the preview timer.
-    # Confine ENCODER threads to the P-core set -- not one per core, and not
-    # the E-cores. Distinct from pin_encoder_threads above, which pins one
-    # encoder per E-core and measured catastrophic (worst lag 321).
+    # Confine encoder threads to the P-core set: not one per core, and not the
+    # E-cores. Distinct from pin_encoder_threads below, which confines them to
+    # the E-core set.
     #
-    # Leaving encoders unpinned is not neutral: Windows is then free to place
-    # one on an E-core, and _EncoderThread.run's own note is that a single
-    # E-core cannot sustain encode submission for one 1920x1200 stream at
-    # 100 fps. In one GUI process running a MIXED sequence
-    # (recording -> calibration -> solve -> recording), the first recording held
-    # every camera at 0 with qsize 0-1, and the second, with identical
-    # grab-thread affinity, filled the encode queue (qsize 183-204 against
-    # ENCODE_QUEUE_DEPTH 200) and ran 3-6x slower on every operation as the
-    # grab threads blocked on ring slots the coordinator could not release.
-    # Placement of unpinned encoders is a fresh lottery each acquisition, which
-    # is why one recording passes and the next does not.
+    # Leaving encoders unpinned lets Windows place one on an E-core, and a
+    # single E-core cannot always sustain encode submission for one camera's
+    # stream. That encoder's queue then fills and the grab threads block on
+    # ring slots the coordinator cannot release, which slows every camera.
+    # Placement of unpinned encoders changes with each acquisition, so one
+    # recording in a GUI session can pass and the next one fail.
     encoder_pcores: bool = False
+    # Seconds between temperature polls while acquiring; 0 disables the check.
+    # How hot a camera runs depends on its mounting and airflow, and a camera
+    # that reaches its shutdown temperature stops delivering mid-session, so
+    # the poll is what lets the operator act before that happens. Thresholds
+    # are never hardwired here: each backend's thermals() reports the camera's
+    # own status and shutdown temperature, so this works on any model. A
+    # register read per camera is a cold path, hence the slow default rather
+    # than the preview timer.
     thermal_poll_s: float = 20.0
-    # Logical CPUs that capture threads are kept OFF, when pinning is enabled.
+    # Logical CPUs that capture threads are kept off, when pinning is enabled.
     # CPU 0 is the Windows boot processor and the default target for timer and
     # DPC work, so a grab thread pinned there is descheduled by exactly the
     # network traffic it is trying to receive. With grab threads pinned, lag
-    # behind the leader as median/p95/max -- the victim follows the CORE, not
-    # the camera:
+    # behind the leader as median/p95/max, measured on the nine-camera
+    # reference rig (the victim follows the core, not the camera):
     #   exclude nothing (cam1 on CPU 0)   cam1 0/6/12, others 0/1/1
     #   exclude [0]     (cam1 on CPU 1)   cam1 0/3/4,  others 0/1/1
-    #   exclude [0, 1]                    ALL NINE 0/1/1
+    #   exclude [0, 1]                    all nine 0/1/1
     # Under the GUI the unexcluded case was far worse than headless: the same
-    # camera diverged to kick_max_lag (480) and was force-dropped.
+    # camera diverged to kick_max_lag and was force-dropped.
     capture_core_exclude: list = field(default_factory=lambda: [0])
-    # Confine ENCODER threads to the E-core set. Separate from the above, and
-    # default OFF because it measures WORSE at nine cameras with grab threads
-    # pinned in every arm:
+    # Confine encoder threads to the E-core set. Default off because it
+    # measured worse than unpinned encoders on the nine-camera reference rig,
+    # with grab threads pinned in every arm:
     #   encoders unpinned          avg_proc 2.19 ms  slack 7.03  worst lag 10
     #   encoders on the E-core set          2.53        6.62               10
     #   encoders one per E-core             3.48        5.52              321
-    # A single E-core cannot sustain encode submission for one 1920x1200
-    # stream at 100 fps, so that camera backs up and drags its grab thread
-    # with it. Kept as a knob for a rig with more cameras than P-cores.
+    # A single E-core cannot always sustain encode submission for one camera's
+    # stream, so that camera backs up and drags its grab thread with it. Kept
+    # as a knob for a rig with more cameras than P-cores.
     pin_encoder_threads: bool = False
     # Optostim output pins held LOW from the instant the sketch boots — before
     # the serial handshake, which blocks until the GUI connects. Without this a
@@ -245,26 +239,25 @@ class RigProfile:
     # must be safe even when no paradigm is loaded.
     stim_safe_pins: list = field(default_factory=lambda: [53])
     # Calibration-only exposure/gain. The ChArUco board often needs far more
-    # light than the experiment does -- especially when the room is dimmed to
+    # light than the experiment does, especially when the room is dimmed to
     # keep a wireless optostim receiver from triggering. Calibration can afford
-    # it: in trigger mode the minimum interval is
-    # `exposure + 1/AcquisitionFrameRate`, so at 100 fps exposure is capped near
-    # 3.94 ms, but at the 30 fps calibration rate the ceiling is ~27 ms.
-    # camera_manager.apply_exposure_gain() enforces 90% of that ceiling, so the
-    # values that actually survive are ~3.55 ms and ~24.5 ms — a larger request
-    # is clamped, with a `CLAMPED from ...` log line. These
-    # are applied for calibration only and the .pfs values are restored for
-    # recording, so a long calibration exposure can never leak into a 100 fps
-    # session (where it would silently halve the frame rate).
-    # 0 / -1 mean "leave the .pfs value alone".
+    # it, because the calibration frame rate leaves a longer trigger period.
+    # camera_manager.apply_exposure_gain() clamps the exposure to 90% of the
+    # camera's exposure ceiling at the acquisition's frame rate (the backend's
+    # exposure_ceiling_us) and logs `CLAMPED from ...` when it lowers a value.
+    # These apply to calibration only; the .pfs values are restored for
+    # recording, so a long calibration exposure cannot reach a recording,
+    # where it would make the camera ignore triggers.
+    # calibration_exposure_us 0 keeps the recording exposure, and
+    # calibration_gain_db -1 keeps the recording gain (0 dB is a real gain).
     calibration_exposure_us: float = 0.0
     calibration_gain_db: float = -1.0
-    # AcquisitionFrameRate applied in trigger mode, or 0 to disable the limiter.
-    # While externally triggered the camera's internal rate generator serves no
-    # purpose, but it still enforces a minimum interval of
-    # `exposure + 1/AcquisitionFrameRate` — the thing that capped exposure at
-    # ~3.94 ms at 100 fps, and (at the old value of 100) caused the 50 fps bug.
-    # 0 leaves only the sensor readout as the constraint.
+    # Basler only: AcquisitionFrameRate written in trigger mode, or 0 to
+    # disable the limiter. While triggered, the limiter still enforces a
+    # minimum frame interval of exposure + 1/trigger_rate_limit, which sets the
+    # exposure ceiling, and it paces each camera's readout onto the link.
+    # validate() refuses a frame rate at or above it, because the camera would
+    # ignore triggers.
     trigger_rate_limit: float = 165.0
 
     # ------------------------------------------------------------------ load
@@ -357,7 +350,7 @@ class RigProfile:
                 f"KNOWN_BACKENDS.")
 
         pins = set(self.trigger_pins)
-        on_serial = sorted(pins & RESERVED_SERIAL_PINS)
+        on_serial = sorted(pins & set(RESERVED_SERIAL_PINS))
         if on_serial:
             raise ValueError(
                 f"trigger_pins {on_serial} are the Serial0 link the trigger "
@@ -441,16 +434,17 @@ class RigProfile:
             if len(set(self.camera_serials)) != len(self.camera_serials):
                 raise ValueError(f"camera_serials {self.camera_serials} lists "
                                  f"a serial twice")
-            # The manager names cameras cam1..camN by position over the
-            # backend's serial-sorted subset, so the list is required to be
-            # in that same (string) order; otherwise cam{i} would not be
-            # entry i of the list and the extrinsics would attach to the
-            # wrong physical camera with no error anywhere.
+            # cam{i+1} is entry i of the list. Ascending (string) order is the
+            # order the backend enumerates in, so the list names every camera
+            # as the rig names it without the list, and a calibration taken
+            # with or without it attaches to the same physical cameras.
             if self.camera_serials != sorted(self.camera_serials):
                 raise ValueError(
                     f"camera_serials {self.camera_serials} is not in ascending "
-                    f"order; cameras are named cam1..camN over the serial-sorted "
-                    f"set, so list them as {sorted(self.camera_serials)}")
+                    f"order. cam1..camN are named by position in this list, "
+                    f"and ascending order keeps those names the same as the "
+                    f"serial order the cameras enumerate in without it, so "
+                    f"list them as {sorted(self.camera_serials)}")
             if self.n_cameras and self.n_cameras != len(self.camera_serials):
                 raise ValueError(
                     f"n_cameras {self.n_cameras} disagrees with the "
