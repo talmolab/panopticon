@@ -1423,6 +1423,21 @@ class CameraManager(QObject):
                    if getattr(gt, "source_down_stalls", 0)]
         if not stalled:
             return []
+        names = ", ".join(f"cam{i + 1}" for i, _gt in stalled)
+        if not any(getattr(gt, "frames_retrieved", 0)
+                   or getattr(gt, "frame_count", 0)
+                   or getattr(gt, "failed_grabs", 0) for gt in threads):
+            # No camera delivered a single result, good or failed: the
+            # triggers never reached any camera, which a board that stops
+            # mid-run cannot explain.
+            msg = (f"No camera received a frame after the trigger board "
+                   f"started ({names}), so nothing was recorded, and no "
+                   f"camera was retired for it. Check that the trigger board "
+                   f"is running and wired to every camera, and that each "
+                   f"camera's trigger input (its trigger line and source "
+                   f"settings) matches the line the board drives.")
+            print(f"[acq] WARNING: {msg}", flush=True)
+            return [msg]
         start = self._board_started_t
         firsts = [gt.source_down_since for _i, gt in stalled
                   if getattr(gt, "source_down_since", None) is not None]
@@ -1430,7 +1445,6 @@ class CameraManager(QObject):
         if start is not None and firsts:
             when = (f" about {max(0.0, min(firsts) - start):.0f} s into the "
                     f"recording")
-        names = ", ".join(f"cam{i + 1}" for i, _gt in stalled)
         msg = (f"Every active camera stopped receiving frames at the same "
                f"time{when} ({names}). A silence shared by every camera "
                f"comes from the trigger source (the trigger board reset, or "
