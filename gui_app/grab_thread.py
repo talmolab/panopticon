@@ -463,7 +463,15 @@ class GrabThread(QThread):
         #: Makes the decoupled path's encoder. None means the process default
         #: (gui_app.encoders); a test or a CPU-encode build installs its own.
         self._encoder_factory = encoder_factory
-        self._running = False
+        #: RULE: stop(), abandon() and signal_triggers_stopped() are honoured
+        #: even when they land before run() is scheduled, so run() never
+        #: resets these three. REASON: open_all starts the preview threads
+        #: and a start_acquisition that follows at once stops them; a run()
+        #: that began after that stop() and set _running itself would keep a
+        #: preview loop retrieving from the camera beside the recording
+        #: thread, the two splitting its frames between them, and the stop
+        #: would leak it as a thread that never exited.
+        self._running = True
         self._triggers_stopped = False
         #: Set by signal_triggers_started() once the trigger board has
         #: acknowledged its start command. Until then a retrieve timeout is
@@ -798,9 +806,6 @@ class GrabThread(QThread):
             except Exception as e:
                 print(f"[grab{self._cam_index}] affinity failed: {e}",
                       flush=True)
-        self._running = True
-        self._triggers_stopped = False
-        self._abandoned = False
         self.retrieve_loop_exited = False
         self.frame_count = 0
         self.timestamps = []
