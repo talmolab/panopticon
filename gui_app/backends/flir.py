@@ -48,7 +48,9 @@ TIMESTAMPS
 The same self-test checks that the device clock is not zero, advances at the
 frame rate the camera reports (so it is in nanoseconds, or in ticks that a
 tick node converts), and keeps running across an acquisition restart, which
-the stall resync depends on. A camera that fails any of these is refused.
+the stall resync depends on. A camera that reports no frame rate has its
+clock unit judged against the host clock instead. A camera that fails any of
+these checks is refused.
 
 TRIGGER WITNESS
 When the camera has counters, Counter0 counts the edges on the trigger line
@@ -105,6 +107,14 @@ TS_UNIT_TOL = 0.05
 #: of the host's time between the two frames. A clock that restarts on
 #: BeginAcquisition goes backwards instead.
 TS_CONTINUITY_SHARE = 0.5
+#: A camera that reports no frame rate has its clock unit judged against the
+#: host clock, over free-run frames spanning at least SELFTEST_HOST_S of host
+#: time (at most SELFTEST_HOST_MAX_FRAMES frames). A few ms of delivery
+#: jitter is then about 1% of the span, and TS_HOST_TOL still separates
+#: nanoseconds from any tick unit (125 MHz ticks are 8 times off).
+SELFTEST_HOST_S = 0.5
+SELFTEST_HOST_MAX_FRAMES = 5000
+TS_HOST_TOL = 0.2
 
 #: Share of the trigger period an "auto" link throughput limit gives one
 #: frame's transfer. Spreading the transfer over most of the period keeps the
@@ -1487,29 +1497,29 @@ class FlirBackend:
         n = cam.nodes
         flir = cam.spec.flir
         self._trigger_off(cam)
-        rate = SELFTEST_FPS
-        if n.has("AcquisitionFrameRateEnable"):
-            n.setb("AcquisitionFrameRateEnable", True)
-        if n.has("AcquisitionFrameRate"):
-            rate = min(rate, n.rangef("AcquisitionFrameRate")[1])
-            n.setf("AcquisitionFrameRate", rate)
-        if n.readable("AcquisitionResultingFrameRate"):
-            rate = n.getf("AcquisitionResultingFrameRate")
-        period_s = 1.0 / rate
-        timeout_ms = int(max(1000.0, 4000.0 * period_s))
+        rate = self._selftest_rate(cam)
+        period_s = 1.0 / rate if rate else None
+        # A camera that reports no rate is assumed to free-run at 1 fps or
+        # faster.
+        timeout_ms = int(max(1000.0, 4000.0 * (period_s or 1.0)))
 
         chunk_ts = flir.timestamp_source == "chunk"
         if chunk_ts:
             self._enable_chunk(cam, "Timestamp")
         cycles = self._selftest_cycles(cam, timeout_ms, chunk_ts)
+        host = (None if rate
+                else self._selftest_host_run(cam, timeout_ms, chunk_ts))
         first_ids = [c[0]["id"] for c in cycles]
         result = {"frame_id": self._judge_ids(cycles), "rate_fps": rate}
-        ts = self._judge_timestamps(cam, cycles, period_s, "image")
+        ts = self._judge_timestamps(cam, cycles, period_s, "image", host)
         if (ts["zero_seen"] and flir.timestamp_source == "auto") or chunk_ts:
             if not chunk_ts:
                 self._enable_chunk(cam, "Timestamp")
                 cycles = self._selftest_cycles(cam, timeout_ms, True)
-            ts_chunk = self._judge_timestamps(cam, cycles, period_s, "chunk")
+                if not rate:
+                    host = self._selftest_host_run(cam, timeout_ms, True)
+            ts_chunk = self._judge_timestamps(cam, cycles, period_s, "chunk",
+                                              host)
             ts_chunk["image_zero"] = ts["zero_seen"]
             ts = ts_chunk
         if ts["zero_seen"]:
@@ -1525,7 +1535,10 @@ class FlirBackend:
         cam.selftest = result
         self._selftests[key] = result
         fid = result["frame_id"]
-        print(f"[flir] {cam.serial}: self-test at {rate:g} fps: first frame "
+        at = (f"{rate:g} fps" if rate else
+              f"the camera's own rate (it reports none; the clock unit is "
+              f"judged against the host clock over {len(host) - 1} frames)")
+        print(f"[flir] {cam.serial}: self-test at {at}: first frame "
               f"IDs {fid['first_ids']} ("
               + (f"restarts, {fid['base']}-based" if fid["restarts"]
                  else "does not restart")
@@ -1535,6 +1548,65 @@ class FlirBackend:
                 f"(interval ratio {ts['unit_ratio']:.4f}, continuous across "
                 f"restarts)", flush=True)
 
+    def _selftest_rate(self, cam):
+        """Ask for the self-test's free-run rate where the camera allows it,
+        and return the rate the camera says it runs at, or None.
+
+        AcquisitionResultingFrameRate is the camera's own statement. Without
+        it, the rate written is used while the frame-rate control is on. A
+        node the camera has but does not let this backend write is left as
+        it is, and the log says so."""
+        n = cam.nodes
+        enabled = True
+        if n.has("AcquisitionFrameRateEnable"):
+            if n.writable("AcquisitionFrameRateEnable"):
+                n.setb("AcquisitionFrameRateEnable", True)
+            else:
+                print(f"[flir] {cam.serial}: AcquisitionFrameRateEnable is "
+                      f"not writable; the self-test leaves it as the camera "
+                      f"has it", flush=True)
+            enabled = (n.readable("AcquisitionFrameRateEnable")
+                       and n.getb("AcquisitionFrameRateEnable"))
+        wrote = None
+        if n.writable("AcquisitionFrameRate"):
+            wrote = min(SELFTEST_FPS, n.rangef("AcquisitionFrameRate")[1])
+            n.setf("AcquisitionFrameRate", wrote)
+        elif n.has("AcquisitionFrameRate"):
+            print(f"[flir] {cam.serial}: AcquisitionFrameRate is not "
+                  f"writable; the self-test runs at the camera's own rate",
+                  flush=True)
+        if n.readable("AcquisitionResultingFrameRate"):
+            return n.getf("AcquisitionResultingFrameRate")
+        return wrote if enabled else None
+
+    def _selftest_frame(self, cam, timeout_ms: int, chunk_ts: bool,
+                        where: str) -> dict:
+        """One free-run image's frame ID, timestamps and host arrival time.
+        The image is released before this returns."""
+        api = self._api
+        try:
+            img = api.next_image(cam.handle, timeout_ms)
+        except FlirTimeout:
+            cam.nodes.refuse(
+                f"the free-run self-test received no frame within "
+                f"{timeout_ms} ms ({where}). Check that no other program "
+                f"holds the camera, and send the output of 'uv run "
+                f"probe_flir.py'.")
+        host = time.perf_counter()
+        try:
+            entry = {"id": int(api.image_frame_id(img)),
+                     "ts_image": int(api.image_timestamp(img)),
+                     "host": host}
+            if chunk_ts:
+                if cam.ts_chunk_name is None:
+                    v, cam.ts_chunk_name = _read_chunk(api, img, "Timestamp")
+                else:
+                    v = api.chunk_int(img, cam.ts_chunk_name)
+                entry["ts_chunk"] = int(v)
+        finally:
+            api.image_release(img)
+        return entry
+
     def _selftest_cycles(self, cam, timeout_ms: int, chunk_ts: bool) -> list:
         api = self._api
         cycles = []
@@ -1543,34 +1615,31 @@ class FlirBackend:
             api.begin(cam.handle)
             try:
                 for _ in range(SELFTEST_FRAMES):
-                    try:
-                        img = api.next_image(cam.handle, timeout_ms)
-                    except FlirTimeout:
-                        cam.nodes.refuse(
-                            f"the free-run self-test received no frame within "
-                            f"{timeout_ms} ms (acquisition {k + 1} of "
-                            f"{SELFTEST_CYCLES}). Check that no other program "
-                            f"holds the camera, and send the output of 'uv "
-                            f"run probe_flir.py'.")
-                    host = time.perf_counter()
-                    try:
-                        entry = {"id": int(api.image_frame_id(img)),
-                                 "ts_image": int(api.image_timestamp(img)),
-                                 "host": host}
-                        if chunk_ts:
-                            if cam.ts_chunk_name is None:
-                                v, cam.ts_chunk_name = _read_chunk(
-                                    api, img, "Timestamp")
-                            else:
-                                v = api.chunk_int(img, cam.ts_chunk_name)
-                            entry["ts_chunk"] = int(v)
-                    finally:
-                        api.image_release(img)
-                    frames.append(entry)
+                    frames.append(self._selftest_frame(
+                        cam, timeout_ms, chunk_ts,
+                        f"acquisition {k + 1} of {SELFTEST_CYCLES}"))
             finally:
                 api.end(cam.handle)
             cycles.append(frames)
         return cycles
+
+    def _selftest_host_run(self, cam, timeout_ms: int, chunk_ts: bool) -> list:
+        """Free-run frames spanning SELFTEST_HOST_S of host time, from the
+        second frame on, for a camera that reports no frame rate. Its clock
+        unit is then judged against the host clock."""
+        api = self._api
+        frames = []
+        api.begin(cam.handle)
+        try:
+            while len(frames) < SELFTEST_HOST_MAX_FRAMES:
+                frames.append(self._selftest_frame(
+                    cam, timeout_ms, chunk_ts, "the host-clock run"))
+                if (len(frames) > 2 and frames[-1]["host"] - frames[1]["host"]
+                        >= SELFTEST_HOST_S):
+                    break
+        finally:
+            api.end(cam.handle)
+        return frames
 
     @staticmethod
     def _judge_ids(cycles) -> dict:
@@ -1592,45 +1661,59 @@ class FlirBackend:
         return {"first_ids": firsts, "restarts": False, "base": None,
                 "steps": steps, "counts_frames": counts}
 
-    def _judge_timestamps(self, cam, cycles, period_s: float,
-                          source: str) -> dict:
+    def _judge_timestamps(self, cam, cycles, period_s, source: str,
+                          host=None) -> dict:
         """The clock checks on one set of self-test frames.
 
-        The unit is judged against the frame period the camera reports, not
-        the host clock: host delivery jitter is a large share of a 33 ms
-        interval, and a simulated camera runs on virtual time."""
+        The unit is judged against the frame period the camera reports
+        (`period_s`), because host delivery jitter is a large share of one
+        frame interval and a simulated camera runs on virtual time. A camera
+        that reports no rate (`period_s` None) is judged against the host
+        clock instead, over the `host` run's span, which is long enough that
+        the jitter is a small share of it."""
         key = "ts_image" if source == "image" else "ts_chunk"
         out = {"source": source, "zero_seen": False, "scale": 1,
                "unit_ratio": float("nan"), "continuity_ok": False,
-               "problem": None}
-        stamps = [[f[key] for f in c] for c in cycles]
+               "problem": None,
+               "unit_basis": "camera rate" if period_s else "host clock"}
+        runs = list(cycles) + ([host] if host else [])
+        stamps = [[f[key] for f in c] for c in runs]
         if any(v == 0 for c in stamps for v in c):
             out["zero_seen"] = True
             return out
         intervals = [b - a for c in stamps for a, b in zip(c, c[1:])]
         if any(d <= 0 for d in intervals):
             out["problem"] = (f"device timestamps do not increase within one "
-                              f"acquisition (intervals {intervals}), so they "
-                              f"are not a free-running clock.")
+                              f"acquisition (intervals {intervals[:12]}), so "
+                              f"they are not a free-running clock.")
             return out
-        ratio = statistics.median(intervals) / (period_s * 1e9)
+        if period_s:
+            ratio = statistics.median(intervals) / (period_s * 1e9)
+            tol, against = TS_UNIT_TOL, "at the frame rate the camera reports"
+        else:
+            wall = host[-1]["host"] - host[1]["host"]
+            dev = host[-1][key] - host[1][key]
+            ratio = dev / (wall * 1e9) if wall > 0 else float("nan")
+            tol = TS_HOST_TOL
+            against = (f"against the host clock over {len(host) - 1} frames "
+                       f"(this camera reports no frame rate)")
         out["unit_ratio"] = ratio
         scale = None
-        if abs(ratio - 1.0) <= TS_UNIT_TOL:
+        if abs(ratio - 1.0) <= tol:
             scale = 1
         else:
             for factor, node in self._tick_factors(cam):
-                if abs(ratio * factor - 1.0) <= TS_UNIT_TOL:
+                if abs(ratio * factor - 1.0) <= tol:
                     scale = factor
                     out["tick_node"] = node
                     break
         if scale is None:
             out["problem"] = (
                 f"device timestamps advance {ratio:.4g} times as fast as "
-                f"nanoseconds at the frame rate the camera reports, and no "
-                f"tick-rate node explains it, so the stall resync and the "
-                f"block-ID rate check would be wrong by that factor. Send the "
-                f"output of 'uv run probe_flir.py'.")
+                f"nanoseconds {against}, and no tick-rate node explains it, "
+                f"so the stall resync and the block-ID rate check would be "
+                f"wrong by that factor. Send the output of 'uv run "
+                f"probe_flir.py'.")
             return out
         out["scale"] = scale
         for prev, nxt in zip(cycles, cycles[1:]):
@@ -1786,11 +1869,15 @@ class FlirBackend:
         cam._arm_pending = False
         n = cam.nodes
         self._trigger_off(cam)
-        if n.has("AcquisitionFrameRateEnable"):
+        if n.writable("AcquisitionFrameRateEnable"):
             n.setb("AcquisitionFrameRateEnable", True)
-        if n.has("AcquisitionFrameRate"):
+        if n.writable("AcquisitionFrameRate"):
             top = n.rangef("AcquisitionFrameRate")[1]
             n.setf("AcquisitionFrameRate", min(float(fps), top))
+        elif n.has("AcquisitionFrameRate"):
+            print(f"[flir] {cam.serial}: AcquisitionFrameRate is not "
+                  f"writable, so the preview runs at the camera's own rate",
+                  flush=True)
 
     def set_triggered(self, cam, rate_limit: float = 165.0,
                       announce: bool = False) -> None:
@@ -1907,6 +1994,13 @@ class FlirBackend:
                   f"exposure ceiling at {fps:g} fps is the trigger period "
                   f"({period_us:.0f} us)", flush=True)
             return period_us
+        unmeasurable = (f"[flir] {cam.serial}: AcquisitionFrameRate cannot be "
+                        f"written on this camera, so the exposure ceiling at "
+                        f"{fps:g} fps is the trigger period ({period_us:.0f} "
+                        f"us)")
+        if not n.writable("AcquisitionFrameRateEnable"):
+            print(unmeasurable, flush=True)
+            return period_us
         was_on = n.getb("AcquisitionFrameRateEnable")
         # Kept even while the frame rate is disabled (trigger mode), where the
         # camera may still report it, so the measurement leaves no trace.
@@ -1914,30 +2008,36 @@ class FlirBackend:
                     if n.readable("AcquisitionFrameRate") else None)
         was_exp = n.getf("ExposureTime")
         readout = None
+        exp_max = None
         try:
             exp_min = n.rangef("ExposureTime")[0]
             n.setf("ExposureTime", exp_min)
             n.setb("AcquisitionFrameRateEnable", True)
-            rate_max = n.rangef("AcquisitionFrameRate")[1]
-            if rate_max + 1e-6 < fps:
-                n.refuse(f"AcquisitionFrameRate can go no higher than "
-                         f"{rate_max:.2f} fps on this camera even at its "
-                         f"shortest exposure ({exp_min:g} us), so it cannot "
-                         f"acquire {fps:g} fps at {cam.width}x{cam.height}. "
-                         f"Lower frame_rate or the ROI.")
-            n.setf("AcquisitionFrameRate", fps)
-            exp_max = n.rangef("ExposureTime")[1]
-            if exp_max >= period_us:
-                readout = self._sensor_readout_us(cam, exp_min)
+            if n.writable("AcquisitionFrameRate"):
+                rate_max = n.rangef("AcquisitionFrameRate")[1]
+                if rate_max + 1e-6 < fps:
+                    n.refuse(f"AcquisitionFrameRate can go no higher than "
+                             f"{rate_max:.2f} fps on this camera even at its "
+                             f"shortest exposure ({exp_min:g} us), so it "
+                             f"cannot acquire {fps:g} fps at "
+                             f"{cam.width}x{cam.height}. Lower frame_rate or "
+                             f"the ROI.")
+                n.setf("AcquisitionFrameRate", fps)
+                exp_max = n.rangef("ExposureTime")[1]
+                if exp_max >= period_us:
+                    readout = self._sensor_readout_us(cam, exp_min)
         finally:
             # The rate goes back while the frame rate is still enabled (it is
             # writable only then) and the exposure is still at its minimum
             # (so any earlier rate fits); the exposure goes back last, under
             # the settings it was valid with.
-            if was_rate is not None:
+            if was_rate is not None and n.writable("AcquisitionFrameRate"):
                 n.setf("AcquisitionFrameRate", was_rate)
             n.setb("AcquisitionFrameRateEnable", was_on)
             n.setf("ExposureTime", was_exp)
+        if exp_max is None:
+            print(unmeasurable, flush=True)
+            return period_us
         if readout is None:
             return exp_max
         ceiling = period_us - readout
