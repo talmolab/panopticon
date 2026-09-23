@@ -66,9 +66,9 @@ from __future__ import annotations
 import math
 import os
 import random
+import sys
 import threading
 import time
-import weakref
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -535,7 +535,8 @@ class _FakeCamera:
         self._last_acq_v = -math.inf
         self._buffers: list = []
         self._addr: list = []
-        self._views: list = []
+        #: Each buffer's reference count with no view of it alive.
+        self._buf_refs: list = []
         self._free: deque = deque()
         self._held: set = set()
         #: Frames on the host waiting for `next_image`, oldest first.
@@ -1197,7 +1198,12 @@ class _FakeCamera:
         self._buffers = [np.full(size, 32, np.uint8)
                          for _ in range(PHYSICAL_BUFFERS)]
         self._addr = [b.__array_interface__["data"][0] for b in self._buffers]
-        self._views = [[] for _ in range(PHYSICAL_BUFFERS)]
+        # A view, and any slice or reshape of it, holds a reference to its
+        # buffer (numpy points every derived view's base at the array that
+        # owns the memory), so a count above this baseline is a view still
+        # alive.
+        self._buf_refs = [sys.getrefcount(self._buffers[i])
+                          for i in range(PHYSICAL_BUFFERS)]
         self._free = deque(range(PHYSICAL_BUFFERS))
         chunks = None
         if self.val_or("ChunkModeActive", None, False):
@@ -1251,7 +1257,7 @@ class _FakeCamera:
         self.ends += 1
         if self.faults.counters_reset_on_end:
             self.stats = dict.fromkeys(_STAT_KEYS, 0)
-        self._buffers, self._addr, self._views = [], [], []
+        self._buffers, self._addr, self._buf_refs = [], [], []
         self._free = deque()
         self._queue = deque()
 
@@ -1511,15 +1517,14 @@ class _FakeCamera:
             self.api._misuse(f"{self}: no free buffer; images were not "
                              f"released")
         i = self._free.popleft()
-        alive = sum(1 for ref in self._views[i] if ref() is not None)
-        if alive:
+        alive = sys.getrefcount(self._buffers[i]) - self._buf_refs[i]
+        if alive > 0:
             self._free.appendleft(i)
             self.api._misuse(
                 f"{self}: {alive} zero-copy view(s) of an earlier, released "
                 f"image are still referenced while the driver refills their "
                 f"buffer; a consumer stored the view instead of copying out "
                 f"of it")
-        self._views[i] = []
         return i
 
     def _frame(self, v: float, trigger_v: float, incomplete: bool) -> tuple:
@@ -1992,7 +1997,6 @@ class FakeSpinC:
                          f"be sheared or truncated: " + "; ".join(problems))
         view = cam._buffers[img.buf][:img.width * img.height].reshape(
             img.height, img.width)
-        cam._views[img.buf].append(weakref.ref(view))
         return view
 
     def chunk_int(self, image, name: str) -> int:
