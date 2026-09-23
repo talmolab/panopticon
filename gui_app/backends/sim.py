@@ -125,6 +125,14 @@ class SimFaults:
     #: Block ID the counter starts from after each `StartGrabbing`. 65500
     #: puts a 16-bit wrap a few frames into the recording.
     blockid_start: int = 1
+    #: The numbering of the camera's raw counter. 1 is the GigE Vision
+    #: convention the contract asks for (`GrabResultProtocol.BlockID`): the
+    #: first frame after `StartGrabbing` reports 1, on the 1..65535 cycle.
+    #: 0 is a 0-based 64-bit counter such as Spinnaker's FrameID, passed
+    #: through without the normalisation a conforming backend applies: the
+    #: first frame reports `blockid_start - 1` (0 by default) and the counter
+    #: never wraps. It stages a backend that skipped the normalisation.
+    first_block_id: int = 1
     #: Row padding reported from `padding_from` frames on. Non-zero must
     #: retire the camera: the (H, W) reshape would shear every row.
     padding_x: int = 0
@@ -143,6 +151,12 @@ class SimFaults:
     stats_error: str = ""
     #: Temperature reading, or None for a camera that reports nothing.
     thermals: dict | None = None
+
+    def __post_init__(self):
+        if self.first_block_id not in (0, 1):
+            raise ValueError(
+                f"first_block_id must be 1 (GigE Vision numbering) or 0 (a "
+                f"0-based counter), not {self.first_block_id!r}")
 
 
 def set_faults(faults: dict | None) -> dict:
@@ -486,8 +500,11 @@ class SimCamera:
         return sim_board.SimBoard.real_time_of(v, st)
 
     def _block_id(self) -> int:
-        """Next block ID, wrapped as a 16-bit GVSP counter does."""
+        """Next block ID: a 16-bit GVSP counter, or with `first_block_id` 0 a
+        0-based counter that does not wrap (see `SimFaults.first_block_id`)."""
         raw = self.faults.blockid_start + self._consumed - 1
+        if self.faults.first_block_id == 0:
+            return raw - 1
         return (raw - 1) % BLOCKID_WRAP + 1
 
     def _make_result(self, i: int, st, ok: bool = True) -> SimGrabResult:
