@@ -437,8 +437,10 @@ class WorkerRouter:
                           f"{e}", flush=True)
 
     def _begin_stopping(self) -> None:
-        """No harvest from the status thread and no append to
-        blockids.partial from here on, and none still under way."""
+        """Stop the status thread's harvests and appends to blockids.partial.
+        An append under way is waited out, so none is in progress once this
+        returns; a harvest that already began finishes under its camera's
+        lock, which the stop takes too."""
         with self._partial_lock:
             self._stopping = True
 
