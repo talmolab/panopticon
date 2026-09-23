@@ -731,6 +731,7 @@ class Worker:
         self.mgr._backend = backend
         self.mgr.global_indices = list(self.cams)
         self.mgr.report_source_silence = False
+        self.mgr.announce_unlisted = False
         self._rig_seg = self._rig = None
         rig = args.get("rig")
         if rig is not None:

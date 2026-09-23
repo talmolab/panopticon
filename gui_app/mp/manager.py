@@ -464,6 +464,9 @@ class ProcessCameraManager(QObject):
         #: Encoder records the workers' factories returned (see
         #: FactorySpec.records), after the last stop.
         self.last_encoder_records: list = []
+        #: workers_info() as it was when the workers last started; it
+        #: outlives close_all, for a caller that writes it afterwards.
+        self.last_workers_info: list = []
 
     # -- backend (enumeration only) ----------------------------------------------
 
@@ -777,7 +780,10 @@ class ProcessCameraManager(QObject):
                         pass
                     w.log_conn = None
                     continue
-                print(line.decode("utf-8", "replace"), flush=True)
+                # One write per line: another thread's print cannot land
+                # inside it.
+                sys.stdout.write(line.decode("utf-8", "replace") + "\n")
+                sys.stdout.flush()
 
     def _attach_status(self, w: _Worker, spec) -> None:
         if not spec:
@@ -886,6 +892,7 @@ class ProcessCameraManager(QObject):
                 self._where[g] = (w, k)
             print(f"[mp] capture process w{w.wid} pid {w.pid}: {w.names}",
                   flush=True)
+        self.last_workers_info = self.workers_info()
         return None
 
     def _stop_workers(self, op: str = "close",

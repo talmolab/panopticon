@@ -86,7 +86,7 @@ MAX_NUM_BUFFER = 1000
 
 
 def resolve_device_order(devices, only_serials=None, expect_cameras: int = 0,
-                         global_indices=None):
+                         global_indices=None, announce_extra: bool = True):
     """The enumerated devices in cam1..camN order, and why they cannot be
     opened: (devices, None), or (None, refusal message).
 
@@ -110,7 +110,8 @@ def resolve_device_order(devices, only_serials=None, expect_cameras: int = 0,
     serial list an extra device is not one of them. A capture worker is
     handed its own share as `only_serials` and checks its own count;
     `global_indices` (one per entry of `only_serials`) then names a missing
-    camera by its index in the whole rig.
+    camera by its index in the whole rig, and `announce_extra` False leaves
+    the line about devices the list does not name to the caller.
     """
     if only_serials:
         want = [str(x) for x in only_serials]
@@ -128,7 +129,7 @@ def resolve_device_order(devices, only_serials=None, expect_cameras: int = 0,
                 f"those names unrecorded. Power-cycle them and reselect "
                 f"the profile.")
         extra = [x for x in sorted(by_serial) if x not in set(want)]
-        if extra:
+        if extra and announce_extra:
             # Ignored rather than refused: an unlisted device cannot take
             # a name when the names come from the list, so it is a fact
             # about the host and not a fault in the rig.
@@ -500,7 +501,8 @@ class CameraManager(QObject):
             return self._open_failed("No cameras found")
         sorted_devs, refusal = resolve_device_order(
             devices, only_serials, expect_cameras,
-            global_indices=self.global_indices)
+            global_indices=self.global_indices,
+            announce_extra=self.announce_unlisted)
         if refusal:
             return self._open_failed(refusal)
 
@@ -680,6 +682,10 @@ class CameraManager(QObject):
     #: silent at once. A capture worker sees only its share of the cameras,
     #: so its parent reports it for the whole rig instead.
     report_source_silence = True
+    #: Whether open_all prints the enumerated devices its serial list leaves
+    #: out. A capture worker is handed its share of the rig as that list, so
+    #: every other camera would be printed as unlisted.
+    announce_unlisted = True
 
     def _gi(self, i: int) -> int:
         """Rig-wide index of open camera `i` (see global_indices)."""
