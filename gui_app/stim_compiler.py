@@ -271,7 +271,7 @@ def describe(blocks: list[dict], edges: list[dict]) -> list[dict]:
             if kind == "low":
                 mode = "off (pin LOW)"
             elif kind == "train":
-                mode = f"{duty:g}% duty"
+                mode = duty_text(duty)
             else:
                 mode = "constant ON"
             # duration_ms is the exact value the sketch executes; a trace that
@@ -414,6 +414,22 @@ def drive_mode(freq, pw) -> tuple[str, float]:
     if pw_us == period_us:
         return "constant", duty
     return "train", duty
+
+
+def duty_text(duty: float) -> str:
+    """A train's duty cycle as a label, for example ``"7% duty"``.
+
+    Four significant figures, because the duty is a ratio of integer
+    microseconds: a 10 ms pulse at 7 Hz is 7.00001%, and the label should say
+    7%. A train never reads 100% or 0%: its pin goes both HIGH and LOW every
+    period, so a duty that would round to either keeps the figures that show
+    it does.
+    """
+    for digits in range(4, 16):
+        text = f"{duty:.{digits}g}"
+        if 0.0 < float(text) < 100.0:
+            break
+    return f"{text}% duty"
 
 
 def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:

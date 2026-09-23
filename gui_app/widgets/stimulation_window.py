@@ -237,7 +237,7 @@ class BlockItem(QGraphicsItem):
             return "pin LOW"
         if kind in ("constant", "impossible"):
             return "constant ON"
-        return f"{duty:g}% duty"
+        return stim_compiler.duty_text(duty)
 
     def boundingRect(self) -> QRectF:
         m = PORT_R + 2
@@ -869,7 +869,7 @@ class WaveformPreview(QWidget):
             return kind, f"pulse {pw:g} ms > period {1000.0 / f:g} ms"
         if kind == "constant":
             return kind, f"100% duty — constant ON, not {f:g} Hz"
-        return kind, f"{f:g} Hz · {pw:g} ms · {duty:.0f}% duty"
+        return kind, f"{f:g} Hz · {pw:g} ms · {stim_compiler.duty_text(duty)}"
 
     def paintEvent(self, event):
         p = QPainter(self)
