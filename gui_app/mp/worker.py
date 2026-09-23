@@ -216,6 +216,13 @@ class WorkerRouter:
     ring_bits triggers, see the ledger).
     """
 
+    #: Why a frame found no free ring slot, as the sinks' warnings say it.
+    #: In a worker the pending frames that fill the ring can also be ones
+    #: the parent's coordinator has not decided yet.
+    NO_SLOT_CAUSE = ("its encoder ran behind the trigger rate, or the "
+                     "coordinator in the parent process stopped deciding "
+                     "triggers")
+
     def __init__(self, cams, ledgers, raw_paths, width: int, height: int,
                  quality: int, fps: int = 100, max_lag: int = 240,
                  pin_encoders: bool = False, enc_pcores: bool = False,
@@ -248,6 +255,8 @@ class WorkerRouter:
             self.warnings, pin_encoders=pin_encoders, enc_pcores=enc_pcores)
         self.available = not reason
         self.unavailable_reason = reason
+        for sink in sinks:
+            sink.no_slot_cause = self.NO_SLOT_CAUSE
         self._sinks = dict(zip(self.cams, sinks))
         self._partial_written = {c: 0 for c in self.cams}
 

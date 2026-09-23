@@ -132,6 +132,10 @@ class _CameraSink:
         #: (submitted without pixels); the rest were still waiting when the
         #: drain at stop ran out of time.
         self.no_slot = 0
+        #: Why the ring can run out of free slots, as the warning names it.
+        #: Here only the encoder holds slots past their decision; a capture
+        #: worker's router names the parent's coordinator too.
+        self.no_slot_cause = "its encoder ran behind the trigger rate"
         #: The deque of free NV12 ring slots the grab thread takes from
         #: (attach_ring), or None for a submitter that owns its buffers.
         self.free_slots = None
@@ -391,7 +395,7 @@ class _CameraSink:
         causes = []
         if no_slot:
             causes.append(f"{no_slot} found no free NV12 ring slot because "
-                          f"its encoder ran behind the trigger rate")
+                          f"{self.no_slot_cause}")
         if n - no_slot:
             causes.append(f"{n - no_slot} were still waiting for the encoder "
                           f"when the drain at stop ran out of time (encoder "
