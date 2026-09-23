@@ -690,6 +690,10 @@ class WorkerLedger:
                 out.append((t, False))
 
 
+_FREE, _CLAIMED, _HANDED = 0, 1, 2
+_SLOT_STATES = ("free", "claimed", "handed off")
+
+
 class RingGuard:
     """Occupancy of one camera's NV12 ring in a capture worker.
 
@@ -700,13 +704,19 @@ class RingGuard:
     frame is dropped before it is copied or announced, and the loss is a gap
     in blockids.npy rather than newer pixels under an older block ID.
 
-    Slots are written in ring order. A slot is busy from `claim` until its
-    frame is dropped (`drop`) or handed to the encoder (`hand_off`) and then
-    consumed. The encoder frees slots in hand-off order, so the guard needs
-    only the encoder's `consumed` count, read through `consumed_fn`. A count
-    of outstanding frames alone is not enough: a frame waiting in the encoder
-    queue behind a stall keeps its slot busy while later frames are dropped
-    around it.
+    Slots are written in ring order. Each slot is free, claimed or handed
+    off. `claim` takes a free slot. Its frame then leaves by `drop`, which
+    frees the slot, or by `hand_off` to the encoder, which frees it once the
+    encoder has consumed the frame. The encoder frees slots in hand-off
+    order, so the guard needs only the encoder's `consumed` count, read
+    through `consumed_fn`. A count of outstanding frames alone is not enough:
+    a frame waiting in the encoder queue behind a stall keeps its slot busy
+    while later frames are dropped around it.
+
+    `drop` and `hand_off` refuse a slot that is not claimed. A second
+    hand-off, or a drop after one, would leave a stale entry that later frees
+    the slot while it holds a newer frame, and the next claim would overwrite
+    that frame.
 
     One thread at a time mutates the guard (the grab thread, then the
     control thread for the final harvest); `consumed_fn` is read from the
@@ -717,7 +727,7 @@ class RingGuard:
         if int(n_slots) < 1:
             raise ValueError("a ring needs at least one slot")
         self.n_slots = int(n_slots)
-        self._busy = bytearray(self.n_slots)
+        self._state = bytearray(self.n_slots)     # _FREE, _CLAIMED or _HANDED
         self._next = 0
         self._handed: deque = deque()
         self._consumed_fn = consumed_fn
@@ -743,15 +753,25 @@ class RingGuard:
     def _sync(self) -> None:
         consumed = self.consumed
         while self._consumed_seen < consumed and self._handed:
-            self._busy[self._handed.popleft()] = 0
+            self._state[self._handed.popleft()] = _FREE
             self._consumed_seen += 1
+
+    def _claimed(self, slot: int, action: str) -> int:
+        slot = int(slot)
+        if not 0 <= slot < self.n_slots:
+            raise ValueError(f"ring slot {slot} is outside this ring's "
+                             f"{self.n_slots} slots")
+        if self._state[slot] != _CLAIMED:
+            raise RuntimeError(f"cannot {action} ring slot {slot}: it is "
+                               f"{_SLOT_STATES[self._state[slot]]}, not claimed")
+        return slot
 
     def slot_free(self) -> bool:
         """True if the next slot may be written."""
-        if not self._busy[self._next]:
+        if self._state[self._next] == _FREE:
             return True
         self._sync()
-        return not self._busy[self._next]
+        return self._state[self._next] == _FREE
 
     def claim(self) -> int:
         """Take the next slot for a new frame. Call only after slot_free()."""
@@ -759,7 +779,7 @@ class RingGuard:
             raise RuntimeError(f"ring slot {self._next} still holds a frame "
                                f"awaiting a decision or the encoder")
         slot = self._next
-        self._busy[slot] = 1
+        self._state[slot] = _CLAIMED
         self._next = (slot + 1) % self.n_slots
         self.copied += 1
         return slot
@@ -770,17 +790,16 @@ class RingGuard:
 
     def drop(self, slot: int) -> None:
         """The frame in `slot` was dropped (by decision, or not entered)."""
-        if not self._busy[slot]:
-            raise RuntimeError(f"ring slot {slot} is not held")
-        self._busy[slot] = 0
+        slot = self._claimed(slot, "drop")
+        self._state[slot] = _FREE
         self.dropped += 1
 
     def hand_off(self, slot: int) -> None:
         """The frame in `slot` was queued to the encoder. Call after the queue
         accepted it (a refused put is a `drop`), in queue order: the guard
         matches the encoder's consumed count to hand-offs one for one."""
-        if not self._busy[slot]:
-            raise RuntimeError(f"ring slot {slot} is not held")
+        slot = self._claimed(slot, "hand off")
+        self._state[slot] = _HANDED
         self._handed.append(slot)
 
     def mark_consumed(self, n: int = 1) -> None:
