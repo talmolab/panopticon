@@ -2210,13 +2210,21 @@ class FlirBackend:
               + (f", last CounterValue {cam._last_counter}"
                  if cam.block_id_source == "trigger_counter" else ""),
               flush=True)
+        dead = self._implausible_counts(cam, w, frames)
+        if dead is not None:
+            why, edge_counter = dead
+            print(f"[flir] {cam.serial}: {why}; no trigger witness for this "
+                  f"acquisition", flush=True)
+            ids = (f" Its block IDs come from that counter's CounterValue "
+                   f"chunk (the last image carried {cam._last_counter}), so "
+                   f"check that they advance before using this camera's "
+                   f"video." if edge_counter
+                   and cam.block_id_source == "trigger_counter" else "")
+            return [f"{why}, so its trigger-witness counters do not count "
+                    f"what Panopticon set them to count on this model, and "
+                    f"this recording has no trigger witness for this camera."
+                    f"{ids} Send the output of 'uv run probe_flir.py'."]
         if exposures is not None:
-            if not cam._ctr_period and exposures > w["edges"]:
-                print(f"[flir] {cam.serial}: the witness counted more "
-                      f"exposures than trigger edges; the counters do not "
-                      f"count what this backend expects on this model",
-                      flush=True)
-                return []
             # Below 0 only when an edge landed between the two reads that
             # bound a re-arm window, which counts it as down time.
             ignored = max(0, cam._ctr_delta(w["edges"], exposures)
@@ -2240,6 +2248,33 @@ class FlirBackend:
                 f"reconstruction. Lower camera.exposure_us, or set "
                 f"camera.flir.block_id_source: trigger_counter so an ignored "
                 f"trigger becomes a gap."]
+
+    @staticmethod
+    def _implausible_counts(cam, w, frames: int):
+        """`(why, edge counter at fault)` when the counters cannot have
+        counted what they were set to, or None.
+
+        Every frame that reached the host was exposed on a trigger edge, so
+        a working edge counter and a working exposure counter each reach at
+        least the frames delivered, and exposures never pass edges. A
+        counter narrower than 2**31 is checked only while the frames
+        delivered are fewer than its period, so the counts cannot have
+        wrapped."""
+        period = cam._ctr_period
+        if period and frames >= period:
+            return None
+        edges, exposures = w["edges"], w["exposures"]
+        line = cam.trigger_line
+        if edges < frames:
+            return (f"its trigger-line counter counted {edges} edges on "
+                    f"{line} for {frames} frames that reached the host", True)
+        if exposures is not None and exposures < frames:
+            return (f"its exposure counter counted {exposures} exposures for "
+                    f"{frames} frames that reached the host", False)
+        if exposures is not None and exposures > edges:
+            return (f"its exposure counter counted {exposures} exposures, "
+                    f"more than the {edges} edges on {line}", True)
+        return None
 
     @staticmethod
     def _edge_only_sentences(cam, w, edges: int, frames: int) -> list:
