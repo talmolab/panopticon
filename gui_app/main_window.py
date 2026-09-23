@@ -1456,11 +1456,51 @@ class MainWindow(QMainWindow):
             return self._quit_during_start()
         print(f"[acq] sending start_triggers "
               f"pins={self._profile.trigger_pins} fps={fps}", flush=True)
-        if not teensy.start_triggers(self._profile.trigger_pins, fps):
+        counted_before_retry = []
+
+        def may_retry() -> bool:
+            """Refuse the reset-and-retry once any camera has frames.
+
+            RULE: a board that speaks RDY is not reset and restarted under
+            cameras that already counted triggers. REASON: the cameras are
+            armed before the start, so frames here mean the first command did
+            start the board and only its ack was lost. The reset restarts the
+            board's trigger count and its stim state machine but not the
+            cameras' block IDs, so every camera would carry the first
+            attempt's triggers as an offset, and stim_trace.csv would place
+            every stimulus that many frames late. Firmware that has never
+            spoken RDY is exempt: for it the reset is how a start takes
+            effect.
+            """
+            if not getattr(teensy, "speaks_rdy", False):
+                return True
+            try:
+                counts = [int(n) for n in self._camera_mgr.frame_counts]
+            except Exception as e:
+                print(f"[acq] frame counts unavailable before the retry: {e}",
+                      flush=True)
+                return True
+            if any(counts):
+                counted_before_retry.extend(counts)
+                return False
+            return True
+
+        if not teensy.start_triggers(self._profile.trigger_pins, fps,
+                                     may_retry=may_retry):
             if self._quitting:
                 # The quit closed the link under this start; the board is
                 # already stood down.
                 return self._quit_during_start()
+            if counted_before_retry:
+                return self._rollback_acquisition(
+                    f"The trigger board did not confirm the start, but the "
+                    f"cameras had already counted "
+                    f"{max(counted_before_retry)} frames, so the board did "
+                    f"start. Resetting it and starting again would leave "
+                    f"every camera's block IDs offset from the board's "
+                    f"trigger count, which shifts stim_trace.csv against the "
+                    f"paradigm.\n\nThe start has been rolled back. Start "
+                    f"again.", sent_start=True)
             # The board never confirmed the config, even after a forced reset.
             # Recording now would produce a full-length session with no frames.
             return self._rollback_acquisition(
