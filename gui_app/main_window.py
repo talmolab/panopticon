@@ -578,6 +578,7 @@ class MainWindow(QMainWindow):
         # close_all + open 6 cameras (+ .pfs load) is ~1-2 s of GigE round-trips;
         # run it off the UI thread so the window doesn't go "not responding".
         self._begin_busy("Switching cameras…")
+        self._switch_from_port = self._profile.serial_port
         self._profile = profile
 
         def _switch():
@@ -597,6 +598,33 @@ class MainWindow(QMainWindow):
         self._size_to_screen()
         self._end_busy()
         self._sidebar.set_status("IDLE", "#888")
+        self._prepare_board_after_switch(
+            getattr(self, "_switch_from_port", self._profile.serial_port))
+
+    def _prepare_board_after_switch(self, old_port: str):
+        """Run the launch sequence for the board on a newly selected port.
+
+        RULE: a profile on another serial port gets the launch-time clean
+        flash and identity check at the switch, never at the first
+        acquisition. REASON: the launch sequence ran only for the old port's
+        board. Left alone, the first Record or Calibrate on the new profile
+        opens the new port, which resets that board and floats its pins inside
+        the experiment, and runs whatever sketch it carries; a calibration on
+        a board holding a stimulation paradigm breaks "calibration can never
+        activate stim". The old port's hint and board identity describe the
+        other board and are forgotten first, so the flash runs.
+        """
+        new_port = self._profile.serial_port
+        if new_port == old_port:
+            return
+        print(f"[acq] the profile moved the trigger board from "
+              f"{old_port or '(none)'} to {new_port or '(none)'}; running the "
+              f"launch firmware check for it", flush=True)
+        self._forget_board_on_other_port()
+        settings.set_board_sketch_hint("")
+        self._board_id_stale = True
+        self._board_identity_reflashed = False
+        self._ensure_clean_firmware()
 
     def _apply_theme(self):
         app = QApplication.instance()
@@ -1515,12 +1543,39 @@ class MainWindow(QMainWindow):
         # The board has just printed its RDY line, so what it reports as its
         # sketch identity describes the firmware running now.
         self._board_id_stale = False
+        refusal = self._wrong_sketch_refusal(teensy, acq_type)
+        if refusal:
+            return self._rollback_acquisition(refusal, sent_start=True)
         # Nothing can refuse the start from here, so the previous run's
         # reports can go.
         self._sweep_stale_diagnostics()
         self._camera_mgr.signal_triggers_started()
         print("[acq] start_acquisition done", flush=True)
         return {"ok": True}
+
+    def _wrong_sketch_refusal(self, teensy, acq_type: str) -> str:
+        """Why the board that just acked must not run this acquisition, or "".
+
+        RULE: when the ack carries a sketch identity, it must be the sketch
+        this acquisition needs. REASON: the flash decision before the start
+        is made from what was known then (an identity heard earlier, or this
+        machine's record of its last flash), and a board swapped, reflashed
+        elsewhere or reached on a new port can differ from both; a
+        calibration running a stimulation sketch breaks "calibration can
+        never activate stim". The identity just heard is fresh, so the next
+        start flashes the right sketch first.
+        """
+        heard = getattr(teensy, "board_id", None)
+        want, label = self._sketch_for(acq_type)
+        want_id = stim_compiler.sketch_id(want)
+        if not heard or not want_id or heard == want_id:
+            return ""
+        print(f"[acq] the board acked with sketch {heard}, not the {label} "
+              f"sketch {want_id}: refusing", flush=True)
+        return (f"The trigger board is running sketch {heard}, not the "
+                f"{label} sketch this {acq_type} needs ({want_id}).\n\nThe "
+                f"start has been rolled back. Start again: Panopticon flashes "
+                f"the {label} sketch first.")
 
     def _quit_during_start(self) -> dict:
         """The start's answer when the window is quitting: send nothing.
@@ -1712,7 +1767,11 @@ class MainWindow(QMainWindow):
         want_sha = stim_compiler.sketch_sha(want)
         want_id = stim_compiler.sketch_id(want)
         heard = getattr(self._teensy, "board_id", None)
-        if heard is not None and want_id is not None and not self._board_id_stale:
+        # An id heard on another port is another board's.
+        same_port = (getattr(self._teensy, "port", None)
+                     == self._profile.serial_port)
+        if (heard is not None and want_id is not None and same_port
+                and not self._board_id_stale):
             return heard != want_id
         return settings.board_sketch_hint() != want_sha
 
@@ -1882,6 +1941,10 @@ class MainWindow(QMainWindow):
                     f"check the board, then retry.\n\n{msg}")
                 self._sidebar.reset_toggles()
                 return
+            # Retake the port BEFORE recording what was flashed: a reclaim
+            # that finds the controller on another port forgets the hint, and
+            # a hint recorded first would be wiped, costing a second flash.
+            self._teensy_connection()
             settings.set_board_sketch_hint(want_sha)
             # Whatever the board printed last is the OLD sketch's identity.
             self._board_id_stale = True
@@ -1897,7 +1960,6 @@ class MainWindow(QMainWindow):
                     and want != self._session_stim_ino):
                 self._stim_window.invalidate_upload(
                     f"a {acq_type} needed the {label} sketch")
-            self._teensy_connection()        # retake the port before acquiring
             # Re-enter at the SIDE EFFECTS, not at the top: every check has
             # already passed, and repeating them would prompt a second time
             # about data and re-run the preflight for an acquisition the
@@ -2031,13 +2093,7 @@ class MainWindow(QMainWindow):
         claims the port eagerly) and on upload, never at the start of a
         recording.
         """
-        if self._teensy is not None and self._teensy.port != self._profile.serial_port:
-            self._teensy.close()          # profile switched to a different port
-            self._teensy = None
-            # A different port is a different board: what this machine last
-            # flashed says nothing about what is on this one.
-            settings.set_board_sketch_hint("")
-            self._board_id_stale = True
+        self._forget_board_on_other_port()
         if self._teensy is None:
             self._teensy = TeensyController(port=self._profile.serial_port)
         if not self._teensy.is_open:
@@ -2047,6 +2103,21 @@ class MainWindow(QMainWindow):
             if not self._teensy.open(retries=retries):
                 return None
         return self._teensy
+
+    def _forget_board_on_other_port(self) -> bool:
+        """Close a link to a port the profile no longer names. True if it did.
+
+        A different port is a different board: what this machine last flashed
+        says nothing about what is on this one, so the board-sketch hint is
+        forgotten and the old board's identity is no longer believed.
+        """
+        if self._teensy is None or self._teensy.port == self._profile.serial_port:
+            return False
+        self._teensy.close()
+        self._teensy = None
+        settings.set_board_sketch_hint("")
+        self._board_id_stale = True
+        return True
 
     def release_serial_port(self):
         """Hand the port back so arduino-cli can upload.
