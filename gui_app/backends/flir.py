@@ -917,7 +917,8 @@ class FlirCamera:
 
         In trigger-counter mode the counter is the block ID, so a reset that
         fails refuses the arm. Otherwise the witness is diagnostic: a failed
-        reset is logged and this arm has no witness."""
+        reset leaves a witness that holds only the error, which
+        `acquisition_warnings` reports."""
         self.witness = None
         self._ctr_prev = None
         self._ctr_acc = 0
@@ -928,18 +929,20 @@ class FlirCamera:
         self._last_counter = None
         if not self.counters:
             return
+        self.witness = self._new_witness()
         try:
             for sel in self.counters:
                 self.nodes.sete("CounterSelector", sel)
                 self.nodes.execute("CounterReset")
         except Exception as e:
             if self.block_id_source == "trigger_counter":
+                self.witness = None
                 raise
-            print(f"[flir] {self.serial}: trigger counters could not be reset "
-                  f"({type(e).__name__}: {e}); this acquisition has no "
-                  f"trigger witness", flush=True)
-            return
-        self.witness = self._new_witness()
+            self._witness_failed("could not be reset when the camera was "
+                                 "armed", e)
+            print(f"[flir] {self.serial}: the trigger counters "
+                  f"{self.witness['error']}; this acquisition has no trigger "
+                  f"witness", flush=True)
 
     @staticmethod
     def _new_witness() -> dict:
@@ -948,6 +951,12 @@ class FlirCamera:
                 "gap_edges": 0, "stopped_at": None, "error": None,
                 "rearms": 0, "id_frames": 0, "late_reads": 0,
                 "ignored_by_rearm": 0, "wrap_gaps": 0, "gaps_by_rearm": 0}
+
+    def _witness_failed(self, what: str, e: BaseException) -> None:
+        """Record why the witness stopped counting. `what` completes "the
+        trigger counters ...", and the sentence for WARNINGS.txt quotes
+        it."""
+        self.witness["error"] = f"{what} ({type(e).__name__}: {e})"
 
     def _ctr_delta(self, later: int, earlier: int) -> int:
         """`later - earlier` for two reads of one counter, across a wrap of
@@ -976,7 +985,7 @@ class FlirCamera:
         try:
             now = self._read(("exposures", "edges"))
         except Exception as e:
-            w["error"] = f"{type(e).__name__}: {e}"
+            self._witness_failed("could not be read at a stall re-arm", e)
             return
         before = w["stopped_at"]
         down = self._ctr_delta(now["edges"], before["edges"])
@@ -1043,7 +1052,7 @@ class FlirCamera:
                 now = dict(before, **self._read(("exposures",)))
                 check = before.get("exposures")
         except Exception as e:
-            w["error"] = f"{type(e).__name__}: {e}"
+            self._witness_failed("could not be read at the stop", e)
             return
         w["stopped_at"] = now
         w["edges"] = now.get("edges")
@@ -2564,7 +2573,8 @@ class FlirBackend:
         (`_latch_sentences`). With the edge counter alone the count mixes
         ignored triggers with frames lost in transport, and the sentence
         says so and makes no claim about alignment
-        (`_edge_only_sentences`)."""
+        (`_edge_only_sentences`). A witness whose counters failed gets a
+        sentence saying this recording has none."""
         try:
             return self._witness_sentences(cam, int(frames_acquired))
         except Exception as e:
@@ -2577,10 +2587,11 @@ class FlirBackend:
         if w is None:
             return []
         if w["error"]:
-            print(f"[flir] {cam.serial}: the trigger counters could not be "
-                  f"read ({w['error']}); no witness for this acquisition",
-                  flush=True)
-            return []
+            print(f"[flir] {cam.serial}: the trigger counters {w['error']}; "
+                  f"no witness for this acquisition", flush=True)
+            return [f"its trigger-witness counters {w['error']}, so this "
+                    f"recording has no trigger witness for this camera. Send "
+                    f"the output of 'uv run probe_flir.py'."]
         if w["edges"] is None:
             return []
         edges = w["edges"] - w["gap_edges"]
