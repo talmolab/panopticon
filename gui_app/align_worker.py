@@ -6,10 +6,11 @@ each mp4 down to the frames every camera captured and replaces the original
 and trigger-aligned. A loss-free recording is a no-op fast path.
 
 The replace is refused, and only the index written, while a camera that ended
-early or started late takes part (``alignment.refusal_reason``): replacing
-would cut every other camera to that camera's length. ``exclude`` leaves
-cameras out and ``truncate_to_shortest`` accepts the cut; the summary's
-``refused`` and ``short_cams`` say what happened.
+early, started late or stopped mid-recording takes part
+(``alignment.refusal_reason``): replacing would cut every other camera to that
+camera's frames. ``exclude`` leaves cameras out and ``truncate_to_shortest``
+accepts the cut; the summary's ``refused`` and ``short_cams`` say what
+happened.
 """
 import threading
 from pathlib import Path

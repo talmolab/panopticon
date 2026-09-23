@@ -27,10 +27,11 @@ recording has a ``stim_paradigm.json``, its ``stim_trace.csv`` is then
 rewritten from the new block IDs, because the old trace labels the replaced
 frames with the stimulus of other triggers.
 
-A replace overwrites each camera's only copy, and a camera that ended early
-or started late (a retirement, a truncated tail) cuts every other camera to
-its length. --replace therefore refuses while such a camera takes part, names
-it, and changes no video. Then choose one:
+A replace overwrites each camera's only copy, and a camera that ended early,
+started late (a retirement, a truncated tail) or stopped for a while
+mid-recording (a stall that recovered) cuts every other camera to its frames.
+--replace therefore refuses while such a camera takes part, names it, and
+changes no video. Then choose one:
 
   --exclude cam3            align the other cameras; cam3's files stay as recorded
   --truncate-to-shortest    cut every camera to the common triggers anyway
@@ -165,8 +166,8 @@ def main() -> int:
                          "stay as recorded (repeat, or separate with commas)")
     ap.add_argument("--truncate-to-shortest", action="store_true",
                     help="with --replace, cut every camera to the common "
-                         "triggers even when a camera ended early or started "
-                         "late")
+                         "triggers even when a camera ended early, started "
+                         "late or stopped mid-recording")
     ap.add_argument("--include-retired", action="store_true",
                     help="align cameras that have a RETIRED.json with the "
                          "others instead of excluding them")

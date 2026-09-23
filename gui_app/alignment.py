@@ -7,12 +7,13 @@ aligned cameras are the triggers every one of them captured, and the hardware
 trigger fires all cameras at once, so those frames are a synchronized,
 equal-length set.
 
-A camera that stopped early (retired, or a truncated tail) or started late
-holds only part of the recording, and the common set is then cut to its
-length. Replacing the videos would destroy the other cameras' only copies of
-everything outside it, so ``align_recording`` refuses to replace while such a
-camera takes part, unless the caller excludes it (its files stay as recorded)
-or asks for ``truncate_to_shortest``.
+A camera that stopped early (retired, or a truncated tail), started late or
+stopped for a while mid-recording (a stall that recovered) holds only part of
+the recording, and the common set is then cut to its frames. Replacing the
+videos would destroy the other cameras' only copies of everything outside it,
+so ``align_recording`` refuses to replace while such a camera takes part,
+unless the caller excludes it (its files stay as recorded) or asks for
+``truncate_to_shortest``.
 
 Imports are numpy, (lazily) imageio-ffmpeg and gui_app modules without Qt,
 so this module is importable from the GUI and from the ``2_align.py`` CLI
@@ -326,14 +327,19 @@ def _short_cameras(names, blocks, margin: int) -> dict:
 
     A camera ended early when its last block ID is more than ``margin``
     triggers before the latest last block ID of any camera, and started late
-    when its first is more than ``margin`` after the earliest first. Cameras
-    triggered together end within a few frames of each other, so a larger gap
-    is a camera that stopped recording, not one that dropped frames.
+    when its first is more than ``margin`` after the earliest first. It
+    stopped mid-recording when, between two of its consecutive frames, the
+    other cameras recorded more than ``margin`` triggers it has no frame for
+    (a stall that re-armed and resynced). Cameras triggered together end
+    within a few frames of each other and drop frames a few at a time, so a
+    larger gap is a camera that stopped recording, not one that dropped
+    frames, and the common set loses that stretch from every camera.
     """
     if len(blocks) < 2:
         return {}
     last_max = max(int(b[-1]) for b in blocks)
     first_min = min(int(b[0]) for b in blocks)
+    union = np.unique(np.concatenate(blocks))
     out = {}
     for nm, b in zip(names, blocks):
         why = []
@@ -347,6 +353,15 @@ def _short_cameras(names, blocks, margin: int) -> dict:
             why.append(f"started late: its first trigger is {int(b[0])}, "
                        f"{late} after the first one another camera recorded "
                        f"({first_min})")
+        if b.size >= 2:
+            # Triggers in the union strictly between consecutive frames of
+            # this camera: every one is a trigger another camera recorded.
+            between = np.diff(np.searchsorted(union, b)) - 1
+            k = int(np.argmax(between))
+            if int(between[k]) > margin:
+                why.append(f"stopped mid-recording: other cameras recorded "
+                           f"{int(between[k])} triggers between its frames at "
+                           f"triggers {int(b[k])} and {int(b[k + 1])}")
         if why:
             out[nm] = "; ".join(why)
     return out
@@ -361,9 +376,9 @@ class Analysis:
 
     ``exclude`` (camera names, or a dict of name -> reason) leaves cameras
     out of the intersection; their files are never touched. ``short_cams``
-    maps each remaining camera that ended early, started late or recorded no
-    frames to the reason, with ``short_margin`` triggers of tolerance (default
-    one second of triggers).
+    maps each remaining camera that ended early, started late, stopped
+    mid-recording or recorded no frames to the reason, with ``short_margin``
+    triggers of tolerance (default one second of triggers).
     """
 
     def __init__(self, rec_dir, fps: int, exclude=(), short_margin=None):
@@ -426,8 +441,9 @@ def refusal_reason(an: Analysis, truncate_to_shortest: bool = False):
 
     A replace re-encodes every aligned camera down to the common triggers and
     overwrites its only copy. That destroys data when the common set is cut
-    short by one camera, so a camera that ended early or started late blocks
-    the replace unless the caller asked for ``truncate_to_shortest``, and a
+    short by one camera, so a camera that ended early, started late or
+    stopped mid-recording blocks the replace unless the caller asked for
+    ``truncate_to_shortest``, and a
     camera with no frames, or a recording with no common trigger, blocks it
     always. The text names the cameras and the remedy.
     """
