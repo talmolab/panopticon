@@ -122,6 +122,71 @@ class ConnectorPort(QGraphicsEllipseItem):
         super().hoverLeaveEvent(event)
 
 
+#: The numeric fields every saved block carries.
+_BLOCK_NUMBERS = ("pin", "freq", "pw", "dur", "x", "y")
+
+
+def parse_workflow(blocks, edges) -> tuple[list[dict], list[dict]]:
+    """Validate a saved graph into plain dicts, or raise ValueError.
+
+    RULE: a file is parsed whole before anything on the canvas changes.
+    REASON: the canvas used to be cleared first and rebuilt block by block, so
+    a hand-edited file with one bad block left the blocks before it on a
+    wiped canvas, one Apply away from the board.
+
+    Checks the shape only: every block has an id no other block uses and
+    numeric pin, freq, pw, dur, x and y (a whole-number pin); every edge has a
+    src and a dst and names real ports. Whether the numbers make a paradigm
+    the firmware can run is for Apply, Test and Record to judge, through the
+    same checks they apply to a drawn graph. Ports default to right and left,
+    as old save files carry none.
+    """
+    if not isinstance(blocks, list) or not isinstance(edges, list):
+        raise ValueError("the file's 'blocks' and 'edges' must both be lists")
+    parsed_blocks: list[dict] = []
+    seen: set[str] = set()
+    for n, d in enumerate(blocks, start=1):
+        if not isinstance(d, dict) or "id" not in d:
+            raise ValueError(f"block {n} has no 'id'")
+        bid = str(d["id"])
+        if bid in seen:
+            raise ValueError(f"block id {bid!r} is used twice")
+        seen.add(bid)
+        rec: dict = {"id": bid}
+        for key in _BLOCK_NUMBERS:
+            if key not in d:
+                raise ValueError(f"block {bid!r} has no {key!r}")
+            try:
+                value = float(d[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"block {bid!r}: {key!r} is not a number "
+                                 f"({d[key]!r})") from None
+            if not math.isfinite(value):
+                raise ValueError(f"block {bid!r}: {key!r} is {d[key]!r}")
+            rec[key] = value
+        if rec["pin"] != int(rec["pin"]):
+            raise ValueError(f"block {bid!r}: pin {d['pin']!r} is not a whole "
+                             f"number")
+        rec["pin"] = int(rec["pin"])
+        rec["start"] = bool(d.get("start", False))
+        rec["end"] = bool(d.get("end", False))
+        parsed_blocks.append(rec)
+    parsed_edges: list[dict] = []
+    for n, e in enumerate(edges, start=1):
+        if not isinstance(e, dict) or "src" not in e or "dst" not in e:
+            raise ValueError(f"edge {n} needs a 'src' and a 'dst'")
+        ports = {"src_port": e.get("src_port", ConnectorPort.RIGHT),
+                 "dst_port": e.get("dst_port", ConnectorPort.LEFT)}
+        for name, side in ports.items():
+            if side not in ConnectorPort._POS:
+                raise ValueError(
+                    f"edge {n}: {name} {side!r} is not one of "
+                    f"{', '.join(ConnectorPort._POS)}")
+        parsed_edges.append({"src": str(e["src"]), "dst": str(e["dst"]),
+                             **ports})
+    return parsed_blocks, parsed_edges
+
+
 # ── BlockItem ─────────────────────────────────────────────────────────────────
 class BlockItem(QGraphicsItem):
     def __init__(self, pin, freq, pw, dur, block_id=None):
@@ -732,19 +797,24 @@ class StimCanvas(QGraphicsView):
     def load_workflow(self, blocks: list[dict], edges: list[dict]) -> int:
         """Replace the canvas with a saved graph; returns the edges dropped.
 
+        The whole graph is validated first (parse_workflow) and the canvas is
+        cleared only once it has parsed, so a malformed file raises
+        ValueError and leaves the canvas exactly as it was.
+
         An edge is dropped when either end is missing, when it points a block
         at itself, or when its source already has an outgoing arrow. The
         editor cannot draw those, but a hand-edited file can carry them, and
         the compiler follows only one successor per block, so keeping them
         would draw an arrow the firmware never runs.
         """
+        blocks, edges = parse_workflow(blocks, edges)
         self.clear()
         by_id: dict[str, BlockItem] = {}
         for d in blocks:
             blk = BlockItem(d["pin"], d["freq"], d["pw"], d["dur"],
                             block_id=d["id"])
-            blk.explicit_start = bool(d.get("start", False))
-            blk.explicit_end = bool(d.get("end", False))
+            blk.explicit_start = d["start"]
+            blk.explicit_end = d["end"]
             blk.setPos(d["x"], d["y"])
             self.scene().addItem(blk)
             by_id[d["id"]] = blk
@@ -756,11 +826,9 @@ class StimCanvas(QGraphicsView):
                     or src.out_arrow is not None:
                 dropped += 1
                 continue
-            # Gracefully fall back to LEFT/RIGHT for old save files.
-            sp = e.get("src_port", ConnectorPort.RIGHT)
-            dp = e.get("dst_port", ConnectorPort.LEFT)
             self.scene().addItem(
-                ArrowItem(src, src.port(sp), dst, dst.port(dp)))
+                ArrowItem(src, src.port(e["src_port"]), dst,
+                          dst.port(e["dst_port"])))
         self.refresh_starts()
         return dropped
 
@@ -1469,10 +1537,15 @@ class StimulationWindow(QDialog):
             return
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("the file holds no 'blocks' and 'edges'")
             dropped = self._canvas.load_workflow(
                 data.get("blocks", []), data.get("edges", []))
         except Exception as e:
-            QMessageBox.critical(self, "Load failed", str(e))
+            QMessageBox.critical(
+                self, "Load failed",
+                f"{Path(path).name} could not be loaded: {e}\n\nThe canvas "
+                f"has been left as it was.")
             return
         self._dirty = False
         if dropped:
