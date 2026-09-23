@@ -193,6 +193,11 @@ class MainWindow(QMainWindow):
     _ext_prompt = None
     #: Milliseconds between two looks at the cameras in those phases.
     EXTERNAL_POLL_MS = 100
+    #: (holder, target) while an external-source start holds the session the
+    #: operator agreed to overwrite: moved out of the way into the hidden
+    #: directory ``holder``, not yet deleted. None outside that window
+    #: (_set_overwrite_aside).
+    _overwrite_aside: tuple | None = None
 
     def __init__(self):
         super().__init__()
@@ -1814,6 +1819,131 @@ class MainWindow(QMainWindow):
             print(f"[acq] could not put {', '.join(kept)} back into {target}: "
                   f"{e}; it is in {aside}", flush=True)
 
+    def _set_overwrite_aside(self):
+        """Move the session the operator agreed to overwrite out of the way.
+        Worker side, external trigger source only.
+
+        RULE: on an external trigger source the agreed session is renamed
+        into a hidden directory beside it, deleted only once the first
+        trigger arrives (_drop_overwrite_aside), and put back by every start
+        that ends before then (_restore_overwrite_aside). REASON: in this
+        mode the refusals after this point are routine: a source left
+        running, Cancel at the prompt, no pulse within the timeout. None of
+        them records anything, and a delete here would cost the earlier
+        session on each one. A rename on the same volume takes no time and
+        keeps the files' timestamps. The files in KEPT_ON_OVERWRITE are
+        copied into the new directory, so the session set aside stays whole
+        until it is dropped.
+
+        The guard is _overwrite_dir_if_agreed's: only the agreed directory,
+        and only one strictly inside the output directory. Raises OSError
+        when the rename or a copy fails; the start then refuses, and
+        _discard_refused_capture puts back a rename that did happen.
+        """
+        target = self._overwrite_dir
+        if target is None or target != self._video_dir or not target.exists():
+            return
+        try:
+            base = Path(self._sidebar.output_dir).resolve()
+            resolved = target.resolve()
+            inside = resolved.is_relative_to(base) and resolved != base
+        except (OSError, ValueError):
+            inside = False
+        if not inside:
+            raise OSError(f"refusing to overwrite {target}: outside the "
+                          f"output directory {self._sidebar.output_dir}")
+        kept = [name for name in KEPT_ON_OVERWRITE
+                if (target / name).is_file()]
+        holder = Path(tempfile.mkdtemp(prefix=f".{target.name}-overwritten-",
+                                       dir=target.parent))
+        try:
+            os.replace(target, holder / target.name)
+        except OSError as e:
+            try:
+                holder.rmdir()
+            except OSError:
+                pass
+            raise OSError(f"the earlier data in {target} could not be moved "
+                          f"aside for the overwrite ({e}). Close anything "
+                          f"that has a file in it open.") from e
+        self._overwrite_aside = (holder, target)
+        print(f"[acq] moved the earlier data in {target} aside into {holder}; "
+              f"it is deleted when the first trigger arrives", flush=True)
+        if kept:
+            target.mkdir(parents=True, exist_ok=True)
+            self._created_dirs.append(target)
+            for name in kept:
+                shutil.copy2(holder / target.name / name, target / name)
+
+    def _restore_overwrite_aside(self) -> tuple:
+        """Put back the session _set_overwrite_aside moved out of the way.
+
+        Returns (note, failed): the paragraph a refusal adds to its message,
+        "" when nothing was set aside, and whether the session is still out
+        of place. Call once this start's own directory is gone: the rename
+        back needs the path free.
+        """
+        aside, self._overwrite_aside = self._overwrite_aside, None
+        if aside is None:
+            return "", False
+        holder, target = aside
+        moved = holder / target.name
+        try:
+            os.replace(moved, target)
+        except OSError as e:
+            print(f"[acq] could not put the earlier data back into {target}: "
+                  f"{e}; it is in {moved}", flush=True)
+            return (f"The data that was in {target} before this start could "
+                    f"not be put back ({e}). None of it was deleted: it is in "
+                    f"{moved}. Move that folder back to {target} by hand.",
+                    True)
+        try:
+            holder.rmdir()
+        except OSError as e:
+            print(f"[acq] could not remove the empty {holder}: {e}",
+                  flush=True)
+        print(f"[acq] put the earlier data back into {target}", flush=True)
+        return (f"The data already in {target} is back in place: none of it "
+                f"was deleted.", False)
+
+    def _drop_overwrite_aside(self) -> None:
+        """Delete the session _set_overwrite_aside moved out of the way. UI
+        thread, at the first trigger: from there the start can no longer be
+        cancelled, so the overwrite the operator agreed to goes ahead.
+
+        Only a directory strictly inside the output directory is removed.
+        Whatever cannot be removed is logged and becomes a line of this
+        acquisition's WARNINGS.txt and its post-session dialog
+        (_sweep_warnings), because it holds the earlier data under a hidden
+        name beside this one.
+        """
+        aside, self._overwrite_aside = self._overwrite_aside, None
+        if aside is None:
+            return
+        holder, target = aside
+        try:
+            base = Path(self._sidebar.output_dir).resolve()
+            resolved = holder.resolve()
+            inside = resolved.is_relative_to(base) and resolved != base
+        except (OSError, ValueError):
+            inside = False
+        errors = []
+        if inside:
+            shutil.rmtree(holder, onerror=lambda _f, path, exc: errors.append(
+                f"{path}: {exc[1]}"))
+        else:
+            errors.append("it is outside the output directory")
+        if not holder.exists():
+            print(f"[acq] overwrote existing data in {target}", flush=True)
+            return
+        print(f"[acq] could not remove the earlier data set aside in {holder}: "
+              f"{errors[0] if errors else 'unknown error'}", flush=True)
+        self._sweep_warnings = list(self._sweep_warnings) + [
+            f"The earlier data this {self._acq_label()} replaced could not be "
+            f"deleted completely ({errors[0] if errors else 'unknown error'}). "
+            f"What is left is in {holder}, a hidden directory beside this "
+            f"one. It is not part of this take; delete it by hand."]
+
     def _remove_created_dirs(self):
         """Take back the empty directories a refused start created.
 
@@ -1842,8 +1972,15 @@ class MainWindow(QMainWindow):
         capture itself opens are removed - a leftover raw.bin or stream.h264
         from a start that was refused would otherwise be written into or
         appended to.
+
+        On an external trigger source the agreed session is moved aside
+        instead of deleted (_set_overwrite_aside), because the refusals that
+        follow are routine there.
         """
-        self._overwrite_dir_if_agreed()
+        if self._external_trigger():
+            self._set_overwrite_aside()
+        else:
+            self._overwrite_dir_if_agreed()
         if not self._video_dir.exists():
             self._created_dirs.append(self._video_dir)
         for cam in self._camera_names:
@@ -2219,13 +2356,16 @@ class MainWindow(QMainWindow):
         try:
             self._create_capture_dirs()
         except OSError as e:
+            # Nothing is armed yet, so what the start made is removed at once
+            # and an earlier session it had set aside goes back.
+            note, _failed = self._discard_refused_capture()
             return {"ok": False,
                     "title": "Could not create the session directories",
                     "message": (
                         f"{self._video_dir}\n\ncould not be created:\n\n{e}"
                         f"\n\nNothing has been started and nothing has been "
                         f"recorded. Check the output directory, then start "
-                        f"again.")}
+                        f"again." + (f"\n\n{note}" if note else ""))}
 
         self._arm_encoder_record(rig)
         try:
@@ -2240,13 +2380,16 @@ class MainWindow(QMainWindow):
                          if acq_type == "calibration"
                          and rig.calibration_gain_db >= 0 else None))
         except AcquisitionStartRefused as e:
-            # The cameras are back in preview with nothing recorded.
+            # The cameras are back in preview with nothing recorded, so what
+            # the start made goes, and an earlier session it set aside comes
+            # back.
             failures = list(getattr(self._camera_mgr, "last_encoder_failures",
                                     []) or [])
             if failures:
                 invalidate_nvenc_cache("; ".join(failures))
+            note, _failed = self._discard_refused_capture()
             return {"ok": False, "title": "Cannot start the acquisition",
-                    "message": str(e)}
+                    "message": str(e) + (f"\n\n{note}" if note else "")}
 
         t_bar = time.perf_counter()
         try:
@@ -2303,8 +2446,8 @@ class MainWindow(QMainWindow):
         for the dialog. Worker thread.
 
         No start was sent anywhere, so there is nothing to stand down: the
-        cameras are cancelled and what the start wrote is removed
-        (_cancel_capture, _discard_refused_capture).
+        cameras are cancelled, what the start wrote is removed and a session
+        it set aside is put back (_cancel_capture, _discard_refused_capture).
         """
         result = {"ok": False, "title": title, "message": message}
         if self._cancel_capture():
@@ -2313,7 +2456,9 @@ class MainWindow(QMainWindow):
                 "\n\nThe cameras could not be put back in preview and have "
                 "been closed. Switch profile and back (or restart "
                 "Panopticon) to reopen them.")
-        self._discard_refused_capture()
+        note, _failed = self._discard_refused_capture()
+        if note:
+            result["message"] += f"\n\n{note}"
         return result
 
     def _cancel_capture(self) -> bool:
@@ -2341,8 +2486,9 @@ class MainWindow(QMainWindow):
             print(f"[acq] abandon while cancelling failed: {e}", flush=True)
         return True
 
-    def _discard_refused_capture(self) -> None:
-        """Remove what a refused external-source start wrote. Worker thread.
+    def _discard_refused_capture(self) -> tuple:
+        """Remove what a refused external-source start wrote, and put back
+        the session it set aside. Worker thread, or the quit.
 
         The start had armed its cameras, so it may have written frames a
         running source delivered before the barrier, or empty streams when
@@ -2351,8 +2497,17 @@ class MainWindow(QMainWindow):
         start. In a camera directory that already existed, only raw.bin and
         stream.h264 are removed: the start deleted both before it opened
         them, so what is there now is its own. Nothing outside the output
-        directory is touched.
+        directory is touched. An overwrite the operator agreed to has only
+        moved the earlier session aside, and it goes back once this start's
+        directory is gone (_restore_overwrite_aside).
+
+        Returns _restore_overwrite_aside's (note, failed).
         """
+        self._remove_refused_capture()
+        return self._restore_overwrite_aside()
+
+    def _remove_refused_capture(self) -> None:
+        """The removal half of _discard_refused_capture."""
         video_dir = self._video_dir
         created = list(self._created_dirs)
         self._created_dirs = []
@@ -2451,6 +2606,13 @@ class MainWindow(QMainWindow):
             result = {"ok": False, "title": "Could not start the acquisition",
                       "message": f"{type(result).__name__}: {result}"}
         if not result.get("ok"):
+            if self._overwrite_aside is not None:
+                # An external-source start that ended without putting back
+                # the session it set aside; its own refusals already have.
+                note, _failed = self._discard_refused_capture()
+                if note:
+                    result["message"] = (result.get("message", "")
+                                         + f"\n\n{note}")
             self._remove_created_dirs()
             self._video_dir = None
             self._state = State.IDLE
@@ -2649,8 +2811,9 @@ class MainWindow(QMainWindow):
         The grab threads' stall detectors are armed now, as the board's ack
         arms them on the board path: from here a camera that receives
         nothing while the others do is a camera fault, not a source that has
-        not started. The previous run's reports are swept now too, because
-        until this moment the start could still be cancelled.
+        not started. The previous run's reports are swept now too, and an
+        earlier session the operator agreed to overwrite is deleted now,
+        because until this moment the start could still be cancelled.
         """
         self._ext_phase = "running"
         self._close_external_prompt()
@@ -2659,6 +2822,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[acq] could not arm the stall detectors: {e}", flush=True)
         self._sweep_stale_diagnostics()
+        self._drop_overwrite_aside()
         if self._state is State.CALIBRATING:
             self._sidebar.set_status("CALIBRATING", "#4488ff")
         else:
@@ -2770,8 +2934,9 @@ class MainWindow(QMainWindow):
     def _cancel_and_discard(self) -> dict:
         """Worker side of _end_external_attempt."""
         closed = self._cancel_capture()
-        self._discard_refused_capture()
-        return {"cameras_closed": closed}
+        note, failed = self._discard_refused_capture()
+        return {"cameras_closed": closed, "note": note,
+                "restore_failed": failed}
 
     def _on_external_attempt_ended(self, result, title: str, message: str,
                                    status: tuple, dialog: bool):
@@ -2787,17 +2952,30 @@ class MainWindow(QMainWindow):
         self._reset_toggles()
         self._sidebar.set_status(*status)
         closed = not isinstance(result, dict) or result.get("cameras_closed")
-        if not isinstance(result, dict):
+        if isinstance(result, dict):
+            note = result.get("note", "")
+            failed = bool(result.get("restore_failed"))
+        else:
             message += (f"\n\nCancelling failed: {type(result).__name__}: "
                         f"{result}")
+            # The worker may have stopped before it put back an earlier
+            # session the start had set aside.
+            note, failed = self._restore_overwrite_aside()
         if closed:
             self._camera_grid.setup_grid(0)
             self._camera_names = []
             message += ("\n\nThe cameras could not be put back in preview and "
                         "have been closed. Switch profile and back (or "
                         "restart Panopticon) to reopen them.")
-        self.statusBar().showMessage(f"{title}: nothing was recorded")
-        if dialog or closed:
+        if note:
+            message += f"\n\n{note}"
+        self.statusBar().showMessage(
+            f"{title}: nothing was recorded"
+            + ("; the earlier data is back in place" if note and not failed
+               else ""))
+        # A session that could not be put back is shown even for a Cancel:
+        # the operator has to move it back by hand.
+        if dialog or closed or failed:
             QMessageBox.warning(self, title, message)
 
     def _save_stim_paradigm(self):
@@ -4745,6 +4923,14 @@ class MainWindow(QMainWindow):
                 self._camera_mgr.abandon()
             except Exception as e:
                 print(f"[quit] abandon failed: {e}", flush=True)
+        if self._overwrite_aside is not None:
+            # An external-source start that never reached its first trigger:
+            # it recorded nothing, and the session it was to replace is only
+            # set aside. What the start wrote goes, and that session comes
+            # back, whatever the state says.
+            note, _failed = self._discard_refused_capture()
+            print(f"[quit] {note}", flush=True)
+            return
         # Read the flag AFTER the waits: a finalize that completed inside them
         # has written the whole session, and deleting it then would destroy
         # exactly the data the wait was there to save.
