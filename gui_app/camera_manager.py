@@ -182,7 +182,8 @@ class CameraManager(QObject):
     _board_started_t = None
     _uses_camera_block = False
     #: Why each camera of the last recording was retired, {"camN": reason}.
-    #: R-APP2 writes it beside the camera's video as RETIRED.json.
+    #: The main window writes it beside the camera's video as RETIRED.json
+    #: (main_window._write_retired).
     last_retired: dict = {}
     #: "camN: reason" for every real-time encoder that could not be created
     #: or failed during the last recording. The main window invalidates the

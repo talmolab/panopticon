@@ -20,14 +20,14 @@ the equivalent `CameraBackend` methods; see `CameraHandleProtocol`. A new
 backend supplies a thin adapter object rather than paying an indirection per
 attribute.
 
-Python call overhead is not the reason. A call is ~60 ns, so even seven per
-frame across nine cameras at 100 fps is 6,300 calls/s, about 0.4 ms of CPU per
-second (0.04% of one core). The reason is that the hot path has invariants a
-wrapper tends to break: the frame view must not outlive `Release()`, and it
-must not be copied on the way through. A hidden copy here is a 2.3 MB memcpy
-with the GIL held, which dropped frames on every camera (docs/HISTORY.md,
-phase 5). A documented duck-type contract keeps those invariants visible at the
-point they matter.
+Python call overhead is not the reason. A call is ~60 ns, so seven per frame
+cost about 0.4 us per frame per camera, a small fraction of any trigger
+period. The reason is that the hot path has invariants a wrapper tends to
+break: the frame view must not outlive `Release()`, and it must not be copied
+on the way through. A hidden copy here is a full-frame memcpy (width x height
+bytes) with the GIL held, which dropped frames on every camera
+(docs/HISTORY.md, phase 5). A documented duck-type contract keeps those
+invariants visible at the point they matter.
 
 WRITING A NEW BACKEND
 1. Implement `CameraBackend` for your SDK, all of it, including the members

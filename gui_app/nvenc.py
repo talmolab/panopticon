@@ -840,8 +840,8 @@ def _create_pinned(width, height, qp, fps, preset, tuning, notes, context):
 
 
 #: How long the launch check holds the encoder's stream before each Encode.
-#: It must outlast one Encode call plus one frame copy, about 1 ms at
-#: 1920x1200. A stall too short makes the check fail, never pass.
+#: It must outlast one Encode call plus one frame copy at the recording's
+#: frame size. A stall too short makes the check fail, never pass.
 _CHECK_STALL_MS = 20
 
 
@@ -876,8 +876,9 @@ def pinned_upload_matches_host(width: int, height: int,
     encode of the reference pictures. A copy queued anywhere else has read
     the inverse by then. The encoder has one staging buffer, so each Encode
     also waits on the previous upload's event; without that wait it would
-    overwrite a rewrite before the upload read it. One NVENC session at a
-    time; under a second at 1920x1200 with the default 16 frames.
+    overwrite a rewrite before the upload read it. It holds one NVENC
+    session at a time, and its run time grows with the frame size and
+    ``frames``.
     """
     if context not in CONTEXT_MODES:
         raise ValueError(f"nvenc context must be one of {CONTEXT_MODES}, "
