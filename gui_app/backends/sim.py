@@ -343,6 +343,11 @@ class SimCamera:
         self.rate_limit = 165.0
         self.gige_driver = ""
         self.extended_ids = False
+        #: The `camera_spec` open() was given, kept so a test can prove the
+        #: manager passed the profile's camera: block through. The simulated
+        #: camera takes its settings from `SimFaults` and the module baseline,
+        #: so nothing in the block is applied.
+        self.camera_spec = None
         self.is_open = True
         # np.full rather than np.empty: it pre-faults every page, so the first
         # frame is not the one that pays for the allocation.
@@ -662,18 +667,24 @@ class SimBackend:
         requires: camera names are positional over this order."""
         return [SimDevice(i, f"SIM{i + 1:05d}") for i in range(self.n_cameras)]
 
-    def open(self, device, pfs_path: str = "", max_num_buffer: int = 0):
+    def open(self, device, pfs_path: str = "", max_num_buffer: int = 0,
+             camera_spec=None):
         """Open one camera. `pfs_path` is accepted and ignored: the simulated
         camera has no feature file, and the caller must not have to know.
 
         `max_num_buffer` is recorded rather than allocated. The real pool
-        absorbs jitter; here the grab loop holds exactly one result at a time,
-        so a 600-deep pool would allocate gigabytes to hide the leak a
-        four-deep one names immediately.
+        absorbs jitter; here the grab loop holds one result at a time, so a
+        600-deep pool would allocate gigabytes to hide the leak a four-deep
+        one names immediately.
+
+        `camera_spec` (the profile's `camera:` block) is accepted, because
+        the sim profile may carry one to exercise the parser, and recorded on
+        the camera as `camera_spec` without being applied.
         """
         cam = SimCamera(device.index, device.GetSerialNumber(), self.width,
                         self.height, self.faults_for(device.index),
                         self.board, max_num_buffer)
+        cam.camera_spec = camera_spec
         self.cameras.append(cam)
         return cam
 
@@ -698,16 +709,36 @@ class SimBackend:
     def get_exposure_gain(self, cam) -> tuple:
         return cam.exposure_us, cam.gain_db
 
-    def set_exposure_gain(self, cam, exposure_us=None, gain_db=None) -> tuple:
+    #: Unit of the simulated camera's gain control, which models a `Gain`
+    #: node in dB. Not published as the optional `gain_unit` member, so the
+    #: exposure log lines keep the bare gain value the sim has always
+    #: printed.
+    GAIN_UNIT = "dB"
+
+    def set_exposure_gain(self, cam, exposure_us=None, gain_db=None,
+                          gain_unit=None) -> tuple:
         """Apply exposure/gain and report what took.
 
-        Nothing is clamped here, deliberately: the ceiling is the caller's job
-        because a camera does not error on an exposure it cannot sustain, it
-        silently ignores triggers — which is what this camera then does.
+        Nothing is clamped here: the ceiling is the caller's job, because a
+        camera does not error on an exposure it cannot sustain. It ignores
+        triggers instead, which is what this camera then does.
+
+        `gain_unit` follows the contract: None (the node's own unit) and "dB"
+        are written; "raw" is refused with ValueError, because this camera's
+        gain is in dB; anything else is refused before any write. The
+        exposure is applied before the gain's unit is checked, as on a real
+        camera.
         """
+        if gain_unit not in (None, "dB", "raw"):
+            raise ValueError(f"gain_unit must be None, 'dB' or 'raw', "
+                             f"not {gain_unit!r}")
         if exposure_us is not None:
             cam.exposure_us = float(exposure_us)
         if gain_db is not None:
+            if gain_unit is not None and gain_unit != self.GAIN_UNIT:
+                raise ValueError(
+                    f"gain value {gain_db!r} is in {gain_unit} but the "
+                    f"simulated camera's gain takes {self.GAIN_UNIT}")
             cam.gain_db = float(gain_db)
         return cam.exposure_us, cam.gain_db
 

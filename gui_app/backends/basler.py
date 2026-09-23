@@ -51,8 +51,22 @@ class BaslerBackend:
         return sorted(devices, key=lambda d: d.GetSerialNumber())
 
     # ------------------------------------------------------------------ opening
-    def open(self, device, pfs_path: str, max_num_buffer: int):
-        """Open one camera and apply the .pfs. Raises on any failure."""
+    def open(self, device, pfs_path: str, max_num_buffer: int,
+             camera_spec=None):
+        """Open one camera and apply the .pfs. Raises on any failure.
+
+        A `camera_spec` (the profile's `camera:` block) is refused before the
+        camera is touched. A Basler camera takes every setting from the .pfs,
+        and a value that could live in two places drifts between them. The
+        profile loader refuses the block first; this is the backend's own
+        check for a caller that bypassed it.
+        """
+        if camera_spec is not None:
+            raise ValueError(
+                "the basler backend takes its camera settings from the .pfs "
+                "named by pfs_path and does not accept a camera: block. Remove "
+                "the camera: block from the profile, or set camera_backend to "
+                "a backend that uses it.")
         cam = pylon.InstantCamera(
             pylon.TlFactory.GetInstance().CreateDevice(device))
         cam.Open()
