@@ -8,6 +8,7 @@ so a default can never drift between the class and the loader.
 """
 import dataclasses
 import json
+import math
 import re
 import types
 import typing
@@ -15,6 +16,8 @@ import yaml
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from gui_app.backends import KNOWN_BACKENDS
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -29,6 +32,11 @@ GIGE_DRIVERS = ("socket", "filter", "auto")
 #: session is available and falls back to libx264; the others force a path.
 #: Consumed by the encoder selection code, declared and validated here.
 ENCODERS = ("auto", "nvenc", "x264", "raw")
+
+#: H.264 quantiser range. The encoders pass RigProfile.quality straight
+#: through as the QP, and libx264 clamps a value above the top of the range
+#: to it, so an out-of-range value would record at another quality.
+QUALITY_RANGE = (0, 51)
 
 #: Arduino pins a camera trigger may never occupy: 0 and 1 are Serial0, the
 #: link the sketch handshakes over, so driving them would sever the board.
@@ -326,8 +334,9 @@ class RigProfile:
 
         These are the checks whose failure would otherwise be silent on the
         rig: a driver typo that lands on pylon's default, a trigger on the
-        serial link or on the laser pin, or a frame rate the camera's own
-        rate limiter would make it skip triggers at.
+        serial link or on the laser pin, a frame rate the camera's own rate
+        limiter would make it skip triggers at, a quality the encoder clamps,
+        or a pool too shallow for the kick-out depth.
         """
         if self.gige_driver not in GIGE_DRIVERS:
             raise ValueError(
@@ -339,6 +348,12 @@ class RigProfile:
                 f"encoder {self.encoder!r} is not one of {list(ENCODERS)}")
         if not isinstance(self.camera_backend, str) or not self.camera_backend:
             raise ValueError("camera_backend must be a non-empty backend name")
+        if self.camera_backend not in KNOWN_BACKENDS:
+            raise ValueError(
+                f"camera_backend {self.camera_backend!r} is not a known "
+                f"backend. Known backends: {', '.join(KNOWN_BACKENDS)}. A new "
+                f"one is a module in gui_app/backends/, registered in "
+                f"KNOWN_BACKENDS.")
 
         pins = set(self.trigger_pins)
         on_serial = sorted(pins & RESERVED_SERIAL_PINS)
@@ -378,6 +393,39 @@ class RigProfile:
                              ("encode_parallel", self.encode_parallel)):
             if value <= 0:
                 raise ValueError(f"{label} must be positive, got {value}")
+        # NV12 stores its chroma at half resolution in both directions, so an
+        # odd size cannot be encoded. On a camera that takes its ROI from the
+        # profile the odd size would reach the camera and fail only at Record.
+        for label, value in (("frame_width", self.frame_width),
+                             ("frame_height", self.frame_height)):
+            if value % 2:
+                raise ValueError(
+                    f"{label} {value} must be even: the NV12 frames the "
+                    f"encoders take have half-resolution chroma, so an odd "
+                    f"size cannot be encoded")
+        lo, hi = QUALITY_RANGE
+        if not lo <= self.quality <= hi:
+            raise ValueError(
+                f"quality {self.quality} is outside {lo}..{hi}, the H.264 QP "
+                f"range the encoders take; lower values give higher quality "
+                f"and larger files")
+        # While the coordinator waits for a lagging camera, that camera's
+        # backlog waits in its driver pool, so a pool shallower than the
+        # kick-out depth runs dry first and loses frames the coordinator would
+        # have released.
+        if (self.realtime_encode and self.realtime_kick
+                and self.max_num_buffer < self.kick_max_lag):
+            raise ValueError(
+                f"max_num_buffer {self.max_num_buffer} is below kick_max_lag "
+                f"{self.kick_max_lag}. In kick-out mode a lagging camera's "
+                f"backlog waits in the driver pool, so a pool shallower than "
+                f"kick_max_lag loses frames the coordinator would have waited "
+                f"for. Raise max_num_buffer or lower kick_max_lag.")
+        cal = self.calibration_exposure_us
+        if not (math.isfinite(cal) and cal >= 0):
+            raise ValueError(
+                f"calibration_exposure_us {cal:g} must be 0 (keep the "
+                f"recording exposure) or a positive number of microseconds")
         if self.n_cameras < 0:
             raise ValueError("n_cameras must be 0 (unchecked) or positive")
         if self.camera_serials is not None:
