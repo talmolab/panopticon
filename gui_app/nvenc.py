@@ -660,13 +660,15 @@ class PinnedUploadEncoder:
             for ev in self._events:
                 try:
                     drv.event_sync(ev)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[nvenc] WARNING: pinned upload teardown could not "
+                          f"wait for a staging buffer's upload: {e}", flush=True)
             for ev in self._events:
                 try:
                     drv.event_destroy(ev)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[nvenc] WARNING: a CUDA event could not be "
+                          f"destroyed: {e}", flush=True)
             self._events = []
             self._frames, self._whole, self._ydst = [], [], []
             for p in self._ptrs:
@@ -680,15 +682,17 @@ class PinnedUploadEncoder:
             if self._stream:
                 try:
                     drv.stream_destroy(self._stream)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[nvenc] WARNING: a CUDA stream could not be "
+                          f"destroyed: {e}", flush=True)
                 self._stream = 0
         finally:
             if pushed:
                 try:
                     drv.ctx_pop()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[nvenc] WARNING: pinned upload teardown could not "
+                          f"restore the thread's CUDA context: {e}", flush=True)
         if self._own_ctx and self._ctx:
             try:
                 drv.ctx_destroy(self._ctx)
