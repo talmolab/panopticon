@@ -397,7 +397,9 @@ class PinnedUploadEncoder:
     RULE: a staging buffer is rewritten only after the CUDA event recorded
     behind its last Encode has completed. REASON: Encode can return before the
     DMA has finished, so rewriting the buffer at once races the upload and
-    the encoded picture no longer matches the frame.
+    the encoded picture no longer matches the frame. The event covers the DMA
+    only because PyNvVideoCodec queues it on this encoder's stream, which
+    pinned_upload_matches_host() proves at launch.
 
     RULE: never synchronize the stream from the host. REASON: the stream also
     carries NVENC's own work, so a stream synchronize drains the encoder's
@@ -422,13 +424,14 @@ class PinnedUploadEncoder:
 
     upload = "pinned"
 
-    def __init__(self, width: int, height: int, context: str, drv):
+    def __init__(self, width: int, height: int, context: str, drv,
+                 buffers: int | None = None):
         self.width, self.height = int(width), int(height)
         self.context = context
         self._drv = drv
         self._ysize = self.width * self.height
         self._fsize = self._ysize * 3 // 2
-        self._nbuf = PINNED_STAGING_BUFFERS
+        self._nbuf = int(buffers or PINNED_STAGING_BUFFERS)
         self._session = None
         self._ctx = 0
         self._own_ctx = False
@@ -640,7 +643,8 @@ class PinnedUploadEncoder:
 
 
 def _build_pinned(width, height, qp, fps, preset, tuning, notes, context,
-                  log: bool = True) -> PinnedUploadEncoder:
+                  log: bool = True,
+                  buffers: int | None = None) -> PinnedUploadEncoder:
     """A PinnedUploadEncoder, or _PinnedSetupError when the pinned path cannot
     be set up for it. NvencUnavailable other than out of memory propagates:
     the host path would fail the same way."""
@@ -648,7 +652,7 @@ def _build_pinned(width, height, qp, fps, preset, tuning, notes, context,
         drv = cuda_driver.get()
     except cuda_driver.CudaUnavailable as e:
         raise _PinnedSetupError(str(e)) from e
-    enc = PinnedUploadEncoder(width, height, context, drv)
+    enc = PinnedUploadEncoder(width, height, context, drv, buffers)
     try:
         drv.ctx_push(enc._ctx)
         try:
@@ -676,8 +680,8 @@ def _build_pinned(width, height, qp, fps, preset, tuning, notes, context,
         where = ("its own CUDA context" if context == "own"
                  else "the shared primary CUDA context")
         print(f"[nvenc] pinned upload: {width}x{height} encoder, "
-              f"{PINNED_STAGING_BUFFERS} page-locked staging buffers "
-              f"({_mib(PINNED_STAGING_BUFFERS * enc._fsize)}), {where}. "
+              f"{enc._nbuf} page-locked staging buffers "
+              f"({_mib(enc._nbuf * enc._fsize)}), {where}. "
               f"Process total: {s['pinned_encoders']} pinned encoder(s), "
               f"{_mib(s['pinned_bytes'])} page-locked, "
               f"{s['own_contexts']} own context(s)", flush=True)
@@ -748,64 +752,148 @@ def _create_pinned(width, height, qp, fps, preset, tuning, notes, context):
     return _create_session(width, height, qp, fps, preset, tuning, notes)
 
 
-def pinned_upload_matches_host(context: str = "shared", size: int = 256,
-                               frames: int = 60) -> bool | None:
-    """Does the pinned path produce the host path's bitstream on this machine?
+#: How long the launch check holds the encoder's stream before each Encode.
+#: It must outlast one Encode call plus one frame copy, about 1 ms at
+#: 1920x1200. A stall too short makes the check fail, never pass.
+_CHECK_STALL_MS = 20
 
-    None when it cannot be measured: NVENC is unavailable, or the pinned
-    setup fails here (then every pinned encoder falls back to the host path
-    anyway, with a warning).
 
-    RULE: prove the pinned path from its output before trusting it, on every
-    launch that uses it. REASON: the events that guard the staging buffers
-    are recorded on the stream PyNvVideoCodec is given, so the path relies on
-    the library queuing its input copy on that stream. The library does not
-    document it. A build that copies elsewhere would encode pictures from
-    buffers already rewritten, and only the bitstream shows it.
+def pinned_upload_matches_host(width: int, height: int,
+                               context: str = "shared",
+                               frames: int = 16) -> bool | None:
+    """Is the pinned upload ordered on the encoder's stream on this machine?
 
-    Encodes the same changing pictures through both paths, feeding the pinned
-    one from a single buffer rewritten the moment Encode returns, and
-    compares the bytes. One session at a time; well under a second.
+    True: PyNvVideoCodec queues its copy of each staging buffer on the
+    stream it is given, behind the work already queued there, and every
+    Encode waited for the previous upload before it reused the buffer. The
+    staging events then guard every upload. False: that is not shown, or
+    the pinned encoder was built but failed to encode; record with the host
+    upload. None: nothing could be measured. NVENC is unavailable, the
+    session cap is reached, or the pinned setup fails; in the last case
+    each pinned encoder falls back to the host upload with a note.
+
+    RULE: run it on every launch that uses the pinned path, at the
+    recording's frame size. REASON: the events that guard the staging
+    buffers are recorded on the stream PyNvVideoCodec is given, and the
+    library does not document that it copies on that stream. A build that
+    copies elsewhere races every rewrite of a staging buffer. At normal
+    timing that race is rare, so an ordinary encode passes by luck. Stalling
+    the stream makes the outcome certain.
+
+    Frame 0 is encoded as it is, because the library's first Encode waits
+    for the stream. Before each later Encode, a host function stalls the
+    encoder's stream. Encode is handed the inverse of the reference picture,
+    and the staging buffer is rewritten with the reference picture while the
+    stall still holds the stream. A copy queued on the stream runs after the
+    stall and reads the rewrite, so the bitstream equals the host path's
+    encode of the reference pictures. A copy queued anywhere else has read
+    the inverse by then. The encoder has one staging buffer, so each Encode
+    also waits on the previous upload's event; without that wait it would
+    overwrite a rewrite before the upload read it. One NVENC session at a
+    time; under a second at 1920x1200 with the default 16 frames.
     """
+    if context not in CONTEXT_MODES:
+        raise ValueError(f"nvenc context must be one of {CONTEXT_MODES}, "
+                         f"got {context!r}")
+    if frames < 2:
+        raise ValueError(f"the check needs at least 2 frames, got {frames}")
     _load()
     if _nvc is None:
         return None
-    y = (np.arange(size * size, dtype=np.int64).reshape(size, size) * 3)
-    host = pinned = None
+    w, h = int(width), int(height)
+    ysize = w * h
+    where = f"{w}x{h}, {context} context"
+    base = (np.arange(ysize, dtype=np.int64) % 251).astype(np.uint8)
+    ref = np.empty(ysize, np.uint8)
+
+    def reference(i):
+        np.add(base, np.uint8(7 * i % 256), out=ref)
+        return ref
+
+    frame = np.full(ysize * 3 // 2, 128, np.uint8)
+    pinned = None
     try:
-        host = _create_session(size, size, 21, 100, "P3", "low_latency", None)
-        buf = np.full(size * size * 3 // 2, 128, np.uint8)
-        want = []
-        for i in range(frames):
-            buf[:size * size] = ((y + i * 7) % 251).astype(np.uint8).reshape(-1)
-            want.append(bytes(host.Encode(buf)))
-        want.append(bytes(host.EndEncode()))
-        del host
         host = None
-        gc.collect()
         try:
-            pinned = _build_pinned(size, size, 21, 100, "P3", "low_latency",
-                                   None, context, log=False)
-        except _PinnedSetupError as e:
-            print(f"[nvenc] pinned upload check could not run: {e}", flush=True)
+            host = _create_session(w, h, 21, 100, "P3", "low_latency", None)
+            want = []
+            for i in range(frames):
+                frame[:ysize] = reference(i)
+                want.append(bytes(host.Encode(frame)))
+            want.append(bytes(host.EndEncode()))
+        except Exception as e:
+            print(f"[nvenc] pinned upload check could not run ({where}): the "
+                  f"host encoder failed: {e}", flush=True)
             return None
-        got = []
-        buf[:size * size] = (y % 251).astype(np.uint8).reshape(-1)
-        for i in range(frames):
-            got.append(bytes(pinned.Encode(buf)))
-            buf[:size * size] = ((y + (i + 1) * 7) % 251).astype(
-                np.uint8).reshape(-1)
-        got.append(bytes(pinned.EndEncode()))
-        return b"".join(got) == b"".join(want)
-    except Exception as e:
-        print(f"[nvenc] pinned upload check could not run: {e}", flush=True)
-        return None
+        finally:
+            del host
+            gc.collect()
+        try:
+            pinned = _build_pinned(w, h, 21, 100, "P3", "low_latency", None,
+                                   context, log=False, buffers=1)
+        except (_PinnedSetupError, NvencUnavailable) as e:
+            print(f"[nvenc] pinned upload check could not run ({where}): {e}",
+                  flush=True)
+            return None
+        try:
+            ok, why = _stalled_encode(pinned, frames, frame, reference, want)
+        except Exception as e:
+            print(f"[nvenc] pinned upload check could not run ({where}): {e}",
+                  flush=True)
+            return None
+        if ok:
+            print(f"[nvenc] pinned upload check passed ({where}): {why}",
+                  flush=True)
+        else:
+            print(f"[nvenc] WARNING: pinned upload check FAILED ({where}): "
+                  f"{why}. Record with the host upload.", flush=True)
+        return ok
     finally:
         if pinned is not None:
             pinned.Close()
-        if host is not None:
-            del host
         gc.collect()
+
+
+def _stalled_encode(enc, frames, frame, reference, want):
+    """The pinned half of pinned_upload_matches_host: (verdict, reason)."""
+    drv, ev, ysize = enc._drv, enc._events[0], enc._ysize
+    got = []
+    frame[:ysize] = reference(0)
+    got.append(bytes(enc.Encode(frame)))
+    covered = 0
+    for i in range(1, frames):
+        pic = reference(i)
+        np.invert(pic, out=frame[:ysize])
+        drv.ctx_push(enc._ctx)
+        try:
+            drv.stream_stall(enc._stream, _CHECK_STALL_MS)
+        finally:
+            drv.ctx_pop()
+        got.append(bytes(enc.Encode(frame)))
+        # Rewritten while the stall holds the stream: a copy queued on the
+        # stream has not run yet and reads this.
+        np.copyto(enc._ydst[0], pic)
+        drv.ctx_push(enc._ctx)
+        try:
+            covered += not drv.event_query(ev)
+        finally:
+            drv.ctx_pop()
+    got.append(bytes(enc.EndEncode()))
+    stalled = frames - 1
+    same = b"".join(got) == b"".join(want)
+    detail = (f"{stalled} stalled frames, the stall still held the stream "
+              f"after {covered} of {stalled} rewrites, {enc.event_waits} "
+              f"upload waits")
+    if not same:
+        return False, (f"the pinned bitstream differs from the host path's. A "
+                       f"staging buffer was read before its rewrite, because "
+                       f"PyNvVideoCodec does not copy on the encoder's stream, "
+                       f"or it was overwritten before its upload, because the "
+                       f"event waits did not hold ({detail})")
+    if covered != stalled:
+        return False, (f"the stall had ended before the rewrite, so the "
+                       f"ordering was not shown ({detail})")
+    return True, f"the library copies on the encoder's stream ({detail})"
 
 
 def count_idr(chunks) -> int:

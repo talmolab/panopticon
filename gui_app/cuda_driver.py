@@ -2,7 +2,8 @@
 
 Only `gui_app.nvenc` uses this module. It binds the driver entry points the
 pinned-staging encoder needs: device and context handles, streams, events and
-page-locked host memory. Every call is checked, and a failure raises
+page-locked host memory, plus a stream stall for the launch check that proves
+the upload's ordering. Every call is checked, and a failure raises
 `CudaError` carrying the driver's error name.
 
 RULE: nothing is loaded at import. The driver library is opened by the first
@@ -72,6 +73,7 @@ _SIGNATURES = {
     "cuMemHostAlloc": [POINTER(c_void_p), c_size_t, c_uint],
     "cuMemFreeHost": [c_void_p],
     "cuMemGetInfo_v2": [POINTER(c_size_t), POINTER(c_size_t)],
+    "cuLaunchHostFunc": [c_void_p, c_void_p, c_void_p],
 }
 
 
@@ -99,7 +101,8 @@ def _open_library(name: str):
 
 
 class Driver:
-    """The CUDA driver entry points the pinned upload path uses.
+    """The CUDA driver entry points the pinned upload path and its launch
+    check use.
 
     Handles (contexts, streams, events, host pointers) are plain ints. A
     context made by `ctx_create` is returned NOT current: callers bracket their
@@ -250,6 +253,18 @@ class Driver:
     def event_sync(self, event: int) -> None:
         self._call("cuEventSynchronize", c_void_p(event))
 
+    def stream_stall(self, stream: int, ms: int) -> None:
+        """Hold `stream` for `ms` milliseconds: work queued on it after this
+        call starts no earlier than that.
+
+        The driver runs a C sleep function (kernel32 Sleep on Windows, usleep
+        elsewhere) on its own callback thread, so the stall needs neither the
+        GIL nor any Python code. The calling thread does not wait.
+        """
+        fn, units_per_ms = _sleep_host_fn()
+        self._call("cuLaunchHostFunc", c_void_p(stream), c_void_p(fn),
+                   c_void_p(max(1, int(ms)) * units_per_ms))
+
     # -- memory
     def host_alloc(self, nbytes: int, flags: int = CU_MEMHOSTALLOC_PORTABLE) -> int:
         p = c_void_p()
@@ -264,6 +279,29 @@ class Driver:
         free, total = c_size_t(), c_size_t()
         self._call("cuMemGetInfo_v2", byref(free), byref(total))
         return free.value, total.value
+
+
+_sleep_fn = None
+
+
+def _sleep_host_fn() -> tuple[int, int]:
+    """(address, argument units per millisecond) of a C function that takes
+    one integer argument and sleeps for it: a valid CUDA host function.
+
+    RULE: the host function is a C library function, never a ctypes
+    callback. REASON: a ctypes callback takes the GIL on the driver's
+    thread, and a thread inside PyNvVideoCodec's Encode holds the GIL while
+    it may wait for that same stream, which deadlocks.
+    """
+    global _sleep_fn
+    if _sleep_fn is None:
+        if os.name == "nt":
+            f = ctypes.WinDLL("kernel32").Sleep        # VOID Sleep(DWORD ms)
+            _sleep_fn = (f, ctypes.cast(f, c_void_p).value, 1)
+        else:
+            f = ctypes.CDLL(None).usleep               # int usleep(useconds_t us)
+            _sleep_fn = (f, ctypes.cast(f, c_void_p).value, 1000)
+    return _sleep_fn[1], _sleep_fn[2]
 
 
 def host_view(ptr: int, nbytes: int):
