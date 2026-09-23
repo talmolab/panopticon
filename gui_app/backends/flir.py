@@ -67,7 +67,10 @@ boundary reads until it settles or records how many edges it left
 unresolved, and a count with unresolved edges is reported as a range. A
 trigger ignored at a re-arm after BeginAcquisition arms the camera and before
 the first read after it returns is counted as down time
-(`_note_restart_counters`).
+(`_note_restart_counters`). A counter narrower than 2**31 counts modulo its
+period, so the witness compares it with the frames modulo the period, and its
+count is right while the triggers it cannot account for number fewer than
+half the period (`_ignored_sentences`, `_edge_only_sentences`).
 
 UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
@@ -2787,7 +2790,9 @@ class FlirBackend:
               + (f", {unresolved} edge(s) not placed at a stop or re-arm"
                  if unresolved else "")
               + (f", last CounterValue {cam._last_counter}"
-                 if cam.block_id_source == "trigger_counter" else ""),
+                 if cam.block_id_source == "trigger_counter" else "")
+              + (f" (the counters wrap at {cam._ctr_period})"
+                 if cam._ctr_period else ""),
               flush=True)
         dead = self._implausible_counts(cam, w, frames)
         if dead is not None:
@@ -2852,8 +2857,12 @@ class FlirBackend:
         The down-time edges are subtracted before the difference nearest 0
         is taken, so the count is right while the camera ignored fewer
         triggers than half the period, however many edges the re-arms left
-        out. The edges the sentence states are the exposures plus that
-        difference."""
+        out. The exposures the sentence states are then the fewest that fit
+        the frames that reached the host (every one of them was exposed),
+        which is the true count while fewer exposed frames than the period
+        failed to reach it, and the edges it states are those exposures
+        plus the difference. The sentence says when these figures differ
+        from the counters' reads (`_wrap_clause`)."""
         exposures = w["exposures"]
         line = cam.trigger_line
         if exposures is None:
@@ -2863,18 +2872,26 @@ class FlirBackend:
         # Below 0 only when an unresolved edge added an exposure without
         # its edge.
         raw = cam._ctr_signed(w["edges"] - w["gap_edges"], exposures)
-        edges = exposures + raw
+        exposed = frames + cam._ctr_delta(exposures, frames)
+        edges = exposed + raw
         ignored = max(0, raw)
         top = max(ignored, raw + unresolved)
         outside = " outside stall re-arms" if w["rearms"] else ""
+        wrap = (self._wrap_clause(
+            cam, f"the exposures stated are the fewest that fit the {frames} "
+                 f"frames that reached the host, the edges stated add the "
+                 f"ignored triggers to them, and the ignored count is right "
+                 f"while it is under {cam._ctr_period // 2}")
+                if cam._ctr_period and (exposed != exposures or edges != w[
+                    "edges"] - w["gap_edges"]) else "")
         if top == ignored:
             what = (f"its trigger input ({line}) counted {edges} edges"
-                    f"{outside} but it started only {exposures} exposures, so "
-                    f"it ignored {ignored} trigger(s).")
+                    f"{outside} but it started only {exposed} exposures, so "
+                    f"it ignored {ignored} trigger(s).{wrap}")
         else:
             what = (f"its trigger input ({line}) counted {edges} edges"
-                    f"{outside} and it started {exposures} exposures, so it "
-                    f"ignored {ignored} to {top} trigger(s)."
+                    f"{outside} and it started {exposed} exposures, so it "
+                    f"ignored {ignored} to {top} trigger(s).{wrap}"
                     + self._unresolved_clause(
                         unresolved, "while its trigger counters were read at "
                                     "a stall re-arm or at the stop"))
@@ -2938,6 +2955,12 @@ class FlirBackend:
                 f"triggers."]
 
     @staticmethod
+    def _wrap_clause(cam, how: str) -> str:
+        """Why the counts a sentence states are not what a counter narrower
+        than 2**31 read: `how` says how they were rebuilt."""
+        return f" Its trigger counters wrap at {cam._ctr_period}, so {how}."
+
+    @staticmethod
     def _unresolved_clause(unresolved: int, where: str) -> str:
         """Why an ignored-trigger count is a range: `unresolved` edges that
         reached the camera `where`."""
@@ -2961,13 +2984,19 @@ class FlirBackend:
         image. The ignored count settles it only when it is exact: both
         counters, no stall re-arm, the stop's edges read before
         EndAcquisition, and no edge the stop left on an unknown side
-        (`_stop_unresolved`). Otherwise the sentence names both causes."""
+        (`_stop_unresolved`). Otherwise the sentence names both causes.
+
+        On a counter narrower than 2**31 the counts it states are unwrapped:
+        the last image's as the block IDs unwrap it (`_bid_counter`), and
+        the edges as that count plus the lag, which is right while the lag
+        is under the period."""
         if (cam.block_id_source != "trigger_counter" or cam._ctr_latch_known
                 or cam._last_counter is None):
             return []
         lag = cam._ctr_delta(w["edges"], cam._last_counter)
         if lag <= 0:
             return []
+        last = cam._last_counter + cam._ctr_acc
         excess = cam._ctr_first_excess
         exposures = w["exposures"]
         if (excess is not None and exposures is not None and not w["rearms"]
@@ -2976,8 +3005,8 @@ class FlirBackend:
             return []
         return [f"its first image did not show whether it latches the "
                 f"CounterValue chunk before the trigger edge, and its last "
-                f"image's count ({cam._last_counter}) is {lag} below the "
-                f"{w['edges']} edges it counted by the stop. Its last {lag} "
+                f"image's count ({last}) is {lag} below the {last + lag} "
+                f"edges it counted by the stop. Its last {lag} "
                 f"trigger(s) delivering no frame would give this. So would a "
                 f"latch before the edge, which makes every block ID of this "
                 f"camera one trigger early. Send the output of 'uv run "
@@ -2992,12 +3021,17 @@ class FlirBackend:
         a working edge counter and a working exposure counter each reach at
         least the frames delivered. Exposures read before the edges never
         pass them (`exposures_check`); the exposures read after
-        EndAcquisition may, by the edges that arrived between the reads. A
-        counter narrower than 2**31 is checked only while the frames
-        delivered are fewer than its period, so the counts cannot have
-        wrapped."""
+        EndAcquisition may, by the edges that arrived between the reads.
+
+        A counter narrower than 2**31 reads its counts modulo its period, so
+        a count below the frames may be a counter that wrapped. It is
+        checked only while the frames delivered and the down-time edges
+        come to at most half the period. The edges, the largest count, then
+        stay below the period while the triggers the camera ignored and the
+        frames it lost together number fewer than half the period, so no
+        count can have wrapped."""
         period = cam._ctr_period
-        if period and frames >= period:
+        if period and frames + w["gap_edges"] > period - period // 2:
             return None
         edges, exposures = w["edges"], w["exposures"]
         check = w["exposures_check"]
@@ -3030,11 +3064,28 @@ class FlirBackend:
         read after it are left out as down time, and any of them the camera
         exposed once armed is a frame counted without its edge. So those
         edges make the count a range. In trigger_counter mode each ignored
-        trigger is a gap, so only a proven count is reported."""
+        trigger is a gap, so only a proven count is reported.
+
+        A counter narrower than 2**31 reads the edges modulo its period,
+        and the frames are a true count, so the edges left over are the
+        difference nearest 0 of the two modulo the period. That is right
+        while fewer than half the period are left over, and the edges the
+        sentence states are the frames plus it."""
         line = cam.trigger_line
-        counted = (f"its trigger input ({line}) counted {edges} edges"
-                   + (" outside stall re-arms" if w["rearms"] else ""))
+        outside = " outside stall re-arms" if w["rearms"] else ""
         unresolved = w["unresolved"]
+        period = cam._ctr_period
+
+        def left_over(base, what):
+            """(edges left over past `base` frames, the edges to state, and
+            the clause for a counter that wraps)."""
+            d = cam._ctr_signed(w["edges"] - w["gap_edges"], base)
+            wrap = (cls._wrap_clause(
+                cam, f"the edge count stated is the {base} {what} plus "
+                     f"the edges left over modulo {period}, which is right "
+                     f"while fewer than {period // 2} are left over")
+                    if period and base + d != edges else "")
+            return d, base + d, wrap
 
         def span(unexplained):
             low = max(0, unexplained)
@@ -3046,32 +3097,35 @@ class FlirBackend:
                             "BeginAcquisition at a stall re-arm")
 
         if cam.block_id_source == "trigger_counter":
-            low, _top, count, why = span(edges - frames)
+            d, shown, wrap = left_over(frames, "frames that reached the host")
+            low, _top, count, why = span(d)
             if low <= 0:
                 return []
-            return [f"{counted} but only {frames} frames reached the host, so "
+            return [f"its trigger input ({line}) counted {shown} edges"
+                    f"{outside} but only {frames} frames reached the host, so "
                     f"{count} trigger(s) were ignored or their frames "
-                    f"were lost in transport.{why} This camera has no exposure "
-                    f"counter to tell the two apart. Its block IDs count the "
-                    f"edges, so each is a gap"
+                    f"were lost in transport.{wrap}{why} This camera has no "
+                    f"exposure counter to tell the two apart. Its block IDs "
+                    f"count the edges, so each is a gap"
                     + (f". {cls._GAP_IN_DOUBT}" if latch_doubt
                        else f", {cls._GAP_DROPPED}")]
         acquired = w["id_frames"]
-        _low, top, count, why = span(edges - acquired)
+        d, shown, wrap = left_over(acquired, "frames its frame IDs account for")
+        _low, top, count, why = span(d)
         if top <= 0:
             return []
         advice = (" Set camera.flir.block_id_source: trigger_counter, which "
                   "this camera offers, so an ignored trigger becomes a gap."
                   if cam.counter_chunk_ok else "")
-        return [f"{counted} and its frame IDs account for {acquired} frames "
-                f"acquired, so "
-                f"{count} trigger(s) were ignored, or their frames were "
+        return [f"its trigger input ({line}) counted {shown} edges{outside} "
+                f"and its frame IDs account for {acquired} frames acquired, "
+                f"so {count} trigger(s) were ignored, or their frames were "
                 f"lost after the last frame that reached the host in an "
                 f"acquisition" + (" (it was re-armed after a stall)"
                                   if w["rearms"] else "")
-                + f".{why} This camera has no exposure counter to tell the "
-                f"two apart. Each ignored trigger moves its later block IDs "
-                f"one trigger away from the other cameras'." + advice]
+                + f".{wrap}{why} This camera has no exposure counter to tell "
+                f"the two apart. Each ignored trigger moves its later block "
+                f"IDs one trigger away from the other cameras'." + advice]
 
     @classmethod
     def sdk_report(cls) -> str:
