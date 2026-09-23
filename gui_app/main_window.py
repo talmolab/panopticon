@@ -198,6 +198,9 @@ class MainWindow(QMainWindow):
     #: directory ``holder``, not yet deleted. None outside that window
     #: (_set_overwrite_aside).
     _overwrite_aside: tuple | None = None
+    #: The last error the trigger-source watch printed, so a manager read
+    #: that fails on every tick is logged once, not ten times a second.
+    _ext_watch_error = ""
 
     def __init__(self):
         super().__init__()
@@ -2759,34 +2762,44 @@ class MainWindow(QMainWindow):
         every camera silent for SOURCE_STOPPED_S means the operator stopped
         the source, and the acquisition finishes through the normal stop.
         stopping: every camera silent, or STOP_WAIT_S gone, finishes it.
+
+        RULE: each deadline is checked whatever the manager read returns.
+        REASON: a read that raises on every tick would otherwise hold the
+        window in WAITING FOR TRIGGER, or in STOP YOUR TRIGGER SOURCE, until
+        the operator pressed a button. A failed read counts as no trigger
+        and no silence, so only the deadline ends the phase.
         """
         phase = self._ext_phase
         if phase is None or self._quitting:
             self._stop_external_watch()
             return
         mgr = self._camera_mgr
+        fps = self._acq_fps
         now = time.monotonic()
         try:
             if phase == "awaiting":
-                if ExternalTriggerSource.triggers_arrived(mgr):
+                if self._watch_read(
+                        lambda: ExternalTriggerSource.triggers_arrived(mgr)):
                     self._external_source_started()
                 elif now >= self._ext_deadline:
                     self._no_trigger_received()
                 else:
                     self._update_external_prompt(
                         ExternalTriggerSource.prompt_text(
-                            self._acq_fps, self._ext_deadline - now,
-                            self._acq_label()))
+                            fps, self._ext_deadline - now, self._acq_label()))
             elif phase == "running":
-                if ExternalTriggerSource.source_stopped(mgr, SOURCE_STOPPED_S):
+                if self._watch_read(
+                        lambda: ExternalTriggerSource.source_stopped(
+                            mgr, SOURCE_STOPPED_S)):
                     print(f"[acq] every camera silent for over "
                           f"{SOURCE_STOPPED_S:g} s: the external trigger "
                           f"source has stopped; finishing the "
                           f"{self._acq_label()}", flush=True)
                     self._end_external_acquisition()
             elif phase == "stopping":
-                stopped = ExternalTriggerSource.source_stopped(
-                    mgr, SOURCE_SILENT_S)
+                stopped = self._watch_read(
+                    lambda: ExternalTriggerSource.source_stopped(
+                        mgr, SOURCE_SILENT_S))
                 if stopped or now >= self._ext_deadline:
                     if not stopped:
                         print(f"[acq] WARNING: frames still arriving "
@@ -2804,6 +2817,25 @@ class MainWindow(QMainWindow):
             # that reports and looks again next tick does not.
             print(f"[acq] trigger-source watch failed: {type(e).__name__}: "
                   f"{e}", flush=True)
+
+    def _watch_read(self, read) -> bool:
+        """``read()`` for the trigger-source watch, False when it raises.
+
+        The error is printed when it differs from the last one, so a read
+        that fails on every tick is logged once rather than ten times a
+        second.
+        """
+        try:
+            answer = bool(read())
+        except Exception as e:
+            text = f"{type(e).__name__}: {e}"
+            if text != self._ext_watch_error:
+                print(f"[acq] trigger-source watch could not read the "
+                      f"cameras: {text}", flush=True)
+                self._ext_watch_error = text
+            return False
+        self._ext_watch_error = ""
+        return answer
 
     def _external_source_started(self):
         """The first trigger reached a camera: the recording is under way.
