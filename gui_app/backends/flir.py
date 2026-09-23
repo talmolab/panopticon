@@ -88,8 +88,8 @@ from gui_app.backends._spinc import (
     FlirSdkUnavailable, FlirTimeout, SpinC)
 
 __all__ = ["FlirBackend", "FlirCamera", "FlirConfigError", "FlirDevice",
-           "FlirFrameError", "FlirResult", "FlirSdkUnavailable", "FlirTimeout",
-           "GRAB_STRATEGY", "shared_api"]
+           "FlirFrameError", "FlirRateError", "FlirResult",
+           "FlirSdkUnavailable", "FlirTimeout", "GRAB_STRATEGY", "shared_api"]
 
 #: The only buffer handling mode this backend runs. OldestFirst makes a grab
 #: loop that falls behind the trigger rate show as increasingly stale frames,
@@ -215,6 +215,14 @@ class FlirConfigError(RuntimeError):
     by serial and model, the node, and the value the camera would accept."""
 
 
+class FlirRateError(FlirConfigError):
+    """The camera cannot record at the frame rate asked: its link cannot
+    carry the frames, AcquisitionFrameRate cannot reach the rate, or the
+    exposure does not fit the trigger period. Recording anyway skips
+    triggers or drops frames, so this is a reason to refuse an acquisition
+    (`FlirBackend.RefusalException`), not a warning after it."""
+
+
 class FlirFrameError(RuntimeError):
     """A delivered image the capture path cannot take. Raised from
     `retrieve()`, after the image is released, for a layout the (H, W) view
@@ -284,8 +292,8 @@ class _Nodes:
         h = self.node(name, which)
         return h is not None and self.api.node_writable(h)
 
-    def refuse(self, text: str):
-        raise FlirConfigError(f"{self.who}: {text}")
+    def refuse(self, text: str, cls=FlirConfigError):
+        raise cls(f"{self.who}: {text}")
 
     def need(self, name: str, which: str = "device", why: str = ""):
         h = self.node(name, which)
@@ -1086,6 +1094,18 @@ class FlirBackend:
                            "'[flir]' line"),
     }
 
+    #: The exception class that means a camera cannot record at the frame
+    #: rate asked. Raised by `open` for the profile's frame_rate and by
+    #: `exposure_ceiling_us` for the acquisition's; from the second, it is a
+    #: reason to refuse the start, because a recording made anyway skips
+    #: triggers or drops frames.
+    RefusalException = FlirRateError
+
+    #: What bounds the exposure on this backend, in the words of the
+    #: '[camN] exposure=... (ceiling ... at N fps, <this>)' log line, where
+    #: the Basler backend names its AcquisitionFrameRate limiter.
+    CEILING_BASIS = "the ExposureTime limit this camera reports"
+
     def __init__(self, api=None, sdk_dir=None):
         self._api = shared_api(sdk_dir) if api is None else api
         self._lock = threading.Lock()
@@ -1501,7 +1521,7 @@ class FlirBackend:
                      f"({payload} bytes) needs {_fmt_rate(need)}, but "
                      f"DeviceLinkThroughputLimit can go no higher than "
                      f"{_fmt_rate(hi)} on this link. Lower frame_rate or the "
-                     f"ROI, or check the link{speed}.")
+                     f"ROI, or check the link{speed}.", FlirRateError)
         want = cam.spec.flir.link_throughput_limit
         if want == "auto":
             if cam._link_fps == fps:
@@ -1519,7 +1539,7 @@ class FlirBackend:
             n.refuse(f"at {fps:g} fps a {cam.width}x{cam.height} frame needs "
                      f"{_fmt_rate(need)}, but camera.flir.link_throughput_"
                      f"limit holds the link to {_fmt_rate(current)}. Raise it, "
-                     f"or set it to auto.")
+                     f"or set it to auto.", FlirRateError)
 
     def _apply_buffers(self, cam) -> None:
         n = cam.nodes
@@ -1980,7 +2000,7 @@ class FlirBackend:
                 f"can expose at frame_rate {fps:g} (ExposureTime max "
                 f"{ceiling:.0f} us at AcquisitionFrameRate {fps:g}; Panopticon "
                 f"keeps 10% margin, so {0.9 * ceiling:.0f} us). Lower "
-                f"exposure_us or add light.")
+                f"exposure_us or add light.", FlirRateError)
 
     def _log_summary(self, cam) -> None:
         a = cam.applied
@@ -2197,7 +2217,7 @@ class FlirBackend:
                              f"shortest exposure ({exp_min:g} us), so it "
                              f"cannot acquire {fps:g} fps at "
                              f"{cam.width}x{cam.height}. Lower frame_rate or "
-                             f"the ROI.")
+                             f"the ROI.", FlirRateError)
                 n.setf("AcquisitionFrameRate", fps)
                 exp_max = n.rangef("ExposureTime")[1]
                 if exp_max >= period_us:
