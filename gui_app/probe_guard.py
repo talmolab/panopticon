@@ -25,21 +25,35 @@ checking the machine by hand.
 from __future__ import annotations
 
 import atexit
+import ntpath
 import os
+import re
 import sys
 from pathlib import Path
 
-#: Command-line fragments that identify a Panopticon process. Every entry point
-#: that opens cameras, the trigger board or the GUI is listed, because the guard
-#: protects both directions only when each side can see the other: a probe that
-#: is guarded but unlisted still refuses to start over a GUI while every other
-#: probe starts happily over it. ``probe_network.py`` is deliberately absent --
-#: its default discovery pass sends a UDP query and opens nothing, so listing it
-#: would let a harmless run block every other probe.
-PANOPTICON_MARKERS = ("gui.py", "probe_seq.py", "probe_lag.py",
-                      "probe_abuse.py", "probe_multiproc.py",
+#: File names that identify a Panopticon process. Every entry point that opens
+#: cameras, the trigger board or the GUI is listed, because the guard protects
+#: both directions only when each side can see the other: a probe that is
+#: guarded but unlisted still refuses to start over a GUI while every other
+#: probe starts over it. ``probe_network.py`` is absent: its default discovery
+#: pass sends a UDP query and opens nothing, so listing it would let a harmless
+#: run block every other probe.
+#:
+#: RULE: a marker matches an argument whose whole file name is the marker (a
+#: bare name such as ``panopticon`` also matches with an extension), never a
+#: fragment of the command line. REASON: the repository is usually cloned
+#: into a folder named panopticon, so every program run from its virtual
+#: environment carries that word in its interpreter path, and test_sim_gui.py
+#: or labelgui.py end in gui.py; matching fragments refuses a probe beside
+#: any of them.
+PANOPTICON_MARKERS = ("gui.py", "probe_seq.py", "probe_lag.py", "probe_mp.py",
+                      "probe_flir.py", "probe_abuse.py", "probe_multiproc.py",
                       "probe_release_gil.py", "probe_zerocopy.py",
                       "panopticon")
+
+#: A multiprocessing worker started by spawn names its parent on its command
+#: line: ``... spawn_main(parent_pid=1234, pipe_handle=...)``.
+_SPAWN_PARENT = re.compile(r"spawn_main\(\s*parent_pid\s*=\s*(\d+)")
 
 #: The repository root, taken from this module's own location.
 REPO = Path(__file__).resolve().parents[1]
@@ -123,12 +137,61 @@ def _own_lineage(rows: list[tuple[int, int, str]]) -> set[int]:
     return mine
 
 
+def _file_names(cmd: str):
+    """Each argument of a command line as a lower-case file name."""
+    for tok in re.split(r"[\s\"']+", cmd or ""):
+        if tok:
+            yield ntpath.basename(tok).lower()
+
+
+def is_panopticon_command(cmd: str) -> bool:
+    """Whether a command line runs a Panopticon entry point (see
+    PANOPTICON_MARKERS for the matching rule)."""
+    marks = {m.lower() for m in PANOPTICON_MARKERS}
+    for name in _file_names(cmd):
+        if name in marks:
+            return True
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if stem in marks and stem != name:
+            return True
+    return False
+
+
+def spawn_parent(cmd: str) -> int | None:
+    """The parent pid a multiprocessing spawn child names, or None."""
+    m = _SPAWN_PARENT.search(cmd or "")
+    return int(m.group(1)) if m else None
+
+
 def find_others(rows: list[tuple[int, int, str]]) -> list[tuple[int, str]]:
-    """Panopticon processes in ``rows`` other than this one and its ancestors."""
+    """Panopticon processes in ``rows`` other than this one and its ancestors.
+
+    A capture worker (a spawn child) counts when its parent is a Panopticon
+    process or is gone. RULE: an orphaned worker refuses a probe as its
+    parent would have. REASON: it still holds its cameras and its NVENC
+    sessions, and a probe started beside it measures the contention, which
+    reads as the lag the probe exists to find.
+    """
     mine = _own_lineage(rows)
-    return [(pid, " ".join(cmd.split())[:120]) for pid, _ppid, cmd in rows
-            if pid not in mine
-            and any(m in cmd.lower() for m in PANOPTICON_MARKERS)]
+    live = {pid for pid, _ppid, _cmd in rows}
+    ours = {pid for pid, _ppid, cmd in rows if is_panopticon_command(cmd)}
+    out = []
+    for pid, _ppid, cmd in rows:
+        if pid in mine:
+            continue
+        text = " ".join(cmd.split())[:120]
+        if pid in ours:
+            out.append((pid, text))
+            continue
+        parent = spawn_parent(cmd)
+        if parent is None or parent in mine:
+            continue
+        if parent not in live:
+            out.append((pid, f"{text}  [a worker whose parent pid {parent} "
+                             f"has exited]"))
+        elif parent in ours:
+            out.append((pid, f"{text}  [a worker of Panopticon pid {parent}]"))
+    return out
 
 
 def _release_lock() -> None:
