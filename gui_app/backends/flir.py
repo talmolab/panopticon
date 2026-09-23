@@ -665,14 +665,23 @@ class FlirCamera:
         an exposure started between the two exposure reads, the edges are
         read once more to bound the edges this stop leaves on an unknown side
         (`_stop_unresolved`). A camera whose counters cannot be read while it
-        streams is read after EndAcquisition only."""
+        streams is read after EndAcquisition only. When the stream cannot be
+        stopped, the camera may still expose, so the witness records the
+        error instead of counts."""
         was = self._grabbing
         self._grabbing = False
-        streaming = self._api.is_streaming(self.handle)
         witness = was and self._triggered
-        before = self._read_before_end() if witness and streaming else None
-        if streaming:
-            self._api.end(self.handle)
+        try:
+            streaming = self._api.is_streaming(self.handle)
+            before = self._read_before_end() if witness and streaming else None
+            if streaming:
+                self._api.end(self.handle)
+        except Exception as e:
+            if witness and self.witness is not None \
+                    and not self.witness["error"]:
+                self._witness_failed("could not be read at the stop, because "
+                                     "the stream did not stop", e)
+            raise
         if witness:
             self._read_counters_at_stop(before)
 
@@ -2718,14 +2727,19 @@ class FlirBackend:
         (`_latch_sentences`). With the edge counter alone the count mixes
         ignored triggers with frames lost in transport, and the sentence
         says so and makes no claim about alignment
-        (`_edge_only_sentences`). A witness whose counters failed gets a
-        sentence saying this recording has none."""
+        (`_edge_only_sentences`). A witness whose counters failed, or whose
+        sentences could not be built, gets a sentence saying this recording
+        has none."""
         try:
             return self._witness_sentences(cam, int(frames_acquired))
         except Exception as e:
-            print(f"[flir] {cam.serial}: trigger witness failed: "
-                  f"{type(e).__name__}: {e}", flush=True)
-            return []
+            why = f"{type(e).__name__}: {e}"
+            print(f"[flir] {cam.serial}: trigger witness failed: {why}",
+                  flush=True)
+            if getattr(cam, "witness", None) is None:
+                return []
+            return [f"its trigger witness could not be evaluated ({why}), so "
+                    f"this recording has no trigger witness for this camera."]
 
     def _witness_sentences(self, cam, frames: int) -> list:
         w = cam.witness
