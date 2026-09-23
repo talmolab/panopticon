@@ -226,9 +226,10 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
         )
     if report.disk_free_gb >= 0 and report.disk_free_gb < 500:
         report.warnings.append(
-            f"Disk: {report.disk_free_gb:.0f} GB free (500 GB+ recommended — the "
-            f"default real-time encode needs far less, but the raw fallback "
-            f"writes ~129 GiB per camera per 10 min)"
+            f"Disk: {report.disk_free_gb:.0f} GB free (500 GB+ recommended). "
+            f"The default real-time encode needs far less, but the raw "
+            f"fallback writes every frame whole: frame width x height bytes "
+            f"per camera per frame."
         )
     if report.disk_write_mb_s >= 0 and report.disk_write_mb_s < 500:
         report.warnings.append(
@@ -245,9 +246,9 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
             "on the CPU with libx264. The RECORDING does so only if the "
             "encoder selection ran for this session — the `Using:` line of "
             "this report names what was installed, and without one every "
-            "camera falls back to raw.bin at ~129 GiB per camera per 10 min. "
-            "Check the camera count in this report against the cameras you "
-            "actually run."
+            "camera falls back to raw.bin, which holds every frame whole "
+            "(frame width x height bytes each). Check the camera count in "
+            "this report against the cameras you actually run."
         )
     elif not report.nvenc_runtime:
         report.warnings.append(
@@ -312,23 +313,22 @@ def nvenc_session_capacity(width: int, height: int, want: int,
                            force: bool = False) -> int:
     """Concurrent NVENC sessions grantable, at least `want` if possible. Cached.
 
-    The cap is real and finite — measured 12 on this rig — and NVIDIA has moved
-    it across driver generations (2 → 3 → 5 → 8 → 12), so it must be PROBED and
-    never hardcoded. Six cameras never revealed it because 6 < 12.
+    The cap is real and finite, it differs between GPUs, and NVIDIA has moved
+    it across driver generations, so it is PROBED and never hardcoded.
 
     Probing is capped at `want` because every session is a real allocation, and
     that makes the result a LOWER BOUND whenever the probe stops at its own
     limit rather than at a refusal. Caching such a value as if it were the cap
-    is wrong — it made a 6-camera probe (limit 8) report "8" and then wrongly
-    block a 9-camera start. So `_nvenc_saturated` records which kind of answer
-    we have, and a larger request re-probes only when the previous answer was
-    limit-bound. Returns -1 if NVENC is unavailable entirely.
+    would refuse a later start that needs more cameras than the first probe
+    asked for, so `_nvenc_saturated` records which kind of answer the cache
+    holds, and a larger request re-probes whenever the cached count is short
+    of it. Returns -1 if NVENC is unavailable entirely.
     """
     global _nvenc_sessions, _nvenc_saturated, _nvenc_probe_error
     if _nvenc_sessions is not None and not force and _nvenc_sessions >= want:
         return _nvenc_sessions
     _nvenc_probe_error = ""
-    # Cached value is below what we need — ALWAYS re-probe rather than trusting
+    # Cached value is below what this start needs: ALWAYS re-probe rather than trusting
     # it. A shortfall is often transient: another process holding sessions for a
     # second (a browser's hardware encode, an orphaned h264_nvenc ffmpeg), or a
     # session this app deliberately leaked because an encoder thread outlived its
@@ -419,8 +419,8 @@ class EncoderChoice:
 
     `blocking` non-empty means the start must be refused: no path on this
     machine can encode the open cameras in real time, and the remaining option
-    (raw) costs ~500x the disk, so it is chosen deliberately in the profile or
-    not at all.
+    (raw) writes every frame whole, hundreds of times the H.264 rate, so it is
+    chosen deliberately in the profile or not at all.
     """
     encoder: str = "nvenc"
     reason: str = ""
@@ -432,6 +432,33 @@ class EncoderChoice:
 
 #: What `select_encoder` last installed, "" until it has run in this process.
 _selected_encoder = ""
+
+
+def selected_encoder() -> str:
+    """What `select_encoder` last installed ("nvenc", "x264" or "raw"), or ""
+    when it has not run in this process."""
+    return _selected_encoder
+
+
+def installed_encoder(realtime: bool) -> str:
+    """The encoder an acquisition started now records with.
+
+    Read off the installed seam rather than from the last selection: the grab
+    threads and the router resolve `encoders.get_default_factory()` when they
+    build their encoders, and with no selection the built-in NVENC path
+    stands. `realtime` is the profile's `realtime_encode`, the only field that
+    puts the capture on raw.bin.
+    """
+    if not realtime:
+        return "raw"
+    if encoders.get_default_factory() is cpu_encode.x264_factory:
+        return "x264"
+    return "nvenc"
+
+
+def _raw_ratio(width: int, height: int) -> str:
+    """How many times the H.264 disk rate raw capture writes, as '~Nx'."""
+    return f"~{max(1, round(width * height / H264_BYTES_PER_FRAME))}x"
 
 
 def encoder_selection_live() -> bool:
@@ -519,8 +546,8 @@ def select_encoder(profile, n_cams: int, fps: int, width: int,
         # `realtime_encode` and reads `encoder` nowhere, so this combination
         # really does encode in real time; believing it skips the session
         # check and leaves the GPU factory installed, and every camera that
-        # cannot get a session falls silently to raw.bin at ~500x the disk,
-        # with a preflight that said nothing.
+        # cannot get a session falls to raw.bin, which writes every frame
+        # whole, with a preflight that said nothing.
         _install("raw")
         return EncoderChoice(
             encoder="raw",
@@ -532,8 +559,8 @@ def select_encoder(profile, n_cams: int, fps: int, width: int,
                 "run would encode in real time and every camera that could not "
                 "get an encoder would fall back to raw.bin one by one. Set "
                 "`realtime_encode: false` in the rig profile to write raw "
-                "frames deliberately (~500x the disk), or set `encoder` to "
-                "`auto`, `nvenc` or `x264`."))
+                f"frames deliberately ({_raw_ratio(width, height)} the disk), "
+                "or set `encoder` to `auto`, `nvenc` or `x264`."))
 
     if want in ("nvenc", "auto"):
         sessions = nvenc_session_capacity(width, height, n_cams + 2)
@@ -590,7 +617,7 @@ def select_encoder(profile, n_cams: int, fps: int, width: int,
                       f"{n_cams} cameras are open. Record fewer cameras, "
                       f"lower the frame rate, or set `realtime_encode: false` "
                       f"to write raw frames and encode after the session "
-                      f"(~500x the disk)."))
+                      f"({_raw_ratio(width, height)} the disk)."))
 
     _install("raw")
     return EncoderChoice(
@@ -601,7 +628,8 @@ def select_encoder(profile, n_cams: int, fps: int, width: int,
             f"{fps} fps: " + _nvenc_shortfall_text(sessions, n_cams) + " "
             + cpu_text + ". Record fewer cameras, or set "
             "`realtime_encode: false` in the rig profile to write raw frames "
-            "and encode after the session — which needs ~500x the disk."))
+            "and encode after the session, which needs "
+            f"{_raw_ratio(width, height)} the disk."))
 
 
 def _nvenc_shortfall_text(sessions: int, n_cams: int) -> str:
@@ -622,11 +650,11 @@ def check_capacity(n_cams: int, width: int, height: int,
     """Refuse-or-warn check run at acquisition start. Returns (blocking, warnings).
 
     Everything here scales linearly with camera count, which is why it exists:
-    the numbers that were comfortable at 6 cameras are not at 9, and each of
-    these limits currently fails SILENTLY — a camera dropping to `raw.bin`
-    (~129 GiB/10 min for that camera alone: raw.bin holds the mono8 frame, so
-    it is width*height bytes each, ~500x the H.264 size), a MemoryError inside
-    a grab thread, or a disk filling mid-session.
+    the numbers that are comfortable at a few cameras are not at more, and
+    each of these limits otherwise fails without a message: a camera dropping
+    to `raw.bin` (it holds the mono8 frame, width*height bytes each, hundreds
+    of times the H.264 size), a MemoryError inside a grab thread, or a disk
+    filling mid-session.
 
     `encoder` is the profile's selection (`auto`, `nvenc`, `x264`, `raw`); it
     decides which capability is checked and, with the answer, which byte rate
@@ -650,15 +678,15 @@ def check_capacity(n_cams: int, width: int, height: int,
     ring_gb = (n_cams * ring_n * nv12_b / 2 ** 30) if realtime else 0.0
     need_gb = pool_gb + ring_gb
     avail_gb = psutil.virtual_memory().available / 2 ** 30
-    detail = (f"{need_gb:.1f} GiB needed ({pool_gb:.1f} pylon pool"
+    detail = (f"{need_gb:.1f} GiB needed ({pool_gb:.1f} driver pool"
               + (f" + {ring_gb:.1f} NV12 ring" if realtime else "")
               + f"), {avail_gb:.1f} GiB available")
     if need_gb > avail_gb:
         # RULE: name the profile field, `max_num_buffer`. REASON: the pool
         # depth actually used comes from the profile; MAX_NUM_BUFFER in
         # camera_manager is only the fallback default, and "MaxNumBuffer" is
-        # the pylon node name — neither string exists in the YAML the operator
-        # must edit to act on this message.
+        # a camera SDK's node name; neither string exists in the YAML the
+        # operator must edit to act on this message.
         blocking.append(
             f"Not enough RAM for {n_cams} cameras: {detail}. Lower "
             f"`max_num_buffer` or `kick_max_lag` in the rig profile, or close "
@@ -786,8 +814,8 @@ def check_capacity(n_cams: int, width: int, height: int,
             # here — so it must not be the one the operator cannot override. It
             # would otherwise refuse a raw-capture profile outright, which
             # CLAUDE.md documents as the fallback when the real-time path
-            # misbehaves: 6 cams x 100 fps x 2.3 MB x 600 s is ~772 GiB demanded
-            # for what may be a one-minute test.
+            # misbehaves, over hundreds of GiB demanded for what may be a
+            # one-minute test.
             warnings.append(
                 f"Disk may be short: a {minutes:g}-minute recording would need "
                 f"~{need_disk_gb:.0f} GiB and only {free_gb:.0f} GiB is free. "
