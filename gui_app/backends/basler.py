@@ -10,6 +10,8 @@ about these cameras; the comments are the point, not decoration.
 """
 from __future__ import annotations
 
+import os
+
 try:
     import pypylon.genicam as genicam
     import pypylon.pylon as pylon
@@ -51,8 +53,25 @@ class BaslerBackend:
         return sorted(devices, key=lambda d: d.GetSerialNumber())
 
     # ------------------------------------------------------------------ opening
-    def open(self, device, pfs_path: str, max_num_buffer: int):
-        """Open one camera and apply the .pfs. Raises on any failure."""
+    def open(self, device, pfs_path: str, max_num_buffer: int,
+             camera_spec=None):
+        """Open one camera and apply the .pfs. Raises on any failure.
+
+        A `camera_spec` (the profile's `camera:` block) is refused before the
+        camera is touched. A Basler camera takes every setting from the .pfs,
+        and a value that could live in two places drifts between them. The
+        profile loader refuses the block first; this is the backend's own
+        check for a caller that bypassed it.
+
+        The camera's timestamp tick rate is logged, because the capture path
+        reads `TimeStamp` as nanoseconds (see `acquisition_warnings`).
+        """
+        if camera_spec is not None:
+            raise ValueError(
+                "the basler backend takes its camera settings from the .pfs "
+                "named by pfs_path and does not accept a camera: block. Remove "
+                "the camera: block from the profile, or set camera_backend to "
+                "a backend that uses it.")
         cam = pylon.InstantCamera(
             pylon.TlFactory.GetInstance().CreateDevice(device))
         cam.Open()
@@ -61,6 +80,7 @@ class BaslerBackend:
         # checks the result.
         pylon.FeaturePersistence.Load(pfs_path, cam.GetNodeMap(), False)
         cam.MaxNumBuffer.SetValue(max_num_buffer)
+        self._log_timestamp_clock(cam, device.GetSerialNumber())
         return cam
 
     def describe(self, cam) -> dict:
@@ -78,6 +98,93 @@ class BaslerBackend:
             "pixel_format": cam.PixelFormat.GetValue(),
             "serial": cam.GetDeviceInfo().GetSerialNumber(),
         }
+
+    # ---------------------------------------------------------- timestamp clock
+    #: The tick rate the capture path assumes: `GrabResultProtocol.TimeStamp`
+    #: is nanoseconds.
+    TIMESTAMP_HZ = 1_000_000_000
+    #: Node that reports a GigE camera's timestamp tick rate. USB3 Vision
+    #: cameras do not have it, and their timestamps are nanoseconds by the
+    #: USB3 Vision standard.
+    TICK_FREQUENCY_NODE = "GevTimestampTickFrequency"
+
+    @classmethod
+    def timestamp_tick_hz(cls, cam):
+        """The camera's timestamp ticks per second, or None when it does not
+        report a rate (USB3 cameras) or the node cannot be read."""
+        try:
+            node = cls._optional_node(cam, cls.TICK_FREQUENCY_NODE)
+            if node is None:
+                return None
+            return int(node.GetValue())
+        except Exception:
+            return None
+
+    @classmethod
+    def _timestamp_unit_problem(cls, hz):
+        """A sentence saying why a clock of `hz` ticks per second is not the
+        nanosecond clock the capture path assumes, or None when it is (or
+        when the camera does not report a rate)."""
+        if hz is None or hz <= 0 or hz == cls.TIMESTAMP_HZ:
+            return None
+        return (f"the camera's device clock ticks at {hz} Hz "
+                f"({cls.TICK_FREQUENCY_NODE}), but the capture path reads "
+                f"TimeStamp as nanoseconds ({cls.TIMESTAMP_HZ} Hz). The "
+                f"delivery lag, the stall resync and the block-ID rate check "
+                f"are wrong for this camera by a factor of "
+                f"{cls.TIMESTAMP_HZ / hz:g}")
+
+    @classmethod
+    def _log_timestamp_clock(cls, cam, serial) -> None:
+        """Print this camera's timestamp tick rate, with a WARNING when it is
+        not the nanosecond clock the capture path assumes."""
+        hz = cls.timestamp_tick_hz(cam)
+        problem = cls._timestamp_unit_problem(hz)
+        if problem is not None:
+            print(f"[basler] WARNING {serial}: {problem}", flush=True)
+            return
+        rate = ("not reported" if hz is None
+                else f"{hz} Hz ({cls.TICK_FREQUENCY_NODE})")
+        print(f"[basler] {serial}: timestamp clock {rate}", flush=True)
+
+    def acquisition_warnings(self, cam, frames_acquired: int) -> list:
+        """Camera-side problems with the acquisition that just ended.
+
+        A Basler camera has no trigger counter in use here, so the only
+        problem reported is a timestamp clock that is not nanoseconds. It is
+        reported for every recording, so it reaches that recording's
+        WARNINGS.txt. `frames_acquired` is part of the contract and unused
+        here. Never raises.
+        """
+        try:
+            problem = self._timestamp_unit_problem(self.timestamp_tick_hz(cam))
+        except Exception:
+            return []
+        return [] if problem is None else [problem]
+
+    # -------------------------------------------------------- exposure ceiling
+    @staticmethod
+    def exposure_ceiling_us(cam, fps: float, rate_limit: float) -> float:
+        """Longest exposure, in us, at which the camera acquires every trigger.
+
+        In trigger mode the camera's frame-rate timer starts after exposure
+        ends, so the shortest interval between acquisitions is
+        `exposure + 1/AcquisitionFrameRate`, and `set_triggered` sets
+        AcquisitionFrameRate to `rate_limit`. The ceiling is therefore
+        `1e6/fps - 1e6/rate_limit`. A trigger arriving inside the interval is
+        ignored, which halves the frame rate with no error.
+
+        `rate_limit <= 0` means the limiter is disabled, so the bound left is
+        the trigger period `1e6/fps`. The result is 0 or negative when `fps`
+        is at or above `rate_limit`, and is returned as is so the caller can
+        report it. The caller applies its own 0.9 margin. The formula is the
+        limiter's physics, so `cam` is not consulted.
+        """
+        fps = float(fps)
+        limit = float(rate_limit or 0.0)
+        if limit > 0:
+            return 1e6 / fps - 1e6 / limit
+        return 1e6 / fps
 
     # ------------------------------------------------------------ GigE specifics
     @staticmethod
@@ -174,9 +281,13 @@ class BaslerBackend:
     def set_transmission_delay(cls, cam, ticks: int) -> int:
         """Write GevSCFTD (frame transmission delay) and return the value set.
 
-        The camera holds each frame back by `ticks` timestamp ticks
-        (GevTimestampTickFrequency, 125 MHz on ace GigE, so 1 tick = 8 ns)
-        before putting it on the wire. Basler documents this as the knob for
+        The camera holds each frame back by `ticks` ticks of its timestamp
+        clock before putting it on the wire. The tick rate is the camera's
+        GevTimestampTickFrequency (see `timestamp_tick_hz`); it differs
+        between camera models, so convert a delay in time with the rate the
+        camera reports rather than an assumed one.
+
+        Basler documents this as the knob for
         cameras "triggered simultaneously": staggering the start of each
         camera's burst spreads the switch load without touching the exposure
         or readout timer, which is what the trigger_rate_limit pacing costs.
@@ -226,6 +337,32 @@ class BaslerBackend:
                 pass
         return out
 
+    @classmethod
+    def set_packet_size(cls, cam, n: int) -> int:
+        """Write GevSCPSPacketSize (stream packet size, bytes) and return the
+        value read back. For `probe_network.py --sweep`, which looks for the
+        MTU wall in each camera's path. A camera without the node raises, and
+        a write error propagates, so the sweep reports that size as failed.
+        """
+        node = cls._require_node(
+            cam, "GevSCPSPacketSize",
+            hint="the packet-size sweep applies to GigE cameras only")
+        node.SetValue(int(n))
+        return int(node.GetValue())
+
+    @staticmethod
+    def device_address(device):
+        """The IPv4 address of an `enumerate_devices()` entry as dotted text,
+        or None for a device without one (a USB3 camera). Never raises."""
+        try:
+            available = getattr(device, "IsIpAddressAvailable", None)
+            if available is not None and not available():
+                return None
+            addr = device.GetIpAddress()
+        except Exception:
+            return None
+        return str(addr) if addr else None
+
     @staticmethod
     def _optional_node(cam, name):
         """The camera node map's `name`, or None when absent/unimplemented."""
@@ -238,14 +375,16 @@ class BaslerBackend:
         return node
 
     @classmethod
-    def _require_node(cls, cam, name):
-        """Like _optional_node, but a missing node is a configuration error."""
+    def _require_node(cls, cam, name, hint=None):
+        """Like _optional_node, but a missing node is a configuration error.
+        `hint` replaces the default advice at the end of the message."""
         node = cls._optional_node(cam, name)
         if node is None:
+            advice = hint or ("remove the profile setting that asks for it or "
+                              "use a camera that implements it")
             raise RuntimeError(
                 f"{name} is not available on this camera (a GigE Vision "
-                f"transport feature); remove the profile setting that asks "
-                f"for it or use a camera that implements it")
+                f"transport feature); {advice}")
         return node
 
     # ------------------------------------------------------------------- modes
@@ -536,6 +675,16 @@ class BaslerBackend:
         Statistic_Failed_Packet_Count is NOT included: it reads absurd values on
         this hardware (tens of millions against 11 M total) and is untrustworthy.
 
+        The `CANONICAL_STREAM_STATS` keys repeat four of these under the names
+        every backend shares, each only when its counter was read:
+        buffers_total, buffers_failed, buffers_underrun and resend_requests.
+
+        The socket driver's ReceiveThreadPriority, and whether
+        ReceiveThreadPriorityOverride is on (without it pylon uses its own
+        default), are read alongside and never written, so a session records
+        the priority its receive threads ran at. The filter driver and USB3
+        cameras do not have these nodes, and nothing is reported for them.
+
         The camera-side transport settings are read alongside, each only when
         the camera implements it, so a session's network state is on record:
           GevSCFJM   — frame jitter max: the read-only bound on how late a
@@ -559,6 +708,16 @@ class BaslerBackend:
                     out[key.replace("Statistic_", "")] = node.GetValue()
         except Exception as e:
             out["error"] = str(e)
+        for canonical, native in self.CANONICAL_STATS:
+            if native in out:
+                out[canonical] = out[native]
+        for key in self.RECEIVE_THREAD_NODES:
+            try:
+                node = cam.GetStreamGrabberNodeMap().GetNode(key)
+                if node is not None:
+                    out[key] = node.GetValue()
+            except Exception:
+                pass
         for key in self.TRANSPORT_NODES:
             try:
                 node = self._optional_node(cam, key)
@@ -570,6 +729,41 @@ class BaslerBackend:
 
     #: Camera-side GigE transport nodes reported by stream_stats.
     TRANSPORT_NODES = ("GevSCFJM", "GevSCFTD", "GevSCBWR", "GevSCBWRA", "GevSCBWA")
+
+    #: `CANONICAL_STREAM_STATS` key -> the stream_stats key it repeats.
+    CANONICAL_STATS = (("buffers_total", "Total_Buffer_Count"),
+                       ("buffers_failed", "Failed_Buffer_Count"),
+                       ("buffers_underrun", "Buffer_Underrun_Count"),
+                       ("resend_requests", "Resend_Request_Count"))
+
+    #: Socket-driver stream grabber nodes stream_stats reads and never writes.
+    RECEIVE_THREAD_NODES = ("ReceiveThreadPriorityOverride",
+                            "ReceiveThreadPriority")
+
+    # -------------------------------------------------------------- SDK report
+    @staticmethod
+    def sdk_report() -> str:
+        """pypylon's version, the pylon runtime version it wraps, and where
+        pypylon was imported from. Never raises."""
+        version = "unknown version"
+        try:
+            from importlib import metadata
+            version = metadata.version("pypylon")
+        except Exception:
+            pass
+        runtime = ""
+        try:
+            fn = getattr(pylon, "GetPylonVersionString", None)
+            if fn is not None:
+                runtime = f", pylon {fn()}"
+        except Exception:
+            pass
+        where = ""
+        try:
+            where = f" ({os.path.dirname(os.path.abspath(pylon.__file__))})"
+        except Exception:
+            pass
+        return f"pypylon {version}{runtime}{where}"
 
 
 #: Module-level spellings of the transport knobs, for callers that hold the
