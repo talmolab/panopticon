@@ -2800,28 +2800,32 @@ class FlirBackend:
         `latch_doubt` is True when `_latch_sentences` questions whether the
         trigger-counter block IDs name the right triggers.
 
-        In frame_id mode an ignored trigger shifts every later block ID of
-        its acquisition, with two exceptions. One ignored at a 16-bit wrap
-        is a gap (`wrap_gaps`, `_id16_step`). One ignored after the last
-        frame the camera delivered before a stall re-arm shifts nothing,
-        because grab_thread realigns the re-armed camera from its device
-        clock. The witness has no count per frame, only one per acquisition,
-        so when every ignored trigger that is not a wrap gap came in an
-        acquisition that ended in a re-arm (`ignored_by_rearm`), the
-        sentence says the alignment is unproven. One ignored in the last
-        acquisition is certain to shift IDs. Whether a stalled camera
-        ignores triggers at all, or keeps exposing them, is one of the
-        module's UNKNOWNS.
+        In frame_id mode an ignored trigger shifts every later block ID, with
+        these exceptions. One ignored at a 16-bit wrap is a gap
+        (`wrap_gaps`, `_id16_step`). One that no delivered frame follows in
+        its acquisition shifts nothing: after the last frame the camera
+        delivered before a stall re-arm, or at the end of the recording. So
+        does one ignored after a re-arm and before the re-armed camera's
+        first delivered frame, because grab_thread realigns the camera at
+        that frame from its device clock. The witness has no count per
+        frame, only one per acquisition, so when every ignored trigger that
+        is not a wrap gap came in an acquisition that ended in a re-arm
+        (`ignored_by_rearm`), the sentence says the alignment is unproven.
+        One ignored in the last acquisition shifts IDs unless it fell at an
+        end of that acquisition. The sentence names those ends and still
+        advises against using the recording, because every ignored trigger
+        would have to fall there. Whether a stalled camera ignores triggers
+        at all, or keeps exposing them, is one of the module's UNKNOWNS.
 
         Unresolved edges (`_unresolved_clause`) make the count a range whose
         low end is what the counters prove. An edge hidden at a re-arm's
         stop lowers the count and the triggers ignored before that re-arm
         alike, and one hidden later lowers only the count, so the low end
-        never overstates the triggers that shift block IDs: a shift it shows
-        is certain. In frame_id mode an unresolved edge may be one more
-        trigger that shifts them, so the sentence says the frames are not
-        proven aligned. In trigger_counter mode an ignored trigger is a gap,
-        so only a proven count is reported.
+        never overstates the triggers ignored in the last acquisition. In
+        frame_id mode an unresolved edge may be one more trigger that shifts
+        block IDs, so the sentence says the frames are not proven aligned.
+        In trigger_counter mode an ignored trigger is a gap, so only a
+        proven count is reported.
 
         A counter narrower than 2**31 reads each count modulo its period.
         The down-time edges are subtracted before the difference nearest 0
@@ -2874,11 +2878,16 @@ class FlirBackend:
         shifting = (ignored - by_rearm) - (gaps - gaps_by_rearm)
         unproven = by_rearm - gaps_by_rearm
         if shifting > 0:
+            after_rearm = (", or before the first frame it delivered after "
+                           "the last stall re-arm," if w["rearms"] else "")
             return [f"{what} Its block IDs count the frames it acquired, so "
                     f"from the first ignored trigger on they name later "
                     f"triggers than the other cameras' do, and its frames are "
-                    f"paired with the wrong instants. Do not use this "
-                    f"recording for 3D reconstruction." + advice]
+                    f"paired with the wrong instants. Only a trigger ignored "
+                    f"after the last frame it delivered{after_rearm} shifts "
+                    f"nothing, and the witness cannot show where each one "
+                    f"fell. Do not use this recording for 3D reconstruction."
+                    + advice]
         if top > ignored:
             unless = " or ".join(
                 (["at a 16-bit frame-ID wrap"] if cam.id16 else [])
