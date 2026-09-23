@@ -1,0 +1,55 @@
+# Template: four FLIR Blackfly S GigE cameras behind a jumbo-frame switch.
+#
+# Status: untested, community-validated. No FLIR rig has recorded with this
+# file yet; it loads and validates, and every value is a starting point.
+#
+# To use it, copy it into profiles/, give it a name of your own, and replace
+# every value marked SITE. Files in profiles/templates/ never appear in the
+# profile dropdown.
+name: flir_gige
+camera_backend: flir
+encoder: auto
+n_cameras: 4                       # SITE
+# SITE: your cameras' serial numbers, quoted, in ascending order as text.
+# cam1 is the first entry.
+camera_serials: ["19234001", "19234002", "19234003", "19234004"]
+frame_width: 1920                  # the ROI each camera is set to; must be even
+frame_height: 1200
+frame_rate: 60
+calibration_frame_rate: 30
+realtime_encode: true
+realtime_kick: true
+kick_max_lag: 240
+max_num_buffer: 300                # must be at least kick_max_lag
+
+# Camera settings. FLIR cameras have no .pfs, so this block is the only source
+# of the recording exposure, gain and trigger line. Anything it does not name
+# comes from the camera's Default user set (factory settings).
+camera:
+  pixel_format: Mono8
+  exposure_us: 5000                # SITE
+  gain_db: 3.0                     # SITE
+  trigger:
+    line: Line0                    # SITE: opto-isolated input; wire the board's GND to the camera's opto GND
+    activation: RisingEdge
+    overlap: ReadOut
+  # Values for single cameras, by quoted serial; each serial must be in
+  # camera_serials.
+  per_camera:
+    "19234003": {exposure_us: 4000}   # SITE: for example the camera facing the IR lamp
+  flir:
+    user_set: Default
+    gamma_enable: false
+    link_throughput_limit: auto
+    packet_size: 9000              # needs jumbo frames end to end; check with probe_network.py --sweep
+    packet_delay: null
+    stream_mode: auto              # the Windows default is TeledyneGigEVision
+    extended_ids: true
+    block_id_source: auto
+
+output_dir: data
+board_config: configs/boards/charuco_8x8_15mm.yaml
+serial_port: COM4                  # SITE
+trigger_pins: [2, 4, 6, 8]         # one Mega pin per camera
+stim_safe_pins: []                 # no stimulation hardware on this rig
+thermal_poll_s: 20

@@ -1,0 +1,52 @@
+# Template: six FLIR Blackfly S USB3 cameras on Panopticon's trigger board.
+#
+# Status: untested, community-validated. No FLIR rig has recorded with this
+# file yet; it loads and validates, and every value is a starting point.
+#
+# To use it, copy it into profiles/, give it a name of your own, and replace
+# every value marked SITE. Files in profiles/templates/ never appear in the
+# profile dropdown.
+name: flir_usb3
+camera_backend: flir
+encoder: auto
+n_cameras: 6                       # SITE
+# SITE: your cameras' serial numbers, quoted, in ascending order as text.
+# cam1 is the first entry.
+camera_serials: ["21039790", "21039791", "21039792", "21039793", "21039794", "21039795"]
+frame_width: 1440                  # the ROI each camera is set to; must be even
+frame_height: 1080
+frame_rate: 100
+calibration_frame_rate: 30
+quality: 21
+realtime_encode: true
+realtime_kick: true
+kick_max_lag: 240
+# Driver buffers per camera (StreamBufferCountManual). Must be at least
+# kick_max_lag. RAM = 6 x 300 x 1.56 MB = 2.6 GiB.
+max_num_buffer: 300
+
+# Camera settings. FLIR cameras have no .pfs, so this block is the only source
+# of the recording exposure, gain and trigger line. Anything it does not name
+# comes from the camera's Default user set (factory settings).
+camera:
+  pixel_format: Mono8
+  exposure_us: 3000                # SITE; must fit the 10000 us trigger period at 100 fps
+  gain_db: 6.0                     # SITE
+  trigger:
+    line: Line3                    # SITE: run 'uv run probe_flir.py --find-line' to confirm your wiring
+    activation: RisingEdge
+    overlap: ReadOut
+  flir:
+    user_set: Default
+    gamma_enable: false
+    link_throughput_limit: auto    # payload x frame_rate / 0.6, clamped to the camera's range
+    block_id_source: auto
+
+calibration_exposure_us: 8000      # 0 keeps the recording exposure
+calibration_gain_db: -1            # -1 keeps the recording gain
+output_dir: data
+board_config: configs/boards/charuco_8x8_15mm.yaml
+serial_port: COM4                  # SITE
+trigger_pins: [2, 4, 6, 8, 10, 12] # one Mega pin per camera
+stim_safe_pins: []                 # no stimulation hardware on this rig
+thermal_poll_s: 20
