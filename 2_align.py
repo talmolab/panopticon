@@ -255,6 +255,9 @@ def main() -> int:
             if summary["replaced_cams"]:
                 print(f"Replaced: {', '.join(summary['replaced_cams'])}",
                       file=sys.stderr)
+    elif not summary["needed"] and an.empty_cams:
+        print(f"\nWrote aligned/ index for {', '.join(an.names)}. Recorded no "
+              f"frames: {', '.join(an.empty_cams)}.")
     elif not summary["needed"]:
         print("\nNo loss — videos already aligned, nothing re-encoded."
               + (f" Left out: {', '.join(excluded)}." if excluded else ""))

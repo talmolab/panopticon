@@ -257,7 +257,10 @@ def write_trace_result(recording_dir: Path, fps: float,
     left_out = dict(recording_meta.retired_cameras(recording_dir))
     left_out.update({nm: "excluded" for nm in exclude})
     held = [nm for nm in arrays if nm not in left_out]
-    ref = held[0] if held else next(iter(arrays))
+    # The reference is the lowest-numbered camera that takes part and has
+    # frames; a camera with none cannot number the rows.
+    ref = next((nm for nm in held if arrays[nm].size),
+               held[0] if held else next(iter(arrays)))
     ref_ids = arrays[ref]
     agree = (all(np.array_equal(arrays[nm], ref_ids) for nm in held)
              and not [nm for nm in missing if nm not in left_out])
@@ -278,8 +281,8 @@ def write_trace_result(recording_dir: Path, fps: float,
                    for nm in [*held, *[m for m in missing if m not in left_out]]}
         disagreement = (
             f"cameras disagree on block IDs {lengths}: the videos are not "
-            f"trigger-aligned. stim_trace.csv has one row per trigger any "
-            f"camera recorded; frame_<cam> gives each camera's frame for it, "
+            f"trigger-aligned. stim_trace.csv has one row per trigger any of "
+            f"them recorded; frame_<cam> gives each camera's frame for it, "
             f"blank where that camera has none, and 'frame' is {ref}'s frame "
             f"number")
         notes.append(disagreement)
