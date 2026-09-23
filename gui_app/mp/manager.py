@@ -7,16 +7,17 @@ probes call the same methods, in the same order, and get the same results
 (`rig_setup.make_manager` picks the class from the profile).
 
 The parent holds no camera handle and no encoder. It enumerates the
-cameras (enumeration opens nothing), resolves cam1..camN exactly as
+cameras (enumeration opens nothing), resolves cam1..camN as
 CameraManager.open_all does, and deals them to the workers in contiguous
-groups by camera index. Each worker then runs the one configuration path
-(`rig_setup.apply_profile_to_manager`, then `open_all` on its share).
+groups by camera index. Each worker then configures its share through the
+same path the in-process manager uses (`rig_setup.apply_profile_to_manager`,
+then `open_all` on its share).
 
 What runs in the parent:
 
 - the coordinator thread, which polls the cross-process ledger every
-  POLL_S during an acquisition and drives the one FrameSyncCoordinator that
-  decides every trigger for every camera;
+  POLL_S during an acquisition and drives a single FrameSyncCoordinator,
+  which decides every trigger for every camera;
 - the supervisor thread, which routes each worker's replies and detects a
   worker's exit from its process sentinel; a worker that exits during an
   acquisition has its cameras retired, so the others keep recording;
@@ -80,7 +81,7 @@ CLOSE_TIMEOUT_S = 10.0
 #: How long stop waits for every camera to reach end of stream before it
 #: retires the ones that have not: a worker's grab loops exit within
 #: STOP_NORMAL_EXIT_S of the trigger stop, and within STOP_FORCED_EXIT_S
-#: more when told to stop outright.
+#: more once the manager escalates the stop.
 STOP_EOS_S = STOP_NORMAL_EXIT_S + STOP_FORCED_EXIT_S + 5.0
 #: How long stop waits for a worker's results once the ledger is flushed:
 #: its encoders drain (a full queue is about a second of encoding, with a

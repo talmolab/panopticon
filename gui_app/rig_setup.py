@@ -147,7 +147,7 @@ def make_manager(profile: RigProfile, **kwargs):
     """The camera manager ``profile`` asks for.
 
     ``capture_processes`` 0 (the default in every shipped profile) returns a
-    CameraManager, exactly as the GUI and the probes build it today. A
+    CameraManager, as the GUI and the probes build it today. A
     positive value returns a gui_app.mp.manager.ProcessCameraManager, which
     has the same surface and captures the cameras in that many worker
     processes, dealt to them in contiguous groups by camera index.

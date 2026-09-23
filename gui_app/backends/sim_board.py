@@ -200,7 +200,7 @@ class SharedSimBoard(SimBoard):
     a stop or a speed change moves the clock, and a reader answers `state()`,
     `virtual_now()`, `fired()`, `starts` and `stops` from that record.
     `time.perf_counter()` reads the same counter in every process on
-    Windows, so the writer's `t0` places the readers' virtual time exactly.
+    Windows, so the writer's `t0` gives every reader the same virtual time.
 
     `miss_pulses` is published at every start, so set it before starting a
     run, like `speed`. At most SHARED_MISS_PULSES ordinals travel.

@@ -1064,8 +1064,8 @@ class CameraManager(QObject):
             # post-hoc re-encode). The profile asked for kick-out, so anything
             # less is refused: the decoupled fallback would try one encoder per
             # grab thread against the same exhausted session cap and end in
-            # raw.bin at ~129 GiB per 10 minutes, unaligned, with the capacity
-            # preflight having budgeted for H.264.
+            # raw.bin, width x height bytes per frame per camera, unaligned,
+            # with the capacity preflight having budgeted for H.264.
             make_router = self.router_factory
             if make_router is None:
                 from gui_app.sync_encode import SyncEncodeRouter
