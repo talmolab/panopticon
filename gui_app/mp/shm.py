@@ -124,10 +124,14 @@ def view(buf, dtype, offset: int, count: int) -> np.ndarray:
     if offset % dt.itemsize:
         raise ValueError(f"offset {offset} is not a multiple of {dt.itemsize}")
     arr = np.frombuffer(buf, dtype=dt, count=count, offset=offset)
-    if arr.ctypes.data % dt.itemsize:
+    addr = arr.ctypes.data
+    if addr % dt.itemsize:
+        # Dropped before raising: a traceback that kept the view would keep
+        # the buffer exported, and the caller could not close its segment.
+        del arr
         raise ValueError(
             f"{dt} view at offset {offset} is not {dt.itemsize}-byte aligned "
-            f"(address {arr.ctypes.data:#x}); an unaligned access can tear")
+            f"(address {addr:#x}); an unaligned access can tear")
     return arr
 
 
@@ -253,21 +257,33 @@ def _stamp(hdr: np.ndarray, magic: int, n_cams: int, param: int, epoch: int,
     hdr[_H_MAGIC] = magic
 
 
-def _validate(hdr: np.ndarray, magic: int, what: str, epoch: int) -> tuple:
-    got_magic = int(hdr[_H_MAGIC])
+def _validate(buf, magic: int, what: str, epoch: int) -> tuple:
+    """Check a segment header and return (n_cams, param, param2).
+
+    The header is copied into plain ints and its view dropped before any
+    check, so a refused attach leaves nothing exporting the buffer and the
+    caller can close its segment while handling the error.
+    """
+    if len(buf) < HEADER_BYTES:
+        raise SegmentMismatch(f"buffer of {len(buf)} bytes is smaller than a "
+                              f"{what} segment header")
+    hdr = int64_view(buf, 0, HEADER_BYTES // 8)
+    vals = tuple(int(x) for x in hdr)
+    del hdr
+    got_magic = vals[_H_MAGIC]
     if got_magic != magic:
         raise SegmentMismatch(f"not a Panopticon {what} segment "
                               f"(magic {got_magic:#x}, expected {magic:#x})")
-    version = int(hdr[_H_VERSION])
+    version = vals[_H_VERSION]
     if version != SEGMENT_VERSION:
         raise SegmentMismatch(f"{what} segment version {version}, expected "
                               f"{SEGMENT_VERSION}")
-    got_epoch = int(hdr[_H_EPOCH])
+    got_epoch = vals[_H_EPOCH]
     if got_epoch != epoch:
         raise SegmentMismatch(
             f"{what} segment epoch {got_epoch:#x} does not match the expected "
             f"{epoch:#x}: it belongs to another acquisition or worker")
-    return int(hdr[_H_NCAMS]), int(hdr[_H_PARAM]), int(hdr[_H_PARAM2])
+    return vals[_H_NCAMS], vals[_H_PARAM], vals[_H_PARAM2]
 
 
 # -- seqlock slots -------------------------------------------------------------
@@ -545,14 +561,15 @@ class StatusSegment:
         epoch = _check_epoch(epoch)
         if n_cams < 1:
             raise ValueError("a status segment needs at least one camera")
+        # Checked before any view exists, so a refusal leaves the buffer free.
+        gidx = list(global_indices) if global_indices is not None else list(range(n_cams))
+        if len(gidx) != n_cams:
+            raise ValueError(f"{len(gidx)} global indices for {n_cams} cameras")
         seg = cls(buf, n_cams, epoch, worker)
         seg._hdr[:] = 0
         seg._i[:, :] = 0
         base = len(STATUS_INT_FIELDS)
         seg._f[:, base:base + len(STATUS_FLOAT_FIELDS)] = np.nan
-        gidx = list(global_indices) if global_indices is not None else list(range(n_cams))
-        if len(gidx) != n_cams:
-            raise ValueError(f"{len(gidx)} global indices for {n_cams} cameras")
         for cam, g in enumerate(gidx):
             seg.set(cam, "global_index", g)
         _stamp(seg._hdr, STATUS_MAGIC, n_cams, STATUS_SLOTS, epoch, worker)
@@ -561,9 +578,7 @@ class StatusSegment:
     @classmethod
     def attach(cls, buf, *, epoch: int) -> "StatusSegment":
         epoch = _check_epoch(epoch)
-        hdr = int64_view(buf, 0, HEADER_BYTES // 8)
-        n_cams, slots, worker = _validate(hdr, STATUS_MAGIC, "status", epoch)
-        del hdr
+        n_cams, slots, worker = _validate(buf, STATUS_MAGIC, "status", epoch)
         if slots != STATUS_SLOTS:
             raise SegmentMismatch(f"status segment has {slots} slots per camera, "
                                   f"expected {STATUS_SLOTS}")
@@ -631,9 +646,7 @@ class PreviewSegment:
     @classmethod
     def attach(cls, buf, *, epoch: int) -> "PreviewSegment":
         epoch = _check_epoch(epoch)
-        hdr = int64_view(buf, 0, HEADER_BYTES // 8)
-        n_cams, capacity, _ = _validate(hdr, PREVIEW_MAGIC, "preview", epoch)
-        del hdr
+        n_cams, capacity, _ = _validate(buf, PREVIEW_MAGIC, "preview", epoch)
         if len(buf) < cls.size_for(n_cams, capacity):
             raise SegmentMismatch(f"preview segment is {len(buf)} bytes, "
                                   f"expected {cls.size_for(n_cams, capacity)}")
@@ -689,9 +702,7 @@ class FrameSegment:
     @classmethod
     def attach(cls, buf, *, epoch: int, names=DEFAULT_SLOTS) -> "FrameSegment":
         epoch = _check_epoch(epoch)
-        hdr = int64_view(buf, 0, HEADER_BYTES // 8)
-        n_cams, capacity, n_names = _validate(hdr, FRAMES_MAGIC, "frame", epoch)
-        del hdr
+        n_cams, capacity, n_names = _validate(buf, FRAMES_MAGIC, "frame", epoch)
         if n_names != len(names):
             raise SegmentMismatch(f"frame segment has {n_names} slots per camera, "
                                   f"expected {len(names)} ({', '.join(names)})")
@@ -721,8 +732,10 @@ class RecordSegment:
     def __init__(self, buf, fields: dict, epoch: int):
         self.epoch = epoch
         self.fields = dict(fields)
-        self._hdr = int64_view(buf, 0, HEADER_BYTES // 8)
+        # The record checks its fields before it makes a view, so building it
+        # first leaves the buffer free when the field list is refused.
         self.record = SeqlockRecord(buf, HEADER_BYTES, self.fields)
+        self._hdr = int64_view(buf, 0, HEADER_BYTES // 8)
 
     @staticmethod
     def size_for(fields: dict) -> int:
@@ -741,9 +754,7 @@ class RecordSegment:
     @classmethod
     def attach(cls, buf, fields: dict, *, epoch: int) -> "RecordSegment":
         epoch = _check_epoch(epoch)
-        hdr = int64_view(buf, 0, HEADER_BYTES // 8)
-        _, n_values, _ = _validate(hdr, RECORD_MAGIC, "record", epoch)
-        del hdr
+        _, n_values, _ = _validate(buf, RECORD_MAGIC, "record", epoch)
         want = sum(int(v) for v in fields.values())
         if n_values != want:
             raise SegmentMismatch(f"record segment holds {n_values} values, the "
