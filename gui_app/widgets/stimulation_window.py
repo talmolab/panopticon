@@ -55,20 +55,16 @@ def block_mode(freq: float, pw: float) -> tuple[str, float]:
     Returns (kind, duty_percent) with kind one of ``low`` (nothing fires),
     ``train`` (a pulse train), ``constant`` (pulse width equals the period,
     so the pin is held HIGH) or ``impossible`` (pulse width exceeds the period,
-    which the firmware also renders as constant ON). The block label and the
-    waveform preview both read this one function so they can never disagree
-    about where a train turns into a constant level; a disagreement at that
-    threshold is how a laser ends up held ON while the canvas shows a train.
+    which the firmware also renders as constant ON).
+
+    RULE: this is stim_compiler.drive_mode(), and the block label and the
+    waveform preview both read it. REASON: drive_mode() decides on the integer
+    microseconds the sketch compares, so the canvas, the provenance record
+    and the board agree about where a train turns into a constant level; a
+    disagreement there is how a laser ends up held ON while the canvas shows a
+    train.
     """
-    if freq <= 0 or pw <= 0:
-        return "low", 0.0
-    period = 1000.0 / freq
-    duty = pw / period * 100.0
-    if pw > period * (1 + 1e-9):
-        return "impossible", duty
-    if pw >= period * (1 - 1e-9):
-        return "constant", duty
-    return "train", duty
+    return stim_compiler.drive_mode(freq, pw)
 
 
 # ── ConnectorPort ─────────────────────────────────────────────────────────────

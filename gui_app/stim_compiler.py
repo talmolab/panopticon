@@ -1,4 +1,5 @@
 """Generate and upload Arduino Mega 2560 combined camera-trigger + stim sketch."""
+import math
 import re
 import subprocess
 import tempfile
@@ -266,12 +267,13 @@ def describe(blocks: list[dict], edges: list[dict]) -> list[dict]:
         steps = []
         for b in chain:
             freq, pw = float(b["freq"]), float(b["pw"])
-            if freq <= 0 or pw <= 0:
+            kind, duty = drive_mode(freq, pw)
+            if kind == "low":
                 mode = "off (pin LOW)"
-            elif pw * freq >= 1000:
-                mode = "constant ON"
+            elif kind == "train":
+                mode = f"{duty:g}% duty"
             else:
-                mode = f"{pw * freq / 10:g}% duty"
+                mode = "constant ON"
             # duration_ms is the exact value the sketch executes; a trace that
             # models step lengths from it shares the board's rounding.
             steps.append({"pin": int(b["pin"]), "freq_hz": freq,
@@ -380,6 +382,38 @@ def block_timing(blk: dict) -> tuple[int, int, int]:
     period_us = int(round(1e6 / freq)) if freq > 0 else 0
     pw_us = int(round(pw * 1000.0))
     return period_us, pw_us, dur_to_ms(blk["dur"])
+
+
+def drive_mode(freq, pw) -> tuple[str, float]:
+    """How a block's frequency (Hz) and pulse width (ms) drive its pin.
+
+    Returns ``(kind, duty_percent)``. ``kind`` is ``"low"`` (the pin stays
+    LOW), ``"train"`` (a pulse train), ``"constant"`` (the pulse width equals
+    the period, so the pin is held HIGH) or ``"impossible"`` (the pulse width
+    exceeds the period, which the firmware also holds HIGH).
+
+    RULE: every place that says whether a block is a train or a constant level
+    asks this, and this decides on block_timing()'s integer microseconds.
+    REASON: those integers are what updateStim() compares. A float comparison
+    disagrees with the board where the pulse width rounds onto the period: at
+    7 Hz with a 142.857 ms pulse the board holds the pin HIGH while a float
+    test calls it a 99.9999% train.
+    """
+    freq, pw = float(freq), float(pw)
+    if not (freq > 0 and pw > 0) or math.isinf(freq):
+        # Also NaN, and a frequency so high its period rounds to 0 us.
+        return "low", 0.0
+    if math.isinf(pw):
+        return "impossible", math.inf
+    period_us, pw_us, _ = block_timing({"freq": freq, "pw": pw, "dur": 0})
+    if period_us <= 0 or pw_us <= 0:
+        return "low", 0.0
+    duty = pw_us / period_us * 100.0
+    if pw_us > period_us:
+        return "impossible", duty
+    if pw_us == period_us:
+        return "constant", duty
+    return "train", duty
 
 
 def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
