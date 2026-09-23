@@ -2017,10 +2017,15 @@ class FlirBackend:
             n.sete("TriggerSelector", "FrameStart")
 
     def set_freerun(self, cam, fps: float = 30.0) -> None:
-        """Untriggered preview at `fps`, or the fastest the camera allows."""
+        """Untriggered preview at `fps`, or the fastest the camera allows.
+
+        The last recording's trigger witness is dropped, because
+        `acquisition_warnings` read it at that recording's stop and a later
+        recording must not report it again."""
         self._stop_if_streaming(cam)
         cam._triggered = False
         cam._arm_pending = False
+        cam.witness = None
         n = cam.nodes
         self._trigger_off(cam)
         if n.writable("AcquisitionFrameRateEnable"):
@@ -2040,8 +2045,11 @@ class FlirBackend:
         The source, activation and overlap change only while TriggerMode is
         Off, which Spinnaker requires. `rate_limit` (trigger_rate_limit) is
         Basler's limiter and does nothing here; `announce` prints one line
-        saying so and naming the pacing the camera actually uses."""
+        saying so and naming the pacing the camera actually uses. Any earlier
+        trigger witness is dropped, so a camera armed here that never starts
+        grabbing reports none; its first StartGrabbing starts a new one."""
         self._stop_if_streaming(cam)
+        cam.witness = None
         n = cam.nodes
         t = cam.spec.trigger
         self._trigger_off(cam)
