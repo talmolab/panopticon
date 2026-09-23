@@ -54,6 +54,13 @@ NVENC_UPLOAD_MODES = ("host", "pinned")
 #: encoder a context of its own.
 NVENC_CONTEXT_MODES = ("shared", "own")
 
+#: Where the camera triggers come from (RigProfile.trigger_source). "board"
+#: is Panopticon's trigger board on serial_port, which the host starts,
+#: confirms and stops, and which also runs stimulation. "external" is a TTL
+#: source the operator runs, such as a pulse generator or a DAQ; the host
+#: opens no serial port for it. gui_app/trigger_source.py implements both.
+TRIGGER_SOURCES = ("board", "external")
+
 #: H.264 quantiser range. The encoders pass RigProfile.quality straight
 #: through as the QP, and libx264 clamps a value above the top of the range
 #: to it, so an out-of-range value would record at another quality.
@@ -592,7 +599,8 @@ class RigProfile:
     board_config: str = ""
     # Trigger-board serial port. No code default: the device name is per-host
     # (COMn on Windows, /dev/tty* elsewhere), so a profile must state it and an
-    # empty value fails at the first serial open instead of guessing.
+    # empty value fails at the first serial open instead of guessing. A
+    # profile with trigger_source: external uses no board and leaves it out.
     serial_port: str = ""
     trigger_pins: list = field(default_factory=lambda: [2, 4, 6, 8, 10, 12])
     # Expected camera count. 0 = don't check. Nonzero makes open_all refuse any
@@ -738,6 +746,15 @@ class RigProfile:
     # NVENC_CONTEXT_MODES. "own" costs GPU memory per encoder. It applies to
     # nvenc_upload: pinned only, so validate() refuses "own" with "host".
     nvenc_context: str = "shared"
+    # Where the camera triggers come from; one of TRIGGER_SOURCES. "board" is
+    # Panopticon's trigger board on serial_port. "external" is a TTL source
+    # the operator runs: Panopticon opens no serial port, arms every camera,
+    # refuses the recording if a frame arrives before every camera is armed,
+    # and asks the operator to start the source and, at the end, to stop it.
+    # Stimulation runs on the board, so it is unavailable with "external",
+    # and validate() refuses serial_port, trigger_pins and a non-empty
+    # stim_safe_pins there: each names a board this mode never opens.
+    trigger_source: str = "board"
 
     #: The keys the profile file sets, recorded by ``load``. A dataclass
     #: default cannot tell a key the file left out from one it set to the
@@ -838,6 +855,7 @@ class RigProfile:
         the cameras open.
         """
         self._validate_backend()
+        self._validate_trigger_source()
         if self.gige_driver not in GIGE_DRIVERS:
             raise ValueError(
                 f"gige_driver {self.gige_driver!r} is not one of "
@@ -1036,6 +1054,45 @@ class RigProfile:
                 raise ValueError(
                     f"{name} is a Basler GigE node ({node}); FLIR cameras "
                     f"have no equivalent. Remove it.")
+
+    def _validate_trigger_source(self) -> None:
+        """The trigger source, and the board fields an external source leaves
+        unused.
+
+        With an external source Panopticon opens no serial port, so it can
+        neither clear a board's stimulation sketch at launch nor stand the
+        board down at quit. A profile that still names the board's port, its
+        trigger pins or its stimulation pins reads as if Panopticon did both,
+        so each is refused with what to do instead. A stim_safe_pins the file
+        leaves out is not refused: its code default names no board the
+        profile describes.
+        """
+        src = self.trigger_source
+        if src not in TRIGGER_SOURCES:
+            raise ValueError(
+                f"trigger_source {src!r} is not one of {list(TRIGGER_SOURCES)}")
+        if src != "external":
+            return
+        if self.serial_port:
+            raise ValueError(
+                f"serial_port {self.serial_port!r} names Panopticon's trigger "
+                f"board, but trigger_source is external, so Panopticon opens "
+                f"no serial port. It will not clear that board's stimulation "
+                f"sketch at launch or stop the board at quit. Remove "
+                f"serial_port and disconnect the board, or set "
+                f"trigger_source: board.")
+        if self._given("trigger_pins"):
+            raise ValueError(
+                "trigger_pins lists the trigger board's output pins, but "
+                "trigger_source is external: your own source drives the "
+                "cameras' trigger inputs. Remove trigger_pins.")
+        if self.stim_safe_pins and self._given("stim_safe_pins"):
+            raise ValueError(
+                f"stim_safe_pins {self.stim_safe_pins} are pins the trigger "
+                f"board holds low for a stimulator, but trigger_source is "
+                f"external and Panopticon never opens the board, so nothing "
+                f"holds them low. Stimulation needs trigger_source: board. "
+                f"Remove stim_safe_pins, or set it to [].")
 
     def _validate_capture_processes(self) -> None:
         n = self.capture_processes
@@ -1552,6 +1609,10 @@ class SessionConfig:
             thermal_warn_margin_c=prof.thermal_warn_margin_c if prof else None,
             nvenc_upload=prof.nvenc_upload if prof else None,
             nvenc_context=prof.nvenc_context if prof else None,
+            # "external" means no board acked the rate: the profile's
+            # frame_rate is assumed, and the block-ID rate check is the only
+            # test of it.
+            trigger_source=prof.trigger_source if prof else None,
             **_environment_metadata(),
         )
         if acq_type is not None:
