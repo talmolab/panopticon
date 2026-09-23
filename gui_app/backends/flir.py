@@ -31,6 +31,8 @@ first frame ID of each:
   - anything else: it does not restart. Each camera would then start a
     recording from whatever its preview left, so frame IDs cannot align the
     cameras, and the trigger-counter source is used when the camera has one.
+A frame ID that restarts but does not step by 1 between free-run frames does
+not count frames, and is treated as one that does not restart.
 With `camera.flir.block_id_source: trigger_counter` the ID is the camera's own
 count of rising edges on its trigger line, carried in each image's
 `CounterValue` chunk. A trigger the camera ignores is then a gap, which
@@ -1527,6 +1529,8 @@ class FlirBackend:
               f"IDs {fid['first_ids']} ("
               + (f"restarts, {fid['base']}-based" if fid["restarts"]
                  else "does not restart")
+              + ("" if fid["counts_frames"]
+                 else f", steps {fid['steps']}, does not count frames")
               + f"), timestamps {ts['source']} x{ts['scale']:g} "
                 f"(interval ratio {ts['unit_ratio']:.4f}, continuous across "
                 f"restarts)", flush=True)
@@ -1570,17 +1574,23 @@ class FlirBackend:
 
     @staticmethod
     def _judge_ids(cycles) -> dict:
+        """Whether the frame ID restarts at every BeginAcquisition, from
+        what base, and whether it counts frames. Free-run frames are
+        consecutive and incomplete ones carry IDs, so an ID that counts
+        frames steps by 1. A larger step appears only where a frame was
+        lost on the way, so the smallest step must be 1."""
         firsts = [c[0]["id"] for c in cycles]
         steps = sorted({b["id"] - a["id"] for c in cycles
                         for a, b in zip(c, c[1:])})
+        counts = bool(steps) and steps[0] == 1
         if all(f == 1 for f in firsts):
             return {"first_ids": firsts, "restarts": True, "base": 1,
-                    "steps": steps}
+                    "steps": steps, "counts_frames": counts}
         if all(f == 0 for f in firsts):
             return {"first_ids": firsts, "restarts": True, "base": 0,
-                    "steps": steps}
+                    "steps": steps, "counts_frames": counts}
         return {"first_ids": firsts, "restarts": False, "base": None,
-                "steps": steps}
+                "steps": steps, "counts_frames": counts}
 
     def _judge_timestamps(self, cam, cycles, period_s: float,
                           source: str) -> dict:
@@ -1676,26 +1686,32 @@ class FlirBackend:
         fid = cam.selftest["frame_id"]
         counter_ok = bool(cam.counters) and cam.counter_chunk_ok
         firsts = ", ".join(str(i) for i in fid["first_ids"])
+        usable = fid["restarts"] and fid["counts_frames"]
+        if not fid["restarts"]:
+            why = (f"the frame ID does not restart when acquisition restarts "
+                   f"(first IDs {firsts})")
+        else:
+            why = (f"the frame ID steps by "
+                   f"{', '.join(str(s) for s in fid['steps'])} between "
+                   f"consecutive free-run frames, not by 1, so it does not "
+                   f"count frames")
         if want == "trigger_counter" and not counter_ok:
             n.refuse("camera.flir.block_id_source trigger_counter needs a "
                      "counter on the trigger line and the CounterValue chunk; "
                      "ChunkSelector offers "
                      + (", ".join(n.entries("ChunkSelector")) or "nothing")
                      + ". Set block_id_source: auto.")
-        if want == "frame_id" and not fid["restarts"]:
-            n.refuse(f"the frame ID does not restart when acquisition "
-                     f"restarts (first IDs {firsts}), so this camera cannot be "
-                     f"aligned by frame ID. Set camera.flir.block_id_source: "
-                     f"auto" + (" or trigger_counter." if counter_ok
-                                else "; this model offers no CounterValue "
-                                     "chunk."))
-        if want == "auto" and not fid["restarts"] and not counter_ok:
-            n.refuse(f"the frame ID does not restart when acquisition "
-                     f"restarts (first IDs {firsts}), so this camera cannot be "
-                     f"aligned by frame ID, and it offers no CounterValue "
-                     f"chunk. This model is not supported for recording; "
-                     f"please send the output of 'uv run probe_flir.py'.")
-        if want == "trigger_counter" or not fid["restarts"]:
+        if want == "frame_id" and not usable:
+            n.refuse(f"{why}, so this camera cannot be aligned by frame ID. "
+                     f"Set camera.flir.block_id_source: auto"
+                     + (" or trigger_counter." if counter_ok
+                        else "; this model offers no CounterValue chunk."))
+        if want == "auto" and not usable and not counter_ok:
+            n.refuse(f"{why}, so this camera cannot be aligned by frame ID, "
+                     f"and it offers no CounterValue chunk. This model is not "
+                     f"supported for recording; please send the output of "
+                     f"'uv run probe_flir.py'.")
+        if want == "trigger_counter" or not usable:
             cam.block_id_source = "trigger_counter"
             self._enable_chunk(cam, "CounterValue")
             if n.has("ChunkCounterSelector"):
