@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
     #: cleared. The start path reads it so that nothing reaches the trigger
     #: board after the quit has stood it down.
     _quitting = False
+    #: What this recording's stimulation files describe, taken at arm time
+    #: (_snapshot_stim); None when the recording carries no paradigm.
+    _stim_snapshot: dict | None = None
 
     def __init__(self):
         super().__init__()
@@ -1068,7 +1071,7 @@ class MainWindow(QMainWindow):
         try:
             blocks, _edges = self._stim_window.get_workflow()
             if not blocks:
-                return None
+                return self._empty_canvas_refusal()
             canvas = self._stim_window.firmware_source()
         except Exception as e:
             return ("Cannot record with this stim workflow",
@@ -1091,6 +1094,69 @@ class MainWindow(QMainWindow):
                     "one.\n\nPress Apply in the Stimulation editor, or undo "
                     "the edit.")
         return None
+
+    def _empty_canvas_refusal(self):
+        """(title, message) when the canvas is empty but the board would run a
+        paradigm, or None.
+
+        RULE: an empty canvas records only on a board that carries no
+        paradigm. REASON: the recording flashes back the paradigm Applied
+        earlier this session whatever the canvas shows, and an empty canvas
+        writes no stim_paradigm.json, no stim_paradigm.ino and no
+        stim_trace.csv, so the laser would fire through a recording that
+        says it was unstimulated.
+        """
+        held = self._session_stim_ino
+        if held is None:
+            return None
+        blank = stim_compiler.recording_only_sketch(
+            self._profile.stim_safe_pins, self._profile.trigger_pins)
+        if held == blank:
+            return None
+        return ("Apply the empty canvas first",
+                "The canvas is empty, but the paradigm Applied earlier this "
+                "session is still what this recording would put on the "
+                "board, so the laser would fire through a recording with no "
+                "stim_paradigm.json or stim_trace.csv.\n\nPress Apply in the "
+                "Stimulation editor to clear the board, or Load the paradigm "
+                "back onto the canvas.")
+
+    def _snapshot_stim(self, acq_type: str) -> dict | None:
+        """What this recording's stimulation files will say, fixed at arm time.
+
+        RULE: stim_paradigm.json, stim_paradigm.ino and the auto-stop come
+        from the canvas as it was when the last check passed, and the .ino is
+        the sketch this recording flashes. REASON: the editor stays live
+        while the start worker runs for seconds, and a block nudged then was
+        written as the recording's provenance, its firmware and its stop time
+        although the board ran the sketch checked a moment before.
+
+        None when there is nothing to record: a calibration (always
+        stimulation-free), no editor, or an empty canvas.
+        """
+        if acq_type != "recording" or self._stim_window is None:
+            return None
+        try:
+            blocks, _edges = self._stim_window.get_workflow()
+            if not blocks:
+                return None
+            flashed, _label = self._sketch_for(acq_type)
+            return {
+                # The sketch THIS acquisition put on the board, not the
+                # editor's own last upload: matches_uploaded_firmware answers
+                # "did the animal receive what this file describes", and a
+                # calibration clears the editor's record while the held
+                # paradigm is still what Record flashes back.
+                "provenance": self._stim_window.provenance(
+                    flashed_source=flashed),
+                "ino": flashed,
+                "end_time_s": self._stim_window.end_time_s(),
+            }
+        except Exception as e:
+            # Provenance must never take the recording down with it.
+            print(f"[stim] could not record the paradigm at arm time: {e}",
+                  flush=True)
+            return None
 
     def _start_acquisition(self, acq_type: str):
         """Every check that can still refuse this acquisition, and nothing else.
@@ -1194,6 +1260,7 @@ class MainWindow(QMainWindow):
         if refusal:
             self._refuse_start(*refusal)
             return
+        self._stim_snapshot = self._snapshot_stim(acq_type)
 
         config = self._config
         video_dir = config.video_dir(acq_type)
@@ -1651,25 +1718,17 @@ class MainWindow(QMainWindow):
 
         Without this the only record of what the animal received is whatever the
         user happened to Save by hand, so a recording could not be interpreted
-        after the fact.
+        after the fact. Written from the arm-time snapshot (_snapshot_stim),
+        never from the canvas as it is now.
         """
-        if self._stim_window is None:
+        snap = self._stim_snapshot
+        if snap is None:
             return
         try:
-            blocks, _edges = self._stim_window.get_workflow()
-            if not blocks:
-                return
-            # The sketch THIS acquisition put on the board, not the editor's
-            # own last upload: matches_uploaded_firmware has to answer "did
-            # the animal receive what this file describes", and a calibration
-            # clears the editor's record while the held paradigm is still
-            # what Record flashes back.
-            flashed, _label = self._sketch_for(self._acq_type)
             (self._video_dir / "stim_paradigm.json").write_text(
-                json.dumps(self._stim_window.provenance(flashed_source=flashed),
-                           indent=2))
+                json.dumps(snap["provenance"], indent=2))
             (self._video_dir / "stim_paradigm.ino").write_text(
-                self._stim_window.firmware_source(), encoding="utf-8")
+                snap["ino"], encoding="utf-8")
             print(f"[stim] paradigm saved to {self._video_dir}", flush=True)
         except Exception as e:
             # Provenance must never take the recording down with it.
@@ -1696,11 +1755,12 @@ class MainWindow(QMainWindow):
 
         The stim sequence is baked into the sketch and starts on the same serial
         command as the triggers, so counting down from here is within a few ms of
-        the Arduino's own clock.
+        the Arduino's own clock. The end time is the arm-time snapshot's.
         """
-        if self._stim_window is None:
+        snap = self._stim_snapshot
+        if snap is None:
             return
-        secs = self._stim_window.end_time_s()
+        secs = snap.get("end_time_s")
         if not secs or secs <= 0:
             return
         self._stim_end_timer.start(int(secs * 1000))
