@@ -160,10 +160,8 @@ class MainWindow(QMainWindow):
         # it, because the state still says RECORDING while the finalize runs.
         self._finalized = True
         self._created_dirs: list = []
-        #: (canonical, moved) when this start renamed a previous acquisition
-        #: out of the way, so a start refused afterwards can put it back.
-        #: Set to the video_dir the operator has agreed to overwrite, so the
-        #: worker deletes it once the start is committed. Reset at each
+        #: The video_dir the operator has agreed to overwrite, so the worker
+        #: deletes it once the serial claim has succeeded. Reset at each
         #: user-initiated start; survives the firmware-flash re-entry so the
         #: operator is asked once, not again after the flash.
         self._overwrite_dir: Path | None = None
@@ -1952,8 +1950,9 @@ class MainWindow(QMainWindow):
         """Make the board carry the firmware this acquisition needs.
 
         Returns True to continue immediately, False to stop — either because a
-        flash is now running (this method re-enters _start_acquisition when it
-        finishes) or because the board could not be put into a known state.
+        flash is now running (its completion re-enters _arm_acquisition, past
+        the checks and the prompts that already ran) or because the board could
+        not be put into a known state.
 
         Flashing takes ~30 s, so it happens only when the board is not already
         carrying the right sketch. In the common order — calibrate, then set up
