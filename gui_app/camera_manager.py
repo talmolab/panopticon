@@ -1508,10 +1508,12 @@ class CameraManager(QObject):
         return out
 
     def _source_silence_warnings(self, threads) -> list:
-        """One session warning when the stall ladders were suspended because
-        every active camera went silent at once."""
+        """One session warning when the stall ladders waited because every
+        active camera went silent at once, and whether they re-armed after
+        the wait (grab_thread.SOURCE_DOWN_WAIT_WINDOWS)."""
         stalled = [(i, gt) for i, gt in enumerate(threads)
-                   if getattr(gt, "source_down_stalls", 0)]
+                   if getattr(gt, "source_down_stalls", 0)
+                   or getattr(gt, "source_down_rearms", 0)]
         if not stalled:
             return []
         names = ", ".join(self._cn(i) for i, _gt in stalled)
@@ -1536,15 +1538,29 @@ class CameraManager(QObject):
         if start is not None and firsts:
             when = (f" about {max(0.0, min(firsts) - start):.0f} s into the "
                     f"recording")
+        rearmed = [(i, gt) for i, gt in stalled
+                   if getattr(gt, "source_down_rearms", 0)]
+        if rearmed:
+            waited = [gt.source_down_rearm_t - gt.source_down_since
+                      for _i, gt in rearmed
+                      if getattr(gt, "source_down_rearm_t", None) is not None
+                      and getattr(gt, "source_down_since", None) is not None]
+            wait = (f" about {max(0.0, min(waited)):.0f} s" if waited
+                    else "")
+            handled = (f". Each camera waited{wait} for frames to resume, "
+                       f"then re-armed its stream, which clears a stall of "
+                       f"the network the cameras share ("
+                       + ", ".join(self._cn(i) for i, _gt in rearmed) + ").")
+        else:
+            handled = ", so no camera was re-armed or retired for it."
         msg = (f"Every active camera stopped receiving frames at the same "
                f"time{when} ({names}). A silence shared by every camera "
                f"comes from the trigger source (the trigger board reset, or "
-               f"lost USB or power) or from the network to all of them, so "
-               f"no camera was re-armed or retired for it. Triggers during "
-               f"the silence are missing from every camera. Check the "
-               f"trigger board and its USB cable. A board that lost power "
-               f"leaves its output pins undriven, stimulation pins "
-               f"included.")
+               f"lost USB or power) or from the network to all of "
+               f"them{handled} Triggers during the silence are missing from "
+               f"every camera. Check the trigger board and its USB cable. A "
+               f"board that lost power leaves its output pins undriven, "
+               f"stimulation pins included.")
         print(f"[acq] WARNING: {msg}", flush=True)
         return [msg]
 

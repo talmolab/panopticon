@@ -1033,6 +1033,8 @@ class Worker:
                 "pin_result": getattr(gt, "pin_result", None),
                 "source_down_stalls": int(getattr(gt, "source_down_stalls", 0)),
                 "source_down_since": getattr(gt, "source_down_since", None),
+                "source_down_rearms": int(getattr(gt, "source_down_rearms", 0)),
+                "source_down_rearm_t": getattr(gt, "source_down_rearm_t", None),
                 "stream_stats_at_stop": getattr(gt, "stream_stats_at_stop", None),
                 "dropped_full": (router.dropped_full(g) if router is not None
                                  else 0),

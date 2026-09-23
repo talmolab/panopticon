@@ -398,6 +398,14 @@ class _CameraView:
         return (self.final or {}).get("source_down_since")
 
     @property
+    def source_down_rearms(self) -> int:
+        return int((self.final or {}).get("source_down_rearms", 0))
+
+    @property
+    def source_down_rearm_t(self):
+        return (self.final or {}).get("source_down_rearm_t")
+
+    @property
     def stream_stats_at_stop(self):
         return (self.final or {}).get("stream_stats_at_stop")
 

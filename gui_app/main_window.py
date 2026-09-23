@@ -1053,10 +1053,11 @@ class MainWindow(QMainWindow):
         RULE: the alarm names the trigger board and, on a profile with
         stimulation pins, the laser. REASON: cameras stop together when what
         they share stops, and on the board path that is the board (reset,
-        unplugged, or without power). The capture path neither re-arms nor
-        retires cameras while all of them are silent, so nothing else tells
-        the operator, and a board without power leaves its stimulation pins
-        undriven, which a laser driver can read as on.
+        unplugged, or without power). The capture path retires no camera
+        while all of them are silent, and re-arms only once the silence has
+        lasted grab_thread.SOURCE_DOWN_WAIT_WINDOWS stall windows, so nothing
+        else tells the operator. A board without power leaves its stimulation
+        pins undriven, which a laser driver can read as on.
         """
         if self._source_alarm_raised:
             return
@@ -1080,9 +1081,11 @@ class MainWindow(QMainWindow):
                  f"driver can read an undriven input as on. Check the laser "
                  f"now." if pins else "")
         text = (f"No camera has received a frame for {silent_s:.0f} s.\n\n"
-                f"{link} No camera is re-armed or retired while all of them are "
-                f"silent, and every trigger in the silence is missing from "
-                f"every camera.{laser}\n\nStop the recording, then check the "
+                f"{link} No camera is retired while all of them are silent. "
+                f"If the silence lasts, each camera re-arms its stream, which "
+                f"clears a stall of the network the cameras share. Every "
+                f"trigger in the silence is missing from every "
+                f"camera.{laser}\n\nStop the recording, then check the "
                 f"trigger board and its USB cable.")
         print(f"[acq] ALARM: every camera silent for {silent_s:.1f} s; board "
               f"link {'answers' if alive else 'is gone'}", flush=True)

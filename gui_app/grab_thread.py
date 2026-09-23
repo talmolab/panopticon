@@ -115,6 +115,15 @@ FAILED_GRAB_HISTORY_S = 3600
 #: runs (seconds of silence) the others have been silent as long; one second
 #: separates that from a camera whose peers are still receiving.
 SOURCE_SILENT_S = 1.0
+#: Stall windows of one shared silence that a camera with frames behind it
+#: waits out before its ladder re-arms anyway. Waiting keeps a trigger
+#: source that stopped from restarting every camera's block-ID counter. The
+#: bound covers the other cause of a silence every camera shares: a stall of
+#: the switch, NIC port or USB host controller they all use, which only a
+#: re-arm clears. Re-arms that run out while every camera is still silent
+#: retire no camera, because no peer is receiving for a retirement to keep
+#: aligned.
+SOURCE_DOWN_WAIT_WINDOWS = 2
 #: A camera's measured block-ID rate is used for a resync only within this
 #: fraction of the profile's frame rate. Oscillators differ by a few hundred
 #: ppm, so a measured rate further off than 1% is bookkeeping gone wrong, and
@@ -529,6 +538,11 @@ class GrabThread(QThread):
         #: (perf_counter).
         self.source_down_stalls = 0
         self.source_down_since = None
+        #: Re-arms made while every active camera was silent, after
+        #: SOURCE_DOWN_WAIT_WINDOWS, and when the first one was made
+        #: (perf_counter).
+        self.source_down_rearms = 0
+        self.source_down_rearm_t = None
         self._abandoned = False
         self._kick = False
         #: Kick mode: the ring slots free to be written, as the deque
@@ -857,6 +871,8 @@ class GrabThread(QThread):
         self.frames_before_barrier = 0
         self.source_down_stalls = 0
         self.source_down_since = None
+        self.source_down_rearms = 0
+        self.source_down_rearm_t = None
         recording = self._raw_path is not None
         fd = None              # raw.bin descriptor (raw-to-disk mode / fallback)
         h264_fd = None         # H.264 elementary-stream descriptor
@@ -1019,6 +1035,10 @@ class GrabThread(QThread):
         frame_n = 0
         timeout_n = 0
         consec_timeouts = 0    # reset by every successful grab; stall detector
+        # Stall windows of the current shared silence (every active camera
+        # silent), and the result count it began at: a result ends it.
+        silent_windows = 0
+        silent_at = None
         bid_offset = 0         # added to raw block IDs after a re-arm
         awaiting_resync = False
         bid = None             # this frame's ordinal; stays None in preview
@@ -1354,14 +1374,27 @@ class GrabThread(QThread):
                                 and self._source_down_check()):
                             # Every active camera is silent: the trigger
                             # source stopped (a board reset or unplugged), or
-                            # the network to every camera did. No re-arm
-                            # restarts a counter the others keep, and no
+                            # the transport every camera shares stalled. No
                             # camera is retired for a fault that is not its
-                            # own; the ladder resumes the moment a peer
+                            # own, and the ladder resumes the moment a peer
                             # receives a frame again. The manager reports the
                             # silence (source_silent) for the operator.
-                            consec_timeouts = 0
-                            self.source_down_stalls += 1
+                            #
+                            # RULE: the wait is bounded for a camera with
+                            # frames behind it; after SOURCE_DOWN_WAIT_WINDOWS
+                            # windows of one silence the ladder re-arms.
+                            # REASON: a stopped source needs no re-arm, and
+                            # waiting keeps every counter running, but a
+                            # shared transport stall needs one, and an
+                            # unbounded wait would record nothing for the rest
+                            # of the session. A camera with no frame waits
+                            # on: its restarted counter could never be
+                            # re-based. Re-arms that run out wait as well.
+                            seen = frame_n + self.failed_grabs
+                            if silent_at != seen:
+                                silent_at = seen
+                                silent_windows = 0
+                            silent_windows += 1
                             if self.source_down_since is None:
                                 # When the silence began: this camera's
                                 # last result, or the source start.
@@ -1369,10 +1402,24 @@ class GrabThread(QThread):
                                     t0 - self.seconds_since_frame(t0))
                                 print(f"[grab{self._cam_index}] every active "
                                       f"camera is silent: waiting for the "
-                                      f"trigger source instead of re-arming",
+                                      f"trigger source before re-arming",
                                       flush=True)
-                            continue
-                        if self._last_ts is None:
+                            if (self._last_ts is None
+                                    or silent_windows <= SOURCE_DOWN_WAIT_WINDOWS
+                                    or self.rearms >= MAX_REARMS):
+                                consec_timeouts = 0
+                                self.source_down_stalls += 1
+                                continue
+                            # Falls through to the re-arm below.
+                            self.source_down_rearms += 1
+                            if self.source_down_rearm_t is None:
+                                self.source_down_rearm_t = t0
+                            print(f"[grab{self._cam_index}] every active "
+                                  f"camera still silent after "
+                                  f"{silent_windows} stall windows: "
+                                  f"re-arming in case the transport they "
+                                  f"share stalled", flush=True)
+                        elif self._last_ts is None:
                             # No frame since the triggers started. A re-arm
                             # cannot help: with no frame history the
                             # restarted counter can never be re-based, so the
@@ -1642,7 +1689,9 @@ class GrabThread(QThread):
 
         `fn()` returns True while every active camera is silent (the
         manager's view across cameras). While it does, a stalled recording
-        camera neither re-arms nor retires. None removes the check.
+        camera is not retired, and it re-arms only after
+        SOURCE_DOWN_WAIT_WINDOWS stall windows of that silence, and only
+        with frames behind it (see run()). None removes the check.
         """
         self._source_down_check = fn
 
