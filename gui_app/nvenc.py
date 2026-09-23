@@ -610,9 +610,11 @@ class PinnedUploadEncoder:
                 pass
             try:
                 # The session is freed by the encoder object's destructor,
-                # never by EndEncode(), so the last reference goes here.
+                # never by EndEncode(), so the last reference goes here. No
+                # gc.collect(): the session is in no reference cycle, and in
+                # the decoupled mode one camera's Close runs while the others
+                # record, where a full collection holds the GIL.
                 del session
-                gc.collect()
             finally:
                 if pushed:
                     try:
