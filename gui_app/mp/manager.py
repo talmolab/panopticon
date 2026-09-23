@@ -1604,11 +1604,11 @@ class ProcessCameraManager(QObject):
             return list(fn())
         except Exception as e:
             import traceback
-            traceback.print_exc()
             msg = (f"{what} did not run ({type(e).__name__}: {e}), so this "
                    f"recording is unchecked for {topic}. Its block IDs and "
                    f"timestamps are saved as usual.")
-            print(f"[acq] WARNING: {msg}", flush=True)
+            print(f"[acq] WARNING: {msg}\n{traceback.format_exc()}",
+                  flush=True)
             return [msg]
 
     def _end_acquisition(self, abandon: bool) -> None:
