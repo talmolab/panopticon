@@ -681,6 +681,54 @@ class SimBackend:
     def faults_for(self, index: int) -> SimFaults:
         return self.faults.get(index) or SimFaults()
 
+    # ------------------------------------------------- capture worker processes
+    def spawn_state(self) -> dict:
+        """What a capture worker process needs to rebuild this simulated rig:
+        its shape, its per-camera faults and its trigger clock. Picklable.
+
+        RULE: the clock must be a `sim_board.SharedSimBoard`. REASON: the
+        cameras of a split rig run in several processes and must still be
+        fired by one board; a board private to this process cannot be seen
+        from a worker, and each worker would then run a clock of its own that
+        nothing starts. Install one with `sim_board.use_shared_board` (or
+        pass it as `board=`) before the cameras are opened.
+        """
+        board = self.board
+        spec = getattr(board, "spec", None)
+        if spec is None:
+            raise RuntimeError(
+                "this simulated rig is captured in several processes, so its "
+                "trigger board must be a sim_board.SharedSimBoard that every "
+                "process can read; install one with "
+                "sim_board.use_shared_board() before opening the cameras")
+        return {"n_cameras": self.n_cameras, "width": self.width,
+                "height": self.height, "faults": dict(self.faults),
+                "board": tuple(spec)}
+
+    def restore_spawn_state(self, state: dict) -> None:
+        """Take on the rig a parent's `spawn_state()` described, reading its
+        shared trigger clock. Called once in a capture worker, before any
+        camera is opened; the attached board also becomes this process's
+        shared board."""
+        self.n_cameras = int(state["n_cameras"])
+        self.width = int(state["width"])
+        self.height = int(state["height"])
+        self.faults = dict(state["faults"])
+        board = sim_board.SharedSimBoard.attach(state["board"])
+        self._board = board
+        sim_board.use_shared_board(board)
+
+    def release_spawn_state(self) -> None:
+        """Close the shared trigger clock restore_spawn_state attached. A
+        capture worker calls this as it exits, so no view over the board's
+        segment outlives the segment."""
+        board, self._board = self._board, None
+        close = getattr(board, "close", None)
+        if close is not None:
+            if sim_board._SHARED is board:
+                sim_board.use_shared_board(None)
+            close()
+
     # ------------------------------------------------------------- cold path
     def enumerate_devices(self) -> list:
         """The simulated cameras, sorted by serial number as the contract

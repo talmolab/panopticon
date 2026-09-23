@@ -179,12 +179,262 @@ class SimBoard:
             return self._running
 
 
+#: Fields of a SharedSimBoard's record: name -> number of float64 values.
+#: stop_v is NaN while no stop time is set; miss_pulses lists the missed
+#: ordinals, 0-terminated.
+SHARED_FIELDS = {"fps": 1, "epoch_v": 1, "stop_v": 1, "running": 1, "t0": 1,
+                 "speed": 1, "starts": 1, "stops": 1, "miss_pulses": 64}
+#: Missed pulses a SharedSimBoard can carry.
+SHARED_MISS_PULSES = SHARED_FIELDS["miss_pulses"]
+
+
+class SharedSimBoard(SimBoard):
+    """A SimBoard whose clock is readable from other processes.
+
+    A simulated rig whose cameras are split across capture worker processes
+    still needs one trigger clock, as the real rig has one board. The
+    process whose `SimSerial` drives the board holds the writer, created
+    with `SharedSimBoard(...)`; each worker attaches a reader with
+    `SharedSimBoard.attach(board.spec)`. The writer publishes its fields to a
+    named shared-memory record (gui_app.mp.shm, a seqlock) whenever a start,
+    a stop or a speed change moves the clock, and a reader answers `state()`,
+    `virtual_now()`, `fired()`, `starts` and `stops` from that record.
+    `time.perf_counter()` reads the same counter in every process on
+    Windows, so the writer's `t0` gives every reader the same virtual time.
+
+    `miss_pulses` is published at every start, so set it before starting a
+    run, like `speed`. At most SHARED_MISS_PULSES ordinals travel.
+
+    `trigger_limit`, when set, makes each pulse train end after that many
+    triggers: the stop time is fixed at start, and a stop command can only
+    bring it forward. A run then fires the same triggers every time, whenever
+    the host sends its stop, which is what a comparison between two runs of
+    the same faults needs.
+
+    A reader refuses start() and stop(): only the board's own serial link
+    drives it.
+    """
+
+    def __init__(self, speed: float = DEFAULT_SPEED,
+                 trigger_limit: int | None = None,
+                 parent_pid: int | None = None):
+        from gui_app.mp import shm
+        self._ready = False
+        self._writer = True
+        self._miss_cache = (None, frozenset())
+        epoch = shm.new_epoch()
+        size = shm.RecordSegment.size_for(SHARED_FIELDS)
+        self._seg = shm.SharedSegment.create(
+            shm.segment_name("simboard", parent_pid=parent_pid, epoch=epoch),
+            size)
+        try:
+            self._rec = shm.RecordSegment.create(self._seg.buf, SHARED_FIELDS,
+                                                 epoch=epoch)
+        except BaseException:
+            self._seg.close()
+            self._seg.unlink()
+            raise
+        self._epoch = epoch
+        self.trigger_limit = None if trigger_limit is None else int(trigger_limit)
+        super().__init__(speed)
+        self._ready = True
+        with self._lock:
+            self._publish()
+
+    @classmethod
+    def attach(cls, spec) -> "SharedSimBoard":
+        """A reader of the board a writer's `spec` names (name, epoch)."""
+        from gui_app.mp import shm
+        name, epoch = spec
+        self = cls.__new__(cls)
+        self._ready = False
+        self._writer = False
+        self._miss_cache = (None, frozenset())
+        self._seg = shm.SharedSegment.attach(
+            name, min_size=shm.RecordSegment.size_for(SHARED_FIELDS))
+        try:
+            self._rec = shm.RecordSegment.attach(self._seg.buf, SHARED_FIELDS,
+                                                 epoch=int(epoch))
+        except BaseException:
+            self._seg.close()
+            raise
+        self._epoch = int(epoch)
+        self.trigger_limit = None
+        SimBoard.__init__(self)
+        self._ready = True
+        return self
+
+    @property
+    def spec(self) -> tuple:
+        """(segment name, epoch): what a reader in another process attaches
+        with. Picklable."""
+        return (self._seg.name, self._epoch)
+
+    @property
+    def is_writer(self) -> bool:
+        return self._writer
+
+    # -- fields published by the writer -----------------------------------------
+
+    @property
+    def speed(self) -> float:
+        if self._writer or not self._ready:
+            return self._speed
+        return self._read()["speed"]
+
+    @speed.setter
+    def speed(self, value) -> None:
+        self._speed = float(value)
+        if self._ready and self._writer:
+            with self._lock:
+                self._publish()
+
+    @property
+    def starts(self) -> int:
+        if self._writer or not self._ready:
+            return self._starts
+        return int(self._read()["starts"])
+
+    @starts.setter
+    def starts(self, value) -> None:
+        self._starts = int(value)
+
+    @property
+    def stops(self) -> int:
+        if self._writer or not self._ready:
+            return self._stops
+        return int(self._read()["stops"])
+
+    @stops.setter
+    def stops(self, value) -> None:
+        self._stops = int(value)
+
+    def _publish(self) -> None:
+        """Write every shared field in one seqlock window. Lock held."""
+        miss = sorted(int(i) for i in self.miss_pulses if int(i) >= 1)
+        if len(miss) > SHARED_MISS_PULSES:
+            raise ValueError(
+                f"a shared simulated board carries at most "
+                f"{SHARED_MISS_PULSES} missed pulses, got {len(miss)}")
+        self._rec.record.write({
+            "fps": self.fps, "epoch_v": self._epoch_v,
+            "stop_v": float("nan") if self._stop_v is None else self._stop_v,
+            "running": 1.0 if self._running else 0.0, "t0": self._t0,
+            "speed": self._speed, "starts": self._starts,
+            "stops": self._stops, "miss_pulses": miss})
+
+    def _read(self) -> dict:
+        got = self._rec.record.read()
+        if got is None:
+            # Never written: a writer publishes before any reader can attach,
+            # so this is a board still being built. It reads as stopped.
+            return {"fps": 0.0, "epoch_v": 0.0, "stop_v": float("nan"),
+                    "running": 0.0, "t0": self._t0, "speed": DEFAULT_SPEED,
+                    "starts": 0.0, "stops": 0.0,
+                    "miss_pulses": [0.0] * SHARED_MISS_PULSES}
+        return got
+
+    # -- time ----------------------------------------------------------------------
+
+    def virtual_now(self) -> float:
+        if self._writer:
+            return super().virtual_now()
+        r = self._read()
+        return (time.perf_counter() - r["t0"]) * r["speed"]
+
+    def state(self) -> BoardState:
+        if self._writer:
+            return super().state()
+        r = self._read()
+        stop_v = r["stop_v"]
+        return BoardState(r["fps"], r["epoch_v"],
+                          None if stop_v != stop_v else stop_v,
+                          bool(r["running"]), r["t0"], r["speed"])
+
+    def fired(self, i: int) -> bool:
+        if self._writer:
+            return super().fired(i)
+        if i < 1:
+            return False
+        r = self._read()
+        key = int(r["starts"])
+        cached_key, miss = self._miss_cache
+        if cached_key != key:
+            miss = frozenset(int(x) for x in r["miss_pulses"] if x >= 1)
+            self._miss_cache = (key, miss)
+        return i not in miss
+
+    @property
+    def running(self) -> bool:
+        if self._writer:
+            with self._lock:
+                return self._running
+        return bool(self._read()["running"])
+
+    # -- driving (writer only) ----------------------------------------------------
+
+    def _refuse_reader(self, what: str) -> None:
+        if not self._writer:
+            raise RuntimeError(
+                f"this simulated board is a reader in a capture process; "
+                f"only the process that drives the board's serial link can "
+                f"{what} it")
+
+    def start(self, fps: float, pins=()) -> float:
+        self._refuse_reader("start")
+        with self._lock:
+            rate = super().start(fps, pins)
+            if self._running and self.trigger_limit is not None and rate > 0:
+                self._stop_v = self._epoch_v + (self.trigger_limit + 0.5) / rate
+            self._publish()
+            return rate
+
+    def stop(self) -> float:
+        self._refuse_reader("stop")
+        with self._lock:
+            if self._running:
+                now = self.virtual_now()
+                self._stop_v = now if self._stop_v is None else min(self._stop_v, now)
+                self._running = False
+                self._stops += 1
+            self._publish()
+            return 0.0
+
+    def close(self) -> None:
+        """Drop the views over the segment and close it. A writer's segment
+        disappears once every reader has closed too."""
+        rec, self._rec = getattr(self, "_rec", None), None
+        if rec is not None:
+            rec.close()
+        seg = getattr(self, "_seg", None)
+        if seg is not None:
+            try:
+                seg.close()
+            except BufferError:
+                pass
+            if self._writer:
+                seg.unlink()
+
+
 # ----------------------------------------------------------- the shared board
 #: One board per process, because the cameras and the serial link must agree
 #: on when a trigger fires: `sim.SimBackend` reads this clock and `SimSerial`
 #: drives it, which is the wiring the rig has.
 _SHARED: SimBoard | None = None
 _SHARED_LOCK = threading.Lock()
+
+
+def use_shared_board(board: SimBoard) -> SimBoard | None:
+    """Install `board` as the process-wide board and return the previous one.
+
+    A multi-process simulated rig installs a SharedSimBoard here in the
+    process that drives the serial link (so `SimSerial` drives it), and a
+    capture worker installs its reader of the same board.
+    """
+    global _SHARED
+    with _SHARED_LOCK:
+        prev, _SHARED = _SHARED, board
+        return prev
 
 
 def shared_board() -> SimBoard:
