@@ -158,12 +158,21 @@ class WorkerFailed(RuntimeError):
 
 
 class _Call:
-    __slots__ = ("event", "reply", "op")
+    """One request to a worker: its reply, and when it was sent and
+    answered (time.monotonic), for the start-up timings in the log."""
+    __slots__ = ("event", "reply", "op", "t_sent", "t_done")
 
     def __init__(self, op):
         self.op = op
         self.event = threading.Event()
         self.reply = None
+        self.t_sent = time.monotonic()
+        self.t_done = None
+
+    def finish(self, reply: dict) -> None:
+        self.reply = reply
+        self.t_done = time.monotonic()
+        self.event.set()
 
 
 class _Worker:
@@ -194,6 +203,10 @@ class _Worker:
         self.armed = False
         self.ready_info = None
         self.hung = False
+        #: time.monotonic() when the process was started and when its hello
+        #: arrived.
+        self.t_spawn = None
+        self.t_hello = None
 
     @property
     def names(self) -> str:
@@ -213,9 +226,8 @@ class _Worker:
             self._next += 1
             rid = self._next
             if self.dead:
-                c.reply = {"ok": False, "kind": "exited",
-                           "error": self._exit_text()}
-                c.event.set()
+                c.finish({"ok": False, "kind": "exited",
+                          "error": self._exit_text()})
                 return c
             self._calls[rid] = c
         try:
@@ -224,25 +236,22 @@ class _Worker:
         except Exception as e:
             with self._lock:
                 self._calls.pop(rid, None)
-            c.reply = {"ok": False, "kind": "exited",
-                       "error": f"the request could not be sent "
-                                f"({type(e).__name__}: {e})"}
-            c.event.set()
+            c.finish({"ok": False, "kind": "exited",
+                      "error": f"the request could not be sent "
+                               f"({type(e).__name__}: {e})"})
         return c
 
     def resolve(self, msg: dict) -> None:
         with self._lock:
             c = self._calls.pop(msg.get("id"), None)
         if c is not None:
-            c.reply = msg
-            c.event.set()
+            c.finish(msg)
 
     def fail_all(self, text: str) -> None:
         with self._lock:
             calls, self._calls = self._calls, {}
         for c in calls.values():
-            c.reply = {"ok": False, "kind": "exited", "error": text}
-            c.event.set()
+            c.finish({"ok": False, "kind": "exited", "error": text})
 
     def _exit_text(self) -> str:
         return (f"the capture process for {self.names} exited"
@@ -284,6 +293,19 @@ def _await(calls: dict, timeout_s: float) -> dict:
                                           kind=r.get("kind", "error"),
                                           data=r.get("data")))
     return out
+
+
+def _log_phase(phase: str, calls: dict) -> None:
+    """One log line with how long each worker took to answer one request,
+    so the bounds on each phase (OPEN_TIMEOUT_S, ARM_TIMEOUT_S, ...) can be
+    set from what a rig measures."""
+    parts = []
+    for w, c in calls.items():
+        took = ("no reply" if c.t_done is None
+                else f"{c.t_done - c.t_sent:.2f} s")
+        parts.append(f"w{w.wid} {took}")
+    if parts:
+        print(f"[mp] {phase}: " + ", ".join(parts), flush=True)
 
 
 class _CameraView:
@@ -777,6 +799,7 @@ class ProcessCameraManager(QObject):
                         w.resolve(msg)
                     elif msg.get("event") == "hello":
                         w.pid = msg.get("pid")
+                        w.t_hello = time.monotonic()
                         self._attach_status(w, msg.get("status"))
                         w.hello.set()
                     elif msg.get("event") == "fatal":
@@ -903,6 +926,7 @@ class ProcessCameraManager(QObject):
                             args=(args, child_conn, log_w, self._gate),
                             name=f"panopticon-capture-w{wid}", daemon=True)
             w.process, w.conn, w.log_conn = p, parent_conn, log_r
+            w.t_spawn = time.monotonic()
             try:
                 p.start()
             except Exception as e:
@@ -933,8 +957,10 @@ class ProcessCameraManager(QObject):
         for w in workers:
             for k, g in enumerate(w.cams):
                 self._where[g] = (w, k)
-            print(f"[mp] capture process w{w.wid} pid {w.pid}: {w.names}",
-                  flush=True)
+            took = ("" if w.t_spawn is None or w.t_hello is None else
+                    f" (hello {w.t_hello - w.t_spawn:.2f} s after spawn)")
+            print(f"[mp] capture process w{w.wid} pid {w.pid}: {w.names}"
+                  f"{took}", flush=True)
         self.last_workers_info = self.workers_info()
         return None
 
@@ -1028,6 +1054,7 @@ class ProcessCameraManager(QObject):
                            affinity=self._affinity())
                  for w in self._workers}
         replies = _await(calls, OPEN_TIMEOUT_S)
+        _log_phase("open", calls)
         failed = [(w, r) for w, (ok, r) in replies.items() if not ok]
         if failed:
             w, err = failed[0]
@@ -1204,6 +1231,7 @@ class ProcessCameraManager(QObject):
             w.armed = True
             self._grants[w.wid] = len(w.cams)
         replies = _await(calls, ARM_TIMEOUT_S)
+        _log_phase("arm", calls)
         refused = [(w, r) for w, (ok, r) in replies.items() if not ok]
         if refused:
             for w, err in refused:
@@ -1277,6 +1305,7 @@ class ProcessCameraManager(QObject):
         calls = {w: w.call("ready", timeout=float(timeout_s))
                  for w in self._workers if w.armed}
         replies = _await(calls, float(timeout_s) + READY_MARGIN_S)
+        _log_phase("ready", calls)
         ready = total = 0
         for w, (ok, res) in replies.items():
             total += len(w.cams)
