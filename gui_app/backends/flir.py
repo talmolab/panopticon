@@ -61,18 +61,23 @@ first armed. After the acquisition, edges minus exposures is the number of
 triggers the camera ignored, a direct count that `acquisition_warnings`
 reports for WARNINGS.txt. Edges that reach the camera while a stall re-arm
 has the stream down are left out of that count (`_note_restart_counters`).
+Two counters cannot be read at one instant, so an edge that lands between
+the reads at a stop or a re-arm may be on either side of the boundary. Each
+boundary reads until it settles or records how many edges it left
+unresolved, and a count with unresolved edges is reported as a range.
 
 UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
 ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
 names, the CounterValue chunk's timing, whether a model's counters can be
-read while it streams, whether a trigger whose delayed exposure has not
-started when EndAcquisition runs is still exposed (if not, the witness
-counts it as ignored), whether a camera keeps exposing while its host has
-stopped taking frames (a stall), which temperature status and threshold
-nodes a model has, and which DeviceTemperatureSelector entry its
-DeviceTemperatureStatus and DeviceTemperatureStatusTransition thresholds
+read while it streams, how long after its edge a camera counts the exposure
+(the witness assumes less than one register read), whether a trigger whose
+delayed exposure has not started when EndAcquisition runs is still exposed
+(if not, the witness counts it as ignored), whether a camera keeps exposing
+while its host has stopped taking frames (a stall), which temperature status
+and threshold nodes a model has, and which DeviceTemperatureSelector entry
+its DeviceTemperatureStatus and DeviceTemperatureStatusTransition thresholds
 refer to (`_temp_basis`).
 """
 from __future__ import annotations
@@ -136,6 +141,12 @@ OTHER_TRIGGER_SELECTORS = ("AcquisitionStart", "FrameBurstStart")
 #: and exposures started.
 EDGE_COUNTER = "Counter0"
 EXPOSURE_COUNTER = "Counter1"
+#: Attempts at one settled read of both witness counters while the camera
+#: acquires (`FlirCamera._read_settled`). An attempt fails only when an edge
+#: lands between its two edge reads, so at a trigger period several times
+#: the read time the first attempts settle; a trigger rate that leaves no
+#: quiet interval ends with the edges it could not place recorded.
+COUNTER_READ_TRIES = 8
 
 #: Chunk names are tried in this order until the SDK accepts one; the
 #: spelling Spinnaker's C chunk accessor takes is not documented.
@@ -602,7 +613,10 @@ class FlirCamera:
         board is still stopped, so they count this recording's edges from 0.
         A re-arm after a stall does not reset them. It reads them again once
         BeginAcquisition has returned, so the edges that arrived while the
-        stream was down are not counted as ignored triggers."""
+        stream was down are not counted as ignored triggers
+        (`_note_restart_counters`). A camera without an exposure counter also
+        has its edges read just before BeginAcquisition
+        (`_note_begin_counters`)."""
         if strategy != GRAB_STRATEGY:
             raise ValueError(f"{self.who}: grab strategy {strategy!r}; the "
                              f"FLIR backend runs {GRAB_STRATEGY} only")
@@ -622,6 +636,8 @@ class FlirCamera:
         self._id_lost = None
         self._arm_last_bid = 0
         self._verify = True
+        if rearm:
+            self._note_begin_counters()
         self._api.begin(self.handle)
         self._grabbing = True
         if rearm:
@@ -637,9 +653,11 @@ class FlirCamera:
         taken for an ignored trigger. The exposures are read again once it
         has stopped. No exposure starts after that, so every edge counted
         before the stop has its exposure in that count, however late the
-        exposure started (a TriggerDelay, or readout holding it back). A
-        camera whose counters cannot be read while it streams is read after
-        EndAcquisition only."""
+        exposure started (a TriggerDelay, or readout holding it back). When
+        an exposure started between the two exposure reads, the edges are
+        read once more to bound the edges this stop leaves on an unknown side
+        (`_stop_unresolved`). A camera whose counters cannot be read while it
+        streams is read after EndAcquisition only."""
         was = self._grabbing
         self._grabbing = False
         streaming = self._api.is_streaming(self.handle)
@@ -946,11 +964,18 @@ class FlirCamera:
 
     @staticmethod
     def _new_witness() -> dict:
-        """The witness of a triggered arm whose counters were just reset."""
+        """The witness of a triggered arm whose counters were just reset.
+
+        `unresolved` counts the edges that the reads bounding a re-arm's
+        down time left on an unknown side, and `stop_unresolved` those of
+        the latest stop (`_stop_unresolved`), until a re-arm adds them to
+        `unresolved`. `begin_edges` is the edge count read just before a
+        re-arm's BeginAcquisition on a camera without an exposure counter."""
         return {"edges": None, "exposures": None, "exposures_check": None,
                 "gap_edges": 0, "stopped_at": None, "error": None,
                 "rearms": 0, "id_frames": 0, "late_reads": 0,
-                "ignored_by_rearm": 0, "wrap_gaps": 0, "gaps_by_rearm": 0}
+                "ignored_by_rearm": 0, "wrap_gaps": 0, "gaps_by_rearm": 0,
+                "unresolved": 0, "stop_unresolved": 0, "begin_edges": None}
 
     def _witness_failed(self, what: str, e: BaseException) -> None:
         """Record why the witness stopped counting. `what` completes "the
@@ -964,26 +989,76 @@ class FlirCamera:
         period = self._ctr_period
         return (later - earlier) % period if period else later - earlier
 
+    def _ctr_signed(self, a: int, b: int) -> int:
+        """`a - b` for reads of two counters, where `a` may be the smaller:
+        a counter narrower than 2**31 gives the difference nearest 0."""
+        period = self._ctr_period
+        if not period:
+            return a - b
+        d = (a - b) % period
+        return d - period if d >= period // 2 else d
+
+    def _read_settled(self) -> tuple:
+        """`(counts, unresolved)`: the edges and the exposures at one moment
+        while the camera acquires, and how many edges that moment leaves on
+        an unknown side.
+
+        The edges are read, then the exposures, then the edges again, until
+        two edge reads agree or COUNTER_READ_TRIES attempts have run. Two
+        edge reads that agree put no edge between them, so every exposure
+        read has its edge in the count, and every edge counted has its
+        exposure in the count unless the exposure started later than one
+        register read after the edge (the module's UNKNOWNS). When no attempt
+        settles, the last attempt's counts are kept, and the edges between
+        its two edge reads are unresolved: each may have been exposed after
+        the exposure read. A camera without an exposure counter reads its
+        edges once."""
+        sel = {what: s for s, what in self.counters.items()}
+        if "exposures" not in sel:
+            return self._read(("edges",)), 0
+        first = self._counter_value(sel["edges"])
+        for _ in range(COUNTER_READ_TRIES):
+            exposures = self._counter_value(sel["exposures"])
+            last = self._counter_value(sel["edges"])
+            unresolved = self._ctr_delta(last, first)
+            if not unresolved:
+                break
+            first = last
+        return {"edges": last, "exposures": exposures}, unresolved
+
+    def _note_begin_counters(self) -> None:
+        """Read the edges just before a re-arm's BeginAcquisition, on a
+        camera without an exposure counter. Every edge up to this read
+        arrived while the stream was down (`_note_restart_counters`)."""
+        w = self.witness
+        if (w is None or w["error"] or w["stopped_at"] is None
+                or "exposures" in self.counters.values()):
+            return
+        try:
+            w["begin_edges"] = self._read(("edges",))["edges"]
+        except Exception as e:
+            self._witness_failed("could not be read before a stall re-arm", e)
+
     def _note_restart_counters(self) -> None:
         """Leave the edges of a re-arm's down time out of the witness.
 
         Called once BeginAcquisition has returned. The window runs from the
-        StopGrabbing reads to this one, so it covers all the time the camera
-        could not expose, BeginAcquisition included. At its start the edges
-        were read before EndAcquisition and the exposures after it, so the
-        exposure of every edge before the window is outside it. At its end
-        the exposures are read first and then the edges, so an exposure
-        inside the window has its edge inside it too. Edges minus exposures
-        over the window is then the down-time edges, plus any edge exposed
-        between two reads of one end. That can hide an ignored trigger. It
-        adds one only for an edge counted before the window whose delayed
-        exposure EndAcquisition cancels, which the module's UNKNOWNS name.
-        With no exposure counter every edge in the window is left out."""
+        stop's reads to a settled read now (`_read_settled`), so it covers
+        all the time the camera could not expose, BeginAcquisition included.
+        At its start the edges were read before EndAcquisition and the
+        exposures after it, so the exposure of every edge before the window
+        is outside it. Edges minus exposures over the window is the
+        down-time edges. The edges either end leaves on an unknown side are
+        added to `unresolved`: the stop's (`_stop_unresolved`) and those of
+        a read that did not settle. With no exposure counter every edge in
+        the window is left out, and the edges from the read before
+        BeginAcquisition to this one are unresolved, because the camera may
+        have exposed any of them once BeginAcquisition armed it."""
         w = self.witness
         if w is None or w["error"] or w["stopped_at"] is None:
             return
         try:
-            now = self._read(("exposures", "edges"))
+            now, unresolved = self._read_settled()
         except Exception as e:
             self._witness_failed("could not be read at a stall re-arm", e)
             return
@@ -993,11 +1068,16 @@ class FlirCamera:
             down -= self._ctr_delta(now["exposures"], before["exposures"])
             # The triggers ignored so far all came in an acquisition that
             # ended in a stall re-arm (`_ignored_sentences`).
-            upto = (self._ctr_delta(before["edges"], before["exposures"])
+            upto = (self._ctr_signed(before["edges"], before["exposures"])
                     - w["gap_edges"])
             w["ignored_by_rearm"] = max(w["ignored_by_rearm"], upto)
             w["gaps_by_rearm"] = w["wrap_gaps"]
+        elif w["begin_edges"] is not None:
+            unresolved = self._ctr_delta(now["edges"], w["begin_edges"])
         w["gap_edges"] += max(0, down)
+        w["unresolved"] += w["stop_unresolved"] + unresolved
+        w["stop_unresolved"] = 0
+        w["begin_edges"] = None
         w["rearms"] += 1
 
     def _read_before_end(self):
@@ -1008,9 +1088,9 @@ class FlirCamera:
         A failed read is counted in the witness (`late_reads`) and logged
         once per camera. The stop then reads every counter after
         EndAcquisition, so an edge that arrives while acquisition stops
-        counts as an ignored trigger. At a stall re-arm such an edge falls
-        in the acquisition that ended there, whose ignored triggers the
-        witness words as not proven to shift the block IDs
+        counts as an ignored trigger and none is hidden. At a stall re-arm
+        such an edge falls in the acquisition that ended there, whose ignored
+        triggers the witness words as not proven to shift the block IDs
         (`_ignored_sentences`)."""
         w = self.witness
         if w is None or w["error"]:
@@ -1048,9 +1128,11 @@ class FlirCamera:
             if before is None:
                 now = self._read(("exposures", "edges"))
                 check = now.get("exposures")
+                unresolved = 0
             else:
                 now = dict(before, **self._read(("exposures",)))
                 check = before.get("exposures")
+                unresolved = self._stop_unresolved(before, now)
         except Exception as e:
             self._witness_failed("could not be read at the stop", e)
             return
@@ -1058,6 +1140,28 @@ class FlirCamera:
         w["edges"] = now.get("edges")
         w["exposures"] = now.get("exposures")
         w["exposures_check"] = check
+        w["stop_unresolved"] = unresolved
+
+    def _stop_unresolved(self, before, now) -> int:
+        """The edges a stop leaves on an unknown side. `before` holds the
+        exposures and then the edges read before EndAcquisition, `now` the
+        exposures read after it.
+
+        An edge that lands between the edge read and EndAcquisition and is
+        exposed before EndAcquisition adds an exposure without its edge,
+        which hides one ignored trigger. Such edges number no more than the
+        exposures started after the first exposure read, nor more than the
+        edges counted after the edge read. So when an exposure started in
+        between, the edges are read once more, now that the camera no longer
+        exposes, and the smaller of the two counts is the bound. None
+        started means none was hidden."""
+        if "exposures" not in now:
+            return 0
+        late = self._ctr_delta(now["exposures"], before["exposures"])
+        if not late:
+            return 0
+        after = self._read(("edges",))["edges"]
+        return min(late, self._ctr_delta(after, before["edges"]))
 
 
 def _read_chunk(api, img, key: str) -> tuple:
@@ -2564,12 +2668,14 @@ class FlirBackend:
         """What the trigger witness found about the acquisition that just
         ended, as sentences for WARNINGS.txt. Never raises.
 
-        With both counters the count is exact: edges on the trigger line
-        minus exposures started is the number of triggers the camera
-        ignored, leaving out edges that arrived while a stall re-arm had the
-        stream down. The sentence then says what those triggers did to the
-        block IDs (`_ignored_sentences`), and in trigger_counter mode a
-        CounterValue latch the recording did not settle gets its own
+        With both counters, edges on the trigger line minus exposures
+        started is the number of triggers the camera ignored, leaving out
+        edges that arrived while a stall re-arm had the stream down. Edges
+        that the reads at a stop or a re-arm could not place make that count
+        a range, from what the counters prove to that plus the unresolved
+        edges. The sentence says what those triggers did to the block IDs
+        (`_ignored_sentences`), and in trigger_counter mode a CounterValue
+        latch the recording did not settle gets its own
         (`_latch_sentences`). With the edge counter alone the count mixes
         ignored triggers with frames lost in transport, and the sentence
         says so and makes no claim about alignment
@@ -2597,12 +2703,15 @@ class FlirBackend:
         edges = w["edges"] - w["gap_edges"]
         exposures = w["exposures"]
         line = cam.trigger_line
+        unresolved = w["unresolved"] + w["stop_unresolved"]
         print(f"[flir] {cam.serial}: trigger witness: {w['edges']} edges on "
               f"{line}"
               + (f" ({w['gap_edges']} of them while re-arming)"
                  if w["gap_edges"] else "")
               + (f", {exposures} exposures" if exposures is not None else "")
               + f", {frames} frames delivered"
+              + (f", {unresolved} edge(s) not placed at a stop or re-arm"
+                 if unresolved else "")
               + (f", last CounterValue {cam._last_counter}"
                  if cam.block_id_source == "trigger_counter" else ""),
               flush=True)
@@ -2649,26 +2758,48 @@ class FlirBackend:
         sentence says the alignment is unproven. One ignored in the last
         acquisition is certain to shift IDs. Whether a stalled camera
         ignores triggers at all, or keeps exposing them, is one of the
-        module's UNKNOWNS."""
+        module's UNKNOWNS.
+
+        Unresolved edges (`_unresolved_clause`) make the count a range whose
+        low end is what the counters prove. An edge hidden at a re-arm's
+        stop lowers the count and the triggers ignored before that re-arm
+        alike, and one hidden later lowers only the count, so the low end
+        never overstates the triggers that shift block IDs: a shift it shows
+        is certain. In frame_id mode an unresolved edge may be one more
+        trigger that shifts them, so the sentence says the frames are not
+        proven aligned. In trigger_counter mode an ignored trigger is a gap,
+        so only a proven count is reported."""
         exposures = w["exposures"]
         line = cam.trigger_line
         if exposures is None:
             return self._edge_only_sentences(cam, w, edges, frames,
                                              latch_doubt)
-        # Below 0 only when an edge landed between the two reads that bound
-        # a re-arm window, which counts it as down time.
-        ignored = max(0, cam._ctr_delta(w["edges"], exposures)
-                      - w["gap_edges"])
-        what = (f"its trigger input ({line}) counted {edges} edges"
-                + (" outside stall re-arms" if w["rearms"] else "")
-                + f" but it started only {exposures} exposures, so it "
-                  f"ignored {ignored} trigger(s).")
-        if ignored <= 0:
+        unresolved = w["unresolved"] + w["stop_unresolved"]
+        # Below 0 only when an unresolved edge added an exposure without
+        # its edge.
+        raw = cam._ctr_signed(w["edges"], exposures) - w["gap_edges"]
+        ignored = max(0, raw)
+        top = max(ignored, raw + unresolved)
+        outside = " outside stall re-arms" if w["rearms"] else ""
+        if top == ignored:
+            what = (f"its trigger input ({line}) counted {edges} edges"
+                    f"{outside} but it started only {exposures} exposures, so "
+                    f"it ignored {ignored} trigger(s).")
+        else:
+            what = (f"its trigger input ({line}) counted {edges} edges"
+                    f"{outside} and it started {exposures} exposures, so it "
+                    f"ignored {ignored} to {top} trigger(s)."
+                    + self._unresolved_clause(
+                        unresolved, "while its trigger counters were read at "
+                                    "a stall re-arm or at the stop"))
+        if top <= 0:
             return []
         advice = (" Lower camera.exposure_us, or set camera.flir."
                   "block_id_source: trigger_counter so an ignored trigger "
                   "becomes a gap.")
         if cam.block_id_source == "trigger_counter":
+            if ignored <= 0:
+                return []
             return [f"{what} Its block IDs count the edges, so each ignored "
                     f"trigger is a gap"
                     + (f". {self._GAP_IN_DOUBT}" if latch_doubt
@@ -2687,6 +2818,16 @@ class FlirBackend:
                     f"triggers than the other cameras' do, and its frames are "
                     f"paired with the wrong instants. Do not use this "
                     f"recording for 3D reconstruction." + advice]
+        if top > ignored:
+            unless = " or ".join(
+                (["at a 16-bit frame-ID wrap"] if cam.id16 else [])
+                + (["after the last frame before a stall re-arm"]
+                   if w["rearms"] else []))
+            return [f"{what} An ignored trigger makes its block IDs from that "
+                    f"trigger on name later triggers than the other cameras' "
+                    f"do" + (f", unless it fell {unless}" if unless else "")
+                    + ". So this camera's frames are not proven aligned."
+                    + advice]
         if unproven > 0:
             lead = ("All of them" if not gaps else
                     f"All of them but the {gaps} at a 16-bit frame-ID wrap, "
@@ -2706,6 +2847,15 @@ class FlirBackend:
                 f"triggers."]
 
     @staticmethod
+    def _unresolved_clause(unresolved: int, where: str) -> str:
+        """Why an ignored-trigger count is a range: `unresolved` edges that
+        reached the camera `where`."""
+        them = "it" if unresolved == 1 else "them"
+        return (f" The count is a range because {unresolved} edge(s) reached "
+                f"the camera {where}, and the witness cannot show whether the "
+                f"camera exposed {them}.")
+
+    @staticmethod
     def _latch_sentences(cam, w) -> list:
         """In trigger_counter mode, when the first image did not prove how
         CounterValue is latched: the check of the count taken to include
@@ -2719,8 +2869,8 @@ class FlirBackend:
         a latch before the edge needs one more ignored trigger before that
         image. The ignored count settles it only when it is exact: both
         counters, no stall re-arm, the stop's edges read before
-        EndAcquisition, and no exposure between that stop's two exposure
-        reads. Otherwise the sentence names both causes."""
+        EndAcquisition, and no edge the stop left on an unknown side
+        (`_stop_unresolved`). Otherwise the sentence names both causes."""
         if (cam.block_id_source != "trigger_counter" or cam._ctr_latch_known
                 or cam._last_counter is None):
             return []
@@ -2730,9 +2880,8 @@ class FlirBackend:
         excess = cam._ctr_first_excess
         exposures = w["exposures"]
         if (excess is not None and exposures is not None and not w["rearms"]
-                and not w["late_reads"]
-                and w["exposures_check"] == exposures
-                and cam._ctr_delta(w["edges"], exposures) == excess):
+                and not w["late_reads"] and not w["stop_unresolved"]
+                and cam._ctr_signed(w["edges"], exposures) == excess):
             return []
         return [f"its first image did not show whether it latches the "
                 f"CounterValue chunk before the trigger edge, and its last "
@@ -2784,37 +2933,54 @@ class FlirBackend:
         IDs: the last block ID of each arm, summed. A frame lost before the
         last one that reached the host is inside that count, so what is
         left is triggers ignored, or frames lost after the last delivered
-        one of an arm (a stall's, or the recording's last)."""
+        one of an arm (a stall's, or the recording's last).
+
+        The edges from the read before a re-arm's BeginAcquisition to the
+        read after it are left out as down time, and any of them the camera
+        exposed once armed is a frame counted without its edge. So those
+        edges make the count a range. In trigger_counter mode each ignored
+        trigger is a gap, so only a proven count is reported."""
         line = cam.trigger_line
         counted = (f"its trigger input ({line}) counted {edges} edges"
                    + (" outside stall re-arms" if w["rearms"] else ""))
+        unresolved = w["unresolved"]
+
+        def span(unexplained):
+            low = max(0, unexplained)
+            top = max(low, unexplained + unresolved)
+            if top == low:
+                return low, top, f"{low}", ""
+            return low, top, f"{low} to {top}", cls._unresolved_clause(
+                unresolved, "between the edge reads either side of "
+                            "BeginAcquisition at a stall re-arm")
+
         if cam.block_id_source == "trigger_counter":
-            unexplained = edges - frames
-            if unexplained <= 0:
+            low, _top, count, why = span(edges - frames)
+            if low <= 0:
                 return []
             return [f"{counted} but only {frames} frames reached the host, so "
-                    f"{unexplained} trigger(s) were ignored or their frames "
-                    f"were lost in transport. This camera has no exposure "
+                    f"{count} trigger(s) were ignored or their frames "
+                    f"were lost in transport.{why} This camera has no exposure "
                     f"counter to tell the two apart. Its block IDs count the "
                     f"edges, so each is a gap"
                     + (f". {cls._GAP_IN_DOUBT}" if latch_doubt
                        else f", {cls._GAP_DROPPED}")]
         acquired = w["id_frames"]
-        unexplained = edges - acquired
-        if unexplained <= 0:
+        _low, top, count, why = span(edges - acquired)
+        if top <= 0:
             return []
         advice = (" Set camera.flir.block_id_source: trigger_counter, which "
                   "this camera offers, so an ignored trigger becomes a gap."
                   if cam.counter_chunk_ok else "")
         return [f"{counted} and its frame IDs account for {acquired} frames "
                 f"acquired, so "
-                f"{unexplained} trigger(s) were ignored, or their frames were "
+                f"{count} trigger(s) were ignored, or their frames were "
                 f"lost after the last frame that reached the host in an "
                 f"acquisition" + (" (it was re-armed after a stall)"
                                   if w["rearms"] else "")
-                + ". This camera has no exposure counter to tell the two "
-                f"apart. Each ignored trigger moves its later block IDs one "
-                f"trigger away from the other cameras'." + advice]
+                + f".{why} This camera has no exposure counter to tell the "
+                f"two apart. Each ignored trigger moves its later block IDs "
+                f"one trigger away from the other cameras'." + advice]
 
     @classmethod
     def sdk_report(cls) -> str:
