@@ -2570,17 +2570,33 @@ class MainWindow(QMainWindow):
             self._sidebar.set_fields_editable(True)
             self._camera_grid.setup_grid(0)
             self._camera_names = []
+            # RULE: the capture warnings are written and shown here too.
+            # REASON: this is the session most likely to be misread later,
+            # and the manager's warnings (a board that ignored the stop, a
+            # retired camera, exposure not applied) exist nowhere else.
+            problems = ([f"Saving the recording failed: "
+                         f"{type(_result).__name__}: {_result}"]
+                        + list(self._capture_warnings)
+                        + self._thermal_shutdown_texts())
+            written = self._write_warnings_file(problems)
+            where = (f"\n\nThis has also been written to:\n{written}"
+                     if written else "")
+            warn_text = ("\n\nCapture warnings:\n- "
+                         + "\n- ".join(self._capture_warnings)
+                         if self._capture_warnings else "")
             QMessageBox.critical(
                 self, "Recording did not finish cleanly",
                 f"Saving the recording failed:\n\n{type(_result).__name__}: "
                 f"{_result}\n\n"
                 + (f"Still running when the stop gave up: {stuck}.\n\n"
                    if stuck else "")
-                + f"The raw capture files are still in:\n"
+                + f"The capture files are still in:\n"
                 f"{self._video_dir}\n\nThey have NOT been encoded or deleted. Do "
-                f"not start another recording into that directory.\n\nThe "
+                f"not start another recording into that directory. Once the "
+                f"cause is fixed, 0_encode.py turns them into mp4s:\n"
+                f"uv run python 0_encode.py \"{self._video_dir}\"\n\nThe "
                 f"cameras have been closed: switch profile and back, or restart "
-                f"Panopticon, to reopen them.")
+                f"Panopticon, to reopen them." + warn_text + where)
             return
         self._state = State.ENCODING
         self._sidebar.set_status("ENCODING", "#ffaa00")
@@ -3507,11 +3523,24 @@ class MainWindow(QMainWindow):
                 text = (f"State is {self._state.value}. Quit anyway?\n\n"
                         "This capture is still running, so it cannot be "
                         "finished — its incomplete data will be DELETED.")
-            elif self._state in (State.ENCODING, State.ALIGNING):
+            elif self._state is State.ENCODING:
                 text = (f"State is {self._state.value}. Quit anyway?\n\n"
                         "The capture is COMPLETE and will be KEPT. Only the "
-                        "mp4 wrapping is unfinished, and it can be re-run "
-                        "later from the same directory.")
+                        "mp4 wrapping is unfinished. To finish it, run\n"
+                        f"uv run python 0_encode.py \"{self._video_dir}\"\n"
+                        "and then 2_align.py on the same directory (with "
+                        "--replace for a recording made without real-time "
+                        "kick-out), which also checks the block-ID rate.")
+            elif self._state is State.ALIGNING:
+                text = (f"State is {self._state.value}. Quit anyway?\n\n"
+                        "The capture and its videos are KEPT, but the "
+                        "alignment is unfinished: some cameras may already "
+                        "hold their aligned video and others not, and "
+                        "stim_trace.csv still describes the unaligned frames. "
+                        "To finish, run\n"
+                        f"uv run python 2_align.py \"{self._video_dir}\" "
+                        f"--replace\nand then 3_stim_trace.py on the same "
+                        f"directory.")
             else:
                 text = ("Work is still in progress — a solve, a profile switch "
                         "or a camera operation.\n\nQuit anyway? It will be "
