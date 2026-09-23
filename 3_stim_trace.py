@@ -1,9 +1,11 @@
 """Write a per-frame stimulus trace next to a recording's videos.
 
-New recordings get ``stim_trace.csv`` automatically at stop; this is for
-recordings made before that existed, or to regenerate after editing a paradigm
-(the ``blocks``/``edges`` graph in ``stim_paradigm.json`` is recompiled, so an
-edit to the block list changes the trace).
+New recordings get ``stim_trace.csv`` automatically at stop, and
+``2_align.py --replace`` rewrites it after it replaces videos. This is for
+recordings made before the trace existed, for a trace a crash left stale, or to
+regenerate after editing a paradigm (the ``blocks``/``edges`` graph in
+``stim_paradigm.json`` is recompiled, so an edit to the block list changes the
+trace).
 
 Runs in the project environment, so use the project's interpreter:
 
@@ -16,9 +18,16 @@ stimulus: frame -> block ID (trigger ordinal) -> seconds since stim t=0. See
 ``gui_app/stim_trace.py`` for the details, including why this is a prediction of
 what the paradigm delivered rather than an observation that it did.
 
-Exit status: 0 when every target was written; 1 when a single target was
-skipped or when any recording in a ``--all`` batch failed (the batch itself
-continues past the failure and prints a SKIP line for it).
+Each row is one trigger, with a ``frame_<cam>`` column per camera. When the
+cameras of a recording do not hold the same block IDs, its videos are not
+trigger-aligned: the trace is still written, a WARN line says so, and the
+warning is appended to that recording's WARNINGS.txt. Cameras with a
+RETIRED.json are not held to the others' block IDs.
+
+Exit status: 0 when every target was written from cameras that agree; 1 when a
+single target was skipped or when any recording in a ``--all`` batch failed
+(the batch itself continues past the failure and prints a SKIP line for it); 2
+when every target was written but some recording's cameras disagree.
 """
 import argparse
 import sys
@@ -26,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from gui_app import recording_meta  # noqa: E402
-from gui_app.stim_trace import PARADIGM_NAME, write_trace  # noqa: E402
+from gui_app.stim_trace import PARADIGM_NAME, write_trace_result  # noqa: E402
 
 DEFAULT_FPS = 100.0
 
@@ -70,21 +79,33 @@ def main():
     else:
         targets = [args.path]
 
-    failures = 0
+    failures = disagreements = 0
     for rec in targets:
         # One corrupt recording (non-monotonic block IDs, a truncated json, a
         # half-written .npy) must cost that recording a SKIP line, not the
         # rest of the batch.
+        disagreement = None
         try:
-            out, msg = write_trace(rec, _fps_for(rec, args.fps))
+            r = write_trace_result(rec, _fps_for(rec, args.fps))
+            out, msg, disagreement = r.path, r.message, r.disagreement
         except Exception as e:
             out, msg = None, f"{type(e).__name__}: {e}"
         if out is None:
             print(f"SKIP {rec}: {msg}")
             failures += 1
-        else:
-            print(f"OK   {out}: {msg}")
-    return 1 if failures else 0
+            continue
+        print(f"OK   {out}: {msg}")
+        if disagreement:
+            disagreements += 1
+            text = f"stim_trace.csv: {disagreement}."
+            where = recording_meta.append_warning(rec, text)
+            print(f"WARN {rec}: {text}"
+                  + (f" (added to {where.name})" if where else
+                     f" ({recording_meta.WARNINGS_NAME} could not be written)"),
+                  file=sys.stderr)
+    if failures:
+        return 1
+    return 2 if disagreements else 0
 
 
 if __name__ == "__main__":

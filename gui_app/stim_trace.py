@@ -15,6 +15,18 @@ frame *i* is not trigger *i*. ``blockids.npy`` records each frame's trigger
 ordinal, and 16-bit IDs wrap every 65535 triggers (~11 min at 100 fps), which
 ``alignment._unwrap_blockids`` undoes.
 
+Each row is one trigger. ``frame`` is the frame number in the reference
+camera's video (the lowest-numbered camera that takes part in the alignment),
+and a ``frame_<cam>`` column per camera gives that camera's own frame number,
+blank where it has no frame for the trigger. When the cameras agree, as
+kick-out and a completed alignment make them, every ``frame_<cam>`` equals
+``frame``. When they disagree the rows cover every trigger any of them
+recorded, the trace is still right for each camera through its own column,
+and ``TraceResult.disagreement`` says so. A camera left out of the alignment
+(retired, or excluded by the caller) gets its column for those rows only.
+Anything that rewrites ``blockids.npy`` must rewrite this file too
+(``2_align.py --replace`` does).
+
 IMPORTANT — this is derived, not observed. It says what the paradigm *should*
 have delivered given the firmware that was uploaded. It cannot know whether the
 laser was keyed on, the interlock was in, or the beam was blocked. For a real
@@ -24,10 +36,12 @@ pulses).
 """
 import csv
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from gui_app import recording_meta
 from gui_app.alignment import _unwrap_blockids, camera_dirs
 
 TRACE_NAME = "stim_trace.csv"
@@ -130,22 +144,35 @@ def resolve_chains(paradigm: dict) -> list[dict]:
     return list(paradigm.get("chains", []))
 
 
-def build_rows(paradigm: dict, blockids: np.ndarray, fps: float):
-    """Return (fieldnames, rows) — one row per recorded frame."""
+def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
+               frames=None, camera_frames: dict | None = None):
+    """Return (fieldnames, rows): one row per block ID in ``blockids``.
+
+    ``frames`` gives each row's ``frame`` value, -1 for a trigger the
+    reference camera did not record (written blank); by default row k is
+    frame k. ``camera_frames`` maps camera name -> per-row frame numbers in
+    that camera's video (-1 where it has none), written as ``frame_<name>``
+    columns after all the others, so the columns a reader already indexes do
+    not move.
+    """
     chains = resolve_chains(paradigm)
     pins = sorted({int(s["pin"]) for c in chains for s in c["steps"]})
+    camera_frames = camera_frames or {}
 
     fields = ["frame", "blockid", "t_s", "any_active"]
     for i, _c in enumerate(chains):
         fields += [f"chain{i}_step", f"chain{i}_active",
                    f"chain{i}_freq_hz", f"chain{i}_pw_ms"]
     fields += [f"pin{p}_ttl" for p in pins]
+    fields += [f"frame_{nm}" for nm in camera_frames]
 
     b = _unwrap_blockids(np.asarray(blockids))
     rows = []
-    for frame, bid in enumerate(b):
+    for k, bid in enumerate(b):
         t = (int(bid) - 1) / fps          # blockid is 1-based from trigger start
-        row = {"frame": frame, "blockid": int(bid), "t_s": round(t, 6)}
+        frame = k if frames is None else int(frames[k])
+        row = {"frame": frame if frame >= 0 else "", "blockid": int(bid),
+               "t_s": round(t, 6)}
         levels = {p: 0 for p in pins}
         any_active = False
         for i, ch in enumerate(chains):
@@ -165,45 +192,104 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float):
             levels[pin] = max(levels[pin], ttl_level(step, into))
         row["any_active"] = int(any_active)
         row |= {f"pin{p}_ttl": levels[p] for p in pins}
+        for nm, per_row in camera_frames.items():
+            v = int(per_row[k])
+            row[f"frame_{nm}"] = v if v >= 0 else ""
         rows.append(row)
     return fields, rows
 
 
-def _pick_blockids(recording_dir: Path):
-    """Any camera's block IDs will do — kick-out makes them identical — but check
-    that assumption rather than trusting it, and say so if it fails."""
-    files = [d / "blockids.npy" for d in camera_dirs(recording_dir)
-             if (d / "blockids.npy").exists()]
-    if not files:
-        return None, "no blockids.npy (recording never stopped cleanly?)"
-    arrays = {f.parent.name: np.load(f) for f in files}
-    lengths = {n: len(a) for n, a in arrays.items()}
-    first = next(iter(arrays.values()))
-    if len(set(lengths.values())) > 1 or not all(
-            np.array_equal(a, first) for a in arrays.values()):
-        return first, (f"cameras disagree on block IDs {lengths} — videos are not "
-                       f"trigger-aligned; trace uses {files[0].parent.name}")
-    return first, None
+@dataclass
+class TraceResult:
+    """What write_trace_result did.
+
+    ``path`` is the written stim_trace.csv, or None when none was written and
+    ``message`` says why. ``disagreement`` is set when the cameras that take
+    part in the alignment do not hold the same block IDs: the videos are not
+    trigger-aligned, which a caller must report where the operator sees it.
+    """
+    path: Path | None
+    message: str
+    disagreement: str | None = None
 
 
-def write_trace(recording_dir: Path, fps: float) -> tuple[Path | None, str]:
-    """Write stim_trace.csv beside the videos. Returns (path, message)."""
+def _frames_of(ids: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """Position of each of ``rows`` in the sorted ``ids``, -1 where absent."""
+    pos = np.searchsorted(ids, rows)
+    ok = pos < ids.size
+    ok[ok] = ids[pos[ok]] == rows[ok]
+    return np.where(ok, pos, -1)
+
+
+def _camera_blockids(recording_dir: Path):
+    """(camera -> unwrapped block IDs, cameras without a blockids.npy)."""
+    arrays, missing = {}, []
+    for d in camera_dirs(recording_dir):
+        f = d / "blockids.npy"
+        if not f.exists():
+            missing.append(d.name)
+            continue
+        try:
+            arrays[d.name] = _unwrap_blockids(np.load(f))
+        except ValueError as e:
+            raise ValueError(f"{f}: {e}") from e
+    return arrays, missing
+
+
+def write_trace_result(recording_dir: Path, fps: float,
+                       exclude=()) -> TraceResult:
+    """Write stim_trace.csv beside the videos and report how it went.
+
+    Cameras in ``exclude`` and cameras with a RETIRED.json still get their
+    ``frame_<cam>`` column, but they are not held to the others' block IDs,
+    never serve as the reference and add no rows: a camera left out of the
+    alignment is expected to differ.
+    """
     recording_dir = Path(recording_dir)
     paradigm_path = recording_dir / PARADIGM_NAME
     if not paradigm_path.exists():
-        return None, "no stimulus paradigm recorded for this session"
+        return TraceResult(None, "no stimulus paradigm recorded for this session")
     paradigm = json.loads(paradigm_path.read_text())
 
-    blockids, warning = _pick_blockids(recording_dir)
-    if blockids is None:
-        return None, warning
-    if len(blockids) and int(blockids[0]) != 1:
-        lead = int(blockids[0]) - 1
-        warning = (f"{(warning + '; ') if warning else ''}first block ID is "
-                   f"{int(blockids[0])}, so {lead} leading trigger(s) were dropped "
-                   f"— times account for this")
+    arrays, missing = _camera_blockids(recording_dir)
+    if not arrays:
+        return TraceResult(None, "no blockids.npy (recording never stopped cleanly?)")
+    left_out = dict(recording_meta.retired_cameras(recording_dir))
+    left_out.update({nm: "excluded" for nm in exclude})
+    held = [nm for nm in arrays if nm not in left_out]
+    ref = held[0] if held else next(iter(arrays))
+    ref_ids = arrays[ref]
+    agree = (all(np.array_equal(arrays[nm], ref_ids) for nm in held)
+             and not [nm for nm in missing if nm not in left_out])
+    # Rows are the triggers of the cameras that take part, so 'frame' is
+    # never blank while they agree; a left-out camera only gets a column.
+    held_arrays = [arrays[nm] for nm in held] or list(arrays.values())
+    if all(np.array_equal(a, ref_ids) for a in held_arrays):
+        rows_ids = ref_ids
+    else:
+        rows_ids = np.unique(np.concatenate(held_arrays))
+    frames = _frames_of(ref_ids, rows_ids)
+    camera_frames = {nm: _frames_of(a, rows_ids) for nm, a in arrays.items()}
 
-    fields, rows = build_rows(paradigm, blockids, fps)
+    notes = []
+    disagreement = None
+    if not agree:
+        lengths = {nm: int(arrays[nm].size) if nm in arrays else 0
+                   for nm in [*held, *[m for m in missing if m not in left_out]]}
+        disagreement = (
+            f"cameras disagree on block IDs {lengths}: the videos are not "
+            f"trigger-aligned. stim_trace.csv has one row per trigger any "
+            f"camera recorded; frame_<cam> gives each camera's frame for it, "
+            f"blank where that camera has none, and 'frame' is {ref}'s frame "
+            f"number")
+        notes.append(disagreement)
+    if rows_ids.size and int(rows_ids[0]) != 1:
+        lead = int(rows_ids[0]) - 1
+        notes.append(f"first block ID is {int(rows_ids[0])}, so {lead} leading "
+                     f"trigger(s) were dropped — times account for this")
+
+    fields, rows = build_rows(paradigm, rows_ids, fps, frames=frames,
+                              camera_frames=camera_frames)
     out = recording_dir / TRACE_NAME
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -213,4 +299,16 @@ def write_trace(recording_dir: Path, fps: float) -> tuple[Path | None, str]:
     active = sum(r["any_active"] for r in rows)
     msg = (f"{len(rows)} frames, {active} with stimulation active "
            f"({100 * active / max(len(rows), 1):.1f}%)")
-    return out, (f"{msg} [{warning}]" if warning else msg)
+    if notes:
+        msg = f"{msg} [{'; '.join(notes)}]"
+    return TraceResult(out, msg, disagreement)
+
+
+def write_trace(recording_dir: Path, fps: float) -> tuple[Path | None, str]:
+    """Write stim_trace.csv beside the videos. Returns (path, message).
+
+    ``write_trace_result`` is the same with the disagreement reported
+    separately; a caller that can show a warning should use that.
+    """
+    r = write_trace_result(recording_dir, fps)
+    return r.path, r.message

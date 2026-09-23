@@ -22,7 +22,10 @@ camera's recording ``.mp4``. Always writes ``aligned/alignment.{npz,json}``
 (the lossless index: frame_index[c, k] = frame number in camera c's video for
 the k-th synchronized sample). With --replace, each camera's mp4 is re-encoded
 to only the common frames and atomically replaces the original, and that
-camera's blockids.npy + frametimes.npy are rewritten to match.
+camera's blockids.npy + frametimes.npy are rewritten to match. When the
+recording has a ``stim_paradigm.json``, its ``stim_trace.csv`` is then
+rewritten from the new block IDs, because the old trace labels the replaced
+frames with the stimulus of other triggers.
 
 A replace overwrites each camera's only copy, and a camera that ended early
 or started late (a retirement, a truncated tail) cuts every other camera to
@@ -43,10 +46,12 @@ with a warning, because that copy describes the session's first acquisition.
 The rate stamps the re-encoded videos and is the reference for the block-rate
 check, so a wrong rate mis-stamps every video and flags every camera at once.
 
-Exit status: 0 on success; 1 on an error, a refused replace, or when --replace
-left any camera unreplaced; 2 when the only problem is a block-rate warning (a
-camera whose block IDs did not advance at the trigger rate, i.e. it ignored
-triggers).
+Exit status: 0 on success; 1 on an error, a refused replace, when --replace
+left any camera unreplaced, or when the stim trace could not be rewritten; 2
+when the only problem is a warning: a block-rate warning (a camera whose block
+IDs did not advance at the trigger rate, i.e. it ignored triggers), or a stim
+trace rewritten from cameras that still disagree. Every stim-trace problem is
+also appended to the acquisition's WARNINGS.txt.
 
 In post-hoc mode (``realtime_kick: false``) the GUI runs this alignment itself
 after each recording; this CLI is for reprocessing existing sessions.
@@ -56,7 +61,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from gui_app import alignment, ffmpeg_cmd, recording_meta
+from gui_app import alignment, ffmpeg_cmd, recording_meta, stim_trace
 
 DEFAULT_FPS = 100
 DEFAULT_QUALITY = 21
@@ -256,9 +261,50 @@ def main() -> int:
     else:
         print(f"\nWrote aligned/ index ({summary['common_frames']} common "
               "frames). Re-run with --replace to trim the videos.")
-    if rc == 0 and summary["rate_warnings"]:
+    trace_rc = rewrite_stim_trace(args.recording_dir, fps, summary, excluded)
+    if trace_rc == 1:
+        rc = 1
+    if rc == 0 and (summary["rate_warnings"] or trace_rc == 2):
         rc = 2
     return rc
+
+
+def rewrite_stim_trace(rec_dir: Path, fps: int, summary: dict,
+                       excluded: dict) -> int:
+    """Rewrite stim_trace.csv after a replace changed any camera's block IDs.
+
+    Returns 0 when nothing needed doing or the new trace is consistent, 2 when
+    it was written from cameras that disagree, 1 when it could not be written.
+    The trace is derived from blockids.npy, which a replace rewrites, so a
+    trace left as it was labels frames with the stimulus of other triggers.
+    Every problem is printed and appended to the acquisition's WARNINGS.txt.
+    """
+    rec_dir = Path(rec_dir)
+    if not summary.get("replaced_cams") or \
+            not (rec_dir / stim_trace.PARADIGM_NAME).exists():
+        return 0
+    try:
+        r = stim_trace.write_trace_result(rec_dir, fps, exclude=excluded)
+        path, msg, disagreement = r.path, r.message, r.disagreement
+    except Exception as e:
+        path, msg, disagreement = None, f"{type(e).__name__}: {e}", None
+    if path is None:
+        text = (f"{stim_trace.TRACE_NAME} could not be rewritten after "
+                f"alignment replaced {', '.join(summary['replaced_cams'])} "
+                f"({msg}). The old file describes the frames before the "
+                f"alignment. Re-run 3_stim_trace.py on {rec_dir}.")
+        recording_meta.append_warning(rec_dir, text)
+        print(f"\nERROR: {text}", file=sys.stderr)
+        return 1
+    print(f"\nRewrote {path.name}: {msg}")
+    if disagreement:
+        text = f"{stim_trace.TRACE_NAME}: {disagreement}."
+        where = recording_meta.append_warning(rec_dir, text)
+        print(f"WARNING: {text}"
+              + (f" (added to {where.name})" if where else ""),
+              file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

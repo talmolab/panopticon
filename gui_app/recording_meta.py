@@ -19,6 +19,9 @@ from gui_app.session_config import METADATA_FILENAME
 #: recording down to its length.
 RETIRED_NAME = "RETIRED.json"
 
+#: The acquisition's operator-facing problem log, beside its cam*/ directories.
+WARNINGS_NAME = "WARNINGS.txt"
+
 #: The session_metadata.json keys acquisition_params() reads as-is, from the
 #: acquisition's own file first and the session-level copy second.
 _PLAIN_KEYS = ("quality", "encoder", "resolution", "date", "session_id")
@@ -82,6 +85,22 @@ def retired_cameras(rec_dir) -> dict:
         else:
             out[d.name] = f"{RETIRED_NAME} gives no reason"
     return out
+
+
+def append_warning(rec_dir, text: str):
+    """Append one paragraph to the acquisition's WARNINGS.txt.
+
+    Returns the file's path, or None when it could not be written; the caller
+    prints the text either way, so a read-only directory loses nothing that
+    was not also on screen.
+    """
+    path = Path(rec_dir) / WARNINGS_NAME
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write("\n" + text.rstrip() + "\n")
+    except OSError:
+        return None
+    return path
 
 
 def _read_json(path: Path, warnings: list):
