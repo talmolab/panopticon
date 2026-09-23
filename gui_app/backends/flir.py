@@ -42,7 +42,9 @@ counter's timing relative to the edge it counts is not yet measured on a real
 camera.
 A GigE camera without extended IDs has a 16-bit frame ID that wraps after
 65535 or 65536 frames, depending on whether the counter uses 0. This backend
-unwraps it, deciding each wrap from the device clock (`_bid_frame_id16`).
+unwraps it with the device clock, which counts the trigger periods across
+each wrap, so a trigger the camera ignored at a wrap is a gap
+(`_id16_step`).
 
 TIMESTAMPS
 The same self-test checks that the device clock is not zero, advances at the
@@ -535,6 +537,11 @@ class FlirCamera:
         self._id_acc = 0
         self._id_ref = None
         self._id_lost = None
+        # The 16-bit cycle once learned, and whether the camera has shown the
+        # raw IDs 0 and 65535 at a wrap; kept across arms (`_id16_step`).
+        self._id16_cycle = None
+        self._id16_saw_zero = False
+        self._id16_saw_top = False
         # Trigger-counter state, reset with the counter.
         self._ctr_prev = None
         self._ctr_acc = 0
@@ -634,18 +641,12 @@ class FlirCamera:
     def _bid_frame_id16(self, img) -> int:
         """A 16-bit frame ID unwrapped into a value that does not wrap.
 
-        The counter's cycle is 65535 (1..65535 as a GigE Vision block ID, or
-        0..65534) or 65536 (0..65535), and the first ID after a wrap does not
-        tell which when a frame is lost at the wrap. So each wrap is decided
-        by the device clock: `_id16_cycle` counts the trigger periods since
-        the previous frame and takes the cycle that gives that many IDs. The
-        timestamp read here is one more SDK call per frame, made only on a
-        GigE camera without extended IDs.
-
-        A wrap the clock cannot decide leaves the arm without an ordinal:
-        this image and every later one of the arm raise FlirFrameError, and
-        the grab loop retires the camera after its consecutive-error limit.
-        """
+        Each wrap is resolved by `_id16_step`. The timestamp read here is
+        one more SDK call per frame, made only on a GigE camera without
+        extended IDs. A wrap it cannot resolve leaves the arm without an
+        ordinal: this image and every later one of the arm raise
+        FlirFrameError, and the grab loop retires the camera after its
+        consecutive-error limit."""
         lost = self._id_lost
         if lost is not None:
             raise FlirFrameError(lost)
@@ -655,52 +656,116 @@ class FlirCamera:
         if prev is None:
             self._id_ref = (raw + self.id_offset + self._id_acc, ts)
         elif raw < prev - _ID16_FULL // 2:
-            self._id_acc += self._id16_cycle(prev, raw, ts)
+            self._id_acc += self._id16_step(prev, raw, ts) + prev - raw
         self._prev_raw = raw
         self._prev_ts = ts
         return raw + self.id_offset + self._id_acc
 
-    def _id16_cycle(self, prev: int, raw: int, ts: int) -> int:
-        """The cycle of the wrap from raw ID `prev` to `raw` (at device time
-        `ts`, in ns), or FlirFrameError.
+    def _id16_step(self, prev: int, raw: int, ts: int) -> int:
+        """The block-ID step across the 16-bit wrap from raw ID `prev` to
+        `raw` (at device time `ts`, in ns), or FlirFrameError.
 
-        The frame rate is this arm's own: unwrapped IDs over device time,
-        from the arm's first frame to the frame before the wrap. It counts
-        the periods between the two frames, which must land within
-        ID16_RESID of a whole number, and exactly one cycle must give that
-        many IDs. A trigger the camera ignored at the wrap makes both
-        cycles miss, and then no ordinal is guessed."""
+        The counter's cycle is 65535 IDs (1..65535 as a GigE Vision block
+        ID, or 0..65534) or 65536 (0..65535), and with frames lost at the
+        wrap the IDs alone do not tell which. The device clock counts the
+        frame periods since the previous frame (`_id16_periods`). The cycle
+        is learned once and kept for this camera across arms: 65536 once
+        the camera has shown both 0 and 65535, or 65535 when the clock
+        counts exactly that cycle's step, since 65536 would then need more
+        frames than periods.
+
+        The step is the clock's count whenever that is at least the step of
+        the camera's cycle, or of the 65536 cycle while the cycle is not
+        known. A trigger the camera ignored at the wrap consumed no ID, so
+        on either cycle it becomes a gap, and `wrap_gaps` counts it for the
+        witness. With the cycle not yet known that count leaves out the one
+        more a 65535 cycle would mean, which errs toward the witness's
+        warning. When the clock does not count a whole number of periods,
+        or counts fewer than a known cycle's step, the step is the cycle's;
+        with no known cycle the arm has no ordinal from here."""
+        if prev == _ID16_SKIP0:
+            self._id16_saw_top = True
+        if raw == 0:
+            self._id16_saw_zero = True
+        step = {c: raw - prev + c for c in (_ID16_SKIP0, _ID16_FULL)}
+        k, problem = self._id16_periods(prev, ts)
+        cycle, why = self._id16_cycle, ""
+        if (cycle != _ID16_FULL and self._id16_saw_zero
+                and self._id16_saw_top):
+            cycle, why = _ID16_FULL, "the camera has shown both 0 and 65535"
+        elif cycle is None and k is not None and k == step[_ID16_SKIP0]:
+            cycle, why = _ID16_SKIP0, ("a 65536 cycle would need more frames "
+                                       "than periods")
+        self._id16_cycle = cycle
+        head = (f"[flir] {self.serial}: 16-bit frame ID wrapped from {prev} "
+                f"to {raw}")
+        if cycle is None:
+            if k is None or k < step[_ID16_FULL]:
+                self._id16_lose(prev, raw, problem or (
+                    f"the device clock counts {k} frame period(s) between "
+                    f"them, fewer than the {step[_ID16_SKIP0]} IDs either "
+                    f"cycle gives"))
+            gaps = k - step[_ID16_FULL]
+            fits = (f"which a 65536 cycle gives, and a 65535 cycle with 1 "
+                    f"trigger ignored at the wrap" if not gaps else
+                    f"which a 65536 cycle gives with {gaps} trigger(s) "
+                    f"ignored at the wrap, and a 65535 cycle with {gaps + 1}")
+            print(f"{head}; the device clock counts {k} frame period(s), "
+                  f"{fits}. The block ID follows the clock, so an ignored "
+                  f"trigger there is a gap", flush=True)
+            self._add_wrap_gaps(gaps)
+            return k
+        known = f"the cycle is {cycle}" + (f" ({why})" if why else "")
+        if k is not None and k >= step[cycle]:
+            gaps = k - step[cycle]
+            print(f"{head}; the device clock counts {k} frame period(s) and "
+                  f"{known}"
+                  + (f", so {gaps} trigger(s) ignored at the wrap are a gap "
+                     f"in the block IDs" if gaps else ""), flush=True)
+            self._add_wrap_gaps(gaps)
+            return k
+        clock = problem or (f"the device clock counts {k} frame period(s), "
+                            f"fewer than the {step[cycle]} IDs of that cycle")
+        print(f"{head}; {known}, and {clock}, so the block ID steps by the "
+              f"cycle", flush=True)
+        return step[cycle]
+
+    def _id16_periods(self, prev: int, ts: int) -> tuple:
+        """`(k, None)`, the whole number of frame periods the device clock
+        puts between the frame before the wrap (raw ID `prev`) and time
+        `ts`, or `(None, why not)`. The frame rate is this arm's own:
+        unwrapped IDs over device time, from its first frame to the frame
+        before the wrap, and the count must land within ID16_RESID of a
+        whole number."""
         ref_bid, ref_ts = self._id_ref
         prev_bid = prev + self.id_offset + self._id_acc
         prev_ts = self._prev_ts
         if prev_bid <= ref_bid or prev_ts <= ref_ts:
-            problem = ("this acquisition has no earlier frame to measure its "
-                       "frame rate from")
-        else:
-            periods = (ts - prev_ts) * (prev_bid - ref_bid) / (prev_ts - ref_ts)
-            k = round(periods)
-            if k < 1 or abs(periods - k) > ID16_RESID:
-                problem = (f"the device clock puts {periods:.2f} frame periods "
-                           f"between them, not a whole number")
-            else:
-                for cycle in (_ID16_SKIP0, _ID16_FULL):
-                    if raw - prev + cycle == k:
-                        print(f"[flir] {self.serial}: 16-bit frame ID wrapped "
-                              f"from {prev} to {raw}; the device clock counts "
-                              f"{k} frame period(s), so the cycle is {cycle}",
-                              flush=True)
-                        return cycle
-                problem = (f"the device clock counts {k} frame period(s) "
-                           f"between them, which neither a 65535 nor a 65536 "
-                           f"cycle gives (an ignored trigger at the wrap does "
-                           f"this)")
+            return None, ("this acquisition has no earlier frame to measure "
+                          "its frame rate from")
+        periods = (ts - prev_ts) * (prev_bid - ref_bid) / (prev_ts - ref_ts)
+        k = round(periods)
+        if k < 1 or abs(periods - k) > ID16_RESID:
+            return None, (f"the device clock puts {periods:.2f} frame periods "
+                          f"between them, not a whole number")
+        return k, None
+
+    def _id16_lose(self, prev: int, raw: int, problem: str) -> None:
+        """Leave the arm without an ordinal after the wrap from `prev` to
+        `raw`, and raise FlirFrameError."""
         self._id_lost = (
             f"{self.who}: the 16-bit frame ID wrapped from {prev} to {raw}, "
-            f"and {problem}, so this frame and every later one of this "
+            f"{problem}, and this camera's cycle (65535 or 65536 IDs) is not "
+            f"known yet, so this frame and every later one of this "
             f"acquisition have no trigger ordinal. Set camera.flir."
             f"extended_ids: true if the camera offers GevGVSPExtendedIDMode.")
         print(f"[flir] {self._id_lost}", flush=True)
         raise FlirFrameError(self._id_lost)
+
+    def _add_wrap_gaps(self, n: int) -> None:
+        w = self.witness
+        if n and w is not None:
+            w["wrap_gaps"] += n
 
     def _bid_tracked(self, img) -> int:
         """The block ID, kept as this arm's last. A frame ID restarts at
@@ -860,7 +925,7 @@ class FlirCamera:
         return {"edges": None, "exposures": None, "exposures_check": None,
                 "gap_edges": 0, "stopped_at": None, "error": None,
                 "rearms": 0, "id_frames": 0, "late_reads": 0,
-                "ignored_by_rearm": 0}
+                "ignored_by_rearm": 0, "wrap_gaps": 0, "gaps_by_rearm": 0}
 
     def _ctr_delta(self, later: int, earlier: int) -> int:
         """`later - earlier` for two reads of one counter, across a wrap of
@@ -900,6 +965,7 @@ class FlirCamera:
             upto = (self._ctr_delta(before["edges"], before["exposures"])
                     - w["gap_edges"])
             w["ignored_by_rearm"] = max(w["ignored_by_rearm"], upto)
+            w["gaps_by_rearm"] = w["wrap_gaps"]
         w["gap_edges"] += max(0, down)
         w["rearms"] += 1
 
@@ -2447,15 +2513,17 @@ class FlirBackend:
         trigger-counter block IDs name the right triggers.
 
         In frame_id mode an ignored trigger shifts every later block ID of
-        its acquisition, except one ignored after the last frame the camera
-        delivered before a stall re-arm: grab_thread realigns the re-armed
-        camera from its device clock, so that one shifts nothing. The
-        witness has no count per frame, only one per acquisition, so when
-        every ignored trigger came in an acquisition that ended in a re-arm
-        (`ignored_by_rearm`) the sentence says the alignment is unproven.
-        One ignored in the last acquisition is certain to shift IDs. Whether
-        a stalled camera ignores triggers at all, or keeps exposing them, is
-        one of the module's UNKNOWNS."""
+        its acquisition, with two exceptions. One ignored at a 16-bit wrap
+        is a gap (`wrap_gaps`, `_id16_step`). One ignored after the last
+        frame the camera delivered before a stall re-arm shifts nothing,
+        because grab_thread realigns the re-armed camera from its device
+        clock. The witness has no count per frame, only one per acquisition,
+        so when every ignored trigger that is not a wrap gap came in an
+        acquisition that ended in a re-arm (`ignored_by_rearm`), the
+        sentence says the alignment is unproven. One ignored in the last
+        acquisition is certain to shift IDs. Whether a stalled camera
+        ignores triggers at all, or keeps exposing them, is one of the
+        module's UNKNOWNS."""
         exposures = w["exposures"]
         line = cam.trigger_line
         if exposures is None:
@@ -2479,8 +2547,24 @@ class FlirBackend:
                     + (f". {self._GAP_IN_DOUBT}" if latch_doubt
                        else f", {self._GAP_DROPPED}")
                     + " Lower camera.exposure_us to keep those triggers."]
-        if ignored <= w["ignored_by_rearm"]:
-            return [f"{what} All of them came before a stall re-arm. One "
+        # Ignored triggers that are not wrap gaps: in the last acquisition
+        # (they shift IDs), and in acquisitions that ended in a re-arm.
+        by_rearm = min(w["ignored_by_rearm"], ignored)
+        gaps = min(w["wrap_gaps"], ignored)
+        gaps_by_rearm = min(w["gaps_by_rearm"], gaps, by_rearm)
+        shifting = (ignored - by_rearm) - (gaps - gaps_by_rearm)
+        unproven = by_rearm - gaps_by_rearm
+        if shifting > 0:
+            return [f"{what} Its block IDs count the frames it acquired, so "
+                    f"from the first ignored trigger on they name later "
+                    f"triggers than the other cameras' do, and its frames are "
+                    f"paired with the wrong instants. Do not use this "
+                    f"recording for 3D reconstruction." + advice]
+        if unproven > 0:
+            lead = ("All of them" if not gaps else
+                    f"All of them but the {gaps} at a 16-bit frame-ID wrap, "
+                    f"which are gaps,")
+            return [f"{what} {lead} came before a stall re-arm. One "
                     f"ignored after the last frame the camera delivered "
                     f"before the re-arm shifts no block ID, because the "
                     f"re-arm realigns the camera from its device clock. One "
@@ -2489,11 +2573,10 @@ class FlirBackend:
                     f"than the other cameras' do. The witness cannot tell "
                     f"the two apart, so this camera's frames are not proven "
                     f"aligned." + advice]
-        return [f"{what} Its block IDs count the frames it acquired, so from "
-                f"the first ignored trigger on they name later triggers than "
-                f"the other cameras' do, and its frames are paired with the "
-                f"wrong instants. Do not use this recording for 3D "
-                f"reconstruction." + advice]
+        return [f"{what} Each fell at a 16-bit frame-ID wrap, where its block "
+                f"IDs follow the device clock, so each is a gap, "
+                f"{self._GAP_DROPPED} Lower camera.exposure_us to keep those "
+                f"triggers."]
 
     @staticmethod
     def _latch_sentences(cam, w) -> list:
