@@ -2472,9 +2472,10 @@ class FlirBackend:
         edges = w["edges"] - w["gap_edges"]
         exposures = w["exposures"]
         line = cam.trigger_line
-        print(f"[flir] {cam.serial}: trigger witness: {edges} edges on {line}"
-              + (f" (+{w['gap_edges']} while re-arming)" if w["gap_edges"]
-                 else "")
+        print(f"[flir] {cam.serial}: trigger witness: {w['edges']} edges on "
+              f"{line}"
+              + (f" ({w['gap_edges']} of them while re-arming)"
+                 if w["gap_edges"] else "")
               + (f", {exposures} exposures" if exposures is not None else "")
               + f", {frames} frames delivered"
               + (f", last CounterValue {cam._last_counter}"
@@ -2533,9 +2534,10 @@ class FlirBackend:
         # a re-arm window, which counts it as down time.
         ignored = max(0, cam._ctr_delta(w["edges"], exposures)
                       - w["gap_edges"])
-        what = (f"its trigger input ({line}) counted {edges} edges but it "
-                f"started only {exposures} exposures, so it ignored "
-                f"{ignored} trigger(s).")
+        what = (f"its trigger input ({line}) counted {edges} edges"
+                + (" outside stall re-arms" if w["rearms"] else "")
+                + f" but it started only {exposures} exposures, so it "
+                  f"ignored {ignored} trigger(s).")
         if ignored <= 0:
             return []
         advice = (" Lower camera.exposure_us, or set camera.flir."
@@ -2659,12 +2661,13 @@ class FlirBackend:
         left is triggers ignored, or frames lost after the last delivered
         one of an arm (a stall's, or the recording's last)."""
         line = cam.trigger_line
+        counted = (f"its trigger input ({line}) counted {edges} edges"
+                   + (" outside stall re-arms" if w["rearms"] else ""))
         if cam.block_id_source == "trigger_counter":
             unexplained = edges - frames
             if unexplained <= 0:
                 return []
-            return [f"its trigger input ({line}) counted {edges} edges but "
-                    f"only {frames} frames reached the host, so "
+            return [f"{counted} but only {frames} frames reached the host, so "
                     f"{unexplained} trigger(s) were ignored or their frames "
                     f"were lost in transport. This camera has no exposure "
                     f"counter to tell the two apart. Its block IDs count the "
@@ -2678,8 +2681,8 @@ class FlirBackend:
         advice = (" Set camera.flir.block_id_source: trigger_counter, which "
                   "this camera offers, so an ignored trigger becomes a gap."
                   if cam.counter_chunk_ok else "")
-        return [f"its trigger input ({line}) counted {edges} edges and its "
-                f"frame IDs account for {acquired} frames acquired, so "
+        return [f"{counted} and its frame IDs account for {acquired} frames "
+                f"acquired, so "
                 f"{unexplained} trigger(s) were ignored, or their frames were "
                 f"lost after the last frame that reached the host in an "
                 f"acquisition" + (" (it was re-armed after a stall)"
