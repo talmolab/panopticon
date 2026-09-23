@@ -93,6 +93,30 @@ class BaslerBackend:
             "serial": cam.GetDeviceInfo().GetSerialNumber(),
         }
 
+    # -------------------------------------------------------- exposure ceiling
+    @staticmethod
+    def exposure_ceiling_us(cam, fps: float, rate_limit: float) -> float:
+        """Longest exposure, in us, at which the camera acquires every trigger.
+
+        In trigger mode the camera's frame-rate timer starts after exposure
+        ends, so the shortest interval between acquisitions is
+        `exposure + 1/AcquisitionFrameRate`, and `set_triggered` sets
+        AcquisitionFrameRate to `rate_limit`. The ceiling is therefore
+        `1e6/fps - 1e6/rate_limit`. A trigger arriving inside the interval is
+        ignored, which halves the frame rate with no error.
+
+        `rate_limit <= 0` means the limiter is disabled, so the bound left is
+        the trigger period `1e6/fps`. The result is 0 or negative when `fps`
+        is at or above `rate_limit`, and is returned as is so the caller can
+        report it. The caller applies its own 0.9 margin. The formula is the
+        limiter's physics, so `cam` is not consulted.
+        """
+        fps = float(fps)
+        limit = float(rate_limit or 0.0)
+        if limit > 0:
+            return 1e6 / fps - 1e6 / limit
+        return 1e6 / fps
+
     # ------------------------------------------------------------ GigE specifics
     @staticmethod
     def enable_extended_block_ids(i: int, cam) -> bool:

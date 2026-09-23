@@ -742,6 +742,24 @@ class SimBackend:
             cam.gain_db = float(gain_db)
         return cam.exposure_us, cam.gain_db
 
+    @staticmethod
+    def exposure_ceiling_us(cam, fps: float, rate_limit: float) -> float:
+        """Longest exposure, in us, at which the simulated camera acquires
+        every trigger: `1e6/fps - 1e6/rate_limit`, or `1e6/fps` with the
+        limiter disabled (`rate_limit <= 0`).
+
+        The simulated camera ignores a trigger that arrives inside
+        `exposure + 1/rate_limit` of the last one it acquired (see
+        `SimCamera._min_interval_v`), the Basler limiter rule, so its ceiling
+        is the Basler formula. The value is raw; the caller applies its 0.9
+        margin, and a value at or below 0 is returned as is.
+        """
+        fps = float(fps)
+        limit = float(rate_limit or 0.0)
+        if limit > 0:
+            return 1e6 / fps - 1e6 / limit
+        return 1e6 / fps
+
     def enable_extended_block_ids(self, i: int, cam) -> bool:
         """Report whether 64-bit ids were negotiated. False by default, so the
         16-bit wrap stays in play and the software unwrap keeps being tested."""
