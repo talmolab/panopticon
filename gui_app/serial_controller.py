@@ -106,6 +106,11 @@ class TeensyController:
         #: the start a second time. Kept for the caller: the cameras were
         #: already armed during the first attempt.
         self.last_start_retried = False
+        #: True from the moment a start is written until a stop is confirmed.
+        #: With the link closed, this is what says whether a stand-down is
+        #: owed: a board that took a start and never confirmed a stop may
+        #: still be triggering, and one that never took a start is not.
+        self._start_unconfirmed = False
 
     @property
     def speaks_rdy(self) -> bool:
@@ -193,8 +198,9 @@ class TeensyController:
         The retry is skipped, and the start fails, in two cases:
 
         - The owner stopped or closed the link while the first attempt waited
-          for its ack. The stop is the owner's last word, and a retry after it
-          would start a board the owner has just stood down.
+          for its ack, or while the port was being reopened for the retry.
+          The stop is the owner's last word, and a start sent after it would
+          start a board the owner has just stood down.
         - ``may_retry``, a zero-argument callable asked immediately before the
           reset, returns False. The caller knows what the reset cannot undo:
           cameras armed during the first attempt have already counted every
@@ -230,6 +236,14 @@ class TeensyController:
             if not self.open(retries=self.REOPEN_RETRIES):
                 print(f"[teensy] could not reopen port: {self.last_error}", flush=True)
                 return False
+            # The owner's stop or close counts itself before it waits for the
+            # lock, so one that arrived during the reopen shows here. The
+            # reopen has reset the board, so it is idle, and the owner's stop
+            # runs next.
+            if self._owner_interrupts != interrupts:
+                print("[teensy] the link was stopped or closed during the "
+                      "reopen: not sending the start again", flush=True)
+                return False
             return self._finish_retry(pins, fps)
 
     def _finish_retry(self, pins: list[int], fps: int) -> bool:
@@ -255,6 +269,9 @@ class TeensyController:
         # burns one timeout on that newline, which the ack budgets cover.
         # Harmless to older firmware.
         cmd = ",".join(str(x) for x in [len(pins)] + list(pins) + [fps]) + "\n"
+        # Set before the write: a write that fails part-way may still have
+        # delivered the command.
+        self._start_unconfirmed = True
         try:
             self._ser.reset_input_buffer()
             self._ser.write(cmd.encode())
@@ -373,9 +390,11 @@ class TeensyController:
             return False
         print(f"[teensy] sent stop: {cmd!r}", flush=True)
         if not self._speaks_rdy:
+            self._start_unconfirmed = False
             return True
         # readFPS() clamps the -1 to 0, so the stop is acked as `RDY <n> 0`.
         if self._await_ack(len(pins), 0, timeout=self.STOP_ACK_TIMEOUT):
+            self._start_unconfirmed = False
             return True
         print("[teensy] STOP NOT CONFIRMED: the board speaks RDY but did not ack "
               "the stop — it may still be triggering and any stim paradigm may "
@@ -429,14 +448,28 @@ class TeensyController:
     def stop_and_close(self, pins: list[int]) -> bool:
         """Stand the board down and close the link, with no start between.
 
-        RULE: the quit path uses this, never stop_triggers() then close().
-        REASON: between those two calls the lock is free, so a start waiting
-        on it writes its command after the stop, and the process exits with
-        the board triggering. Returns what the stop returned.
+        RULE: the quit path uses this, never stop_triggers() then close(),
+        and whatever the link looks like from outside. REASON: between those
+        two calls the lock is free, so a start waiting on it writes its
+        command after the stop, and the process exits with the board
+        triggering. Whether the link is open is decided here, under the lock:
+        a start's retry closes the port before it reopens it, so the link
+        reads as closed from outside while that retry is about to start the
+        board.
+
+        Returns True when the board is known to be stood down: the stop was
+        confirmed, or the link is closed and no start has gone out on it since
+        the last confirmed stop. A closed link after an unconfirmed start
+        returns False, because that board may still be triggering.
         """
         self._owner_interrupts += 1
         with self._lock:
             try:
+                if self._ser is None and not self._start_unconfirmed:
+                    print("[teensy] no serial link, and no start has gone out "
+                          "on it since its last confirmed stop: nothing to "
+                          "stand down", flush=True)
+                    return True
                 return self._stop_locked(pins)
             finally:
                 self._close_port()

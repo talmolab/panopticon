@@ -3176,26 +3176,29 @@ class MainWindow(QMainWindow):
         laser) running.
 
         RULE: stop_and_close(), one step on the controller, after _quitting
-        is set. REASON: a start worker may be waiting for its ack on the same
-        controller. The controller runs this stop after that attempt and the
-        attempt does not retry after it, and no start can be written between
-        the stop and the close; _quitting keeps a worker that has not reached
-        the board yet from sending one at all. A stop followed by a separate
-        close leaves a gap in which a queued start goes out after the stop.
+        is set, whether or not the link looks open. REASON: a start worker may
+        be waiting for its ack on the same controller. The controller runs
+        this stop after that attempt and the attempt does not retry after it,
+        and no start can be written between the stop and the close; _quitting
+        keeps a worker that has not reached the board yet from sending one at
+        all. A stop followed by a separate close leaves a gap in which a
+        queued start goes out after the stop. And ``is_open`` read here,
+        outside the controller's lock, is False while a start's retry is
+        between closing the port and reopening it: a quit that skipped the
+        stop on that reading would leave the board the retry then starts.
+        The controller looks at the link under its lock and says whether a
+        stand-down was owed and failed.
 
         The warning comes before the window goes, while there is something to
-        show it on. ``is_open`` proves nothing: pyserial keeps it True after
-        the USB device disappears, so an unplugged cable looks healthy right
-        up until the write.
+        show it on. ``is_open`` proves nothing in the other direction either:
+        pyserial keeps it True after the USB device disappears, so an
+        unplugged cable looks healthy right up until the write.
         """
         try:
             if self._teensy is None:
                 return
-            if self._teensy.is_open:
-                self._warn_if_not_stood_down(
-                    self._teensy.stop_and_close(self._profile.trigger_pins))
-            else:
-                self._teensy.close()
+            self._warn_if_not_stood_down(
+                self._teensy.stop_and_close(self._profile.trigger_pins))
         except Exception as e:
             print(f"[quit] standing the board down failed: {e}", flush=True)
 
