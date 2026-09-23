@@ -423,11 +423,12 @@ class MainWindow(QMainWindow):
 
         RULE: a profile with capture_processes above 0 opens no camera here.
         REASON: this window captures every camera in its own process
-        (CameraManager), and only probe_mp.py builds the multi-process manager
-        (gui_app.mp.manager.ProcessCameraManager). Opening anyway records in
-        one process a session whose profile asks for several, and a
-        comparison of the two capture paths then counts that session on the
-        wrong side.
+        (CameraManager). The multi-process manager
+        (gui_app.mp.manager.ProcessCameraManager) is built only by the
+        maintainers' local probe, probe_mp.py, which the public tree does not
+        ship, so the dialog does not name it. Opening anyway records in one
+        process a session whose profile asks for several, and a comparison of
+        the two capture paths then counts that session on the wrong side.
         session_metadata.json records both the request and what ran
         (capture_processes, capture_processes_used).
         """
@@ -435,10 +436,9 @@ class MainWindow(QMainWindow):
         if n <= 0:
             return None
         return (f"The profile sets capture_processes: {n}. This window "
-                f"captures every camera in its own process. Only probe_mp.py "
-                f"captures in several processes so far.\n\nSet "
-                f"capture_processes: 0 in the profile YAML to record from "
-                f"this window.")
+                f"captures every camera in its own process, and it cannot "
+                f"yet capture in several.\n\nSet capture_processes: 0 in "
+                f"the profile YAML to record from this window.")
 
     def _apply_camera_open_result(self, ok):
         if ok is True:
