@@ -27,6 +27,8 @@ docs/PERF_EXPERIMENTS.md
 /probe_abuse.py
 /probe_cpu_load.py
 /probe_lag.py
+/probe_mp.py
+/probe_flir.py
 /probe_seq.py
 /tools/
 /docs/make_screenshots.py
