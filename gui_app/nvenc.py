@@ -748,6 +748,66 @@ def _create_pinned(width, height, qp, fps, preset, tuning, notes, context):
     return _create_session(width, height, qp, fps, preset, tuning, notes)
 
 
+def pinned_upload_matches_host(context: str = "shared", size: int = 256,
+                               frames: int = 60) -> bool | None:
+    """Does the pinned path produce the host path's bitstream on this machine?
+
+    None when it cannot be measured: NVENC is unavailable, or the pinned
+    setup fails here (then every pinned encoder falls back to the host path
+    anyway, with a warning).
+
+    RULE: prove the pinned path from its output before trusting it, on every
+    launch that uses it. REASON: the events that guard the staging buffers
+    are recorded on the stream PyNvVideoCodec is given, so the path relies on
+    the library queuing its input copy on that stream. The library does not
+    document it. A build that copies elsewhere would encode pictures from
+    buffers already rewritten, and only the bitstream shows it.
+
+    Encodes the same changing pictures through both paths, feeding the pinned
+    one from a single buffer rewritten the moment Encode returns, and
+    compares the bytes. One session at a time; well under a second.
+    """
+    _load()
+    if _nvc is None:
+        return None
+    y = (np.arange(size * size, dtype=np.int64).reshape(size, size) * 3)
+    host = pinned = None
+    try:
+        host = _create_session(size, size, 21, 100, "P3", "low_latency", None)
+        buf = np.full(size * size * 3 // 2, 128, np.uint8)
+        want = []
+        for i in range(frames):
+            buf[:size * size] = ((y + i * 7) % 251).astype(np.uint8).reshape(-1)
+            want.append(bytes(host.Encode(buf)))
+        want.append(bytes(host.EndEncode()))
+        del host
+        host = None
+        gc.collect()
+        try:
+            pinned = _build_pinned(size, size, 21, 100, "P3", "low_latency",
+                                   None, context, log=False)
+        except _PinnedSetupError as e:
+            print(f"[nvenc] pinned upload check could not run: {e}", flush=True)
+            return None
+        got = []
+        buf[:size * size] = (y % 251).astype(np.uint8).reshape(-1)
+        for i in range(frames):
+            got.append(bytes(pinned.Encode(buf)))
+            buf[:size * size] = ((y + (i + 1) * 7) % 251).astype(
+                np.uint8).reshape(-1)
+        got.append(bytes(pinned.EndEncode()))
+        return b"".join(got) == b"".join(want)
+    except Exception as e:
+        print(f"[nvenc] pinned upload check could not run: {e}", flush=True)
+        return None
+    finally:
+        if pinned is not None:
+            pinned.Close()
+        if host is not None:
+            del host
+        gc.collect()
+
+
 def count_idr(chunks) -> int:
     """IDR pictures in an Annex-B byte stream, by NAL type 5 after a start code."""
     buf = b"".join(bytes(c) for c in chunks if c is not None and len(c))
