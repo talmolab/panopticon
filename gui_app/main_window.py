@@ -63,9 +63,8 @@ KEPT_ON_OVERWRITE = ("calibration.toml",)
 #: files are among them because stim_trace.write_trace builds the trace from
 #: whatever stim_paradigm.json it finds: one left from a stimulated take would
 #: label every frame of a new, unstimulated take as stimulated.
-STALE_SESSION_FILES = ("WARNINGS.txt", "codet_frames.json",
-                       "stim_paradigm.json", "stim_paradigm.ino",
-                       "stim_trace.csv")
+STIM_FILES = ("stim_paradigm.json", "stim_paradigm.ino", "stim_trace.csv")
+STALE_SESSION_FILES = ("WARNINGS.txt", "codet_frames.json") + STIM_FILES
 
 
 def _has_capture_data(video_dir: Path) -> bool:
@@ -116,6 +115,9 @@ class MainWindow(QMainWindow):
     #: What this recording's stimulation files describe, taken at arm time
     #: (_snapshot_stim); None when the recording carries no paradigm.
     _stim_snapshot: dict | None = None
+    #: Files from an earlier take that this acquisition's start could not
+    #: remove, one warning each (_sweep_stale_diagnostics).
+    _sweep_warnings: tuple | list = ()
 
     def __init__(self):
         super().__init__()
@@ -1281,6 +1283,7 @@ class MainWindow(QMainWindow):
         # it, because the worker is what makes the directories.
         self._created_dirs = []
         self._capture_warnings = []
+        self._sweep_warnings = []
         self._thermal_warnings = []
         self._thermal_reported = set()
         self._thermal_alert = None
@@ -1474,19 +1477,34 @@ class MainWindow(QMainWindow):
         replaces; and a stim_paradigm.json from a stimulated take becomes the
         paradigm stim_trace.csv describes for this one, which the recording
         writes again only when it has a paradigm of its own.
+
+        A file that cannot be removed is logged and becomes a line of this
+        recording's WARNINGS.txt and its post-session dialog
+        (_sweep_warnings), because it now sits beside this take claiming to
+        describe it.
         """
-        for stale in STALE_SESSION_FILES:
+        stale_paths = [self._video_dir / name for name in STALE_SESSION_FILES]
+        stale_paths += [self._video_dir / cam / name
+                        for cam in self._camera_names
+                        for name in ("raw_tail.bin", "tail.h264",
+                                     "encode_error.log", "WARNINGS.txt")]
+        warnings = []
+        for path in stale_paths:
             try:
-                (self._video_dir / stale).unlink(missing_ok=True)
-            except OSError:
-                pass
-        for cam in self._camera_names:
-            for stale in ("raw_tail.bin", "tail.h264", "encode_error.log",
-                          "WARNINGS.txt"):
-                try:
-                    (self._video_dir / cam / stale).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                print(f"[acq] could not remove {path}, left by an earlier "
+                      f"take: {e}", flush=True)
+                text = (f"{path.relative_to(self._video_dir).as_posix()} is "
+                        f"left from an earlier take in this directory and "
+                        f"could not be removed ({e}). It describes that "
+                        f"take, not this one.")
+                if path.name in STIM_FILES:
+                    text += (" This recording's stim_paradigm.json and "
+                             "stim_trace.csv may describe the earlier take's "
+                             "paradigm instead of this one's.")
+                warnings.append(text)
+        self._sweep_warnings = warnings
 
     def _start_body(self, acq_type, raw_paths, display_every, realtime, kick,
                     fps) -> dict:
@@ -2649,6 +2667,9 @@ class MainWindow(QMainWindow):
             or (len(frame_counts) > 1 and min_frames != max_frames)
         if self._thermal_warnings and lost_frames:
             problems += list(self._thermal_warnings)
+        # Not a loss of frames, so not in lost_frames: these are files from
+        # an earlier take that could not be removed at the start.
+        problems += list(self._sweep_warnings)
         if problems:
             # Write it down as well as showing it: a dialog is dismissed and
             # forgotten, and this is exactly what someone needs months later
