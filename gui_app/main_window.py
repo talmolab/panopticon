@@ -759,8 +759,8 @@ class MainWindow(QMainWindow):
         # responding".
         self._begin_busy("Switching cameras…")
         self._switch_from_port = self._profile.serial_port
-        # The old board's own pins, for the stop a switch to an external
-        # trigger source sends it (_prepare_board_after_switch).
+        # The old board's own pins, for the stop a switch to another port or
+        # to an external trigger source sends it (_stand_down_switched_board).
         self._switch_from_pins = list(self._profile.trigger_pins)
         self._profile = profile
 
@@ -800,37 +800,19 @@ class MainWindow(QMainWindow):
         opens the new port, which resets that board and floats its pins inside
         the experiment, and runs whatever sketch it carries; a calibration on
         a board holding a stimulation paradigm breaks "calibration can never
-        activate stim". The old port's hint and board identity describe the
-        other board and are forgotten first, so the flash runs.
+        activate stim". The old board is stood down first
+        (_stand_down_switched_board), and its hint and identity describe the
+        other board and are forgotten, so the flash runs.
 
         A profile on an external trigger source uses no board. The previous
-        profile's board is sent a stop on its own trigger pins and its link
-        is closed (stop_and_close), and its hint is forgotten, so a later
-        switch back runs the launch check on it. The Stimulation editor is
-        closed, because nothing can run a paradigm now.
-
-        RULE: the stop goes out before the link closes, and a stop the board
-        does not confirm is shown. REASON: in this mode nothing talks to that
-        board again, not even the quit's stand-down, so this is the last
-        chance to drive its camera and stimulation pins low.
+        profile's board is stood down the same way, so a later switch back
+        runs the launch check on it, and the Stimulation editor is closed,
+        because nothing can run a paradigm now.
         """
         if self._external_trigger():
             if self._teensy is not None:
-                teensy, self._teensy = self._teensy, None
-                pins = list(self._switch_from_pins
-                            or self._profile.trigger_pins)
-                print(f"[acq] the profile takes its triggers from an external "
-                      f"source; stopping the trigger board on {teensy.port} "
-                      f"and closing its link", flush=True)
-                try:
-                    stood_down = teensy.stop_and_close(pins)
-                except Exception as e:
-                    print(f"[acq] standing the board down failed: {e}",
-                          flush=True)
-                    stood_down = False
-                settings.set_board_sketch_hint("")
-                self._board_id_stale = True
-                self._warn_if_not_stood_down(stood_down)
+                self._stand_down_switched_board(
+                    "the profile takes its triggers from an external source")
             close = getattr(self._stim_window, "close", None)
             if close is not None:
                 close()
@@ -841,11 +823,41 @@ class MainWindow(QMainWindow):
         print(f"[acq] the profile moved the trigger board from "
               f"{old_port or '(none)'} to {new_port or '(none)'}; running the "
               f"launch firmware check for it", flush=True)
-        self._forget_board_on_other_port()
+        if self._teensy is not None and self._teensy.port != new_port:
+            self._stand_down_switched_board(
+                f"the profile moved the trigger board to {new_port or '(none)'}")
         settings.set_board_sketch_hint("")
         self._board_id_stale = True
         self._board_identity_reflashed = False
         self._ensure_clean_firmware()
+
+    def _stand_down_switched_board(self, why: str) -> None:
+        """Stand the previous profile's board down and forget it.
+
+        The board is sent a stop on the previous profile's own trigger pins
+        and its link is closed (stop_and_close), then the board-sketch hint
+        and its identity are forgotten.
+
+        RULE: the stop goes out before the link closes, and a stop the board
+        does not confirm is shown. REASON: after a switch nothing talks to
+        that board again, not even the quit's stand-down, which reaches only
+        the board the current profile names, so this is the last chance to
+        drive its camera and stimulation pins low. The switch runs only at
+        IDLE, so the board is normally stood down already; the stop matters
+        when the last one was not confirmed.
+        """
+        teensy, self._teensy = self._teensy, None
+        pins = list(self._switch_from_pins or self._profile.trigger_pins)
+        print(f"[acq] {why}; stopping the trigger board on {teensy.port} and "
+              f"closing its link", flush=True)
+        try:
+            stood_down = teensy.stop_and_close(pins)
+        except Exception as e:
+            print(f"[acq] standing the board down failed: {e}", flush=True)
+            stood_down = False
+        settings.set_board_sketch_hint("")
+        self._board_id_stale = True
+        self._warn_if_not_stood_down(stood_down)
 
     def _apply_theme(self):
         app = QApplication.instance()
