@@ -163,3 +163,7 @@ capture_core_exclude: [0, 1]
 # post-encoding report only flags heat when the session actually lost frames
 # (main_window._on_encoding_done), so a warm-but-clean session does not nag.
 thermal_poll_s: 20
+
+# Degrees C below the shutdown temperature each camera reports at which the live
+# thermal warning starts. These cameras report 81 C, so 2.0 warns at 79 C.
+thermal_warn_margin_c: 2.0

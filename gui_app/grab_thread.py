@@ -4,7 +4,7 @@ Real-time (online) encode is DECOUPLED from the grab loop: the grab thread only
 does retrieve -> copy -> queue.put -> Release (raw-to-disk weight, proven at
 100 fps), while a per-camera _EncoderThread drains the queue through the
 encoder. Encoding inline in the grab loop blows the 10 ms/frame budget under
-contention, exhausts the pylon buffer pool and drops ~28% of frames as GigE
+contention, exhausts the driver buffer pool and drops ~28% of frames as GigE
 "buffer incompletely grabbed" errors, so no work goes back on the loop's
 critical path.
 """
@@ -26,7 +26,7 @@ from pathlib import Path
 from PyQt5.QtCore import QThread
 
 from gui_app import encoders
-from gui_app.frame_sync import BLOCK_RATE_MIN_FRAMES
+from gui_app.frame_sync import BLOCK_RATE_MIN_FRAMES, BLOCKID_WRAP
 
 # The hot loop uses the NATIVE grab-result object rather than a wrapper — see
 # gui_app/backends/__init__.py for the contract it must satisfy and why it is
@@ -36,15 +36,21 @@ from gui_app.frame_sync import BLOCK_RATE_MIN_FRAMES
 # whole application and a second backend needs no edit here.
 
 # Frames of slack per camera between grab and encode: 200 = 2 s at 100 fps. What
-# is queued is an NV12 ring slot (3.46 MB each at 1920x1200), owned by the ring
-# rather than by the queue. The pylon buffer pool upstream adds more slack; its
-# depth comes from the profile (max_num_buffer) and must be >= kick_max_lag, or
-# the coordinator can hold frames the driver has already had to overwrite.
+# is queued is an NV12 ring slot (width x height x 1.5 bytes), owned by the ring
+# rather than by the queue. The driver buffer pool upstream adds more slack;
+# its depth comes from the profile (max_num_buffer) and must be >=
+# kick_max_lag, because a grab loop that falls behind the trigger holds its
+# backlog in that pool: a pool shallower than the lag kick-out tolerates runs
+# dry first, and the camera loses frames to buffer underrun instead of
+# catching up.
 ENCODE_QUEUE_DEPTH = 200
-#: Ring slots beyond the queue depth. In kick mode a frame is held by the
-#: coordinator (up to max_lag) and then queued (up to ENCODE_QUEUE_DEPTH), so the
-#: slack only has to cover the frame in Encode() plus the one being written;
-#: 64 leaves room for the router's own bookkeeping to lag a little.
+#: Ring slots beyond max_lag + ENCODE_QUEUE_DEPTH in kick mode. A frame is
+#: held by the coordinator (up to max_lag) and then queued (up to
+#: ENCODE_QUEUE_DEPTH); the slack covers the frame in Encode(), the one being
+#: written and a short backlog. A slot is reused only once it is free (see
+#: SyncEncodeRouter.attach_ring), so the depth decides how long an encoder
+#: may run behind the trigger before its camera drops frames, never whether a
+#: queued frame's pixels are overwritten.
 KICK_RING_SLACK = 64
 #: Decoupled mode holds at most ENCODE_QUEUE_DEPTH queued + 1 in Encode() + 1
 #: being written, so 4 spare slots suffice as long as a slot is only consumed
@@ -57,7 +63,7 @@ DECOUPLED_RING_SLACK = 4
 # recorded for it (see _put_frame's caller), so the loss shows up as a GAP in
 # blockids.npy — detectable and re-alignable — instead of shifting every later
 # frame onto the wrong trigger. Blocking indefinitely would only push the
-# backlog upstream until the pylon pool ran dry too.
+# backlog upstream until the driver pool ran dry too.
 PUT_TIMEOUT_S = 2.0
 #: Frames between the per-thread timing summaries in the log.
 STATS_EVERY = 1000
@@ -82,6 +88,51 @@ CLOCK_BASELINE_FRAMES = 200
 #: with margin: a sketch flash (~30 s) + the readiness barrier (30 s bound) +
 #: the serial handshake with a forced reset (~10 s) is ~70 s.
 PRE_TRIGGER_GRACE_S = 90.0
+#: Consecutive failed grabs (GrabSucceeded() False) that retire a recording
+#: camera, in seconds of the trigger rate: the limit is fps times this. A
+#: camera whose every result fails never submits a frame, so in kick mode it
+#: force-drops every trigger for every camera. A second of nothing but
+#: failures is a link that is not carrying images (a switch port without
+#: jumbo frames passes the small leader and trailer packets and drops the
+#: payload), and transport loss that resends recover does not last that
+#: long.
+FAILED_GRAB_RETIRE_S = 1.0
+#: Failed grabs above this fraction of a recording's results add a warning
+#: at stop: each one is a trigger the camera lost in transmission, and kick
+#: mode drops that trigger from every camera.
+FAILED_GRAB_WARN_FRACTION = 0.005
+#: A failed grab is printed while the driver buffer is still held, so only
+#: the first few of a run are printed, then the first of each one-second
+#: bucket. The bucket lines keep a failure cluster's timing in the log, and
+#: failed_grabs_per_second() keeps its size.
+FAILED_GRAB_PRINT_FIRST = 5
+#: Seconds of per-second failed-grab counts kept for probes.
+FAILED_GRAB_HISTORY_S = 3600
+#: How long every other active camera must have been silent before a stalled
+#: camera reads its own silence as the trigger source's (see
+#: GrabThread.set_source_down_check). A board that stops or loses USB silences
+#: every camera at the same trigger, so by the time one camera's stall ladder
+#: runs (seconds of silence) the others have been silent as long; one second
+#: separates that from a camera whose peers are still receiving.
+SOURCE_SILENT_S = 1.0
+#: Stall windows of one shared silence that a camera with frames behind it
+#: waits out before its ladder re-arms anyway. Waiting keeps a trigger
+#: source that stopped from restarting every camera's block-ID counter. The
+#: bound covers the other cause of a silence every camera shares: a stall of
+#: the switch, NIC port or USB host controller they all use, which only a
+#: re-arm clears. Re-arms that run out while every camera is still silent
+#: retire no camera, because no peer is receiving for a retirement to keep
+#: aligned.
+SOURCE_DOWN_WAIT_WINDOWS = 2
+#: A camera's measured block-ID rate is used for a resync only within this
+#: fraction of the profile's frame rate. Oscillators differ by a few hundred
+#: ppm, so a measured rate further off than 1% is bookkeeping gone wrong, and
+#: resyncing with it would land on a wrong ordinal that still passes the
+#: quarter-period test.
+MEASURED_RATE_TOL = 0.01
+#: Half the 16-bit block-ID period: a step down larger than this is a wrap
+#: (the rule frame_sync.unwrap_one applies).
+_HALF_WRAP = BLOCKID_WRAP // 2
 
 
 def ring_slots(max_lag, kick: bool) -> int:
@@ -128,10 +179,12 @@ class _EncoderThread(threading.Thread):
 
     The grab thread copies each gray frame straight into a preallocated NV12
     ring buffer (one memcpy, ~0.08 ms into an already-faulted buffer, and numpy
-    releases the GIL for it) and queues the buffer; this thread then only calls
-    Encode() (releases the GIL) and os.write (ditto) — so the encoder side holds
-    the GIL for ~zero time per frame. All cameras' encoder threads run truly
-    concurrently.
+    releases the GIL for it) and queues the buffer; this thread then calls
+    Encode() and os.write. os.write releases the GIL. PyNvVideoCodec's
+    Encode() does not release it while it copies the NV12 frame to the GPU,
+    so every encoder thread holds the GIL for part of each frame and competes
+    with the grab threads for it; that time is measured per encoder, not
+    assumed (docs/INTERNALS.md).
 
     If the encoder dies mid-recording, the thread switches to writing the
     remaining queued frames' Y planes (the gray data) raw to ``raw_tail.bin``
@@ -153,6 +206,12 @@ class _EncoderThread(threading.Thread):
         self._spill_path = spill_path
         self._height = height
         self.queue = queue.Queue(maxsize=ENCODE_QUEUE_DEPTH)
+        #: Called with each queued buffer once this thread has finished
+        #: reading it (encoded, spilled or discarded), or None. The router
+        #: sets it to the camera's free-slot list (SyncEncodeRouter.
+        #: attach_ring), so a ring slot is reused only after Encode() or the
+        #: spill write that reads it has returned.
+        self.recycle = None
         self.encoded = 0
         self.spilled = 0
         self.failed = False
@@ -187,9 +246,9 @@ class _EncoderThread(threading.Thread):
         `EndEncode()` ends the bitstream; the SESSION is released by the encoder
         object's *destructor* (and by `Close()` where the encoder has one), so
         the reference has to be dropped as well. NVENC concurrent sessions are
-        capped by the driver, and at 9 cameras the budget is tight enough that
-        one leaked session can push a camera onto the raw fallback at ~129 GiB
-        per 10 minutes.
+        capped by the driver, and with as many cameras as the cap allows one
+        leaked session pushes a camera onto the raw fallback, which writes
+        width x height bytes per frame.
 
         `timeout_s` is the caller's remaining teardown budget, passed on to an
         encoder whose EndEncode takes one; None means the encoder's own
@@ -239,6 +298,12 @@ class _EncoderThread(threading.Thread):
             self.join(timeout=timeout)
         return not self.is_alive()
 
+    def _done_with(self, nv12) -> None:
+        """Hand a buffer back once nothing in this thread reads it again."""
+        recycle = self.recycle
+        if recycle is not None:
+            recycle(nv12)
+
     def _open_spill(self, nv12) -> int:
         """Open raw_tail.bin and write the first spilled plane.
 
@@ -270,11 +335,10 @@ class _EncoderThread(threading.Thread):
             return -1
 
     def run(self):
-        # Encoders go on E-cores. They are not latency-critical (Encode() and
-        # os.write() both release the GIL; the work is on the GPU) but there is
-        # one per camera, so unpinned they compete with the grab threads for
-        # the eight P-cores -- which would undo the grab-thread pinning
-        # entirely. No priority bump: the point is to yield to capture.
+        # Encoder placement. Unpinned is the default; the two branches are
+        # the profile's pin_encoder_threads (the E-core set) and
+        # encoder_pcores (the P-core set). No priority change in either: the
+        # point is to yield to capture.
         if getattr(self, "_pin_ecore", False):
             try:
                 from gui_app.cpu_affinity import pin_to_efficiency_core
@@ -323,6 +387,7 @@ class _EncoderThread(threading.Thread):
                     # preflight budgets ~4.6 KB/frame for H.264, and this path
                     # writes the full 2.3 MB plane.
                     if spill_fd == -1:
+                        self._done_with(nv12)
                         continue                 # spill failed; nothing to do but drop
                     try:
                         plane = nv12[:self._height]
@@ -342,6 +407,7 @@ class _EncoderThread(threading.Thread):
                         except Exception:
                             pass
                         spill_fd = -1        # sentinel: spill is dead, drop frames
+                    self._done_with(nv12)
                     continue
                 try:
                     bs = self._enc.Encode(nv12)
@@ -362,6 +428,7 @@ class _EncoderThread(threading.Thread):
                     except Exception:
                         pass
                     spill_fd = self._open_spill(nv12)
+                self._done_with(nv12)
         except Exception as e:
             # Nothing above is supposed to raise, but the sentinel contract
             # must hold regardless: keep consuming (and discarding) until the
@@ -373,8 +440,10 @@ class _EncoderThread(threading.Thread):
                   f"sentinel", flush=True)
             self.failed = True
             while not self._abort:
-                if self.queue.get() is None:
+                item = self.queue.get()
+                if item is None:
                     break
+                self._done_with(item)
         finally:
             # -1 is the "spill died and was already closed" sentinel.
             if spill_fd is not None and spill_fd != -1:
@@ -423,7 +492,15 @@ class GrabThread(QThread):
         #: Makes the decoupled path's encoder. None means the process default
         #: (gui_app.encoders); a test or a CPU-encode build installs its own.
         self._encoder_factory = encoder_factory
-        self._running = False
+        #: RULE: stop(), abandon() and signal_triggers_stopped() are honoured
+        #: even when they land before run() is scheduled, so run() never
+        #: resets these three. REASON: open_all starts the preview threads
+        #: and a start_acquisition that follows at once stops them; a run()
+        #: that began after that stop() and set _running itself would keep a
+        #: preview loop retrieving from the camera beside the recording
+        #: thread, the two splitting its frames between them, and the stop
+        #: would leak it as a thread that never exited.
+        self._running = True
         self._triggers_stopped = False
         #: Set by signal_triggers_started() once the trigger board has
         #: acknowledged its start command. Until then a retrieve timeout is
@@ -435,12 +512,67 @@ class GrabThread(QThread):
         #: trigger. Not reset by run(): the signal may land before run() is
         #: scheduled.
         self._triggers_started = False
+        #: Set by mark_board_starting(), just before the trigger board is
+        #: told to start. A thread whose StartGrabbing returns after it would
+        #: count block IDs from a later trigger than every other camera, so
+        #: it retires itself instead of recording. Not reset by run(), for
+        #: the same reason as _triggers_started.
+        self._board_starting = False
+        #: perf_counter() when the trigger source was marked started (by
+        #: mark_board_starting or signal_triggers_started), the origin of
+        #: seconds_since_frame() before the first frame.
+        self._source_started_t = None
+        #: Frames retrieved while recording before the barrier passed, i.e.
+        #: before mark_board_starting() or signal_triggers_started(). Every
+        #: camera is armed before the board starts, so on the board path any
+        #: count here is a trigger nobody sent, and with an external TTL
+        #: source it is a camera that saw pulses before every camera was
+        #: armed. Either way the block-ID origin differs between cameras.
+        self.frames_before_barrier = 0
+        #: Callable returning True while every other active camera is silent
+        #: too (see set_source_down_check), or None, which keeps the stall
+        #: ladder purely per camera.
+        self._source_down_check = None
+        #: Stall windows this thread sat out because every active camera was
+        #: silent, and when the silence before the first one began
+        #: (perf_counter).
+        self.source_down_stalls = 0
+        self.source_down_since = None
+        #: Re-arms made while every active camera was silent, after
+        #: SOURCE_DOWN_WAIT_WINDOWS, and when the first one was made
+        #: (perf_counter).
+        self.source_down_rearms = 0
+        self.source_down_rearm_t = None
         self._abandoned = False
         self._kick = False
+        #: Kick mode: the ring slots free to be written, as the deque
+        #: SyncEncodeRouter.attach_ring returned; None in the other modes.
+        self._free_slots = None
         self.frame_count = 0
         self.timestamps = []
         self.block_ids = []
         self.drops = 0
+        #: Kick-mode frames that found no free NV12 ring slot this run (see
+        #: SyncEncodeRouter.attach_ring). Counted on that path only.
+        self.ring_full_drops = 0
+        #: Results that arrived with GrabSucceeded() False this run, the
+        #: time of the last one (perf_counter), and per-second counts as
+        #: [int(perf_counter second), count] pairs for probes. Updated on the
+        #: failure path only.
+        self.failed_grabs = 0
+        self._last_failed_t = None
+        self._failed_by_second = deque(maxlen=FAILED_GRAB_HISTORY_S)
+        #: "ErrorCode ErrorDescription" of the last failed grab that was read.
+        self.last_failed_description = ""
+        #: Frames processed by the retrieve loop in the run that just ended.
+        self.frames_retrieved = 0
+        #: Why this camera was retired, or None.
+        self.retired_reason = None
+        #: Why the decoupled encoder could not be created, or None.
+        self.encoder_failure = None
+        #: The backend's stream counters as read just before StopGrabbing,
+        #: which resets them on some SDKs; None until a recording stops.
+        self.stream_stats_at_stop = None
         #: Problems this thread found with ITS OWN recording (decoupled and raw
         #: modes: a failed resync, block-ID truncation, an encoder that spilled).
         #: In kick mode the router carries the equivalent list; CameraManager
@@ -458,12 +590,22 @@ class GrabThread(QThread):
         #: CameraManager.wait_until_ready.
         self.ready = threading.Event()
         self.latest_full_frame = None
+        #: (full-resolution frame, block ID) of the same frame, published as
+        #: one tuple so a reader can never pair a frame with the ID of the
+        #: next one. The ID is unwrapped (the numbering
+        #: frame_sync.unwrap_blockids gives this camera's blockids.npy), or
+        #: None outside a recording, where frames carry no ordinal.
+        self.latest_full_with_bid = None
         # Stall recovery state (see _rearm_stream / _resync_offset).
         self._last_ts = None          # device timestamp of the last good frame
         self._last_bid_eff = -1       # its globally-consistent block ID
         self._first_ts = None         # device timestamp of the first good frame
         self._first_bid_eff = -1      # its block ID; with the pair above, the
         self._rate_frames = 0         # camera's own measured block-ID rate
+        #: 16-bit wraps between the first and the last good frame, so the
+        #: measured rate spans unwrapped IDs.
+        self._bid_wraps = 0
+        self._rate_warned = False
         self.rearms = 0               # stream restarts this run
         #: Seconds this camera is behind real time, in every recording mode.
         #: ~0 is healthy; sustained growth means the grab loop is losing to the
@@ -509,20 +651,42 @@ class GrabThread(QThread):
         that systematic error is what a resync across a gap of tens of seconds
         would otherwise spend its tolerance on: at +250 ppm a 40 s gap is off by
         a whole period against the nominal rate and lands on the wrong ordinal.
+
+        RULE: the span is taken over UNWRAPPED IDs, and a measured rate more
+        than MEASURED_RATE_TOL off the nominal one is not used. REASON: a
+        camera without 64-bit IDs wraps at 65535, and the raw span across a
+        wrap is small but positive, so the rate would read a few per second
+        and the resync would accept a wrong ordinal about half the time.
         """
         if (self._first_ts is not None and self._last_ts is not None
                 and self._rate_frames >= BLOCK_RATE_MIN_FRAMES):
             dur = self._last_ts - self._first_ts
-            span = self._last_bid_eff - self._first_bid_eff
+            span = (self._last_bid_eff + self._bid_wraps * BLOCKID_WRAP
+                    - self._first_bid_eff)
             if dur > 0 and span > 0:
-                return span / dur
+                rate = span / dur
+                if self._fps <= 0 or abs(rate / self._fps - 1.0) <= MEASURED_RATE_TOL:
+                    return rate
+                if not self._rate_warned:
+                    self._rate_warned = True
+                    print(f"[grab{self._cam_index}] measured block-ID rate "
+                          f"{rate:.3f}/s is more than {MEASURED_RATE_TOL:.0%} "
+                          f"off the nominal {self._fps}/s; resyncing with the "
+                          f"nominal rate", flush=True)
         return float(self._fps)
 
     def _note_block_id(self, bid: int, dev_ts: float) -> None:
-        """Record a good frame's ordinal and device time for stall recovery."""
+        """Record a good frame's ordinal and device time for stall recovery.
+
+        `bid` stays in the raw-plus-offset domain the router and the resync
+        use; a step down of more than half the 16-bit period is counted as a
+        wrap, so the rate can be measured over unwrapped IDs.
+        """
         if self._first_ts is None:
             self._first_ts = dev_ts
             self._first_bid_eff = bid
+        elif bid < self._last_bid_eff - _HALF_WRAP:
+            self._bid_wraps += 1
         self._last_bid_eff = bid
         self._last_ts = dev_ts
         self._rate_frames += 1
@@ -589,6 +753,10 @@ class GrabThread(QThread):
             stats = self._backend.stream_stats(self._camera)
         except Exception as e:
             stats = {"error": f"{type(e).__name__}: {e}"}
+        try:
+            self.stream_stats_at_stop = dict(stats)
+        except Exception as e:
+            self.stream_stats_at_stop = {"error": f"{type(e).__name__}: {e}"}
         if stats.get("error"):
             print(f"[grab{self._cam_index}] stream stats unavailable: "
                   f"{stats['error']}", flush=True)
@@ -607,6 +775,7 @@ class GrabThread(QThread):
         if self.desynced:
             return
         self.desynced = True
+        self.retired_reason = reason
         if self._kick and self._router is not None:
             self._router.retire(self._cam_index, reason)
         else:
@@ -646,13 +815,24 @@ class GrabThread(QThread):
             pass
 
     def run(self):
-        # Hybrid-CPU placement. 9 grab + 9 encoder + Qt is ~19 busy threads on
-        # 8 P-cores, so Windows must put most of them on E-cores and picks
-        # differently every launch. A grab thread on an E-core runs a few
-        # percent slow, and a few percent is unrecoverable here: the loop
-        # retrieves at exactly the rate frames arrive, so it never catches up.
-        # That is the shape of the rotating laggard. Failure to pin is logged
-        # and ignored -- it is a performance regression, never a correctness one.
+        if not self._running:
+            # stop() or abandon() landed before this thread was scheduled.
+            # RULE: return before touching the camera. REASON: a thread the
+            # manager gave up waiting for can be scheduled after another
+            # thread has taken the camera over, and a StartGrabbing and
+            # StopGrabbing from this one would then stop that thread's stream.
+            self.retrieve_loop_exited = True
+            self.ready.set()
+            print(f"[grab{self._cam_index}] stopped before it started; the "
+                  f"camera was not touched", flush=True)
+            return
+        # Hybrid-CPU placement. When the capture threads outnumber the
+        # P-cores, Windows puts some of them on E-cores and picks differently
+        # every launch. A grab thread on an E-core runs a few percent slow,
+        # and a few percent is unrecoverable here: the loop retrieves at
+        # exactly the rate frames arrive, so it never catches up. That is the
+        # shape of the rotating laggard. Failure to pin is logged and ignored:
+        # it is a performance regression, never a correctness one.
         if self._pin_cpu:
             try:
                 import gui_app.cpu_affinity as _ca
@@ -660,12 +840,14 @@ class GrabThread(QThread):
                     place_capture_thread, restrict_to_performance_cores)
                 THREAD_PRIORITY_HIGHEST = _ca.GRAB_THREAD_PRIORITY
                 if self._pin_cpu == "set":
+                    # The P-core set, no core of its own: probe_lag.py's
+                    # `--pin set` arm assigns this string after the profile's
+                    # bool. The application only ever sets True or False.
                     r = restrict_to_performance_cores(
                         priority=THREAD_PRIORITY_HIGHEST)
                 else:
-                    # Not pin_to_performance_core: its round-robin doubles two
-                    # cameras onto one core once there are more cameras than
-                    # P-cores. See place_capture_thread.
+                    # One core per camera while they last, the overflow
+                    # floating over the pool; see place_capture_thread.
                     r = place_capture_thread(
                         self._cam_index, priority=THREAD_PRIORITY_HIGHEST)
                 self.pin_result = r
@@ -675,15 +857,22 @@ class GrabThread(QThread):
             except Exception as e:
                 print(f"[grab{self._cam_index}] affinity failed: {e}",
                       flush=True)
-        self._running = True
-        self._triggers_stopped = False
-        self._abandoned = False
         self.retrieve_loop_exited = False
         self.frame_count = 0
         self.timestamps = []
         self.block_ids = []
         self.warnings = []
         self.drops = 0
+        self.ring_full_drops = 0
+        self.failed_grabs = 0
+        self._failed_by_second.clear()
+        self._last_failed_t = None
+        self.frames_retrieved = 0
+        self.frames_before_barrier = 0
+        self.source_down_stalls = 0
+        self.source_down_since = None
+        self.source_down_rearms = 0
+        self.source_down_rearm_t = None
         recording = self._raw_path is not None
         fd = None              # raw.bin descriptor (raw-to-disk mode / fallback)
         h264_fd = None         # H.264 elementary-stream descriptor
@@ -695,17 +884,18 @@ class GrabThread(QThread):
 
         if kick:
             # Frames go to the shared router; this thread keeps no encoder. The
-            # ring must outlast a frame's whole journey (held by the coordinator
-            # up to max_lag, then queued at the encoder) before its slot reuses.
+            # ring is sized for a frame's usual journey (held by the coordinator
+            # up to max_lag, then queued at the encoder); see ring_slots.
             ring_n = ring_slots(self._router.max_lag, kick=True)
             try:
                 self._nv12_ring = [
                     np.full((self._height * 3 // 2, self._width), 128, np.uint8)
                     for _ in range(ring_n)]
             except MemoryError as e:
-                # Reachable, not theoretical: the ring is 2.39 GiB per camera at
-                # max_lag=480 (744 buffers x 3.456 MB), so 9 cameras is ~21.5 GiB
-                # of ring on top of the pylon buffer pool. Unprotected, a
+                # Reachable, not theoretical: the ring is ring_slots() NV12
+                # buffers of width x height x 1.5 bytes per camera, for every
+                # camera, on top of the driver buffer pool, and both grow
+                # with the profile's frame size and kick_max_lag. Unprotected, a
                 # MemoryError here escapes run() and takes the GUI down — and in
                 # kick mode a camera that never publishes makes the coordinator
                 # force-drop EVERY trigger for EVERY camera, so the session
@@ -717,7 +907,17 @@ class GrabThread(QThread):
                 self._give_up("could not allocate its NV12 ring")
                 self.ready.set()        # never hold the barrier open
                 return
-            self._ring_i = 0
+            # RULE: in kick mode a slot is written only when it is free, and
+            # the router owns every slot in between: it frees one when it
+            # drops the frame, and the encoder frees one after Encode()
+            # returns. REASON: the router may hold a frame far longer than
+            # ring_slots() submits (a backlog behind an encoder slower than
+            # the trigger), and a ring that simply cycled would then write a
+            # newer frame into a slot whose block ID is already recorded,
+            # which shifts this camera's video against blockids.npy with no
+            # gap and a clean rate check.
+            self._free_slots = self._router.attach_ring(self._cam_index,
+                                                        self._nv12_ring)
             print(f"[grab{self._cam_index}] real-time kick-out -> shared router "
                   f"(ring={ring_n})", flush=True)
         elif recording and self._realtime:
@@ -753,6 +953,20 @@ class GrabThread(QThread):
                 # back (the next acquisition needs it), and an empty
                 # stream.h264 is removed so the post-hoc encoder picks raw.bin.
                 print(f"[grab{self._cam_index}] encoder init failed, falling back to raw.bin: {e}", flush=True)
+                # A property of the recording, not of the console: raw.bin
+                # costs width x height bytes per frame against the few KB an
+                # H.264 frame takes, which the capacity preflight budgeted.
+                # The manager reports the failure so the NVENC session count
+                # the preflight cached is probed again.
+                self.encoder_failure = f"{type(e).__name__}: {e}"
+                gib_10min = (self._width * self._height * self._fps * 600
+                             / 2 ** 30)
+                self.warnings.append(
+                    f"cam{self._cam_index + 1}: no real-time encoder could be "
+                    f"created ({self.encoder_failure}), so this camera "
+                    f"recorded raw frames to raw.bin (about {gib_10min:.0f} "
+                    f"GiB per 10 minutes at {self._width}x{self._height}, "
+                    f"{self._fps} fps) and is encoded after the session")
                 self._release_orphan_encoder(enc, enc_thread)
                 enc = None
                 enc_thread = None
@@ -766,12 +980,20 @@ class GrabThread(QThread):
             fd = os.open(str(self._raw_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_BINARY)
 
         print(f"[grab{self._cam_index}] StartGrabbing (recording={recording})", flush=True)
+        armed_late = False
         try:
             self._camera.StartGrabbing(self._grab_strategy)
+            # StartGrabbing restarts the block-ID counter, so a camera armed
+            # after the board was told to start counts from a later trigger
+            # than every other camera: its ID 1 is some trigger K+1, with no
+            # gap and a clean rate check. Read once, before `ready` is set,
+            # so a camera that armed in time is never mistaken for a late one.
+            armed_late = recording and (self._board_starting
+                                        or self._triggers_started)
             # Ring allocated, stream started: this thread can now keep up with
             # the trigger rate. Announce it BEFORE the retrieve loop so the
-            # board is not started against a thread still writing 2.57 GiB of
-            # ring. Set on the failure paths too -- a thread that will never be
+            # board is not started against a thread still writing its ring.
+            # Set on the failure paths too -- a thread that will never be
             # ready must not hold the barrier until it times out.
             self.ready.set()
         except Exception as e:
@@ -801,11 +1023,28 @@ class GrabThread(QThread):
             self._write_warnings(recording and not kick)
             return
         print(f"[grab{self._cam_index}] grabbing={self._camera.IsGrabbing()}", flush=True)
+        if armed_late:
+            # Records nothing: the loop below is never entered, and its
+            # finally still stops the stream and closes the files.
+            self._give_up("armed after the trigger board started, so its "
+                          "block IDs would count from a later trigger than "
+                          "the other cameras'")
+            self._running = False
+        # The free-slot list's pop, bound once: one call per kick-mode frame.
+        take_slot = self._free_slots.popleft if kick else None
         frame_n = 0
         timeout_n = 0
         consec_timeouts = 0    # reset by every successful grab; stall detector
+        # Stall windows of the current shared silence (every active camera
+        # silent), and the result count it began at: a result ends it.
+        silent_windows = 0
+        silent_at = None
         bid_offset = 0         # added to raw block IDs after a re-arm
         awaiting_resync = False
+        bid = None             # this frame's ordinal; stays None in preview
+        # True until the barrier (mark_board_starting/signal_triggers_started)
+        # is seen on a frame; after that, one local test per frame.
+        pre_barrier = recording
         # ~5 s of silence at the 200 ms recording timeout. Long enough that a
         # burst of GigE resends can't trip it, short enough to lose seconds
         # rather than the rest of the session.
@@ -816,6 +1055,11 @@ class GrabThread(QThread):
         # mode it starves every OTHER camera, so failing fast beats spinning.
         MAX_CONSEC_ERRORS = 10
         consec_errors = 0      # reset by every successful frame
+        # Failed grabs in a row (reset by every good frame), and the run
+        # length that retires a recording camera.
+        consec_failed = 0
+        failed_limit = max(MAX_CONSEC_ERRORS,
+                           int(round(self._fps * FAILED_GRAB_RETIRE_S)))
         first_frame_logged = False
         # Gates the one-time "padding OK" log only. The padding CHECK itself runs
         # on every frame, below — it is one attribute read and padding could in
@@ -866,9 +1110,18 @@ class GrabThread(QThread):
                     stats_line = None
                     try:
                         if not result.GrabSucceeded():
-                            print(f"[grab{self._cam_index}] grab failed: "
-                                  f"{result.ErrorCode} {result.ErrorDescription}",
-                                  flush=True)
+                            # Counted, and a recording camera that delivers
+                            # nothing but failures for FAILED_GRAB_RETIRE_S
+                            # is retired: it never submits a frame, so in
+                            # kick mode it would force-drop every trigger for
+                            # every camera. All of it is on the failure path.
+                            self.failed_grabs += 1
+                            consec_failed += 1
+                            self._note_failed_grab(result, t1, recording)
+                            if recording and consec_failed >= failed_limit:
+                                self._give_up(self._failed_grab_reason(
+                                    result, consec_failed))
+                                break
                             continue
                         # Zero-copy view over the driver buffer. `result.Array`
                         # (GetArray) ALLOCATES a fresh 2.3 MB array and memcpys into
@@ -971,15 +1224,38 @@ class GrabThread(QThread):
                                     raise ValueError(
                                         f"block ID {bid} is not a trigger ordinal")
                                 self._note_block_id(bid, dev_ts)
+                                if pre_barrier:
+                                    if (self._board_starting
+                                            or self._triggers_started):
+                                        pre_barrier = False
+                                    else:
+                                        self.frames_before_barrier += 1
                                 if kick:
-                                    # Copy gray into the next ring slot and submit to the
+                                    # Copy gray into a free ring slot and submit to the
                                     # router; it records metadata for frames it RELEASES
                                     # (the common set), so this thread records none.
-                                    buf = self._nv12_ring[self._ring_i]
-                                    self._ring_i = (self._ring_i + 1) % len(self._nv12_ring)
-                                    tc0 = time.perf_counter()
-                                    buf[:self._height, :] = img
-                                    t_copy += time.perf_counter() - tc0
+                                    try:
+                                        buf = take_slot()
+                                    except IndexError:
+                                        # Every slot still holds a frame the router
+                                        # or its encoder has not finished with. The
+                                        # frame is submitted without pixels, so the
+                                        # alignment still sees the trigger; the
+                                        # router drops it from this camera's video
+                                        # alone and counts it (dropped_full).
+                                        buf = None
+                                        self.ring_full_drops += 1
+                                        if self.ring_full_drops in (1, 10, 100) or \
+                                                self.ring_full_drops % 1000 == 0:
+                                            stats_line = (
+                                                f"[grab{self._cam_index}] ENCODER "
+                                                f"BEHIND: no free NV12 ring slot, "
+                                                f"{self.ring_full_drops} frames "
+                                                f"dropped from this camera so far")
+                                    else:
+                                        tc0 = time.perf_counter()
+                                        buf[:self._height, :] = img
+                                        t_copy += time.perf_counter() - tc0
                                     ts0 = time.perf_counter()
                                     self._router.submit(self._cam_index, bid,
                                                         dev_ts, buf)
@@ -1003,6 +1279,7 @@ class GrabThread(QThread):
                                     self.block_ids.append(bid)
 
                             consec_errors = 0
+                            consec_failed = 0
                             frame_n += 1
                             if recording and not first_frame_logged:
                                 first_frame_logged = True
@@ -1040,7 +1317,13 @@ class GrabThread(QThread):
                                 # only) — oblique cams (1/4) need full res to resolve the
                                 # board, same as the post-hoc calibration.
                                 if self._keep_full:
-                                    self.latest_full_frame = img.copy()
+                                    full = img.copy()
+                                    self.latest_full_frame = full
+                                    # One assignment, so the pair is never
+                                    # torn between two frames.
+                                    self.latest_full_with_bid = (
+                                        full, None if bid is None else
+                                        bid + self._bid_wraps * BLOCKID_WRAP)
                                 t_disp += time.perf_counter() - td0
 
                         # Python does not unbind a with-target when the block ends, so
@@ -1085,6 +1368,69 @@ class GrabThread(QThread):
                             and t0 - t_loop_start < PRE_TRIGGER_GRACE_S):
                         consec_timeouts = 0
                         continue
+                    if (recording and consec_timeouts >= STALL_TIMEOUTS
+                            and not self.desynced):
+                        if (self._source_down_check is not None
+                                and self._source_down_check()):
+                            # Every active camera is silent: the trigger
+                            # source stopped (a board reset or unplugged), or
+                            # the transport every camera shares stalled. No
+                            # camera is retired for a fault that is not its
+                            # own, and the ladder resumes the moment a peer
+                            # receives a frame again. The manager reports the
+                            # silence (source_silent) for the operator.
+                            #
+                            # RULE: the wait is bounded for a camera with
+                            # frames behind it; after SOURCE_DOWN_WAIT_WINDOWS
+                            # windows of one silence the ladder re-arms.
+                            # REASON: a stopped source needs no re-arm, and
+                            # waiting keeps every counter running, but a
+                            # shared transport stall needs one, and an
+                            # unbounded wait would record nothing for the rest
+                            # of the session. A camera with no frame waits
+                            # on: its restarted counter could never be
+                            # re-based. Re-arms that run out wait as well.
+                            seen = frame_n + self.failed_grabs
+                            if silent_at != seen:
+                                silent_at = seen
+                                silent_windows = 0
+                            silent_windows += 1
+                            if self.source_down_since is None:
+                                # When the silence began: this camera's
+                                # last result, or the source start.
+                                self.source_down_since = (
+                                    t0 - self.seconds_since_frame(t0))
+                                print(f"[grab{self._cam_index}] every active "
+                                      f"camera is silent: waiting for the "
+                                      f"trigger source before re-arming",
+                                      flush=True)
+                            if (self._last_ts is None
+                                    or silent_windows <= SOURCE_DOWN_WAIT_WINDOWS
+                                    or self.rearms >= MAX_REARMS):
+                                consec_timeouts = 0
+                                self.source_down_stalls += 1
+                                continue
+                            # Falls through to the re-arm below.
+                            self.source_down_rearms += 1
+                            if self.source_down_rearm_t is None:
+                                self.source_down_rearm_t = t0
+                            print(f"[grab{self._cam_index}] every active "
+                                  f"camera still silent after "
+                                  f"{silent_windows} stall windows: "
+                                  f"re-arming in case the transport they "
+                                  f"share stalled", flush=True)
+                        elif self._last_ts is None:
+                            # No frame since the triggers started. A re-arm
+                            # cannot help: with no frame history the
+                            # restarted counter can never be re-based, so the
+                            # ladder would only spend MAX_REARMS stall
+                            # windows of forced drops for every camera before
+                            # retiring it anyway.
+                            self._give_up(
+                                "no frame received since the triggers "
+                                "started; check this camera's trigger cable "
+                                "and trigger input line")
+                            break
                     # Stalled: the stream has gone quiet while triggers are still
                     # running. Restart it rather than time out for the rest of
                     # the session.
@@ -1154,7 +1500,9 @@ class GrabThread(QThread):
             if (recording and not self._triggers_stopped
                     and not self._abandoned and not self.desynced):
                 self._give_up("grab thread exited before the recording was stopped")
+            self.frames_retrieved = frame_n
             if recording:
+                self._warn_failed_grabs(frame_n)
                 self._log_stream_stats()  # before StopGrabbing resets counters
             enc_exited = True
             if enc_thread is not None:
@@ -1218,6 +1566,15 @@ class GrabThread(QThread):
                   f"Encode at abandon; leaving its session to process exit",
                   flush=True)
             return False
+        if self.drops:
+            # Each drop is a gap in blockids.npy, so post-hoc alignment
+            # accounts for it; the operator still has to learn that this
+            # camera lost frames and why.
+            self.warnings.append(
+                f"{cam}: {self.drops} frames were dropped because its encoder "
+                f"queue stayed full for more than {PUT_TIMEOUT_S:g} s (the "
+                f"encoder was not keeping up). They are gaps in this camera's "
+                f"blockids.npy, which post-hoc alignment accounts for.")
         # Drain: sentinel, then wait for the backlog (~1 s at full queue).
         try:
             enc_thread.queue.put(None, timeout=DRAIN_SENTINEL_TIMEOUT_S)
@@ -1310,7 +1667,113 @@ class GrabThread(QThread):
         is under way, and a camera that never delivers is still retired once
         the grace runs out.
         """
+        if self._source_started_t is None:
+            self._source_started_t = time.perf_counter()
         self._triggers_started = True
+
+    def mark_board_starting(self):
+        """The trigger board is about to be told to start.
+
+        Called by CameraManager.mark_board_starting() immediately before
+        start_triggers. From here a StartGrabbing that returns is late: the
+        thread retires itself instead of recording (see run()). It also ends
+        the pre-barrier count (frames_before_barrier) and starts the silence
+        clock of seconds_since_frame().
+        """
+        if self._source_started_t is None:
+            self._source_started_t = time.perf_counter()
+        self._board_starting = True
+
+    def set_source_down_check(self, fn):
+        """Install the check the stall ladder asks before it re-arms.
+
+        `fn()` returns True while every active camera is silent (the
+        manager's view across cameras). While it does, a stalled recording
+        camera is not retired, and it re-arms only after
+        SOURCE_DOWN_WAIT_WINDOWS stall windows of that silence, and only
+        with frames behind it (see run()). None removes the check.
+        """
+        self._source_down_check = fn
+
+    def seconds_since_frame(self, now=None) -> float:
+        """Seconds since this camera last delivered a result, good or failed.
+
+        Before the first result the clock runs from the moment the trigger
+        source was marked started, and reads 0.0 until then: silence before
+        the board starts is expected. Reads only attributes the grab loop
+        already writes (the frame-rate window and the failed-grab time).
+        """
+        now = time.perf_counter() if now is None else now
+        last = self._fps_times[-1] if self._fps_times else None
+        failed = self._last_failed_t
+        if failed is not None and (last is None or failed > last):
+            last = failed
+        if last is None:
+            last = self._source_started_t
+        if last is None:
+            return 0.0
+        return max(0.0, now - last)
+
+    def failed_grabs_per_second(self) -> list:
+        """(second, count) pairs of failed grabs this run, oldest first.
+
+        `second` is int(time.perf_counter()) at the failure, so a probe in
+        the same process lines them up with its own clock. Seconds without a
+        failure are absent.
+        """
+        return [(s, n) for s, n in list(self._failed_by_second)]
+
+    def _note_failed_grab(self, result, t1: float, recording: bool) -> None:
+        """Bookkeeping for one failed grab: the per-second count, the
+        pre-barrier count, and the rate-limited log line.
+
+        Runs with the driver buffer held, on the failure path only. Reading
+        ErrorCode/ErrorDescription can raise; that propagates to the loop's
+        error handler like any per-frame error.
+        """
+        self._last_failed_t = t1
+        sec = int(t1)
+        dq = self._failed_by_second
+        new_second = not dq or dq[-1][0] != sec
+        if new_second:
+            dq.append([sec, 1])
+        else:
+            dq[-1][1] += 1
+        if recording and not (self._board_starting or self._triggers_started):
+            self.frames_before_barrier += 1
+        if self.failed_grabs <= FAILED_GRAB_PRINT_FIRST or new_second:
+            desc = f"{result.ErrorCode} {result.ErrorDescription}"
+            self.last_failed_description = desc
+            print(f"[grab{self._cam_index}] grab failed: {desc}", flush=True)
+
+    @staticmethod
+    def _link_hint() -> str:
+        return ("check the link to this camera: on GigE, jumbo frames (MTU "
+                "9000) on the NIC and on every switch port in its path; on "
+                "USB3, the cable and the host controller's bandwidth")
+
+    def _failed_grab_reason(self, result, n: int) -> str:
+        """The retirement reason for a camera whose grabs all fail."""
+        try:
+            desc = f"{result.ErrorCode} {result.ErrorDescription}"
+        except Exception:
+            desc = self.last_failed_description or "error text unavailable"
+        return (f"every grab failing ({n} in a row, last: {desc}); "
+                f"{self._link_hint()}")
+
+    def _warn_failed_grabs(self, good: int) -> None:
+        """Add a warning when failed grabs exceed FAILED_GRAB_WARN_FRACTION
+        of this recording's results."""
+        failed = self.failed_grabs
+        total = failed + good
+        if not failed or failed <= FAILED_GRAB_WARN_FRACTION * total:
+            return
+        desc = self.last_failed_description or "error text unavailable"
+        msg = (f"cam{self._cam_index + 1}: {failed} of {total} grabs failed "
+               f"({100.0 * failed / total:.2f}%, last: {desc}). Each is a "
+               f"trigger this camera lost in transmission; {self._link_hint()}")
+        print(f"[grab{self._cam_index}] WARNING: {msg}", flush=True)
+        self.warnings.append(msg)
 
     def signal_triggers_stopped(self):
         self._triggers_stopped = True

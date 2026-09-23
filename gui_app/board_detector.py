@@ -9,32 +9,34 @@ Tracks:
   - ``glow``          : per-camera decaying pulse, set to 1.0 on each detection
   - ``shared``        : pairwise co-detection counts (board seen by both cams in
                         the same detection tick)
-  - ``per_cam_covis`` : per-camera co-visibility coverage (ticks where this cam
+  - ``per_cam_frames``: per-camera co-detection ticks (ticks where this cam
                         detected the board AND at least one other cam did too)
   - ``grid_cells_hit``: how many of the 2x2 FOV cells that camera has seen the
                         board in, binned by the marker centroid
-  - ``ready``         : ALL THREE of — every camera has >= ``min_per_cam_shared``
-                        co-visible detections; every camera has hit
+  - ``ready``         : ALL THREE of: every camera has >= ``min_per_cam_shared``
+                        co-detection ticks; every camera has hit
                         >= ``MIN_GRID_CELLS`` of its 4 grid cells; and the
                         co-visibility graph is ONE CONNECTED COMPONENT over the
-                        pairs with >= ``min_edge`` co-detections. Note the last
-                        one is a connectivity test, not a per-pair test: the
-                        board is one-sided, so opposed cameras can never
-                        co-detect and "every pair connected" could never fill.
+                        pairs with >= ``min_edge`` co-detections. The last one
+                        is a connectivity test, not a per-pair test: the board
+                        is one-sided, so opposed cameras can never co-detect
+                        and "every pair connected" could never fill.
                         ``ready`` LATCHES: detection, glow decay, counting and
                         ``codet_frames`` all keep running afterwards, because
                         the hinted solve decodes only the frames listed in
                         ``codet_frames`` and every co-detection recorded while
                         the operator keeps waving is more data for it.
-  - ``codet_frames``  : per tick, ``{cam_index: grabbed_frame_ordinal}`` for
-                        the cameras that co-detected. The value is the grab
-                        thread's GRABBED count read after the frame copy, so it
-                        is +1 relative to the 0-based mp4 index and, in kick
-                        mode, further offset by any frames the coordinator
-                        force-dropped. Pairing survives because every camera
-                        carries the same offset for the same tick; the solve
-                        clamps the hints into range and treats them as
-                        neighbourhood hints, not exact indices.
+  - ``codet_frames``  : per tick, ``{cam_index: block_id}`` for the cameras
+                        that co-detected. The block ID is the one the grab
+                        thread published together with the frame the HUD
+                        detected on (``latest_full_frames_with_bids``), i.e.
+                        that frame's unwrapped trigger ordinal. The solve maps
+                        it to a video index through the camera's own
+                        ``blockids.npy``, so a drop, a kicked trigger or an
+                        alignment that changes one camera's video cannot shift
+                        that camera's hints against the others. A camera
+                        without an ID for its frame (a preview frame, or no
+                        recording) contributes coverage but no hint.
   - ``ticks_per_s``   : measured detection tick rate (EMA), for the HUD and
                         the rig log. Detection is sequential over cameras and
                         costs 6-250 ms per camera depending on scene clutter,
@@ -53,6 +55,7 @@ engine and the GUI self-disables the HUD when OpenCV is missing.
 """
 import json
 import math
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -126,17 +129,17 @@ class BoardDetector:
         # raise or lower it without editing code.
         if min_grid_cells is not None:
             self.MIN_GRID_CELLS = int(min_grid_cells)
-        import yaml
-        with open(board_config_path) as f:
-            b = yaml.safe_load(f)
-        self._engine = _CharucoEngine(b)
+        # The same loader as the solve: a config lacking a key raises a
+        # ValueError naming it, which the GUI prints as "coverage detector
+        # unavailable: ...".
+        self._engine = _CharucoEngine(
+            charuco.load_board_config(board_config_path))
         self.reset()
 
     def reset(self):
         n = self.n
         self.glow = np.zeros(n)
         self.shared = np.zeros((n, n), dtype=int)
-        self.per_cam_covis = np.zeros(n, dtype=int)   # partner-weighted: display
         self.per_cam_frames = np.zeros(n, dtype=int)  # ticks: what READY uses
         #: Connected components of the co-visibility graph, refreshed each tick.
         #: One component is the READY condition; more than one means the solve
@@ -156,11 +159,14 @@ class BoardDetector:
         c = min(int(cx * self.GRID_COLS), self.GRID_COLS - 1)
         return max(0, r), max(0, c)
 
-    def update(self, frames, frame_counts=None):
-        """Run one detection tick. If frame_counts (per-camera GRABBED frame
-        ordinals) is provided, the co-detecting cameras' ordinals are appended
-        to ``codet_frames`` for the solve to decode instead of re-scanning
-        every frame.
+    def update(self, frames, block_ids=None):
+        """Run one detection tick over one frame per camera.
+
+        ``block_ids[i]`` is the trigger ordinal of ``frames[i]`` (the pair
+        ``latest_full_frames_with_bids`` published), or None for a frame that
+        has none. The co-detecting cameras' IDs are appended to
+        ``codet_frames`` for the solve to decode instead of re-scanning every
+        frame. A camera whose ID is None still counts towards coverage.
 
         Runs after READY too: ``ready`` only latches. Stopping would freeze the
         glow and, worse, stop recording hints while the operator is still
@@ -193,41 +199,23 @@ class BoardDetector:
                         self.grid_cells_hit[i] = int(self.grid_covered[i].sum())
 
         if len(seen) >= 2:
-            # Weighted by PARTNER COUNT, not 1 per tick. A tick in which three
-            # cameras see the board yields three pairwise constraints, not one,
-            # and pairwise constraints are what stereo calibration consumes — so
-            # a camera that co-sees with two others is making twice the progress
-            # of one that co-sees with a single neighbour. Counting ticks
-            # flattened that distinction and let a camera reach its target while
-            # only ever pairing with the same partner, which is exactly how a
-            # co-visibility graph ends up in disconnected clusters that each
-            # look well covered. Connectivity is still enforced separately in
-            # _update_ready(); this only makes the per-camera number mean
-            # "constraints gathered" rather than "moments seen".
-            partners = len(seen) - 1
             for i in seen:
-                # TWO counters, deliberately. `per_cam_frames` counts TICKS and
-                # is what READY thresholds on, because the solve consumes
-                # FRAMES: 1_calibrate.py caps intrinsics at 60 per camera.
-                # `per_cam_covis` is partner-weighted and is for the display
-                # and the bridge hint -- it says how many pairwise constraints
-                # this camera has gathered, which is the right thing to steer
-                # by but the WRONG thing to threshold.
-                #
-                # Threshold FRAMES, never the partner-weighted number: at nine
-                # cameras all seeing the board partners=8, so a target of 120 is
-                # met in FIFTEEN ticks -- a 16.7x drop in the actual bar, which
-                # would greenlight a calibration on almost no data and produce a
-                # confident, badly-conditioned solve.
+                # RULE: count one per tick, never one per partner. REASON: the
+                # solve consumes frames, and READY thresholds this count
+                # against min_per_cam_shared. Weighting by partner count would
+                # meet the bar N-1 times sooner with N cameras in view and pass
+                # a calibration on a fraction of the frames it needs. How the
+                # partners connect is the graph test in _update_ready().
                 self.per_cam_frames[i] += 1
-                self.per_cam_covis[i] += partners
             for a in range(len(seen)):
                 for b in range(a + 1, len(seen)):
                     self.shared[seen[a], seen[b]] += 1
                     self.shared[seen[b], seen[a]] += 1
-            if frame_counts is not None:
-                self.codet_frames.append(
-                    {i: frame_counts[i] for i in seen})
+            if block_ids is not None:
+                tick = {i: int(block_ids[i]) for i in seen
+                        if i < len(block_ids) and block_ids[i] is not None}
+                if tick:
+                    self.codet_frames.append(tick)
 
         self._update_ready()
         return self
@@ -261,26 +249,6 @@ class BoardDetector:
             groups.setdefault(find(i), []).append(i)
         return sorted(groups.values(), key=lambda g: (-len(g), g[0]))
 
-    def bridge_hint(self):
-        """The pair most worth working next, or None once the graph is joined.
-
-        Across every pair of components, the two cameras with the most shared
-        detections are the ones already closest to forming an edge, so naming
-        them turns "the graph is in pieces" into an instruction.
-        """
-        comps = self.components
-        if len(comps) < 2:
-            return None
-        best = None
-        for a_idx in range(len(comps)):
-            for b_idx in range(a_idx + 1, len(comps)):
-                for i in comps[a_idx]:
-                    for j in comps[b_idx]:
-                        n = int(self.shared[i, j])
-                        if best is None or n > best[2]:
-                            best = (i, j, n)
-        return best
-
     def _update_ready(self):
         """Recompute components and READY. READY latches: every input is
         monotone (counts only grow, edges only appear), so a true can never
@@ -299,46 +267,131 @@ class BoardDetector:
 # codet_frames.json: the hint file the solve reads
 # ---------------------------------------------------------------------------
 
-CODET_FORMAT = 2
+#: The layout write_codet_frames writes: per camera, the block IDs to decode.
+CODET_FORMAT = 3
+#: Where each layout keeps its per-camera lists. Format 3 lists block IDs
+#: under ``block_ids``; format 2 listed grabbed-frame counts under ``frames``,
+#: and the solve still reads it. RULE: the two layouts use different keys.
+#: REASON: a reader that knows only format 2 then finds no ``frames`` in a
+#: format-3 file and never decodes block IDs as frame indices.
+CODET_KEY_BLOCK_IDS = "block_ids"
+CODET_KEY_FRAMES = "frames"
+
+
+def codet_hint_key(doc):
+    """The key holding a hint document's per-camera lists.
+
+    ``CODET_KEY_BLOCK_IDS`` for format 3, ``CODET_KEY_FRAMES`` for format 2,
+    and None for the flat legacy layout (``{cam: [frames]}``) or anything that
+    is not a JSON object.
+    """
+    if not isinstance(doc, dict):
+        return None
+    for key in (CODET_KEY_BLOCK_IDS, CODET_KEY_FRAMES):
+        if key in doc:
+            return key
+    return None
+
+
+def codet_indices(block_ids, ordinals):
+    """Video frame indices of hinted block IDs, and how many the video lacks.
+
+    ``ordinals`` is the camera's ``blockids.npy`` unwrapped
+    (``frame_sync.unwrap_blockids``), so ``ordinals[i]`` is the trigger of
+    video frame i and the array is strictly increasing. A hinted ID the video
+    does not hold (a trigger this camera missed, or one that kick mode or the
+    alignment removed) is left out and counted, because decoding a nearby
+    frame instead would pair two cameras on different triggers.
+
+    Returns ``(indices, absent)``: a sorted list of int and an int.
+    """
+    ords = np.asarray(ordinals, dtype=np.int64).ravel()
+    ids = np.unique(np.asarray(list(block_ids), dtype=np.int64))
+    if ords.size == 0 or ids.size == 0:
+        return [], int(ids.size)
+    pos = np.minimum(np.searchsorted(ords, ids), ords.size - 1)
+    hit = ords[pos] == ids
+    return pos[hit].tolist(), int((~hit).sum())
+
+
+def _write_json_atomic(path, doc) -> None:
+    """Write ``doc`` as JSON through a sibling temporary file and os.replace.
+
+    RULE: the hint file is replaced whole or not at all. REASON: a crash or a
+    full disk during an in-place rewrite leaves truncated JSON, and the hints
+    of that calibration are then lost to every later solve.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def write_codet_frames(path, codet_frames, camera_names, videos=None):
-    """Write the co-detection hint file the solve reads.
+    """Write the co-detection hint file the solve reads, in format 3.
 
-    ``codet_frames`` is ``BoardDetector.codet_frames``; ``camera_names`` maps
-    camera index to name. ``videos`` is ``{cam_name: {"name": mp4 file name,
-    "size": bytes}}`` when the videos already exist; at acquisition stop they
-    usually do not (the remux runs afterwards), so the caller stamps them later
-    with ``stamp_codet_videos``. The solve refuses hints whose video identity
-    does not match the mp4 it is about to open, because a stale hint file from
-    a previous calibration decodes the wrong frames silently.
+    ``codet_frames`` is ``BoardDetector.codet_frames``, one
+    ``{cam_index: block_id}`` per tick; ``camera_names`` maps camera index to
+    name. ``videos`` is ``{cam_name: {"name": mp4 file name, "size": bytes}}``
+    when the videos already exist; at acquisition stop they usually do not
+    (the remux runs afterwards), so the caller stamps them later with
+    ``stamp_codet_videos``. The solve refuses hints whose video identity does
+    not match the mp4 it is about to open, because a stale hint file from a
+    previous calibration decodes the wrong frames with no error.
 
-    Returns the total number of hint indices written.
+    RULE: each camera of a tick is listed with every block ID of that tick,
+    not only its own. REASON: the cameras' latest frames at one tick can
+    straddle a trigger (one camera already holds trigger T, another still
+    T-1), and the solve pairs two cameras only on a trigger both decoded. With
+    the union, every pair of a tick shares every trigger the tick saw. The
+    solve re-detects the board in each listed frame, so an extra frame costs
+    one detection and can never pair a frame without the board. A few percent
+    of co-detections straddle, so the union adds about that many decodes.
+
+    Returns the total number of hints written.
     """
-    per_cam: dict[str, set] = {}
+    per_idx: dict[int, set] = {}
     for tick in codet_frames:
-        for cam_idx, frame_n in tick.items():
-            per_cam.setdefault(camera_names[cam_idx], set()).add(int(frame_n))
+        ids = {int(b) for b in tick.values()}
+        for cam_idx in tick:
+            per_idx.setdefault(int(cam_idx), set()).update(ids)
     doc = {
         "format": CODET_FORMAT,
         "written": datetime.now().isoformat(timespec="seconds"),
-        "frames": {cam: sorted(fns) for cam, fns in per_cam.items()},
+        CODET_KEY_BLOCK_IDS: {camera_names[i]: sorted(per_idx[i])
+                              for i in sorted(per_idx)},
         "videos": dict(videos or {}),
     }
-    with open(path, "w") as f:
-        json.dump(doc, f)
-    return sum(len(v) for v in doc["frames"].values())
+    _write_json_atomic(path, doc)
+    return sum(len(v) for v in doc[CODET_KEY_BLOCK_IDS].values())
 
 
 def calibration_video(cam_dir):
-    """The calibration mp4 in a camera directory, or None."""
+    """The calibration mp4 in a camera directory, or None.
+
+    The rule is ``alignment.video_for(cam_dir, "calibration")``: the one mp4
+    whose name ends in ``-calibration.mp4``, which is how every writer names
+    it. RULE: two candidates raise ``ValueError``. REASON: taking the first of
+    two would solve from a video nobody chose, with nothing in the report
+    saying which one it was.
+    """
     cam_dir = Path(cam_dir)
     if not cam_dir.is_dir():
         return None
-    mp4s = sorted(f for f in cam_dir.iterdir()
-                  if f.is_file() and f.suffix == ".mp4"
-                  and "calibration" in f.name)
-    return mp4s[0] if mp4s else None
+    # Imported here, not at module level: alignment reads the session config,
+    # which imports yaml, and this module must import with numpy alone.
+    from gui_app.alignment import video_for
+    return video_for(cam_dir, "calibration")
 
 
 def stamp_codet_videos(calib_dir):
@@ -350,25 +403,34 @@ def stamp_codet_videos(calib_dir):
     A stamp taken before alignment runs therefore mismatches on exactly the
     sessions that were aligned, and the solve discards the hints and scans in
     full. The GUI's right moment is the transition to idle, reached both when
-    no alignment runs and after alignment finishes. Returns the number of
-    cameras stamped, 0 when there is no hint file to stamp.
+    no alignment runs and after alignment finishes.
+
+    A camera without exactly one calibration mp4 is left unstamped, so the
+    solve scans that camera in full and keeps the others' hints. Returns the
+    number of cameras stamped, 0 when there is no hint file to stamp.
     """
     calib_dir = Path(calib_dir)
     path = calib_dir / "codet_frames.json"
     if not path.exists():
         return 0
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         doc = json.load(f)
-    if "frames" not in doc:
-        # Legacy flat {cam: [frames]} layout: lift it into the current one.
-        doc = {"format": CODET_FORMAT, "written": "", "frames": doc,
+    key = codet_hint_key(doc)
+    if key is None:
+        # Legacy flat {cam: [frames]} layout: lift it into format 2, whose
+        # per-camera values are frame numbers like the legacy ones.
+        doc = {"format": 2, "written": "", CODET_KEY_FRAMES: doc,
                "videos": {}}
+        key = CODET_KEY_FRAMES
     videos = {}
-    for cam in doc["frames"]:
-        mp4 = calibration_video(calib_dir / cam)
+    for cam in doc[key]:
+        try:
+            mp4 = calibration_video(calib_dir / cam)
+        except ValueError as e:
+            print(f"[hud] {cam} not stamped: {e}", flush=True)
+            continue
         if mp4 is not None:
             videos[cam] = {"name": mp4.name, "size": mp4.stat().st_size}
     doc["videos"] = videos
-    with open(path, "w") as f:
-        json.dump(doc, f)
+    _write_json_atomic(path, doc)
     return len(videos)

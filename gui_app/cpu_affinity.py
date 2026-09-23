@@ -337,28 +337,25 @@ def restrict_to_performance_cores(priority: int | None = None) -> dict:
     return out
 
 
-def pin_to_performance_core(slot: int, priority: int | None = None) -> dict:
-    """Pin the calling thread to the slot-th P-core, round-robin if oversubscribed.
+#: Priority for capture threads that overflow the core pool (see
+#: place_capture_thread), or None to give them the same priority as the
+#: pinned ones. Set through set_overflow_priority.
+_overflow_priority: int | None = None
 
-    `slot` is normally the camera index, so cameras spread across P-cores
-    deterministically instead of competing for whichever the scheduler picks.
-    Returns a dict describing what happened — callers log it rather than trust it.
+
+def set_overflow_priority(level: int | None) -> None:
+    """Set the priority of capture threads that float over the pool.
+
+    None, the default, gives an overflow thread the same priority as a pinned
+    one. A diagnostic knob for a rig A/B: at equal priority Windows only
+    round-robins, so a floater that lands on a pinned thread's core makes
+    that thread wait, while one notch lower (THREAD_PRIORITY_ABOVE_NORMAL
+    under a pinned THREAD_PRIORITY_HIGHEST) lets the pinned thread preempt
+    it. Nothing in the application calls this; a probe does, before its grab
+    threads start.
     """
-    cores = _core_order or performance_cores()
-    out = {"pinned": False, "cpu": None, "priority": False,
-           "n_pcores": len(cores)}
-    if not cores:
-        # Not hybrid, or pinning unavailable. Do NOTHING -- including no
-        # priority bump. session_config advertises this as a no-op in that
-        # case, and quietly raising priority anyway would make that false and
-        # change scheduling on machines nobody measured.
-        return out
-    cpu = cores[slot % len(cores)]
-    out["cpu"] = cpu
-    out["pinned"] = pin_current_thread(cpu)
-    if priority is not None:
-        out["priority"] = set_current_thread_priority(priority)
-    return out
+    global _overflow_priority
+    _overflow_priority = None if level is None else int(level)
 
 
 def capture_core_pool(exclude=None) -> list[int]:
@@ -379,12 +376,14 @@ def capture_core_pool(exclude=None) -> list[int]:
 
     Headless the penalty is a few frames. Under the GUI, whose main thread adds
     ~1.5-2 ms of repaint work per cycle, the same camera diverged to
-    kick_max_lag (480) and was force-dropped.
+    kick_max_lag and was force-dropped.
 
-    Dropping CPU 0 leaves 7 cores for 9 cameras here, so two float. That is a
-    far better trade than one camera parked on the busiest core in the machine.
-    An explicit set_core_order() wins over this, so a rig that has measured
-    something different can override it.
+    Every excluded core is one fewer exclusive core, so on a rig with more
+    cameras than the pool holds the extra capture threads float over the
+    pool (see place_capture_thread). That is a far better trade than a camera
+    parked on the busiest core in the machine. `exclude` is the profile's
+    capture_core_exclude; an explicit set_core_order() wins over both, so a
+    rig that has measured something different can override them.
     """
     cores = performance_cores()
     if len(cores) <= 1:
@@ -397,31 +396,33 @@ def capture_core_pool(exclude=None) -> list[int]:
 def place_capture_thread(slot: int, priority: int | None = None) -> dict:
     """Placement policy for capture threads: exclusive core, else float.
 
-    `pin_to_performance_core` wraps with `slot % len(cores)`, which is correct
-    only while there are at least as many P-cores as cameras. At nine cameras
-    on eight P-cores it pins cam1 and cam9 to the SAME core, both at
-    GRAB_THREAD_PRIORITY, and that core is CPU 0 -- which on this part also
-    carries the largest share of NIC DPC. Two grab threads on one such core at
-    GRAB_THREAD_PRIORITY give monotonic lag on one camera (67 -> 173 frames)
-    while the other eight sit at 0-4, with resends at 9-15 and zero buffer
-    underruns: pure CPU contention, not the network.
+    RULE: never pin two capture threads to one core. REASON: a round-robin
+    `slot % len(cores)` is correct only while there are at least as many
+    cores as cameras; past that it puts two grab threads on one core at
+    GRAB_THREAD_PRIORITY. Measured on the reference rig, that gives monotonic
+    lag on one camera (67 -> 173 frames) while the others sit at 0-4, with
+    resends at 9-15 and zero buffer underruns: CPU contention, not the
+    network.
 
-    Two whole-rig alternatives were already measured and rejected: confining
-    every thread to the P-core set was worse than baseline, and reordering the
-    cores only moves which camera is the victim -- with nine threads on eight
-    cores, somebody always doubles up.
+    Two whole-rig alternatives were measured and rejected: confining every
+    thread to the P-core set was worse than baseline, and reordering the
+    cores only moves which camera is the victim, because with more threads
+    than cores somebody always doubles up.
 
-    So do neither. Give every camera that fits a core of its own, and let only
-    the overflow float across the whole P-core set, where the scheduler can
-    slot it into whichever core is momentarily free. Nothing changes at all
-    for a rig with no more cameras than P-cores.
+    So every camera that fits gets a core of its own, and only the overflow
+    floats across the whole pool, where the scheduler can slot it into
+    whichever core is momentarily free. Nothing changes for a rig with no
+    more cameras than pool cores. The overflow threads take `priority`
+    unless set_overflow_priority() gave them a level of their own.
     """
     cores = _core_order or capture_core_pool()
     out = {"pinned": False, "cpu": None, "priority": False,
            "n_pcores": len(cores)}
     if not cores:
-        # Not hybrid, or pinning unavailable: no-op, exactly as
-        # pin_to_performance_core would.
+        # Not hybrid, or pinning unavailable. Do NOTHING, including no
+        # priority change: session_config advertises pinning as a no-op on
+        # such a host, and raising priority anyway would change scheduling on
+        # machines nobody measured.
         return out
     if slot < len(cores):
         cpu = cores[slot]
@@ -434,8 +435,9 @@ def place_capture_thread(slot: int, priority: int | None = None) -> dict:
     # the excluded core comes back in through the overflow path.
     out["cpu"] = f"pool[{len(cores)}]"
     out["pinned"] = restrict_current_thread(cores)
-    if priority is not None:
-        out["priority"] = set_current_thread_priority(priority)
+    level = priority if _overflow_priority is None else _overflow_priority
+    if level is not None:
+        out["priority"] = set_current_thread_priority(level)
     out["overflow"] = True
     return out
 
@@ -470,17 +472,17 @@ def restrict_current_thread(cpus) -> bool:
 def pin_to_efficiency_core(slot: int) -> dict:
     """Confine the calling thread to the E-core SET (not one E-core).
 
-    For the ENCODER threads. They are not latency-critical — `Encode()` and
-    `os.write()` both release the GIL and the real work is on the GPU — but
-    there is one per camera, so left unpinned they compete with the grab
-    threads for the eight P-cores, which would undo the grab-thread pinning.
+    For the ENCODER threads, and off by default (`pin_encoder_threads`). It
+    keeps the encoders off the P-cores the grab threads are pinned to, which
+    unpinned encoders compete for. `Encode()` holds the GIL while it uploads
+    each frame to the GPU, so an encoder is not idle CPU work either.
 
     **Never pin an encoder to ONE E-core: it is much worse than not pinning
-    them at all** — a camera blew out to 321 frames behind and avg_proc went
-    2.19 -> 3.48 ms. A single E-core cannot sustain encode
-    submission for one 1920x1200 stream at 100 fps, so the encoder backs up and
-    drags its camera with it. The set keeps them off the P-cores while letting
-    the scheduler move them freely among the sixteen E-cores.
+    them at all.** Measured on the reference rig, one camera fell 321 frames
+    behind and avg_proc rose from 2.19 to 3.48 ms: a single E-core could not
+    sustain encode submission for one 1920x1200 stream at 100 fps, so the
+    encoder backed up and held its camera back. The set keeps them off the
+    P-cores while letting the scheduler move them freely among the E-cores.
 
     Deliberately no priority bump: the point is to yield to capture.
     """

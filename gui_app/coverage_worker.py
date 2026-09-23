@@ -17,6 +17,15 @@ Full-resolution frames are preferred (that is what resolves the board for the
 oblique cameras, and it matches what the post-hoc solve sees); the downsampled
 preview is only a stand-in for a camera whose first full frame has not arrived.
 
+Each tick reads every camera's full frame together with its block ID from
+``CameraManager.latest_full_frames_with_bids()``. RULE: the frame and the ID
+come from one tuple the grab thread published in one assignment. REASON: the
+ID becomes the co-detection hint the solve decodes, and an ID read separately
+from the frame can belong to the next frame, which moves the hint off the
+frame the board was detected in. A preview stand-in has no ID and records no
+hint. A camera manager without that method gets full frames and no hints, and
+the solve then scans every frame.
+
 OpenCV thread pool. Each ``detectBoard`` call fans out over OpenCV's global
 pool, which defaults to every hardware thread on the host, while the grab
 threads are pinned and budgeted per frame. ``run()`` therefore caps the pool
@@ -69,6 +78,7 @@ class CoverageWorker(QThread):
         self.ticks = 0
         self._err_last = -float("inf")
         self._err_suppressed = 0
+        self._no_bids_logged = False
 
     def _log_error(self, e):
         now = time.monotonic()
@@ -99,6 +109,35 @@ class CoverageWorker(QThread):
             print("[hud] could not set OpenCV threads: {}".format(e), flush=True)
             return None
 
+    def _read_frames(self):
+        """(frames, block_ids) for one tick, one entry per camera.
+
+        A camera with a full frame gives that frame and its block ID (None in
+        preview); a camera without one gives its downsampled preview and None.
+        """
+        mgr = self._camera_mgr
+        pairs_of = getattr(mgr, "latest_full_frames_with_bids", None)
+        if pairs_of is not None:
+            pairs = pairs_of()
+        else:
+            if not self._no_bids_logged:
+                self._no_bids_logged = True
+                print("[hud] the camera manager publishes no block IDs, so no "
+                      "co-detection hints are recorded and the solve will "
+                      "scan every frame", flush=True)
+            pairs = [None if f is None else (f, None)
+                     for f in mgr.latest_full_frames]
+        preview = mgr.latest_frames
+        frames, bids = [], []
+        for i, pair in enumerate(pairs):
+            if pair is not None and pair[0] is not None:
+                frames.append(pair[0])
+                bids.append(pair[1])
+            else:
+                frames.append(preview[i] if i < len(preview) else None)
+                bids.append(None)
+        return frames, bids
+
     def run(self):
         prev_threads = self._set_opencv_threads()
         t_start = time.perf_counter()
@@ -107,15 +146,9 @@ class CoverageWorker(QThread):
         try:
             while self._running and not self.isInterruptionRequested():
                 t0 = time.perf_counter()
-                # Prefer full-res frames (resolves oblique cams); fall back to the
-                # downsampled preview per-camera until the first full frame lands.
-                full = self._camera_mgr.latest_full_frames
-                preview = self._camera_mgr.latest_frames
-                frames = [f if f is not None else (preview[i] if i < len(preview) else None)
-                          for i, f in enumerate(full)]
-                fc = self._camera_mgr.frame_counts
                 try:
-                    self._detector.update(frames, frame_counts=fc)
+                    frames, bids = self._read_frames()
+                    self._detector.update(frames, block_ids=bids)
                 except Exception as e:
                     self._log_error(e)
                 self.ticks += 1

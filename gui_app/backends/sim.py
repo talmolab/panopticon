@@ -35,6 +35,9 @@ from pathlib import Path
 import numpy as np
 
 from gui_app.backends import sim_board
+# The block-ID cycle is defined once, in frame_sync, because the coordinator's
+# unwrap and this simulated counter must agree on it.
+from gui_app.frame_sync import BLOCKID_WRAP
 from gui_app.session_config import RigProfile
 
 #: The profile that selects this backend, and the ONE place the simulated
@@ -70,10 +73,10 @@ BASELINE_GAIN_DB = 6.0
 #: an immediate, named failure instead of unbounded memory growth.
 BUFFER_POOL = 4
 
-#: 16-bit GVSP block IDs run 1..65535: 0 is reserved, so the counter wraps
-#: onto 1. `frame_sync.BLOCKID_WRAP` and `alignment._unwrap_blockids` assume
-#: exactly this, and a wrap that produced a 0 would be read as "no ordinal".
-BLOCKID_WRAP = 65535
+# 16-bit GVSP block IDs run 1..65535: 0 is reserved, so the counter wraps
+# onto 1. `BLOCKID_WRAP` (imported above from frame_sync) is that period, and
+# `alignment._unwrap_blockids` assumes the same cycle; a wrap that produced a
+# 0 would be read as "no ordinal".
 
 
 class SimTimeout(Exception):
@@ -125,6 +128,14 @@ class SimFaults:
     #: Block ID the counter starts from after each `StartGrabbing`. 65500
     #: puts a 16-bit wrap a few frames into the recording.
     blockid_start: int = 1
+    #: The numbering of the camera's raw counter. 1 is the GigE Vision
+    #: convention the contract asks for (`GrabResultProtocol.BlockID`): the
+    #: first frame after `StartGrabbing` reports 1, on the 1..65535 cycle.
+    #: 0 is a 0-based 64-bit counter such as Spinnaker's FrameID, passed
+    #: through without the normalisation a conforming backend applies: the
+    #: first frame reports `blockid_start - 1` (0 by default) and the counter
+    #: never wraps. It stages a backend that skipped the normalisation.
+    first_block_id: int = 1
     #: Row padding reported from `padding_from` frames on. Non-zero must
     #: retire the camera: the (H, W) reshape would shear every row.
     padding_x: int = 0
@@ -143,6 +154,12 @@ class SimFaults:
     stats_error: str = ""
     #: Temperature reading, or None for a camera that reports nothing.
     thermals: dict | None = None
+
+    def __post_init__(self):
+        if self.first_block_id not in (0, 1):
+            raise ValueError(
+                f"first_block_id must be 1 (GigE Vision numbering) or 0 (a "
+                f"0-based counter), not {self.first_block_id!r}")
 
 
 def set_faults(faults: dict | None) -> dict:
@@ -343,6 +360,11 @@ class SimCamera:
         self.rate_limit = 165.0
         self.gige_driver = ""
         self.extended_ids = False
+        #: The `camera_spec` open() was given, kept so a test can prove the
+        #: manager passed the profile's camera: block through. The simulated
+        #: camera takes its settings from `SimFaults` and the module baseline,
+        #: so nothing in the block is applied.
+        self.camera_spec = None
         self.is_open = True
         # np.full rather than np.empty: it pre-faults every page, so the first
         # frame is not the one that pays for the allocation.
@@ -481,8 +503,11 @@ class SimCamera:
         return sim_board.SimBoard.real_time_of(v, st)
 
     def _block_id(self) -> int:
-        """Next block ID, wrapped as a 16-bit GVSP counter does."""
+        """Next block ID: a 16-bit GVSP counter, or with `first_block_id` 0 a
+        0-based counter that does not wrap (see `SimFaults.first_block_id`)."""
         raw = self.faults.blockid_start + self._consumed - 1
+        if self.faults.first_block_id == 0:
+            return raw - 1
         return (raw - 1) % BLOCKID_WRAP + 1
 
     def _make_result(self, i: int, st, ok: bool = True) -> SimGrabResult:
@@ -656,24 +681,78 @@ class SimBackend:
     def faults_for(self, index: int) -> SimFaults:
         return self.faults.get(index) or SimFaults()
 
+    # ------------------------------------------------- capture worker processes
+    def spawn_state(self) -> dict:
+        """What a capture worker process needs to rebuild this simulated rig:
+        its shape, its per-camera faults and its trigger clock. Picklable.
+
+        RULE: the clock must be a `sim_board.SharedSimBoard`. REASON: the
+        cameras of a split rig run in several processes and must still be
+        fired by one board; a board private to this process cannot be seen
+        from a worker, and each worker would then run a clock of its own that
+        nothing starts. Install one with `sim_board.use_shared_board` (or
+        pass it as `board=`) before the cameras are opened.
+        """
+        board = self.board
+        spec = getattr(board, "spec", None)
+        if spec is None:
+            raise RuntimeError(
+                "this simulated rig is captured in several processes, so its "
+                "trigger board must be a sim_board.SharedSimBoard that every "
+                "process can read; install one with "
+                "sim_board.use_shared_board() before opening the cameras")
+        return {"n_cameras": self.n_cameras, "width": self.width,
+                "height": self.height, "faults": dict(self.faults),
+                "board": tuple(spec)}
+
+    def restore_spawn_state(self, state: dict) -> None:
+        """Take on the rig a parent's `spawn_state()` described, reading its
+        shared trigger clock. Called once in a capture worker, before any
+        camera is opened; the attached board also becomes this process's
+        shared board."""
+        self.n_cameras = int(state["n_cameras"])
+        self.width = int(state["width"])
+        self.height = int(state["height"])
+        self.faults = dict(state["faults"])
+        board = sim_board.SharedSimBoard.attach(state["board"])
+        self._board = board
+        sim_board.use_shared_board(board)
+
+    def release_spawn_state(self) -> None:
+        """Close the shared trigger clock restore_spawn_state attached. A
+        capture worker calls this as it exits, so no view over the board's
+        segment outlives the segment."""
+        board, self._board = self._board, None
+        close = getattr(board, "close", None)
+        if close is not None:
+            if sim_board._SHARED is board:
+                sim_board.use_shared_board(None)
+            close()
+
     # ------------------------------------------------------------- cold path
     def enumerate_devices(self) -> list:
         """The simulated cameras, sorted by serial number as the contract
         requires: camera names are positional over this order."""
         return [SimDevice(i, f"SIM{i + 1:05d}") for i in range(self.n_cameras)]
 
-    def open(self, device, pfs_path: str = "", max_num_buffer: int = 0):
+    def open(self, device, pfs_path: str = "", max_num_buffer: int = 0,
+             camera_spec=None):
         """Open one camera. `pfs_path` is accepted and ignored: the simulated
         camera has no feature file, and the caller must not have to know.
 
         `max_num_buffer` is recorded rather than allocated. The real pool
-        absorbs jitter; here the grab loop holds exactly one result at a time,
-        so a 600-deep pool would allocate gigabytes to hide the leak a
-        four-deep one names immediately.
+        absorbs jitter; here the grab loop holds one result at a time, so a
+        600-deep pool would allocate gigabytes to hide the leak a four-deep
+        one names immediately.
+
+        `camera_spec` (the profile's `camera:` block) is accepted, because
+        the sim profile may carry one to exercise the parser, and recorded on
+        the camera as `camera_spec` without being applied.
         """
         cam = SimCamera(device.index, device.GetSerialNumber(), self.width,
                         self.height, self.faults_for(device.index),
                         self.board, max_num_buffer)
+        cam.camera_spec = camera_spec
         self.cameras.append(cam)
         return cam
 
@@ -698,18 +777,56 @@ class SimBackend:
     def get_exposure_gain(self, cam) -> tuple:
         return cam.exposure_us, cam.gain_db
 
-    def set_exposure_gain(self, cam, exposure_us=None, gain_db=None) -> tuple:
+    #: Unit of the simulated camera's gain control, which models a `Gain`
+    #: node in dB. Not published as the optional `gain_unit` member, so the
+    #: exposure log lines keep the bare gain value the sim has always
+    #: printed.
+    GAIN_UNIT = "dB"
+
+    def set_exposure_gain(self, cam, exposure_us=None, gain_db=None,
+                          gain_unit=None) -> tuple:
         """Apply exposure/gain and report what took.
 
-        Nothing is clamped here, deliberately: the ceiling is the caller's job
-        because a camera does not error on an exposure it cannot sustain, it
-        silently ignores triggers — which is what this camera then does.
+        Nothing is clamped here: the ceiling is the caller's job, because a
+        camera does not error on an exposure it cannot sustain. It ignores
+        triggers instead, which is what this camera then does.
+
+        `gain_unit` follows the contract: None (the node's own unit) and "dB"
+        are written; "raw" is refused with ValueError, because this camera's
+        gain is in dB; anything else is refused before any write. The
+        exposure is applied before the gain's unit is checked, as on a real
+        camera.
         """
+        if gain_unit not in (None, "dB", "raw"):
+            raise ValueError(f"gain_unit must be None, 'dB' or 'raw', "
+                             f"not {gain_unit!r}")
         if exposure_us is not None:
             cam.exposure_us = float(exposure_us)
         if gain_db is not None:
+            if gain_unit is not None and gain_unit != self.GAIN_UNIT:
+                raise ValueError(
+                    f"gain value {gain_db!r} is in {gain_unit} but the "
+                    f"simulated camera's gain takes {self.GAIN_UNIT}")
             cam.gain_db = float(gain_db)
         return cam.exposure_us, cam.gain_db
+
+    @staticmethod
+    def exposure_ceiling_us(cam, fps: float, rate_limit: float) -> float:
+        """Longest exposure, in us, at which the simulated camera acquires
+        every trigger: `1e6/fps - 1e6/rate_limit`, or `1e6/fps` with the
+        limiter disabled (`rate_limit <= 0`).
+
+        The simulated camera ignores a trigger that arrives inside
+        `exposure + 1/rate_limit` of the last one it acquired (see
+        `SimCamera._min_interval_v`), the Basler limiter rule, so its ceiling
+        is the Basler formula. The value is raw; the caller applies its 0.9
+        margin, and a value at or below 0 is returned as is.
+        """
+        fps = float(fps)
+        limit = float(rate_limit or 0.0)
+        if limit > 0:
+            return 1e6 / fps - 1e6 / limit
+        return 1e6 / fps
 
     def enable_extended_block_ids(self, i: int, cam) -> bool:
         """Report whether 64-bit ids were negotiated. False by default, so the
@@ -767,8 +884,19 @@ class SimBackend:
             return {"error": cam.faults.stats_error}
         s = cam.stats
         total = s["succeeded"] + s["failed"] + s["underrun"]
+        resends = s["failed"] * 3
         return {"Total_Buffer_Count": total,
                 "Failed_Buffer_Count": s["failed"],
                 "Buffer_Underrun_Count": s["underrun"],
-                "Resend_Request_Count": s["failed"] * 3,
-                "Ignored_Trigger_Count": s["ignored"]}
+                "Resend_Request_Count": resends,
+                "Ignored_Trigger_Count": s["ignored"],
+                # The CANONICAL_STREAM_STATS keys every backend shares.
+                "buffers_total": total,
+                "buffers_failed": s["failed"],
+                "buffers_underrun": s["underrun"],
+                "resend_requests": resends}
+
+    @staticmethod
+    def sdk_report() -> str:
+        """The simulated rig drives no camera SDK."""
+        return "no camera SDK (simulated cameras, gui_app/backends/sim.py)"

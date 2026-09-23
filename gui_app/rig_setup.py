@@ -23,7 +23,9 @@ MANAGER_FLAGS = ("pin_capture_threads", "encoder_pcores", "pin_encoder_threads")
 
 #: Profile field -> open_all keyword. Only keywords the installed manager's
 #: signature accepts are passed (see open_kwargs), so a profile field whose
-#: consumer has not landed is declared without breaking open.
+#: consumer has not landed is declared without breaking open. A field whose
+#: value is None is left out, so ``camera`` reaches open_all (and the backend)
+#: only when the profile has a camera: block.
 _OPEN_KWARG_FIELDS = {
     "pfs_path": "pfs_path",
     "gige_driver": "gige_driver",
@@ -34,7 +36,14 @@ _OPEN_KWARG_FIELDS = {
     "camera_backend": "backend",
     "gev_bandwidth_reserve_pct": "gev_bandwidth_reserve_pct",
     "gev_bandwidth_reserve_accum": "gev_bandwidth_reserve_accum",
+    "camera": "camera_spec",
 }
+
+#: open_all keywords that open_kwargs never drops for a manager that does not
+#: accept them. The camera: block is the only source of the settings it
+#: names; a manager that lost it would open the cameras on whatever they
+#: hold, so open_kwargs refuses instead.
+_REQUIRED_OPEN_KWARGS = ("camera_spec",)
 
 
 def _expect_geometry(profile):
@@ -97,6 +106,11 @@ def open_kwargs(mgr, profile: RigProfile) -> dict:
     ``**kwargs`` receives everything. Optional fields whose value is None are
     left out because None means "keep the camera file's value".
 
+    The exception is a keyword in ``_REQUIRED_OPEN_KWARGS``: when the profile
+    sets it and the manager does not accept it, RuntimeError names the
+    keyword, because opening without it would configure the cameras from
+    something other than the profile.
+
         mgr.open_all(**open_kwargs(mgr, profile))
     """
     candidates = {}
@@ -117,4 +131,42 @@ def open_kwargs(mgr, profile: RigProfile) -> dict:
         return candidates
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return candidates
+    lost = [k for k in _REQUIRED_OPEN_KWARGS if k in candidates and k not in params]
+    if lost:
+        raise RuntimeError(
+            f"Profile {getattr(profile, 'name', '?')!r} has a camera: block, "
+            f"but this copy of Panopticon's camera manager does not pass "
+            f"{', '.join(lost)} to the camera backend, so the cameras would "
+            f"open without the block's settings. Update gui_app/"
+            f"camera_manager.py to a version whose open_all takes "
+            f"{', '.join(lost)}.")
     return {k: v for k, v in candidates.items() if k in params}
+
+
+def make_manager(profile: RigProfile, **kwargs):
+    """The camera manager ``profile`` asks for.
+
+    ``capture_processes`` 0 (the default in every shipped profile) returns a
+    CameraManager. A positive value returns a
+    gui_app.mp.manager.ProcessCameraManager, which has the same surface and
+    captures the cameras in that many worker processes, dealt to them in
+    contiguous groups by camera index. ``kwargs`` go to
+    ProcessCameraManager (``log_dir``, ``backend``).
+
+    The main window does not call this. It builds a CameraManager and opens
+    no camera for a profile whose capture_processes is above 0
+    (MainWindow._capture_processes_refusal). probe_mp.py builds its
+    ProcessCameraManager directly.
+
+    Both are configured the same way afterwards:
+    ``apply_profile_to_manager(mgr, profile)`` and
+    ``mgr.open_all(**open_kwargs(mgr, profile))``.
+
+    The multi-process package is imported only for a positive value, so a
+    profile at 0 never loads it.
+    """
+    if int(getattr(profile, "capture_processes", 0) or 0) > 0:
+        from gui_app.mp.manager import ProcessCameraManager
+        return ProcessCameraManager(profile, **kwargs)
+    from gui_app.camera_manager import CameraManager
+    return CameraManager()

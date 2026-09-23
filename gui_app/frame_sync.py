@@ -29,19 +29,108 @@ Design notes:
 """
 from collections import deque
 
+#: How messages name what drives the triggers, by the profile's
+#: trigger_source (session_config.TRIGGER_SOURCES). With an external source
+#: the block-ID rate check is the only test of the operator's rate, so its
+#: advice sends the operator to that source, not to a board the rig does not
+#: use. trigger_source.TriggerSource.describe() reads these too.
+SOURCE_NAMES = {"board": "the trigger board", "external": "your trigger source"}
+
+
+def source_name(kind) -> str:
+    """SOURCE_NAMES for ``kind``; the board for None or an unknown kind."""
+    return SOURCE_NAMES.get(kind or "board", SOURCE_NAMES["board"])
+
+
+#: The period of a 16-bit GigE Vision block-ID counter: it counts 1..65535 and
+#: skips 0, so ID 65535 is followed by ID 1. Every module that unwraps block
+#: IDs takes the period from here, because a live unwrap and a post-hoc one
+#: that disagree on it place the same frame at different trigger ordinals.
 BLOCKID_WRAP = 65535
 
 
+class UnwrapState:
+    """What `unwrap_one` remembers about one camera's block-ID stream."""
+
+    __slots__ = ("seen", "last_raw", "offset")
+
+    def __init__(self):
+        self.seen = False     # whether any ID has been unwrapped yet
+        self.last_raw = 0     # the previous raw ID
+        self.offset = 0       # wraps so far, times BLOCKID_WRAP
+
+
+def unwrap_one(raw: int, state: UnwrapState) -> int:
+    """Unwrap the next raw block ID of one camera's stream.
+
+    RULE: a raw ID more than half a period below the previous one is a wrap,
+    and anything else is taken as it stands. REASON: every camera is
+    triggered by the same board and starts at the same ID, so each one wraps
+    at the same trigger, and counting its wraps from its own first ID yields
+    ordinals that agree across cameras. A drop of less than half a period
+    cannot be a wrap, because no camera falls 32767 triggers behind itself.
+
+    `state` carries the stream's history and is updated in place. Callers
+    keep one state per camera, fed in the order the camera delivered.
+    """
+    if state.seen and raw < state.last_raw - (BLOCKID_WRAP // 2):
+        state.offset += BLOCKID_WRAP
+    state.seen = True
+    state.last_raw = raw
+    return raw + state.offset
+
+
+def unwrap_blockids(ids):
+    """A whole recorded block-ID sequence unwrapped, as an int64 numpy array.
+
+    The same rule as `unwrap_one` applied to every step, so a sequence read
+    back from blockids.npy and the stream the coordinator unwrapped live come
+    out with the same ordinals. It refuses what cannot be an ordinal: an ID
+    at or below 0 raises ValueError (0 is reserved and -1 is a placeholder,
+    and either one would read as a wrap), and so does a sequence that is not
+    strictly increasing after the unwrap, which only corrupt or reordered
+    data produces.
+    """
+    import numpy as np
+
+    b = np.asarray(ids).astype(np.int64)
+    bad = b <= 0
+    if np.any(bad):
+        raise ValueError(
+            f"{int(bad.sum())} non-positive block ID(s) (0 is reserved, -1 "
+            f"means the camera did not report one); first at index "
+            f"{int(np.argmax(bad))}")
+    if b.size < 2:
+        return b
+    wrap_at = np.diff(b) < -(BLOCKID_WRAP // 2)
+    if wrap_at.any():
+        b = b + np.concatenate(
+            [[0], np.cumsum(wrap_at.astype(np.int64))]) * BLOCKID_WRAP
+    if np.any(np.diff(b) <= 0):
+        raise ValueError("block IDs not monotonic even after wrap-unwrap "
+                         "(corrupt or reordered)")
+    return b
+
+
 class FrameSyncCoordinator:
-    def __init__(self, n_cams: int, max_lag: int = 240):
+    def __init__(self, n_cams: int, max_lag: int = 240, on_drop=None):
         self.n = int(n_cams)
         self.max_lag = int(max_lag)
+        #: Called as on_drop(cam, frame) for each frame the coordinator
+        #: discards instead of releasing, or None. RULE: every frame submit()
+        #: is given leaves exactly once, in a release or through on_drop,
+        #: including a late frame, a retired camera's frame and the frames a
+        #: retirement clears. REASON: the router's frames are NV12 ring
+        #: slots that the grab thread may reuse only once they are free, and
+        #: a discarded frame nobody hands back shrinks that ring for the rest
+        #: of the session.
+        self._on_drop = on_drop
         self._pending = [deque() for _ in range(self.n)]  # (block_id, frame)
         self._frontier = [0] * self.n        # highest unwrapped ID seen per cam
-        self._seen_any = [False] * self.n
-        self._last_raw = [0] * self.n         # for incremental wrap unwrap
-        self._wrap_off = [0] * self.n
+        #: Per-camera unwrap history (see unwrap_one).
+        self._unwrap_state = [UnwrapState() for _ in range(self.n)]
         self._decided_upto = 0                # highest block ID whose fate is set
+        self._first_decided = None            # lowest one, once any is decided
         self._retired = [False] * self.n      # cameras dropped from the align set
         #: (cam_index, reason) for every retirement, in order. A retirement is
         #: the difference between losing one camera and losing the session, so
@@ -61,10 +150,31 @@ class FrameSyncCoordinator:
         """Max frames buffered awaiting a release decision (for monitoring)."""
         return max((len(p) for p in self._pending), default=0)
 
+    def pending_count(self, cam: int) -> int:
+        """Frames of camera `cam` awaiting a release decision."""
+        return len(self._pending[cam])
+
+    @property
+    def forced_triggers(self) -> int:
+        """Triggers force-dropped from every camera because one lagged more
+        than max_lag. `forced` counts the frames those triggers took with
+        them, one per camera that had the trigger."""
+        return sum(self.forced_by)
+
     @property
     def decided_upto(self) -> int:
         """Highest trigger whose fate (released or dropped) is final."""
         return self._decided_upto
+
+    @property
+    def decided_triggers(self) -> int:
+        """Triggers from the first decided one to decided_upto, released or
+        not. Counted from the first decision rather than from 1, because a
+        stream's IDs start wherever its counter started (a 16-bit counter
+        near its wrap, a resumed stream)."""
+        if self._first_decided is None:
+            return 0
+        return self._decided_upto - self._first_decided + 1
 
     def retire(self, cam: int, reason: str = "", announce: bool = True):
         """Drop a camera from the alignment set.
@@ -82,9 +192,18 @@ class FrameSyncCoordinator:
             return None
         self._retired[cam] = True
         self.retired_reasons.append((cam, reason))
-        self._pending[cam].clear()
+        held = self._pending[cam]
+        if self._on_drop is not None:
+            for _bid, frame in held:
+                self._on_drop(cam, frame)
+        held.clear()
+        if self.active():
+            tail = "Remaining cameras stay aligned; this one's video ends here."
+        else:
+            tail = ("No camera is left in the alignment set, so every video "
+                    "ends here.")
         msg = (f"[sync] cam{cam + 1} RETIRED from the alignment set: {reason}. "
-               f"Remaining cameras stay aligned; this one's video ends here.")
+               f"{tail}")
         if announce:
             print(msg, flush=True)
         return msg
@@ -116,15 +235,16 @@ class FrameSyncCoordinator:
                 f"forced={self.forced}" + (f" forced_by[{blame}]" if blame else ""))
 
     def _unwrap(self, cam: int, raw: int) -> int:
-        if self._seen_any[cam] and raw < self._last_raw[cam] - (BLOCKID_WRAP // 2):
-            self._wrap_off[cam] += BLOCKID_WRAP
-        self._last_raw[cam] = raw
-        return raw + self._wrap_off[cam]
+        """Camera `cam`'s next raw ID unwrapped (see unwrap_one)."""
+        return unwrap_one(raw, self._unwrap_state[cam])
 
     def submit(self, cam: int, raw_block_id: int, frame):
         """Register a successfully-grabbed frame. Returns a list of
-        (cam, block_id, frame) ready to encode now, in per-camera order."""
+        (cam, block_id, frame) ready to encode now, in per-camera order.
+        A frame that is refused or dropped goes to on_drop (see __init__)."""
         if self._retired[cam]:
+            if self._on_drop is not None:
+                self._on_drop(cam, frame)
             return []
         if raw_block_id <= 0:
             # GVSP reserves block ID 0 and no camera reports a negative one, so
@@ -132,15 +252,18 @@ class FrameSyncCoordinator:
             # ordinal". Fed to the unwrap it reads as a 16-bit wrap and places
             # the camera far ahead, force-dropping every other camera. Refuse
             # it; the grab thread counts the exception as a frame error.
+            if self._on_drop is not None:
+                self._on_drop(cam, frame)
             raise ValueError(
                 f"cam{cam + 1}: block ID {raw_block_id} is not a trigger "
                 f"ordinal (0 is reserved, negative means unreported)")
-        bid = self._unwrap(cam, raw_block_id)
-        self._seen_any[cam] = True
+        bid = unwrap_one(raw_block_id, self._unwrap_state[cam])
         if bid <= self._decided_upto:
             # Late arrival (e.g. recovered after we force-dropped its trigger);
             # its slot is already decided, so it can't be aligned — drop it.
             self.dropped += 1
+            if self._on_drop is not None:
+                self._on_drop(cam, frame)
             return []
         self._pending[cam].append((bid, frame))
         self._frontier[cam] = bid
@@ -179,22 +302,23 @@ class FrameSyncCoordinator:
             else:
                 slowest = min(act, key=lambda c: self._frontier[c])
                 forced = t > self._frontier[slowest]  # dropped only by max_lag
-                for c in havers:
-                    self._pending[c].popleft()
-                self.dropped += len(havers)
+                self._discard_heads(havers)
                 if forced:
                     self.forced += len(havers)
                     self.forced_by[slowest] += 1
+            if self._first_decided is None:
+                self._first_decided = t
             self._decided_upto = t
         return ready
 
     def block_rate_warnings(self, timestamps, block_ids, fps: int,
-                            names=None) -> list:
-        """Run the block-ID rate check over every camera in this session."""
+                            names=None, hints=None) -> list:
+        """Run the block-ID rate check over every camera in this session.
+        `hints` is passed through to `check_block_id_rate`."""
         names = names or [f"cam{i + 1}" for i in range(self.n)]
         return block_rate_warnings(
             [block_ids[i] for i in range(self.n)],
-            [timestamps[i] for i in range(self.n)], fps, names)
+            [timestamps[i] for i in range(self.n)], fps, names, hints=hints)
 
     def flush(self):
         """End of recording: no more frames will arrive, so decide every
@@ -215,11 +339,21 @@ class FrameSyncCoordinator:
                 self.released += len(act)
                 self.released_triggers += 1
             else:
-                for c in havers:
-                    self._pending[c].popleft()
-                self.dropped += len(havers)
+                self._discard_heads(havers)
+            if self._first_decided is None:
+                self._first_decided = t
             self._decided_upto = t
         return ready
+
+    def _discard_heads(self, cams) -> None:
+        """Drop the head frame of each camera in `cams` (a trigger not every
+        camera has), counting it and handing it to on_drop."""
+        on_drop = self._on_drop
+        for c in cams:
+            _bid, frame = self._pending[c].popleft()
+            if on_drop is not None:
+                on_drop(c, frame)
+        self.dropped += len(cams)
 
 
 #: Fractional tolerance on the measured block-ID rate.
@@ -242,7 +376,9 @@ BLOCK_RATE_MIN_FRAMES = 300
 BLOCK_RATE_MIN_SECONDS = 2.0
 
 
-def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera"):
+def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera",
+                        ceiling_hint=None, timestamp_hint=None,
+                        source_hint=None):
     """Verify that a camera's block IDs really are trigger ordinals.
 
     Everything downstream takes "same block ID" to mean "same instant" —
@@ -266,7 +402,23 @@ def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera"):
 
     Returns None if the rate checks out or there is too little data to judge,
     otherwise a description of the discrepancy.
+
+    The advice at the end of each message names camera settings, and those
+    are vendor-specific. `ceiling_hint` is the clause that says how to keep
+    exposure under the ceiling, and `timestamp_hint` the clause that says how
+    to check the timestamp unit. Each defaults to the Basler wording (the
+    .pfs, GevTimestampTickFrequency); a caller for another backend passes its
+    own. `source_hint` names what drove the triggers (source_name), and
+    defaults to the trigger board.
     """
+    if ceiling_hint is None:
+        ceiling_hint = (f"ExposureTime + 1/trigger_rate_limit must stay under "
+                        f"1/{fps} s, so check ExposureTime in the .pfs")
+    if timestamp_hint is None:
+        timestamp_hint = ("check GevTimestampTickFrequency, which is 1e9 on "
+                          "the Basler ace models this was built against")
+    if source_hint is None:
+        source_hint = source_name("board")
     if fps <= 0 or len(block_ids) < BLOCK_RATE_MIN_FRAMES:
         return None
     if len(timestamps) < len(block_ids):
@@ -285,9 +437,9 @@ def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera"):
     missed = expected - span
     drift = abs(missed) / fps
 
-    head = (f"{name}: block IDs advanced at {measured:.2f}/s while the trigger "
-            f"board runs at {fps}/s, over {dur:.1f} s of this camera's own "
-            f"device clock.")
+    head = (f"{name}: block IDs advanced at {measured:.2f}/s while "
+            f"{source_hint} should run at {fps}/s, over {dur:.1f} s of this "
+            f"camera's own device clock.")
     if measured < fps:
         return (
             f"{head} That means it did NOT produce one frame per trigger — it "
@@ -296,21 +448,21 @@ def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera"):
             f"with the other cameras' frames from a DIFFERENT instant, drifting "
             f"to about {drift:.1f} s by the end. Equal frame counts and gapless "
             f"block IDs do not rule this out. The usual cause is an exposure "
-            f"over the ceiling: ExposureTime + 1/trigger_rate_limit must stay "
-            f"under 1/{fps} s, so check ExposureTime in the .pfs. DO NOT use "
+            f"over the ceiling: {ceiling_hint}. DO NOT use "
             f"this recording for 3D reconstruction.")
     return (
         f"{head} Block IDs cannot outrun the trigger, so this is not a capture "
-        f"fault: either the recording fps ({fps}) is not what the board was "
-        f"actually driving, a stream re-arm mid-recording resynchronised this "
-        f"camera to the wrong ordinal, or this camera model does not report its "
-        f"device timestamp in nanoseconds (grab_thread assumes it does — check "
-        f"GevTimestampTickFrequency, which is 1e9 on the Basler ace models this "
-        f"was built against). Cross-camera alignment for {name} is unverified "
+        f"fault: either the recording fps ({fps}) is not what {source_hint} "
+        f"was actually driving, a stream re-arm mid-recording resynchronised "
+        f"this camera to the wrong ordinal, or this camera model does not "
+        f"report its device timestamp in nanoseconds (grab_thread assumes it "
+        f"does — "
+        f"{timestamp_hint}). Cross-camera alignment for {name} is unverified "
         f"until that is resolved.")
 
 
-def block_rate_warnings(block_ids, timestamps, fps: int, names) -> list:
+def block_rate_warnings(block_ids, timestamps, fps: int, names,
+                        hints=None) -> list:
     """check_block_id_rate() over every camera, plus one cross-camera read.
 
     A single camera off the trigger rate is a camera fault. *Every* camera off
@@ -320,10 +472,17 @@ def block_rate_warnings(block_ids, timestamps, fps: int, names) -> list:
     board was driving, or this camera model does not report device timestamps
     in nanoseconds. Saying so costs one comparison and stops a fleet-wide
     misconfiguration from reading as nine separate exposure problems.
+
+    `hints` is None or a dict with `ceiling_hint`, `timestamp_hint` and/or
+    `source_hint`, passed to every per-camera check (see
+    `check_block_id_rate`). `source_hint` also names the source in the
+    cross-camera read.
     """
+    hints = dict(hints or {})
+    source = hints.get("source_hint") or source_name("board")
     msgs, rates = [], []
     for b, ts, nm in zip(block_ids, timestamps, names):
-        msg = check_block_id_rate(b, ts, fps, nm)
+        msg = check_block_id_rate(b, ts, fps, nm, **hints)
         if msg:
             msgs.append(msg)
         if len(b) >= BLOCK_RATE_MIN_FRAMES and len(ts) >= len(b):
@@ -340,7 +499,7 @@ def block_rate_warnings(block_ids, timestamps, fps: int, names) -> list:
                 f"({lo:.2f}/s), which is off the configured {fps}/s by the same "
                 f"amount. Cameras do not fail identically, so suspect the "
                 f"reference rather than the cameras: check that the profile's "
-                f"frame rate matches what the trigger board is driving, and "
+                f"frame rate matches what {source} is driving, and "
                 f"that these cameras report device timestamps in nanoseconds. "
                 f"The videos are probably aligned with each other; it is the "
                 f"absolute timebase that is in question.")
