@@ -151,6 +151,11 @@ class FlirSdkUnavailable(ImportError):
         super().__init__(message)
         self.searched = tuple(searched)
 
+    def __reduce__(self):
+        # Pickling rebuilds the exception from these arguments, so it
+        # crosses a spawn boundary with `searched` intact.
+        return (type(self), (str(self), self.searched))
+
 
 class FlirError(RuntimeError):
     """A Spinnaker call returned a non-zero `spinError`.
@@ -165,6 +170,11 @@ class FlirError(RuntimeError):
         self.what = what
         detail = f"Spinnaker error {self.code} ({self.name})"
         super().__init__(f"{what}: {detail}" if what else detail)
+
+    def __reduce__(self):
+        # The default rebuilds from the message, which `int()` refuses, so a
+        # FlirError sent to another process would arrive as a ValueError.
+        return (type(self), (self.code, self.what))
 
 
 class FlirTimeout(Exception):
