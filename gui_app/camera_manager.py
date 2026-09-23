@@ -1068,8 +1068,9 @@ class CameraManager(QObject):
 
         Returns (ready, total). The caller starts the trigger board only after
         this, because starting it earlier is what produced the startup backlog:
-        each thread writes a 2.57 GiB NV12 ring at nine cameras, and frames
-        delivered during that allocation queue in the driver. The grab loop
+        each thread fills its NV12 ring (ring_slots() frames of width x height
+        x 1.5 bytes) before it arms, and frames delivered during that
+        allocation queue in the driver. The grab loop
         retrieves at exactly the arrival rate, so a backlog created here is
         never recovered -- a camera that starts 124 frames behind rides kick_max_lag
         for the whole session and force-drops thousands of frames for everyone.
@@ -1267,8 +1268,8 @@ class CameraManager(QObject):
             # already-common frames) comes from the router, not the grab threads.
             results = self._router.stop()
             # Read the warnings BEFORE dropping the router, or they are lost
-            # with it — which is how a truncated or retired camera used to
-            # degrade to a line on stdout that nobody was watching.
+            # with it, and a truncated or retired camera then reaches the
+            # operator only as a line on stdout.
             warnings.extend(self._router.warnings)
             for cam, reason in self._router.retired_reasons:
                 retired.setdefault(f"cam{cam + 1}", reason)

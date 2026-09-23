@@ -36,7 +36,7 @@ from gui_app.frame_sync import BLOCK_RATE_MIN_FRAMES, BLOCKID_WRAP
 # whole application and a second backend needs no edit here.
 
 # Frames of slack per camera between grab and encode: 200 = 2 s at 100 fps. What
-# is queued is an NV12 ring slot (3.46 MB each at 1920x1200), owned by the ring
+# is queued is an NV12 ring slot (width x height x 1.5 bytes), owned by the ring
 # rather than by the queue. The driver buffer pool upstream adds more slack;
 # its depth comes from the profile (max_num_buffer) and must be >=
 # kick_max_lag, because a grab loop that falls behind the trigger holds its
@@ -237,9 +237,9 @@ class _EncoderThread(threading.Thread):
         `EndEncode()` ends the bitstream; the SESSION is released by the encoder
         object's *destructor* (and by `Close()` where the encoder has one), so
         the reference has to be dropped as well. NVENC concurrent sessions are
-        capped by the driver, and at 9 cameras the budget is tight enough that
-        one leaked session can push a camera onto the raw fallback at ~129 GiB
-        per 10 minutes.
+        capped by the driver, and with as many cameras as the cap allows one
+        leaked session pushes a camera onto the raw fallback, which writes
+        width x height bytes per frame.
 
         `timeout_s` is the caller's remaining teardown budget, passed on to an
         encoder whose EndEncode takes one; None means the encoder's own
@@ -812,13 +812,13 @@ class GrabThread(QThread):
             print(f"[grab{self._cam_index}] stopped before it started; the "
                   f"camera was not touched", flush=True)
             return
-        # Hybrid-CPU placement. 9 grab + 9 encoder + Qt is ~19 busy threads on
-        # 8 P-cores, so Windows must put most of them on E-cores and picks
-        # differently every launch. A grab thread on an E-core runs a few
-        # percent slow, and a few percent is unrecoverable here: the loop
-        # retrieves at exactly the rate frames arrive, so it never catches up.
-        # That is the shape of the rotating laggard. Failure to pin is logged
-        # and ignored -- it is a performance regression, never a correctness one.
+        # Hybrid-CPU placement. When the capture threads outnumber the
+        # P-cores, Windows puts some of them on E-cores and picks differently
+        # every launch. A grab thread on an E-core runs a few percent slow,
+        # and a few percent is unrecoverable here: the loop retrieves at
+        # exactly the rate frames arrive, so it never catches up. That is the
+        # shape of the rotating laggard. Failure to pin is logged and ignored:
+        # it is a performance regression, never a correctness one.
         if self._pin_cpu:
             try:
                 import gui_app.cpu_affinity as _ca
@@ -877,9 +877,9 @@ class GrabThread(QThread):
                     for _ in range(ring_n)]
             except MemoryError as e:
                 # Reachable, not theoretical: the ring is ring_slots() NV12
-                # buffers of width x height x 1.5 bytes per camera (2.39 GiB
-                # at 1920x1200 and max_lag 480), for every camera, on top of
-                # the driver buffer pool. Unprotected, a
+                # buffers of width x height x 1.5 bytes per camera, for every
+                # camera, on top of the driver buffer pool, and both grow
+                # with the profile's frame size and kick_max_lag. Unprotected, a
                 # MemoryError here escapes run() and takes the GUI down — and in
                 # kick mode a camera that never publishes makes the coordinator
                 # force-drop EVERY trigger for EVERY camera, so the session
@@ -976,8 +976,8 @@ class GrabThread(QThread):
                                         or self._triggers_started)
             # Ring allocated, stream started: this thread can now keep up with
             # the trigger rate. Announce it BEFORE the retrieve loop so the
-            # board is not started against a thread still writing 2.57 GiB of
-            # ring. Set on the failure paths too -- a thread that will never be
+            # board is not started against a thread still writing its ring.
+            # Set on the failure paths too -- a thread that will never be
             # ready must not hold the barrier until it times out.
             self.ready.set()
         except Exception as e:

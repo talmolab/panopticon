@@ -472,18 +472,17 @@ def restrict_current_thread(cpus) -> bool:
 def pin_to_efficiency_core(slot: int) -> dict:
     """Confine the calling thread to the E-core SET (not one E-core).
 
-    For the ENCODER threads, and off by default (`pin_encoder_threads`). The
-    idea was that encoders are not latency-critical while there is one per
-    camera, so left unpinned they compete with the grab threads for the
-    P-cores. `Encode()` holds the GIL while it uploads each frame to the GPU,
-    so an encoder is not idle CPU work either.
+    For the ENCODER threads, and off by default (`pin_encoder_threads`). It
+    keeps the encoders off the P-cores the grab threads are pinned to, which
+    unpinned encoders compete for. `Encode()` holds the GIL while it uploads
+    each frame to the GPU, so an encoder is not idle CPU work either.
 
     **Never pin an encoder to ONE E-core: it is much worse than not pinning
-    them at all** — a camera blew out to 321 frames behind and avg_proc went
-    2.19 -> 3.48 ms. A single E-core cannot sustain encode
-    submission for one 1920x1200 stream at 100 fps, so the encoder backs up and
-    drags its camera with it. The set keeps them off the P-cores while letting
-    the scheduler move them freely among the E-cores.
+    them at all.** Measured on the reference rig, one camera fell 321 frames
+    behind and avg_proc rose from 2.19 to 3.48 ms: a single E-core could not
+    sustain encode submission for one 1920x1200 stream at 100 fps, so the
+    encoder backed up and held its camera back. The set keeps them off the
+    P-cores while letting the scheduler move them freely among the E-cores.
 
     Deliberately no priority bump: the point is to yield to capture.
     """
