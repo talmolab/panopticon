@@ -1,14 +1,14 @@
-"""Align multi-camera recordings by GigE block ID (trigger ordinal).
+"""Align multi-camera recordings by block ID (trigger ordinal).
 
-At 6x100 fps over GigE the host/network occasionally drops a frame, which
-breaks the assumption that frame *i* is the same trigger across cameras: after
-the first dropped frame every later frame is off by one or more, so naive
-frame-by-frame use silently compares different moments in time.
+The host or the network occasionally drops a frame, which breaks the
+assumption that frame *i* is the same trigger across cameras: after the first
+dropped frame every later frame is off by one or more, so frame-by-frame use
+compares different moments in time.
 
-Each camera's ``blockids.npy`` records the GigE block ID (trigger ordinal) of
-every recorded frame. The block IDs common to ALL cameras are the triggers
-every camera captured, and the hardware trigger fires all cameras at once — so
-those frames are a synchronized, equal-length set.
+Each camera's ``blockids.npy`` records the block ID (trigger ordinal) of every
+recorded frame. The block IDs common to all the aligned cameras are the
+triggers every one of them captured, and the hardware trigger fires all
+cameras at once, so those frames are a synchronized, equal-length set.
 
 Runs in the project environment (it imports ``gui_app``), so use the
 project's interpreter rather than an isolated script environment:
@@ -22,70 +22,133 @@ camera's recording ``.mp4``. Always writes ``aligned/alignment.{npz,json}``
 (the lossless index: frame_index[c, k] = frame number in camera c's video for
 the k-th synchronized sample). With --replace, each camera's mp4 is re-encoded
 to only the common frames and atomically replaces the original, and that
-camera's blockids.npy + frametimes.npy are rewritten to match.
+camera's blockids.npy + frametimes.npy are rewritten to match. When the
+recording has a ``stim_paradigm.json``, its ``stim_trace.csv`` is then
+rewritten from the new block IDs, because the old trace labels the replaced
+frames with the stimulus of other triggers. A --replace that finds the videos
+already aligned rewrites a trace that does not describe them (one an
+interrupted earlier alignment left behind).
 
-The frame rate defaults to the one recorded in ``session_metadata.json`` beside
-the recording directory (``frame_rate`` for recording/, ``calibration_frame_rate``
-for calibration/), because it stamps the re-encoded videos AND is the reference
-for the block-rate check; a wrong rate mis-stamps every video and flags every
-camera at once.
+A replace overwrites each camera's only copy, and a camera that ended early,
+started late (a retirement, a truncated tail) or stopped for a while
+mid-recording (a stall that recovered) cuts every other camera to its frames.
+--replace therefore refuses while such a camera takes part, names it, and
+changes no video. Then choose one:
 
-Exit status: 0 on success; 1 on an error or when --replace left any camera
-unreplaced; 2 when the only problem is a block-rate warning (a camera whose
-block IDs did not advance at the trigger rate, i.e. it ignored triggers).
+  --exclude cam3            align the other cameras; cam3's files stay as recorded
+  --truncate-to-shortest    cut every camera to the common triggers anyway
 
-The GUI runs this automatically after a realtime recording; this CLI is for
-reprocessing existing sessions.
+A camera the GUI retired during the recording has a RETIRED.json in its
+directory and is excluded by default; --include-retired aligns it with the
+others.
+
+The frame rate, the re-encode quality and the encoder (when the recorded one is
+nvenc or x264) default to the values the acquisition recorded in its own
+``session_metadata.json`` (inside ``<recording_dir>``). A
+recording without one falls back to the session-level copy one directory up,
+with a warning, because that copy describes the session's first acquisition.
+The rate stamps the re-encoded videos and is the reference for the block-rate
+check, so a wrong rate mis-stamps every video and flags every camera at once.
+
+Exit status: 0 on success; 1 on an error, a refused replace, when --replace
+left any camera unreplaced, or when the stim trace could not be rewritten; 2
+when the only problem is a warning: a block-rate warning (a camera whose block
+IDs did not advance at the trigger rate, i.e. it ignored triggers), or a stim
+trace rewritten from cameras that still disagree. Every stim-trace problem is
+also appended to the acquisition's WARNINGS.txt.
+
+In post-hoc mode (``realtime_kick: false``) the GUI runs this alignment itself
+after each recording; this CLI is for reprocessing existing sessions.
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from gui_app import alignment, ffmpeg_cmd
+from gui_app import alignment, ffmpeg_cmd, recording_meta, stim_trace
 
 DEFAULT_FPS = 100
 DEFAULT_QUALITY = 21
 
 
 def session_defaults(rec_dir: Path) -> tuple:
-    """(fps, quality, source) from session_metadata.json, or the fallbacks.
+    """(fps, quality, fps_source, quality_source, warnings, encoder,
+    encoder_source) for a recording.
 
-    ``source`` names where the numbers came from so the run can print it.
+    Values come from ``recording_meta.acquisition_params``; a value no file
+    records is the fallback here, with source None so the run can say so.
+    ``encoder`` is the recorded encoder only when it names an ffmpeg backend
+    (``ffmpeg_cmd.BACKENDS``); "auto" and "raw" name none, and the re-encode
+    then uses the default backend (None).
     """
-    meta = Path(rec_dir).parent / "session_metadata.json"
-    if meta.exists():
-        try:
-            data = json.loads(meta.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = None
-        if isinstance(data, dict):
-            key = ("calibration_frame_rate" if Path(rec_dir).name == "calibration"
-                   else "frame_rate")
-            fps = data.get(key)
-            quality = data.get("quality")
-            if fps:
-                return (int(round(float(fps))),
-                        int(quality) if quality else DEFAULT_QUALITY,
-                        f"{meta.name}:{key}")
-    return DEFAULT_FPS, DEFAULT_QUALITY, None
+    params = recording_meta.acquisition_params(rec_dir)
+    fps = params["acq_fps"]
+    quality = params["quality"]
+    try:
+        quality = int(quality) if quality is not None else None
+    except (TypeError, ValueError):
+        params["warnings"].append(
+            f"quality {quality!r} in session_metadata.json is not a number; "
+            f"using {DEFAULT_QUALITY}")
+        quality = None
+    encoder = params["encoder"] if params["encoder"] in ffmpeg_cmd.BACKENDS else None
+    return (int(round(fps)) if fps else DEFAULT_FPS,
+            quality if quality is not None else DEFAULT_QUALITY,
+            params["sources"].get("acq_fps") if fps else None,
+            params["sources"].get("quality") if quality is not None else None,
+            params["warnings"],
+            encoder, params["sources"].get("encoder") if encoder else None)
 
 
 def print_table(an: alignment.Analysis) -> None:
     print(f"Recording: {an.rec_dir}")
     print(f"Cameras:   {', '.join(an.names)}")
+    for nm, why in an.excluded.items():
+        print(f"Excluded:  {nm} ({why}); its files stay as recorded")
     print(f"Trigger span (union): {an.full_span}")
     print(f"Common (aligned) frames: {an.common.size}\n")
-    print(f"{'cam':6} {'recorded':>9} {'dropped':>8} {'%drop':>7}")
+    print(f"{'cam':6} {'recorded':>9} {'dropped':>8} {'%drop':>7} "
+          f"{'first':>8} {'last':>8}")
     for nm, pc in an.per_camera().items():
+        mark = "  short" if nm in an.short_cams else ""
         print(f"{nm:6} {pc['recorded']:>9} {pc['dropped']:>8} "
-              f"{100 * pc['dropped'] / an.full_span:>6.2f}%")
+              f"{100 * pc['dropped'] / an.full_span:>6.2f}% "
+              f"{pc['first_trigger']:>8} {pc['last_trigger']:>8}{mark}")
+    for nm in an.empty_cams:
+        print(f"{nm:6} {0:>9} {'-':>8} {'-':>7} {'-':>8} {'-':>8}  no frames")
     total_drop = an.full_span - an.common.size
     print(f"\nAligned set keeps {an.common.size} of {an.full_span} triggers; drops "
           f"{total_drop} ({100 * total_drop / an.full_span:.2f}%) any camera missed.")
+    for nm, why in an.short_cams.items():
+        print(f"Short camera {nm}: {why}")
+    print()
+    if an.rate_checked:
+        print(f"Block-rate check judged: {', '.join(an.rate_checked)}")
+    for nm, why in an.rate_skipped.items():
+        print(f"Block-rate check skipped {nm}: {why}")
+    if not an.rate_checked:
+        print("\nWARNING (block rate): no camera could be checked, so nothing "
+              "here shows that the block IDs are trigger ordinals.",
+              file=sys.stderr)
     for msg in an.rate_warnings:
         print(f"\nWARNING (block rate): {msg}", file=sys.stderr)
+
+
+def exclusions(rec_dir: Path, requested: list, include_retired: bool) -> dict:
+    """camera -> reason for every camera this run leaves out.
+
+    The cameras named on the command line, plus every camera with a
+    RETIRED.json unless ``include_retired``.
+    """
+    out = {}
+    if not include_retired:
+        for nm, why in recording_meta.retired_cameras(rec_dir).items():
+            out[nm] = f"retired during the recording: {why}"
+    for item in requested:
+        for nm in (x.strip() for x in item.split(",")):
+            if nm:
+                out[nm] = "excluded on the command line"
+    return out
 
 
 def main() -> int:
@@ -96,38 +159,65 @@ def main() -> int:
     ap.add_argument("--replace", action="store_true",
                     help="trim+replace the per-camera mp4s (re-encodes)")
     ap.add_argument("--quality", type=int, default=None,
-                    help="QP for the --replace re-encode "
-                         "(default: session_metadata.json, else 21)")
+                    help="QP for the --replace re-encode (default: the "
+                         "acquisition's session_metadata.json, else 21)")
     ap.add_argument("--fps", type=int, default=None,
                     help="trigger rate: stamps re-encoded videos and is the "
-                         "block-rate reference (default: session_metadata.json, "
-                         "else 100 with a warning)")
+                         "block-rate reference (default: the acquisition's "
+                         "session_metadata.json, else 100 with a warning)")
     ap.add_argument("--encoder", choices=ffmpeg_cmd.BACKENDS, default=None,
-                    help="H.264 encoder for --replace (default nvenc; x264 "
-                         "for a machine without an NVIDIA GPU)")
+                    help="H.264 encoder for --replace (default: the encoder "
+                         "session_metadata.json records when it is nvenc or "
+                         "x264, else nvenc; x264 for a machine without an "
+                         "NVIDIA GPU)")
     ap.add_argument("--parallel", type=int, default=3,
                     help="cameras re-encoded concurrently with --replace")
+    ap.add_argument("--exclude", action="append", default=[], metavar="CAM",
+                    help="leave this camera out of the alignment; its files "
+                         "stay as recorded (repeat, or separate with commas)")
+    ap.add_argument("--truncate-to-shortest", action="store_true",
+                    help="with --replace, cut every camera to the common "
+                         "triggers even when a camera ended early, started "
+                         "late or stopped mid-recording")
+    ap.add_argument("--include-retired", action="store_true",
+                    help="align cameras that have a RETIRED.json with the "
+                         "others instead of excluding them")
     ap.add_argument("--dry-run", action="store_true",
                     help="report only (including the block-rate check); write nothing")
     args = ap.parse_args()
 
-    meta_fps, meta_quality, source = session_defaults(args.recording_dir)
-    fps = args.fps or meta_fps
-    quality = args.quality or meta_quality
+    (meta_fps, meta_quality, fps_source, quality_source, meta_warnings,
+     meta_encoder, encoder_source) = session_defaults(args.recording_dir)
+    fps = args.fps if args.fps is not None else meta_fps
+    quality = args.quality if args.quality is not None else meta_quality
+    encoder = args.encoder if args.encoder is not None else meta_encoder
+    for w in meta_warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
     if args.fps is None:
-        if source:
-            print(f"fps {fps} from {source}")
+        if fps_source:
+            print(f"fps {fps} from {fps_source}")
         else:
-            print(f"WARNING: no session_metadata.json beside "
-                  f"{args.recording_dir}; assuming {fps} fps. Pass --fps if the "
-                  f"recording ran at another rate.", file=sys.stderr)
+            print(f"WARNING: no session_metadata.json records the frame rate "
+                  f"of {args.recording_dir}; assuming {fps} fps. Pass --fps if "
+                  f"the recording ran at another rate.", file=sys.stderr)
+    if args.replace and args.quality is None:
+        print(f"quality {quality} from {quality_source}" if quality_source else
+              f"quality {quality} (the default: no session_metadata.json "
+              f"records one; pass --quality to change it)")
+    if args.replace and args.encoder is None and encoder:
+        print(f"encoder {encoder} from {encoder_source}")
 
+    excluded = exclusions(args.recording_dir, args.exclude,
+                          args.include_retired)
     try:
-        an = alignment.analyse(args.recording_dir, fps)
+        an = alignment.analyse(args.recording_dir, fps, exclude=excluded)
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print_table(an)
+    would_refuse = alignment.refusal_reason(an, args.truncate_to_shortest)
+    if would_refuse and (args.dry_run or not args.replace):
+        print(f"\nNOTE: --replace would be refused. {would_refuse}")
 
     if args.dry_run:
         return 2 if an.rate_warnings else 0
@@ -143,7 +233,8 @@ def main() -> int:
         summary = alignment.align_recording(
             args.recording_dir, fps=fps, quality=quality,
             replace=args.replace, parallel=args.parallel, progress=_progress,
-            backend=args.encoder, analysis=an)
+            backend=encoder, analysis=an, exclude=excluded,
+            truncate_to_shortest=args.truncate_to_shortest)
     except Exception as e:
         print(f"ERROR: alignment failed: {e}", file=sys.stderr)
         return 1
@@ -156,10 +247,18 @@ def main() -> int:
         print(f"\nERROR: {summary['index_error']} (the aligned/ index is "
               f"derived data; the videos and metadata are as reported below)",
               file=sys.stderr)
-    if args.replace and summary["needed"]:
-        if summary["replaced"]:
+    if summary.get("refused"):
+        rc = 1
+        print(f"\nERROR: {summary['refused']}", file=sys.stderr)
+        print("Wrote the aligned/ index only; no video was changed.")
+    elif args.replace and summary["needed"]:
+        if summary["replaced"] and not excluded:
             print(f"\nReplaced all videos with {summary['common_frames']}-frame "
                   "aligned versions.")
+        elif summary["replaced"]:
+            print(f"\nReplaced the videos of {', '.join(summary['replaced_cams'])} "
+                  f"with {summary['common_frames']}-frame aligned versions. "
+                  f"Left as recorded: {', '.join(excluded)}.")
         else:
             rc = 1
             print(f"\nERROR: {len(summary['failed_cams'])} camera(s) NOT replaced "
@@ -171,14 +270,79 @@ def main() -> int:
             if summary["replaced_cams"]:
                 print(f"Replaced: {', '.join(summary['replaced_cams'])}",
                       file=sys.stderr)
+    elif not summary["needed"] and an.empty_cams:
+        print(f"\nWrote aligned/ index for {', '.join(an.names)}. Recorded no "
+              f"frames: {', '.join(an.empty_cams)}.")
     elif not summary["needed"]:
-        print("\nNo loss — videos already aligned, nothing re-encoded.")
+        print("\nNo loss — videos already aligned, nothing re-encoded."
+              + (f" Left out: {', '.join(excluded)}." if excluded else ""))
     else:
         print(f"\nWrote aligned/ index ({summary['common_frames']} common "
               "frames). Re-run with --replace to trim the videos.")
-    if rc == 0 and summary["rate_warnings"]:
+    trace_rc = rewrite_stim_trace(args.recording_dir, fps, summary, excluded,
+                                  analysis=an if args.replace else None)
+    if trace_rc == 1:
+        rc = 1
+    if rc == 0 and (summary["rate_warnings"] or trace_rc == 2):
         rc = 2
     return rc
+
+
+def rewrite_stim_trace(rec_dir: Path, fps: int, summary: dict,
+                       excluded: dict, analysis=None) -> int:
+    """Rewrite stim_trace.csv after a replace changed any camera's block IDs,
+    or, given the run's ``analysis``, when the trace does not describe videos
+    that are already aligned.
+
+    Returns 0 when nothing needed doing or the new trace is consistent, 2 when
+    it was written from cameras that disagree, 1 when it could not be written.
+    The trace is derived from blockids.npy, which a replace rewrites, so a
+    trace left as it was labels frames with the stimulus of other triggers.
+    The second case is a replace run that finds nothing to replace: an
+    earlier alignment (the GUI's, for one) can have replaced every video and
+    stopped before it rewrote the trace, and the stale trace must not outlive
+    a run that reports no loss. Every problem is printed and appended to the
+    acquisition's WARNINGS.txt.
+    """
+    rec_dir = Path(rec_dir)
+    if not (rec_dir / stim_trace.PARADIGM_NAME).exists():
+        return 0
+    stale = None
+    if not summary.get("replaced_cams"):
+        if analysis is None or summary.get("refused") or summary.get("needed"):
+            return 0
+        stale = stim_trace.trace_mismatch(rec_dir, analysis.common)
+        if stale is None:
+            return 0
+    try:
+        r = stim_trace.write_trace_result(rec_dir, fps, exclude=excluded)
+        path, msg, disagreement = r.path, r.message, r.disagreement
+    except Exception as e:
+        path, msg, disagreement = None, f"{type(e).__name__}: {e}", None
+    if path is None:
+        if stale:
+            text = (f"{stim_trace.TRACE_NAME} does not describe the videos "
+                    f"({stale}) and could not be rewritten ({msg}). Re-run "
+                    f"3_stim_trace.py on {rec_dir}.")
+        else:
+            text = (f"{stim_trace.TRACE_NAME} could not be rewritten after "
+                    f"alignment replaced {', '.join(summary['replaced_cams'])} "
+                    f"({msg}). The old file describes the frames before the "
+                    f"alignment. Re-run 3_stim_trace.py on {rec_dir}.")
+        recording_meta.append_warning(rec_dir, text)
+        print(f"\nERROR: {text}", file=sys.stderr)
+        return 1
+    if stale:
+        print(f"\n{path.name} did not describe the videos ({stale}).")
+    print(f"\nRewrote {path.name}: {msg}")
+    if disagreement:
+        text = f"{stim_trace.TRACE_NAME}: {disagreement}."
+        where = recording_meta.append_warning(rec_dir, text)
+        print(f"WARNING: {text}"
+              + (f" (added to {where.name})" if where else ""),
+              file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
