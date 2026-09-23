@@ -797,12 +797,11 @@ class MainWindow(QMainWindow):
         number is visible the session is already short a camera and the
         block-ID bookkeeping has had to truncate.
 
-        Every threshold comes from the camera itself -- `BslTemperatureStatus`
-        is the vendor's own verdict and `BsliOverTemperature` its shutdown
-        point -- so this is not tied to one model or one rig. These cameras
-        have no fan and cool by conduction through the mount, which makes
-        temperature a property of the INSTALLATION: on the reference rig four
-        of nine sit above Critical while three never pass 73 C.
+        Every threshold comes from the camera itself (its temperature status
+        and its shutdown point, as the backend reports them), so this is not
+        tied to one model or one rig. How hot a camera runs depends on its
+        installation as much as on the camera: airflow, mounting and whether
+        the model has a fan.
         """
         if self._state not in (State.RECORDING, State.CALIBRATING):
             self._thermal_timer.stop()
@@ -875,10 +874,9 @@ class MainWindow(QMainWindow):
             self._thermal_warnings.append(
                 f"{name} reached {temp_s} C during this acquisition, which its "
                 f"own firmware reports as '{status or 'over limit'}'{tail}. "
-                f"These cameras have no fan and cool through the mount, so "
-                f"this is an airflow or mounting problem rather than a camera "
-                f"fault. A camera that reaches its shutdown point stops "
-                f"delivering mid-session.")
+                f"Check the airflow around the camera and its mounting. A "
+                f"camera that reaches its shutdown point stops delivering "
+                f"mid-session.")
             print(f"[acq] THERMAL: {self._thermal_warnings[-1]}", flush=True)
 
     def _camera_label(self, idx: int) -> str:
@@ -2399,9 +2397,8 @@ class MainWindow(QMainWindow):
                 raise
             self._save_frametimes(cam_results)
             # Read thermals BEFORE resume_preview: DeviceTemperature starts
-            # decaying the moment the load comes off, and these cameras have no
-            # fan, so how hot they got is a property of the mounting that is
-            # otherwise unrecoverable after the fact.
+            # decaying the moment the load comes off, and how hot a camera got
+            # under load cannot be recovered after the fact.
             try:
                 self._config.camera_thermals = self._camera_mgr.thermals()
             except Exception as e:
