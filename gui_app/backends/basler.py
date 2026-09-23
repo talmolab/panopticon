@@ -10,6 +10,8 @@ about these cameras; the comments are the point, not decoration.
 """
 from __future__ import annotations
 
+import os
+
 try:
     import pypylon.genicam as genicam
     import pypylon.pylon as pylon
@@ -673,6 +675,16 @@ class BaslerBackend:
         Statistic_Failed_Packet_Count is NOT included: it reads absurd values on
         this hardware (tens of millions against 11 M total) and is untrustworthy.
 
+        The `CANONICAL_STREAM_STATS` keys repeat four of these under the names
+        every backend shares, each only when its counter was read:
+        buffers_total, buffers_failed, buffers_underrun and resend_requests.
+
+        The socket driver's ReceiveThreadPriority, and whether
+        ReceiveThreadPriorityOverride is on (without it pylon uses its own
+        default), are read alongside and never written, so a session records
+        the priority its receive threads ran at. The filter driver and USB3
+        cameras do not have these nodes, and nothing is reported for them.
+
         The camera-side transport settings are read alongside, each only when
         the camera implements it, so a session's network state is on record:
           GevSCFJM   — frame jitter max: the read-only bound on how late a
@@ -696,6 +708,16 @@ class BaslerBackend:
                     out[key.replace("Statistic_", "")] = node.GetValue()
         except Exception as e:
             out["error"] = str(e)
+        for canonical, native in self.CANONICAL_STATS:
+            if native in out:
+                out[canonical] = out[native]
+        for key in self.RECEIVE_THREAD_NODES:
+            try:
+                node = cam.GetStreamGrabberNodeMap().GetNode(key)
+                if node is not None:
+                    out[key] = node.GetValue()
+            except Exception:
+                pass
         for key in self.TRANSPORT_NODES:
             try:
                 node = self._optional_node(cam, key)
@@ -707,6 +729,41 @@ class BaslerBackend:
 
     #: Camera-side GigE transport nodes reported by stream_stats.
     TRANSPORT_NODES = ("GevSCFJM", "GevSCFTD", "GevSCBWR", "GevSCBWRA", "GevSCBWA")
+
+    #: `CANONICAL_STREAM_STATS` key -> the stream_stats key it repeats.
+    CANONICAL_STATS = (("buffers_total", "Total_Buffer_Count"),
+                       ("buffers_failed", "Failed_Buffer_Count"),
+                       ("buffers_underrun", "Buffer_Underrun_Count"),
+                       ("resend_requests", "Resend_Request_Count"))
+
+    #: Socket-driver stream grabber nodes stream_stats reads and never writes.
+    RECEIVE_THREAD_NODES = ("ReceiveThreadPriorityOverride",
+                            "ReceiveThreadPriority")
+
+    # -------------------------------------------------------------- SDK report
+    @staticmethod
+    def sdk_report() -> str:
+        """pypylon's version, the pylon runtime version it wraps, and where
+        pypylon was imported from. Never raises."""
+        version = "unknown version"
+        try:
+            from importlib import metadata
+            version = metadata.version("pypylon")
+        except Exception:
+            pass
+        runtime = ""
+        try:
+            fn = getattr(pylon, "GetPylonVersionString", None)
+            if fn is not None:
+                runtime = f", pylon {fn()}"
+        except Exception:
+            pass
+        where = ""
+        try:
+            where = f" ({os.path.dirname(os.path.abspath(pylon.__file__))})"
+        except Exception:
+            pass
+        return f"pypylon {version}{runtime}{where}"
 
 
 #: Module-level spellings of the transport knobs, for callers that hold the

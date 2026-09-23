@@ -836,8 +836,19 @@ class SimBackend:
             return {"error": cam.faults.stats_error}
         s = cam.stats
         total = s["succeeded"] + s["failed"] + s["underrun"]
+        resends = s["failed"] * 3
         return {"Total_Buffer_Count": total,
                 "Failed_Buffer_Count": s["failed"],
                 "Buffer_Underrun_Count": s["underrun"],
-                "Resend_Request_Count": s["failed"] * 3,
-                "Ignored_Trigger_Count": s["ignored"]}
+                "Resend_Request_Count": resends,
+                "Ignored_Trigger_Count": s["ignored"],
+                # The CANONICAL_STREAM_STATS keys every backend shares.
+                "buffers_total": total,
+                "buffers_failed": s["failed"],
+                "buffers_underrun": s["underrun"],
+                "resend_requests": resends}
+
+    @staticmethod
+    def sdk_report() -> str:
+        """The simulated rig drives no camera SDK."""
+        return "no camera SDK (simulated cameras, gui_app/backends/sim.py)"
