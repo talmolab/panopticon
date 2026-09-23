@@ -25,7 +25,9 @@ to only the common frames and atomically replaces the original, and that
 camera's blockids.npy + frametimes.npy are rewritten to match. When the
 recording has a ``stim_paradigm.json``, its ``stim_trace.csv`` is then
 rewritten from the new block IDs, because the old trace labels the replaced
-frames with the stimulus of other triggers.
+frames with the stimulus of other triggers. A --replace that finds the videos
+already aligned rewrites a trace that does not describe them (one an
+interrupted earlier alignment left behind).
 
 A replace overwrites each camera's only copy, and a camera that ended early,
 started late (a retirement, a truncated tail) or stopped for a while
@@ -265,7 +267,8 @@ def main() -> int:
     else:
         print(f"\nWrote aligned/ index ({summary['common_frames']} common "
               "frames). Re-run with --replace to trim the videos.")
-    trace_rc = rewrite_stim_trace(args.recording_dir, fps, summary, excluded)
+    trace_rc = rewrite_stim_trace(args.recording_dir, fps, summary, excluded,
+                                  analysis=an if args.replace else None)
     if trace_rc == 1:
         rc = 1
     if rc == 0 and (summary["rate_warnings"] or trace_rc == 2):
@@ -274,32 +277,51 @@ def main() -> int:
 
 
 def rewrite_stim_trace(rec_dir: Path, fps: int, summary: dict,
-                       excluded: dict) -> int:
-    """Rewrite stim_trace.csv after a replace changed any camera's block IDs.
+                       excluded: dict, analysis=None) -> int:
+    """Rewrite stim_trace.csv after a replace changed any camera's block IDs,
+    or, given the run's ``analysis``, when the trace does not describe videos
+    that are already aligned.
 
     Returns 0 when nothing needed doing or the new trace is consistent, 2 when
     it was written from cameras that disagree, 1 when it could not be written.
     The trace is derived from blockids.npy, which a replace rewrites, so a
     trace left as it was labels frames with the stimulus of other triggers.
-    Every problem is printed and appended to the acquisition's WARNINGS.txt.
+    The second case is a replace run that finds nothing to replace: an
+    earlier alignment (the GUI's, for one) can have replaced every video and
+    stopped before it rewrote the trace, and the stale trace must not outlive
+    a run that reports no loss. Every problem is printed and appended to the
+    acquisition's WARNINGS.txt.
     """
     rec_dir = Path(rec_dir)
-    if not summary.get("replaced_cams") or \
-            not (rec_dir / stim_trace.PARADIGM_NAME).exists():
+    if not (rec_dir / stim_trace.PARADIGM_NAME).exists():
         return 0
+    stale = None
+    if not summary.get("replaced_cams"):
+        if analysis is None or summary.get("refused") or summary.get("needed"):
+            return 0
+        stale = stim_trace.trace_mismatch(rec_dir, analysis.common)
+        if stale is None:
+            return 0
     try:
         r = stim_trace.write_trace_result(rec_dir, fps, exclude=excluded)
         path, msg, disagreement = r.path, r.message, r.disagreement
     except Exception as e:
         path, msg, disagreement = None, f"{type(e).__name__}: {e}", None
     if path is None:
-        text = (f"{stim_trace.TRACE_NAME} could not be rewritten after "
-                f"alignment replaced {', '.join(summary['replaced_cams'])} "
-                f"({msg}). The old file describes the frames before the "
-                f"alignment. Re-run 3_stim_trace.py on {rec_dir}.")
+        if stale:
+            text = (f"{stim_trace.TRACE_NAME} does not describe the videos "
+                    f"({stale}) and could not be rewritten ({msg}). Re-run "
+                    f"3_stim_trace.py on {rec_dir}.")
+        else:
+            text = (f"{stim_trace.TRACE_NAME} could not be rewritten after "
+                    f"alignment replaced {', '.join(summary['replaced_cams'])} "
+                    f"({msg}). The old file describes the frames before the "
+                    f"alignment. Re-run 3_stim_trace.py on {rec_dir}.")
         recording_meta.append_warning(rec_dir, text)
         print(f"\nERROR: {text}", file=sys.stderr)
         return 1
+    if stale:
+        print(f"\n{path.name} did not describe the videos ({stale}).")
     print(f"\nRewrote {path.name}: {msg}")
     if disagreement:
         text = f"{stim_trace.TRACE_NAME}: {disagreement}."

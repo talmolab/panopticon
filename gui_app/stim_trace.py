@@ -25,7 +25,8 @@ recorded, the trace is still right for each camera through its own column,
 and ``TraceResult.disagreement`` says so. A camera left out of the alignment
 (retired, or excluded by the caller) gets its column for those rows only.
 Anything that rewrites ``blockids.npy`` must rewrite this file too
-(``2_align.py --replace`` does).
+(``2_align.py --replace`` does, and ``trace_mismatch`` finds a trace an
+interrupted rewrite left stale).
 
 IMPORTANT — this is derived, not observed. It says what the paradigm *should*
 have delivered given the firmware that was uploaded. It cannot know whether the
@@ -343,6 +344,42 @@ def write_trace_result(recording_dir: Path, fps: float,
     if notes:
         msg = f"{msg} [{'; '.join(notes)}]"
     return TraceResult(out, msg, disagreement)
+
+
+def trace_mismatch(recording_dir: Path, blockids) -> str | None:
+    """Why stim_trace.csv does not describe cameras that all hold ``blockids``.
+
+    Returns None when it does. For cameras that agree, the trace has one row
+    per block ID in ``blockids``, in order, and ``frame`` counts 0, 1, 2, ...
+    A trace that differs was written for other frames, typically before an
+    alignment replaced the videos and stopped before rewriting it. Only the
+    ``blockid`` and ``frame`` columns are read, so a long recording's trace
+    is never held in memory whole.
+    """
+    path = Path(recording_dir) / TRACE_NAME
+    if not path.exists():
+        return f"there is no {TRACE_NAME}"
+    want = _unwrap_blockids(np.asarray(blockids))
+    try:
+        with open(path, newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            i_bid, i_frame = header.index("blockid"), header.index("frame")
+            n = 0
+            for row in reader:
+                if n == want.size:
+                    return (f"it has more than {n} rows; the videos hold "
+                            f"{want.size} frames")
+                if int(row[i_bid]) != int(want[n]) or row[i_frame] != str(n):
+                    return (f"row {n + 1} is block ID {row[i_bid]}, frame "
+                            f"{row[i_frame] or 'blank'}; the videos hold block "
+                            f"ID {int(want[n])} as frame {n}")
+                n += 1
+    except (OSError, StopIteration, ValueError, IndexError, csv.Error) as e:
+        return f"{TRACE_NAME} is unreadable ({type(e).__name__}: {e})"
+    if n != want.size:
+        return f"it has {n} rows; the videos hold {want.size} frames"
+    return None
 
 
 def write_trace(recording_dir: Path, fps: float) -> tuple[Path | None, str]:
