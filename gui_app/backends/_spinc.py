@@ -781,15 +781,18 @@ class SpinC:
     def node(self, nodemap, name: str):
         """The named node, or None when this camera has no such node.
 
-        An invalid or uninitialised nodemap still raises, so a caller bug is
-        not reported as a missing feature.
+        A node is absent only when the lookup succeeds and returns no
+        handle. Any error code raises `FlirError` naming the node and the
+        code. `flir.py` skips a setting whose node is absent (for example
+        `TriggerOverlap`), so an error read as absence would leave that
+        setting at the camera's value with no message.
         """
         h = ctypes.c_void_p()
         err = self._lib.spinNodeMapGetNode(nodemap, name.encode("ascii"),
                                            ctypes.byref(h))
-        if err in (SPINNAKER_ERR_INVALID_HANDLE, SPINNAKER_ERR_NOT_INITIALIZED):
+        if err:
             raise FlirError(err, f"spinNodeMapGetNode({name})")
-        if err or not h.value:
+        if not h.value:
             return None
         self._names[h.value] = name
         return h.value
