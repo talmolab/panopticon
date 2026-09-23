@@ -176,6 +176,7 @@ class _Worker:
         self._calls: dict = {}
         self._next = 0
         self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
         self.dead = False
         self.exitcode = None
         self.closing = False
@@ -189,6 +190,14 @@ class _Worker:
         return ", ".join(f"cam{g + 1}" for g in self.cams)
 
     def call(self, op: str, **payload) -> _Call:
+        """Send a request; the reply arrives on the returned call.
+
+        RULE: the send has a lock of its own, apart from the lock over the
+        pending calls. REASON: a Connection must not be written from two
+        threads at once, and a send that blocks (a worker busy in a long
+        request, its pipe full) must not hold the lock the supervisor takes
+        to deliver replies, or no reply reaches any caller.
+        """
         c = _Call(op)
         with self._lock:
             self._next += 1
@@ -199,14 +208,16 @@ class _Worker:
                 c.event.set()
                 return c
             self._calls[rid] = c
-            try:
+        try:
+            with self._send_lock:
                 self.conn.send({"id": rid, "op": op, **payload})
-            except Exception as e:
+        except Exception as e:
+            with self._lock:
                 self._calls.pop(rid, None)
-                c.reply = {"ok": False, "kind": "exited",
-                           "error": f"the request could not be sent "
-                                    f"({type(e).__name__}: {e})"}
-                c.event.set()
+            c.reply = {"ok": False, "kind": "exited",
+                       "error": f"the request could not be sent "
+                                f"({type(e).__name__}: {e})"}
+            c.event.set()
         return c
 
     def resolve(self, msg: dict) -> None:
@@ -1344,7 +1355,11 @@ class ProcessCameraManager(QObject):
         """
         coord = self._coordinator
         if coord is None:
-            raise RuntimeError("stop_acquisition called with no acquisition")
+            # CameraManager returns here too: nothing was recording.
+            print("[acq] stop_acquisition: no acquisition is running",
+                  flush=True)
+            self.last_results = []
+            return []
         self._triggers_running = False
         armed = [w for w in self._workers if w.armed]
         calls = {w: w.call("stop") for w in armed}
