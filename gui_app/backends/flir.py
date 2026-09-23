@@ -538,8 +538,13 @@ class FlirCamera:
         self._ctr_period = 0
         self._ctr_latch = 0
         self._ctr_first = True
+        self._ctr_latch_known = False
         self._ctr_name = None
         self._last_counter = None
+        # Whether the frame ID restarts at every arm and counts frames, and
+        # what makes it 1-based; the latch decision uses it.
+        self._fid_evidence = False
+        self._fid_base_offset = 0
         #: The witness for the current triggered arm, filled at stops.
         self.witness = None
         # With an edge counter and no exposure counter, a frame_id camera
@@ -700,10 +705,10 @@ class FlirCamera:
         edges on the trigger line since the counter was reset at arm.
 
         The chunk is expected to carry the count including the edge that
-        triggered the image, so the first trigger reads 1. A first image that
-        reads 0 shows the camera latched the count before the edge; from then
-        on 1 is added, and the log says so. A counter narrower than 2**31 is
-        unwrapped here."""
+        triggered the image, so the first trigger reads 1. The recording's
+        first image decides whether the camera latches the count before the
+        edge instead (`_first_counter_image`); from then on 1 is added, and
+        the log says so. A counter narrower than 2**31 is unwrapped here."""
         name = self._ctr_name
         if name is None:
             v, name = _read_chunk(self._api, img, "CounterValue")
@@ -712,12 +717,7 @@ class FlirCamera:
             v = self._api.chunk_int(img, name)
         if self._ctr_first:
             self._ctr_first = False
-            if v == 0:
-                self._ctr_latch = 1
-                print(f"[flir] {self.serial}: the first image's CounterValue "
-                      f"chunk reads 0, so this camera latches the counter "
-                      f"before the trigger edge; its block IDs are the chunk "
-                      f"value plus 1", flush=True)
+            self._first_counter_image(img, v)
         period = self._ctr_period
         if period:
             prev = self._ctr_prev
@@ -726,6 +726,35 @@ class FlirCamera:
             self._ctr_prev = v
         self._last_counter = v
         return v + self._ctr_latch + self._ctr_acc
+
+    def _first_counter_image(self, img, v: int) -> None:
+        """Decide from the recording's first image, whose chunk count is
+        `v`, whether the camera latches CounterValue before the edge.
+
+        A count that includes the edge is at least the image's ordinal among
+        the frames the camera acquired, and a count latched before the edge
+        is at least one less. So 0 proves the latch, and so does a count
+        below the frame ID on a camera whose frame ID restarts at every arm
+        and counts frames; a count at or above that frame ID shows the
+        count includes the edge. Without such a frame ID a count above 0
+        decides nothing (the first trigger's frame may have been lost), and
+        `_latch_sentences` checks the last image at stop instead. The frame
+        ID is one more SDK call, on this image only."""
+        if v == 0:
+            fid = None
+        elif self._fid_evidence:
+            fid = self._api.image_frame_id(img) + self._fid_base_offset
+        else:
+            return
+        self._ctr_latch_known = True
+        if fid is not None and v >= fid:
+            return
+        self._ctr_latch = 1
+        print(f"[flir] {self.serial}: the first image's CounterValue chunk "
+              f"reads {v}" + (f" on the camera's frame {fid}"
+                              if fid is not None else "")
+              + ", so this camera latches the counter before the trigger "
+                "edge; its block IDs are the chunk value plus 1", flush=True)
 
     # ----------------------------------------------------------- timestamps
     def _ts_image(self, img) -> int:
@@ -795,6 +824,7 @@ class FlirCamera:
         self._ctr_acc = 0
         self._ctr_latch = 0
         self._ctr_first = True
+        self._ctr_latch_known = False
         self._last_counter = None
         if not self.counters:
             return
@@ -1794,6 +1824,8 @@ class FlirBackend:
                      f"and it offers no CounterValue chunk. This model is not "
                      f"supported for recording; please send the output of "
                      f"'uv run probe_flir.py'.")
+        cam._fid_evidence = usable
+        cam._fid_base_offset = 1 if fid["base"] == 0 else 0
         if want == "trigger_counter" or not usable:
             cam.block_id_source = "trigger_counter"
             self._enable_chunk(cam, "CounterValue")
@@ -2340,16 +2372,23 @@ class FlirBackend:
                     f"what Panopticon set them to count on this model, and "
                     f"this recording has no trigger witness for this camera."
                     f"{ids} Send the output of 'uv run probe_flir.py'."]
-        if exposures is not None:
-            # Below 0 only when an edge landed between the two reads that
-            # bound a re-arm window, which counts it as down time.
-            ignored = max(0, cam._ctr_delta(w["edges"], exposures)
-                          - w["gap_edges"])
-            what = (f"its trigger input ({line}) counted {edges} edges but it "
-                    f"started only {exposures} exposures, so it ignored "
-                    f"{ignored} trigger(s).")
-        else:
+        return (self._ignored_sentences(cam, w, edges, frames)
+                + self._latch_sentences(cam, w))
+
+    def _ignored_sentences(self, cam, w, edges: int, frames: int) -> list:
+        """The ignored-trigger count from counters that passed the
+        plausibility check. `edges` leaves out the re-arm down time."""
+        exposures = w["exposures"]
+        line = cam.trigger_line
+        if exposures is None:
             return self._edge_only_sentences(cam, w, edges, frames)
+        # Below 0 only when an edge landed between the two reads that bound
+        # a re-arm window, which counts it as down time.
+        ignored = max(0, cam._ctr_delta(w["edges"], exposures)
+                      - w["gap_edges"])
+        what = (f"its trigger input ({line}) counted {edges} edges but it "
+                f"started only {exposures} exposures, so it ignored "
+                f"{ignored} trigger(s).")
         if ignored <= 0:
             return []
         if cam.block_id_source == "trigger_counter":
@@ -2364,6 +2403,32 @@ class FlirBackend:
                 f"reconstruction. Lower camera.exposure_us, or set "
                 f"camera.flir.block_id_source: trigger_counter so an ignored "
                 f"trigger becomes a gap."]
+
+    @staticmethod
+    def _latch_sentences(cam, w) -> list:
+        """In trigger_counter mode, when the first image did not show
+        whether CounterValue is latched before the edge: the last image's
+        count against the edges counted at stop.
+
+        With a count that includes the edge, a last image on the last
+        trigger reads the edge count. A last image one or more below it is
+        what a latch before the edge gives (and then every block ID of the
+        recording is one trigger early), and also what triggers at the end
+        that delivered no frame give. The sentence names both."""
+        if (cam.block_id_source != "trigger_counter" or cam._ctr_latch_known
+                or cam._last_counter is None):
+            return []
+        lag = cam._ctr_delta(w["edges"], cam._last_counter)
+        if lag <= 0:
+            return []
+        return [f"its first image did not show whether it latches the "
+                f"CounterValue chunk before the trigger edge, and its last "
+                f"image's count ({cam._last_counter}) is {lag} below the "
+                f"{w['edges']} edges it counted by the stop. Its last "
+                f"trigger(s) delivering no frame gives this, and so does a "
+                f"latch before the edge, which makes every block ID of this "
+                f"camera one trigger early. Send the output of 'uv run "
+                f"probe_flir.py'."]
 
     @staticmethod
     def _implausible_counts(cam, w, frames: int):
