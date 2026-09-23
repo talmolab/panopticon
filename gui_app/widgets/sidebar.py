@@ -381,11 +381,36 @@ class SidebarWidget(QWidget):
         self._run_calib_btn.setToolTip(solve_reason or self._SOLVE_TIP)
 
     def _on_profile_changed(self, index: int):
+        """Ask the listener to switch rigs; change nothing here.
+
+        RULE: the chosen profile's fields are applied and it is remembered for
+        the next launch only in accept_profile(), which the listener calls once
+        it has taken the switch. A listener that refuses calls
+        restore_profile_choice() instead. REASON: the window refuses a switch
+        during a firmware upload, a Test, a solve or a camera operation, and a
+        sidebar that applied and remembered the choice first then showed the
+        refused rig, sent the next recording to its output directory, and
+        brought the next launch up on it, while the window ran the old one.
+        """
         if 0 <= index < len(self._profiles):
-            profile = self._profiles[index]
-            self._apply_profile(profile)
-            settings.app_settings().setValue(settings.KEY_PROFILE, profile.name)
-            self.profile_changed.emit(profile)
+            self.profile_changed.emit(self._profiles[index])
+
+    def accept_profile(self, profile: RigProfile):
+        """The window has taken this profile: apply its fields, remember it."""
+        self.select_profile(profile.name)
+        settings.app_settings().setValue(settings.KEY_PROFILE, profile.name)
+
+    def restore_profile_choice(self, name: str) -> bool:
+        """Point the dropdown back at the running profile after a refused
+        switch, without emitting and without re-applying its fields, so an
+        output directory chosen by hand survives the refusal."""
+        for i, profile in enumerate(self._profiles):
+            if profile.name == name:
+                self._profile_combo.blockSignals(True)
+                self._profile_combo.setCurrentIndex(i)
+                self._profile_combo.blockSignals(False)
+                return True
+        return False
 
     def _apply_profile(self, profile: RigProfile):
         """Take the output directory and the metadata defaults from a profile.
@@ -420,9 +445,11 @@ class SidebarWidget(QWidget):
             self._fields["date"].setText(self._today())
 
     def select_profile(self, name: str) -> bool:
-        """Select a profile by name without re-emitting profile_changed.
+        """Select a profile by name and apply its fields, without emitting
+        profile_changed and without remembering it for the next launch.
 
-        Used at startup to restore the last one used on this machine.
+        Used at startup to restore the last one used on this machine, and by
+        accept_profile() once the window has taken a switch.
         """
         for i, profile in enumerate(self._profiles):
             if profile.name == name:

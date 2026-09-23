@@ -505,11 +505,23 @@ class MainWindow(QMainWindow):
             print(msg, flush=True)
             QMessageBox.warning(self, "Hardware Check", msg)
 
+    def _refuse_profile_switch(self):
+        """Point the sidebar's dropdown back at the rig this window runs.
+
+        RULE: every refused switch ends here. REASON: the sidebar applies and
+        remembers a profile only once the window accepts it, so a refusal that
+        left the dropdown alone would show the refused rig while this window
+        records with the old one.
+        """
+        self._sidebar.restore_profile_choice(self._profile.name)
+
     def _on_profile_changed(self, profile: RigProfile):
         if self._state != State.IDLE or self._busy:
+            self._refuse_profile_switch()
             return
         if self._solve_running():
             # A solve never leaves IDLE, so the state guard above misses it.
+            self._refuse_profile_switch()
             QMessageBox.information(
                 self, "A solve is running",
                 "A calibration solve is running. Switch profiles once it has "
@@ -519,6 +531,7 @@ class MainWindow(QMainWindow):
             return
         if self._stim_window is not None and self._stim_window.is_uploading():
             # A profile carries the serial port, and arduino-cli is holding it.
+            self._refuse_profile_switch()
             QMessageBox.information(
                 self, "Firmware upload in progress",
                 "The trigger board is being flashed (~30 s). Switch profiles "
@@ -537,6 +550,7 @@ class MainWindow(QMainWindow):
         if self._worker_busy(self._cam_op):
             print("[acq] a camera operation is still running; not switching "
                   "profile", flush=True)
+            self._refuse_profile_switch()
             return
         # close_all + open 6 cameras (+ .pfs load) is ~1-2 s of GigE round-trips;
         # run it off the UI thread so the window doesn't go "not responding".
@@ -552,6 +566,10 @@ class MainWindow(QMainWindow):
         self._cam_op.start()
 
     def _on_profile_switch_done(self, ok):
+        # The window runs this profile from here on, whether or not its
+        # cameras opened, so the sidebar takes its fields and the next launch
+        # comes up on it.
+        self._sidebar.accept_profile(self._profile)
         self._apply_camera_open_result(ok)
         self._size_to_screen()
         self._end_busy()
