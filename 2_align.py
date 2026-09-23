@@ -85,6 +85,15 @@ def print_table(an: alignment.Analysis) -> None:
     total_drop = an.full_span - an.common.size
     print(f"\nAligned set keeps {an.common.size} of {an.full_span} triggers; drops "
           f"{total_drop} ({100 * total_drop / an.full_span:.2f}%) any camera missed.")
+    print()
+    if an.rate_checked:
+        print(f"Block-rate check judged: {', '.join(an.rate_checked)}")
+    for nm, why in an.rate_skipped.items():
+        print(f"Block-rate check skipped {nm}: {why}")
+    if not an.rate_checked:
+        print("\nWARNING (block rate): no camera could be checked, so nothing "
+              "here shows that the block IDs are trigger ordinals.",
+              file=sys.stderr)
     for msg in an.rate_warnings:
         print(f"\nWARNING (block rate): {msg}", file=sys.stderr)
 

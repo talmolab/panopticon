@@ -23,7 +23,8 @@ from pathlib import Path
 import numpy as np
 
 # BLOCKID_WRAP is defined once, in frame_sync, which unwraps the same IDs live.
-from gui_app.frame_sync import BLOCKID_WRAP
+from gui_app.frame_sync import (BLOCK_RATE_MIN_FRAMES, BLOCK_RATE_MIN_SECONDS,
+                                BLOCKID_WRAP)
 from gui_app.frame_sync import block_rate_warnings as _block_rate_warnings
 from gui_app import ffmpeg_cmd
 
@@ -43,6 +44,15 @@ MIN_MP4_BYTES = 1024
 # (a video re-muxed by another tool). Every later frame then maps to the
 # wrong trigger while the frame count can still look right.
 DECODE_OUTPUT_ARGS = ("-fps_mode", "passthrough")
+
+# Written beside frametimes.npy when a replace pass had to synthesise it from
+# block IDs (the original was missing or described other frames). Timestamps
+# made from block IDs advance at exactly the configured rate, so the
+# block-rate check would measure its own reference and always pass; the
+# marker makes every later check report that camera as unverifiable instead.
+# The original, when there was one, is kept as SYNTH_ORIGINAL.
+SYNTH_MARKER = "frametimes_synthesized.json"
+SYNTH_ORIGINAL = "frametimes.orig.npy"
 
 
 def _unwrap_blockids(b: np.ndarray, period: int = BLOCKID_WRAP) -> np.ndarray:
@@ -165,8 +175,31 @@ def load_blockids(rec_dir: Path):
     return names, blocks, videos
 
 
-def block_rate_warnings(rec_dir: Path, names, blocks, fps: int) -> list:
+def _rate_judgeable(b: np.ndarray, ts: np.ndarray, fps: int):
+    """Why frame_sync.check_block_id_rate would abstain on this camera, or None.
+
+    The same limits as the check itself, so a camera listed as checked is
+    one the check really judged.
+    """
+    if fps <= 0:
+        return "no reference rate"
+    if b.size < BLOCK_RATE_MIN_FRAMES:
+        return (f"too short to judge ({b.size} frames; the check needs "
+                f"{BLOCK_RATE_MIN_FRAMES} over {BLOCK_RATE_MIN_SECONDS:g} s)")
+    dur = float(ts[b.size - 1]) - float(ts[0])
+    if dur < BLOCK_RATE_MIN_SECONDS or b[-1] <= b[0]:
+        return (f"too short to judge ({dur:.2f} s of device time; the check "
+                f"needs {BLOCK_RATE_MIN_SECONDS:g} s)")
+    return None
+
+
+def block_rate_check(rec_dir: Path, names, blocks, fps: int):
     """Check each camera's block IDs really are trigger ordinals.
+
+    Returns ``(warnings, checked, skipped)``: the warning texts, the cameras
+    the check judged, and a dict of camera -> the reason it was not judged.
+    A summary that lists no camera as checked has verified nothing, and the
+    caller must be able to say so.
 
     The intersection below matches on block ID and nothing else, so it is only
     an alignment if every camera consumed one block ID per trigger. A camera
@@ -177,26 +210,42 @@ def block_rate_warnings(rec_dir: Path, names, blocks, fps: int) -> list:
     block-ID counter against the camera's own device clock.
 
     Timestamps come from ``frametimes.npy`` row 1 (device seconds, shifted to
-    start at zero). A camera missing that file is skipped, not failed — old
-    recordings should still align.
+    start at zero). A camera without usable timestamps is skipped, not failed,
+    so older recordings still align, and its reason is reported. A camera
+    whose timestamps an earlier replace pass synthesised (``SYNTH_MARKER``)
+    is reported as unverifiable.
     """
-    ids, times, have = [], [], []
+    rec_dir = Path(rec_dir)
+    ids, times, checked, skipped = [], [], [], {}
     for nm, b in zip(names, blocks):
-        ft_path = rec_dir / nm / "frametimes.npy"
+        cam = rec_dir / nm
+        ft_path = cam / "frametimes.npy"
+        if (cam / SYNTH_MARKER).exists():
+            skipped[nm] = ("unverifiable: its frametimes.npy was synthesised "
+                           "from block IDs by an earlier alignment, so it "
+                           "holds no device times")
+            continue
         if not ft_path.exists():
+            skipped[nm] = "no frametimes.npy"
             continue
         try:
             ft = np.load(ft_path)
-        except Exception:
+        except Exception as e:
+            skipped[nm] = f"frametimes.npy unreadable: {e}"
             continue
         if ft.ndim != 2 or ft.shape[0] < 2 or ft.shape[1] < b.size:
+            skipped[nm] = (f"frametimes.npy has shape {ft.shape}, not "
+                           f"(2, {b.size})")
+            continue
+        why = _rate_judgeable(b, ft[1], fps)
+        if why:
+            skipped[nm] = why
             continue
         ids.append(b)
         times.append(ft[1])
-        have.append(nm)
-    if not have:
-        return []
-    return _block_rate_warnings(ids, times, fps, have)
+        checked.append(nm)
+    warnings = _block_rate_warnings(ids, times, fps, checked) if checked else []
+    return warnings, checked, skipped
 
 
 def compute_alignment(blocks: list[np.ndarray]):
@@ -241,8 +290,9 @@ class Analysis:
         # Runs on every path, including the ones that report "already aligned":
         # a camera ignoring triggers keeps its block IDs gapless, so the
         # intersection is total and nothing else here looks wrong.
-        self.rate_warnings = block_rate_warnings(self.rec_dir, self.names,
-                                                 self.blocks, self.fps)
+        (self.rate_warnings, self.rate_checked,
+         self.rate_skipped) = block_rate_check(self.rec_dir, self.names,
+                                               self.blocks, self.fps)
 
     def per_camera(self) -> dict:
         return {nm: dict(recorded=int(b.size),
@@ -255,7 +305,9 @@ class Analysis:
                     trigger_span=self.full_span,
                     common_frames=int(self.common.size), needed=self.needed,
                     per_camera=self.per_camera(),
-                    rate_warnings=list(self.rate_warnings))
+                    rate_warnings=list(self.rate_warnings),
+                    rate_checked=list(self.rate_checked),
+                    rate_skipped=dict(self.rate_skipped))
 
 
 def analyse(rec_dir, fps: int = 100) -> Analysis:
@@ -392,29 +444,53 @@ def _save_atomic(path: Path, arr: np.ndarray) -> None:
 
 
 def _rewrite_metadata(cam_dir: Path, cam_blockids: np.ndarray,
-                      frame_idx: np.ndarray, common: np.ndarray, fps: int):
+                      frame_idx: np.ndarray, common: np.ndarray,
+                      fps: int) -> bool:
     """Replace blockids.npy + frametimes.npy with the aligned (common) set.
+
+    Returns True when the new frametimes.npy holds synthesised timestamps.
 
     Both arrays are computed first and written atomically afterwards, so a
     failure between the two files cannot leave one describing the aligned set
-    and the other the original.
+    and the other the original. When the original timestamps do not describe
+    this camera's frames (missing, or another length), they are synthesised
+    from the uniform hardware trigger. The original is then kept as
+    ``SYNTH_ORIGINAL``, and ``SYNTH_MARKER`` is written before frametimes.npy,
+    so no reader ever sees synthesised times without the marker.
     """
     ft_path = cam_dir / "frametimes.npy"
+    marker = cam_dir / SYNTH_MARKER
     m = common.size
     frame_nums = np.arange(1, m + 1, dtype=np.float64)
     ts = None
+    ft = None
     if ft_path.exists():
         ft = np.load(ft_path)
-        # Original frametimes line up with the camera's own frames only when it
-        # was saved untruncated (realtime path). Otherwise synthesize from the
-        # uniform hardware trigger.
-        if ft.ndim == 2 and ft.shape[1] == cam_blockids.size:
+        if (ft.ndim == 2 and ft.shape[0] >= 2
+                and ft.shape[1] == cam_blockids.size):
             ts = ft[1][frame_idx].astype(np.float64)
             ts = ts - ts[0]
+    synthesized = ts is None or marker.exists()
     if ts is None:
         ts = (common - common[0]).astype(np.float64) / float(fps)
+        original = None
+        if ft is not None:
+            original = SYNTH_ORIGINAL
+            if not (cam_dir / SYNTH_ORIGINAL).exists():
+                _save_atomic(cam_dir / SYNTH_ORIGINAL, ft)
+        why = ("frametimes.npy was missing" if ft is None else
+               f"frametimes.npy had shape {ft.shape}, which does not describe "
+               f"the camera's {cam_blockids.size} frames")
+        if not marker.exists():
+            tmp = marker.with_name(marker.name + ".tmp")
+            tmp.write_text(json.dumps({
+                "reason": f"{why}; timestamps synthesised as "
+                          f"(blockid - first blockid) / {fps}",
+                "original": original}, indent=2))
+            os.replace(tmp, marker)
     _save_atomic(cam_dir / "blockids.npy", common.astype(np.int64))
     _save_atomic(ft_path, np.stack([frame_nums, ts]))
+    return synthesized
 
 
 def _write_index(out: Path, an: Analysis, frame_index: np.ndarray,
@@ -575,6 +651,8 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
     )
     for nm, flag in zip(names, replaced_flags):
         summary["per_camera"][nm]["video_is_common"] = bool(flag)
+        summary["per_camera"][nm]["frametimes_synthesized"] = (
+            rec_dir / nm / SYNTH_MARKER).exists()
 
     # ``replaced`` is settled above from the camera outcomes alone: the videos
     # and their metadata are already on disk in their final form, so a disk
