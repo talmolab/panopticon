@@ -96,7 +96,7 @@ class BoardTriggerSource(TriggerSource):
 
     Every call is the controller's own, with the same arguments and the same
     return value: the RDY ack, the reset-and-retry and its may_retry veto,
-    and the stop's ack all behave exactly as they do without this wrapper.
+    and the stop's ack all behave as they do without this wrapper.
     With no controller (the link was never claimed) a start and a stop both
     return False, as the window's own checks for a missing link do.
     """
@@ -167,8 +167,10 @@ class ExternalTriggerSource(TriggerSource):
         that is already running to reach every camera. Then it calls
         camera_mgr.mark_board_starting(), which fixes each camera's count of
         frames retrieved before the barrier, and reads those counts back
-        (frames_before_barrier). Marking first and reading second means a
-        frame that lands during the read is still counted.
+        (frames_before_barrier). Marking first and reading second means the
+        read cannot miss a frame retrieved before the mark: the counts are
+        final once the mark is made, and a frame retrieved after it is past
+        the barrier.
 
         ``action`` is the button the refusal tells the operator to press.
         """

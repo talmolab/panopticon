@@ -466,7 +466,7 @@ class SimExternalClock:
     """A trigger source that runs on its own, as a lab's pulse generator does.
 
     It drives a SimBoard's pulse train directly, so the simulated cameras
-    receive its pulses exactly as they receive the board's. Nothing on the
+    receive its pulses as they receive the board's. Nothing on the
     serial link reaches it: no SimSerial command starts or stops it, and it
     prints no RDY line. That is the rig a profile with `trigger_source:
     external` describes, where only the operator starts and stops the
