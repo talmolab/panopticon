@@ -529,6 +529,12 @@ class ProcessCameraManager(QObject):
     def _loc(self, g: int):
         return self._where.get(g, (None, None))
 
+    def _cn(self, i: int) -> str:
+        """The camN name of camera `i`. The facade's camera views are in rig
+        order, so `i` is the rig-wide index (CameraManager._cn maps its own
+        share's index to that one)."""
+        return f"cam{i + 1}"
+
     def _status_get(self, g: int, field: str, default=0):
         w, k = self._loc(g)
         if w is None or w.status is None:
@@ -1394,71 +1400,83 @@ class ProcessCameraManager(QObject):
         stuck: list = []
         dropped_full = backlog_peak = 0
         records: list = []
-        for w in armed:
-            ok, res = replies[w]
-            if not ok:
-                if w.dead:
-                    text = (f"{w.names}: the capture process exited during "
-                            f"the recording"
-                            + ("" if w.exitcode is None else
-                               f" (code {w.exitcode})")
-                            + ". Its stream.h264 is partial and the "
-                              "frame-to-trigger mapping is UNVERIFIED; the "
-                              "block IDs of the frames it had handed to the "
-                              "encoder are in blockids.partial beside the "
-                              "stream.")
-                else:
-                    text = (f"{w.names}: the capture process did not return "
-                            f"its results ({res}). Its stream.h264 is kept "
-                            f"and the frame-to-trigger mapping is "
-                            f"UNVERIFIED; see blockids.partial beside the "
-                            f"stream.")
-                print(f"[acq] WARNING: {text}", flush=True)
-                warnings.append(text)
-                continue
-            for k, g in enumerate(w.cams):
-                if k < len(res["results"]):
-                    c, ts, ids = res["results"][k]
-                    results[g] = (int(c), list(ts), list(ids))
-                if k < len(res["stream_stats"]):
-                    stats[g] = res["stream_stats"][k]
-                det = res["details"].get(g)
-                if det is not None:
-                    self._grab_threads[g].final = det
-                    dropped_full += int(det.get("dropped_full", 0))
-            warnings.extend(res["warnings"])
-            for name, reason in res["retired"].items():
-                retired.setdefault(name, reason)
-            failures.extend(res["encoder_failures"])
-            stuck.extend(res["stuck"])
-            backlog_peak = max(backlog_peak, int(res["backlog_peak"]))
-            for rec in res["encoder_records"]:
-                rec = dict(rec)
-                rec["worker"] = w.wid
-                records.append(rec)
-        core = coord.core
-        print(f"[sync] released={core.released} dropped={core.dropped} "
-              f"forced={core.forced} queue_full_drops={dropped_full}",
-              flush=True)
-        warnings.extend(sync_encode.session_warnings(
-            core, [r[1] for r in results], [r[2] for r in results],
-            self._fps, self._max_lag))
-        for cam, reason in core.retired_reasons:
-            retired.setdefault(f"cam{cam + 1}", reason)
-        warnings.extend(self._source_silence_warnings(self._grab_threads))
-        if self._router is not None:
-            self._router.dropped_full = dropped_full
-            self._router.backlog_peak = backlog_peak
-        self.last_warnings = warnings
-        self.last_results = results
-        self.last_retired = retired
-        self.last_encoder_failures = failures
-        self.last_stream_stats = stats
-        self.last_encoder_records = records
-        spec = self.encoder_factory
-        if isinstance(spec, wk.FactorySpec) and spec.records is not None:
-            spec.records.extend(records)
-        self._end_acquisition(abandon=False)
+        try:
+            for w in armed:
+                ok, res = replies[w]
+                if not ok:
+                    if w.dead:
+                        text = (f"{w.names}: the capture process exited "
+                                f"during the recording"
+                                + ("" if w.exitcode is None else
+                                   f" (code {w.exitcode})")
+                                + ". Its stream.h264 is partial and the "
+                                  "frame-to-trigger mapping is UNVERIFIED; "
+                                  "the block IDs of the frames it had handed "
+                                  "to the encoder are in blockids.partial "
+                                  "beside the stream.")
+                    else:
+                        text = (f"{w.names}: the capture process did not "
+                                f"return its results ({res}). Its stream.h264 "
+                                f"is kept and the frame-to-trigger mapping is "
+                                f"UNVERIFIED; see blockids.partial beside the "
+                                f"stream.")
+                    print(f"[acq] WARNING: {text}", flush=True)
+                    warnings.append(text)
+                    continue
+                for k, g in enumerate(w.cams):
+                    if k < len(res["results"]):
+                        c, ts, ids = res["results"][k]
+                        results[g] = (int(c), list(ts), list(ids))
+                    if k < len(res["stream_stats"]):
+                        stats[g] = res["stream_stats"][k]
+                    det = res["details"].get(g)
+                    if det is not None:
+                        self._grab_threads[g].final = det
+                        dropped_full += int(det.get("dropped_full", 0))
+                warnings.extend(res["warnings"])
+                for name, reason in res["retired"].items():
+                    retired.setdefault(name, reason)
+                failures.extend(res["encoder_failures"])
+                stuck.extend(res["stuck"])
+                backlog_peak = max(backlog_peak, int(res["backlog_peak"]))
+                for rec in res["encoder_records"]:
+                    rec = dict(rec)
+                    rec["worker"] = w.wid
+                    records.append(rec)
+            core = coord.core
+            print(f"[sync] released={core.released} dropped={core.dropped} "
+                  f"forced={core.forced} queue_full_drops={dropped_full}",
+                  flush=True)
+            for cam, reason in core.retired_reasons:
+                retired.setdefault(f"cam{cam + 1}", reason)
+            # RULE: the results are the caller's before any cross-camera
+            # check runs. REASON: the caller writes blockids.npy and
+            # frametimes.npy from them, and a check that raised would
+            # otherwise leave the recording without either.
+            self.last_results = results
+            self.last_warnings = warnings
+            self.last_retired = retired
+            self.last_encoder_failures = failures
+            self.last_stream_stats = stats
+            self.last_encoder_records = records
+            warnings.extend(self._checked(
+                "The cross-camera checks",
+                "forced drops, kick-outs, the block-ID rate and retirements",
+                lambda: sync_encode.session_warnings(
+                    core, [r[1] for r in results], [r[2] for r in results],
+                    self._fps, self._max_lag)))
+            warnings.extend(self._checked(
+                "The trigger-source check",
+                "a trigger source that fell silent",
+                lambda: self._source_silence_warnings(self._grab_threads)))
+            if self._router is not None:
+                self._router.dropped_full = dropped_full
+                self._router.backlog_peak = backlog_peak
+            spec = self.encoder_factory
+            if isinstance(spec, wk.FactorySpec) and spec.records is not None:
+                spec.records.extend(records)
+        finally:
+            self._end_acquisition(abandon=False)
         if stuck:
             names = ", ".join(f"cam{g + 1}" for g in sorted(stuck))
             raise AcquisitionStopIncomplete(
@@ -1469,6 +1487,27 @@ class ProcessCameraManager(QObject):
                 f"and frametimes.npy have NOT been written yet: save "
                 f"last_results before abandoning.", results, sorted(stuck))
         return results
+
+    @staticmethod
+    def _checked(what: str, topic: str, fn) -> list:
+        """fn()'s warnings, or one warning saying the check `what` (which
+        looks for `topic`) could not run.
+
+        RULE: a cross-camera check that raises adds a session warning and
+        the stop carries on. REASON: the stop holds the recording's results
+        by then, and an exception would reach the caller in place of them;
+        the operator must still learn that the recording went unchecked.
+        """
+        try:
+            return list(fn())
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            msg = (f"{what} did not run ({type(e).__name__}: {e}), so this "
+                   f"recording is unchecked for {topic}. Its block IDs and "
+                   f"timestamps are saved as usual.")
+            print(f"[acq] WARNING: {msg}", flush=True)
+            return [msg]
 
     def _end_acquisition(self, abandon: bool) -> None:
         """Stop the coordinator thread and release the ledger and the
