@@ -44,6 +44,7 @@ import numpy as np
 
 from gui_app import recording_meta
 from gui_app.alignment import _unwrap_blockids, camera_dirs
+from gui_app.stim_compiler import block_timing, drive_mode
 
 TRACE_NAME = "stim_trace.csv"
 PARADIGM_NAME = "stim_paradigm.json"
@@ -103,30 +104,40 @@ def locate(steps: list[dict], loop_to, t: float):
 def ttl_level(step: dict, t_into_step: float) -> int:
     """Modelled pin level at an instant inside a step.
 
-    Matches the firmware: 0 Hz or 0 pulse width holds LOW, a pulse width at or
-    above the period is a constant HIGH, and otherwise the pulse *leads* each
-    period. Sampled at the trigger instant — the exposure spans ~2 ms after it,
-    so treat this as indicative for a pulse train, exact for on/off blocks.
+    Matches the firmware: stim_compiler.drive_mode() says whether the pin is
+    held LOW, held HIGH (a pulse width at or above the period) or pulsed, and
+    a train's pulse *leads* each period. Sampled at the trigger instant; the
+    exposure spans ~2 ms after it, so treat this as indicative for a pulse
+    train, exact for on/off blocks.
+
+    RULE: classify with drive_mode() and sample on block_timing()'s integer
+    microseconds. REASON: those integers are what updateStim() compares. A
+    float test disagrees with the board where the pulse width rounds onto the
+    period: at 7 Hz with a 142.857 ms pulse the board holds the pin HIGH,
+    and a float test puts a LOW phase at the end of every period.
     """
     freq = float(step["freq_hz"])
     pw_ms = float(step["pulse_width_ms"])
-    if freq <= 0 or pw_ms <= 0:
+    kind, _duty = drive_mode(freq, pw_ms)
+    if kind == "low":
         return 0
-    period_ms = 1000.0 / freq
-    if pw_ms >= period_ms:
+    if kind != "train":
         return 1
-    return 1 if (t_into_step * 1000.0) % period_ms < pw_ms else 0
+    period_us, pw_us, _ = block_timing({"freq": freq, "pw": pw_ms, "dur": 0})
+    return 1 if int(round(t_into_step * 1e6)) % period_us < pw_us else 0
 
 
 def step_active(step: dict) -> bool:
     """Whether a step drives its pin at all.
 
-    Decided from the numbers the firmware uses (a positive frequency AND a
-    positive pulse width), never from the human-readable ``mode`` label:
-    the label is display text that can be reworded, and a trace that keyed
-    on it would flip every off-period frame to active without a test noticing.
+    Decided by stim_compiler.drive_mode() from the numbers the firmware uses,
+    never from the human-readable ``mode`` label: the label is display text
+    that can be reworded, and a trace that keyed on it would flip every
+    off-period frame to active without a test noticing. A pulse width or
+    period that rounds to 0 us holds the pin LOW on the board, so it is not
+    active here either.
     """
-    return float(step["freq_hz"]) > 0 and float(step["pulse_width_ms"]) > 0
+    return drive_mode(step["freq_hz"], step["pulse_width_ms"])[0] != "low"
 
 
 def resolve_chains(paradigm: dict) -> list[dict]:
