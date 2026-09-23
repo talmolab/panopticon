@@ -2252,11 +2252,11 @@ class FlirBackend:
             n.sete("TriggerOverlap", t.overlap, field="camera.trigger.overlap")
         if t.delay_us is not None:
             n.setf("TriggerDelay", t.delay_us)
+        n.sete("TriggerMode", "On")
         # The user set can hold a delay the profile does not name, so the
-        # witness waits the value the camera reports.
+        # witness waits the value the camera reports in trigger mode.
         cam._trigger_delay_s = (max(0.0, n.getf("TriggerDelay")) * 1e-6
                                 if n.readable("TriggerDelay") else 0.0)
-        n.sete("TriggerMode", "On")
         if n.writable("AcquisitionFrameRateEnable"):
             n.setb("AcquisitionFrameRateEnable", False)
         cam._triggered = True
