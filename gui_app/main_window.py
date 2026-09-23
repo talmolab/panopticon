@@ -447,6 +447,7 @@ class MainWindow(QMainWindow):
         """
         return (self._state is State.IDLE
                 and not self._solve_running()
+                and not self._hw_check_pending
                 and bool(self._profile.name)
                 and not (self._stim_window is not None
                          and self._stim_window.is_uploading()))
@@ -522,22 +523,47 @@ class MainWindow(QMainWindow):
             (screen.height() - target_h) // 2 + screen.y(),
         )
 
-    def _run_hardware_check(self):
-        """Survey the host once, at launch, off the UI thread.
+    def _run_hardware_check(self, survey: bool = True):
+        """Check the host against the profile, off the UI thread.
 
-        The profile and the camera count are what make the libx264 bench, the
-        NVENC session probe and the encoder selection run HERE. Without them
-        the profile's `encoder` field selects nothing at all and the session
-        probe lands on the UI thread at the first Record, freezing the window
-        with no busy indicator.
+        At launch (`survey`) the whole host is surveyed; after a profile
+        switch only the encoder half runs again (HardwareCheckThread). The
+        profile and the camera count are what make the libx264 bench, the
+        NVENC session probe, the NVENC upload setting and the encoder
+        selection run HERE. Without them the profile's `encoder` field
+        selects nothing at all and the session probe lands on the UI thread
+        at the first Record, freezing the window with no busy indicator.
+
+        RULE: Record and Calibrate stay disabled until the report arrives.
+        REASON: the check installs the encoder factory and the NVENC upload,
+        and its session probe allocates every session the driver grants. A
+        start during it would record on whatever was installed before, and
+        the capacity preflight's own probe would run beside this one, each
+        child seeing only part of the session cap.
         """
         output_dir = self._profile.output_dir if self._profile else ""
         n_cams = self._camera_mgr.num_cameras or (
             self._profile.n_cameras if self._profile else 0)
-        self._hw_check_thread = HardwareCheckThread(
-            output_dir, profile=self._profile, n_cams=n_cams)
-        self._hw_check_thread.report_ready.connect(self._on_hardware_check_done)
-        self._hw_check_thread.start()
+        self._hw_check_pending = True
+        self._sidebar.set_toggles_enabled(False)
+        self.statusBar().showMessage(
+            "Checking hardware: Record and Calibrate are available once it "
+            "reports")
+        thread = HardwareCheckThread(output_dir, profile=self._profile,
+                                     n_cams=n_cams, survey=survey)
+        self._hw_check_thread = thread
+        thread.report_ready.connect(self._on_hardware_check_done)
+        # QThread's own finished, after report_ready: the backstop for a
+        # thread that ended without a report.
+        thread.finished.connect(self._on_hardware_check_thread_finished)
+        thread.start()
+
+    def _on_hardware_check_thread_finished(self):
+        if self._hw_check_pending:
+            print("[hw] the hardware check ended without a report; Record and "
+                  "Calibrate are enabled without its findings", flush=True)
+            self._hw_check_pending = False
+            self._sidebar.set_toggles_enabled(self._toggles_permitted())
 
     def _show_profile_warnings(self):
         """Report the profiles that would not load, once the window is up.
@@ -567,9 +593,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Rig profiles", "\n".join(warnings))
 
     def _on_hardware_check_done(self, report):
+        self._hw_check_pending = False
+        self._sidebar.set_toggles_enabled(self._toggles_permitted())
+        msg = format_report(report)
+        print(msg, flush=True)
+        self.statusBar().showMessage(
+            "Hardware check done" + (f": encoding with {report.encoder}"
+                                     if report.encoder else ""))
         if report.warnings:
-            msg = format_report(report)
-            print(msg, flush=True)
             QMessageBox.warning(self, "Hardware Check", msg)
 
     def _refuse_profile_switch(self):
@@ -630,8 +661,21 @@ class MainWindow(QMainWindow):
                   "profile", flush=True)
             self._refuse_profile_switch()
             return
-        # close_all + open 6 cameras (+ .pfs load) is ~1-2 s of GigE round-trips;
-        # run it off the UI thread so the window doesn't go "not responding".
+        if self._worker_busy(self._hw_check_thread):
+            # The switch runs the encoder check again for the new profile, and
+            # a second check cannot start over a running one: assigning over
+            # the running thread drops its last reference (a qFatal), and the
+            # two would install encoders for different profiles.
+            self._refuse_profile_switch()
+            QMessageBox.information(
+                self, "The hardware check is running",
+                "Panopticon is still checking the hardware for the current "
+                "profile. Switch profiles once it reports (the status bar "
+                "says when).")
+            return
+        # close_all + open the cameras (+ settings load) is seconds of camera
+        # round-trips; run it off the UI thread so the window doesn't go "not
+        # responding".
         self._begin_busy("Switching cameras…")
         self._switch_from_port = self._profile.serial_port
         self._profile = profile
@@ -653,6 +697,12 @@ class MainWindow(QMainWindow):
         self._size_to_screen()
         self._end_busy()
         self._sidebar.set_status("IDLE", "#888")
+        # RULE: the encoder check runs again for the new profile. REASON: the
+        # encoder factory, the NVENC upload and the libx264 bench are process
+        # state set by the last check, so without it the new profile records
+        # on the old profile's encoder and upload path, against a bench
+        # measured at the old frame size.
+        self._run_hardware_check(survey=False)
         self._prepare_board_after_switch(
             getattr(self, "_switch_from_port", self._profile.serial_port))
 
@@ -1005,9 +1055,29 @@ class MainWindow(QMainWindow):
         # rate for it overstates the disk cost by the ratio between them.
         fps = (p.calibration_frame_rate if acq_type == "calibration"
                else p.frame_rate)
+        n_cams = self._camera_mgr.num_cameras
+        # RULE: the encoder is selected again for every start, against the
+        # live profile and the cameras that are open. REASON: the launch
+        # selection answers for the machine as it was then; an NVENC session
+        # shortfall at launch installs libx264, and a start that trusted it
+        # would record every camera on the CPU after the sessions came back,
+        # while the check below saw enough sessions and said nothing. The
+        # session count is cached, so this re-probes only when the cache is
+        # short of what this start needs.
+        choice_blocking = []
+        try:
+            if n_cams > 0:
+                choice = select_encoder(p, n_cams, fps, p.frame_width,
+                                        p.frame_height)
+                print(f"[acq] encoder: {choice.encoder} ({choice.reason})",
+                      flush=True)
+                if choice.blocking:
+                    choice_blocking.append(choice.blocking)
+        except Exception as e:
+            print(f"[acq] encoder selection failed to run: {e}", flush=True)
         try:
             blocking, warnings = check_capacity(
-                n_cams=self._camera_mgr.num_cameras,
+                n_cams=n_cams,
                 width=p.frame_width, height=p.frame_height,
                 ring_n=ring_n, max_num_buffer=p.max_num_buffer,
                 realtime=realtime, output_dir=self._sidebar.output_dir,
@@ -1015,8 +1085,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             # A broken preflight must never be what stops a recording.
             print(f"[acq] capacity preflight failed to run: {e}", flush=True)
-            return [], []
-        return list(blocking or []), list(warnings or [])
+            return choice_blocking, []
+        blocking = list(blocking or [])
+        return (choice_blocking + [b for b in blocking
+                                   if b not in choice_blocking],
+                list(warnings or []))
 
     def _on_capacity_checked(self, result):
         """Answer the capacity preflight, then carry the start on. UI thread."""
@@ -1220,6 +1293,18 @@ class MainWindow(QMainWindow):
             print(f"[acq] refusing start: state={self._state.value} "
                   f"busy={self._busy}", flush=True)
             self._sidebar.clear_toggle_silently(acq_type)
+            return
+
+        # The toggles are disabled while the hardware check runs; this is the
+        # guard for a start that reaches here another way.
+        if self._hw_check_pending:
+            self._refuse_start(
+                "The hardware check is running",
+                "Panopticon is still checking the hardware for this profile: "
+                "it installs the encoder and probes the NVENC session cap, "
+                "and a start now would record on whatever was installed "
+                "before.\n\nStart again once the status bar says the check "
+                "is done.")
             return
 
         # A solve runs for minutes and never leaves IDLE, so the guard above
