@@ -85,9 +85,19 @@ STOP_EOS_S = STOP_NORMAL_EXIT_S + STOP_FORCED_EXIT_S + 5.0
 #: How long stop waits for a worker's results once the ledger is flushed:
 #: its encoders drain (a full queue is about a second of encoding, with a
 #: bound of DRAIN_SENTINEL_TIMEOUT_S + DRAIN_JOIN_TIMEOUT_S) and it
-#: reconciles every camera.
+#: reconciles every camera. A worker that misses it is terminated.
 STOP_RESULTS_S = (sync_encode.DRAIN_SENTINEL_TIMEOUT_S
                   + sync_encode.DRAIN_JOIN_TIMEOUT_S + 60.0)
+#: Name of the file a worker appends its cameras' encoder-order block IDs
+#: to during a recording (gui_app.mp.worker.WorkerRouter.write_partial).
+PARTIAL_NAME = wk.PARTIAL_NAME
+#: What the session warnings say about blockids.partial for a camera whose
+#: worker gave no results.
+PARTIAL_NOTE = ("blockids.partial beside the stream lists, in encoder order, "
+                "the block ID and timestamp of the frames the capture process "
+                "had handed to the encoder at its last append (about once a "
+                "second): entry i is frame i of the stream, and the stream's "
+                "frames past the end of the file have no recorded trigger.")
 
 
 def split_contiguous(n: int, groups: int) -> list:
@@ -465,6 +475,8 @@ class ProcessCameraManager(QObject):
         self._grants: dict = {}
         self._max_lag = 0
         self._fps = 0
+        #: Each camera's recording directory, from start_acquisition.
+        self._cam_dirs: list = []
         self._snap_base: dict = {}
         self.last_open_error = None
         self.last_warnings: list = []
@@ -814,9 +826,12 @@ class ProcessCameraManager(QObject):
                   f"for {w.names}: {e}", flush=True)
 
     def _on_exit(self, w: _Worker) -> None:
-        if w.dead:
-            return
-        w.dead = True
+        # The supervisor and a stop that terminates a worker can both get
+        # here; only the first one acts.
+        with w._lock:
+            if w.dead:
+                return
+            w.dead = True
         try:
             w.process.join(timeout=1.0)
         except Exception:
@@ -1162,6 +1177,7 @@ class ProcessCameraManager(QObject):
         if spec.nvenc:
             from gui_app import nvenc
             upload = nvenc.upload_config()
+        self._cam_dirs = [Path(p).parent for p in raw_paths]
         self._ledger_seg, self._coordinator = create_shared(n, kick_max_lag)
         self._max_lag, self._fps = int(kick_max_lag), int(fps)
         self._router = _RouterView(self._coordinator, kick_max_lag)
@@ -1387,6 +1403,14 @@ class ProcessCameraManager(QObject):
                   f"missing", flush=True)
             coord.flush(require_eos=False)
         replies = _await(calls, STOP_RESULTS_S)
+        terminated = set()
+        for w in armed:
+            ok, res = replies[w]
+            if not ok and res.kind == "timeout" and not w.dead:
+                self._terminate(w, f"the capture process for {w.names} did "
+                                   f"not return its results within "
+                                   f"{STOP_RESULTS_S:g} s of the stop")
+                terminated.add(w)
         self._coord_stop.set()
         if self._coord_thread is not None:
             self._coord_thread.join(timeout=2.0)
@@ -1404,22 +1428,7 @@ class ProcessCameraManager(QObject):
             for w in armed:
                 ok, res = replies[w]
                 if not ok:
-                    if w.dead:
-                        text = (f"{w.names}: the capture process exited "
-                                f"during the recording"
-                                + ("" if w.exitcode is None else
-                                   f" (code {w.exitcode})")
-                                + ". Its stream.h264 is partial and the "
-                                  "frame-to-trigger mapping is UNVERIFIED; "
-                                  "the block IDs of the frames it had handed "
-                                  "to the encoder are in blockids.partial "
-                                  "beside the stream.")
-                    else:
-                        text = (f"{w.names}: the capture process did not "
-                                f"return its results ({res}). Its stream.h264 "
-                                f"is kept and the frame-to-trigger mapping is "
-                                f"UNVERIFIED; see blockids.partial beside the "
-                                f"stream.")
+                    text = self._no_results(w, res, w in terminated)
                     print(f"[acq] WARNING: {text}", flush=True)
                     warnings.append(text)
                     continue
@@ -1433,6 +1442,7 @@ class ProcessCameraManager(QObject):
                     if det is not None:
                         self._grab_threads[g].final = det
                         dropped_full += int(det.get("dropped_full", 0))
+                self._remove_partials(w)
                 warnings.extend(res["warnings"])
                 for name, reason in res["retired"].items():
                     retired.setdefault(name, reason)
@@ -1487,6 +1497,65 @@ class ProcessCameraManager(QObject):
                 f"and frametimes.npy have NOT been written yet: save "
                 f"last_results before abandoning.", results, sorted(stuck))
         return results
+
+    def _terminate(self, w: _Worker, why: str) -> None:
+        """End a worker the stop has given up on.
+
+        RULE: a worker whose stop results miss STOP_RESULTS_S is terminated,
+        and its cameras are reported as a dead worker's are. REASON: one
+        that recovers later would finish its stop and send results nobody
+        reads, while the session warnings already describe its files as the
+        parent found them; ending it keeps the two in agreement.
+        """
+        print(f"[mp] {why}; terminating it", flush=True)
+        # Its cameras are reported by the stop that called this; the exit
+        # must not retire them in a coordinator that has already flushed.
+        w.closing = True
+        try:
+            w.process.terminate()
+            w.process.join(5.0)
+        except Exception as e:
+            print(f"[mp] terminating the capture process for {w.names} "
+                  f"failed: {type(e).__name__}: {e}", flush=True)
+        self._on_exit(w)
+
+    @staticmethod
+    def _no_results(w: _Worker, res, terminated: bool) -> str:
+        """The session warning for a worker whose stop gave no results."""
+        if terminated:
+            what = (f"did not return its results within {STOP_RESULTS_S:g} s "
+                    f"of the stop and was terminated. Its stream.h264 is "
+                    f"kept, may be incomplete")
+        elif w.dead:
+            what = ("exited during the recording"
+                    + ("" if w.exitcode is None else f" (code {w.exitcode})")
+                    + ". Its stream.h264 is partial")
+        else:
+            what = (f"could not finish the stop ({res}). Its stream.h264 is "
+                    f"kept")
+        return (f"{w.names}: the capture process {what}, and the "
+                f"frame-to-trigger mapping is UNVERIFIED. {PARTIAL_NOTE}")
+
+    def _remove_partials(self, w: _Worker) -> None:
+        """Delete blockids.partial for a worker's cameras, whose results the
+        parent now holds.
+
+        RULE: the parent deletes this file, never the worker. REASON: until
+        the parent has a worker's results, the file is the only record of
+        which trigger each frame of those streams is, and a worker that
+        answers after the parent gave up on it must not remove it.
+        """
+        for g in w.cams:
+            if g >= len(self._cam_dirs):
+                continue
+            p = self._cam_dirs[g] / PARTIAL_NAME
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"[mp] cam{g + 1}: could not remove {p.name}: {e}",
+                      flush=True)
 
     @staticmethod
     def _checked(what: str, topic: str, fn) -> list:

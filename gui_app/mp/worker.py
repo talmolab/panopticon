@@ -62,6 +62,9 @@ IDLE_HARVEST_S = 0.02
 #: its cameras reached end of stream. The parent flushes as soon as every
 #: camera has, so this bounds a parent that died or wedged.
 FLUSH_WAIT_S = 60.0
+#: The file beside each camera's stream that keeps its encoder-order block
+#: IDs during a recording (WorkerRouter.write_partial).
+PARTIAL_NAME = "blockids.partial"
 #: Frames between appends to a camera's blockids.partial.
 PARTIAL_EVERY = 100
 #: Record dtype of blockids.partial: each frame handed to the encoder, in
@@ -233,6 +236,9 @@ class WorkerRouter:
         self._retire_req: dict = {}
         self._threads_fn = threads_fn
         self._stopping = False
+        #: Held by each append to blockids.partial and by the switch to
+        #: stopping, so no append is under way once stop() or abandon() runs.
+        self._partial_lock = threading.Lock()
         self.warnings: list = []
         self.encoder_failures: list = []
         self.backlog_peak = 0
@@ -379,31 +385,44 @@ class WorkerRouter:
 
         A worker that dies mid-recording takes its block-ID list with it,
         and its stream.h264 is partial. This file keeps, in encoder order,
-        the (block ID, timestamp) of every frame handed to the encoder up to
-        the last append, so the stream's frames can still be placed. The
-        stream may hold fewer frames than the file lists (the encoder had
-        not finished them), never more.
+        the (block ID, timestamp) of the frames handed to the encoder up to
+        the last append, so the stream's frames can still be placed: entry i
+        is frame i of the stream. The two lengths differ both ways. The
+        stream can end before the file does (the encoder had not finished
+        those frames), and it can run past the file's end, because an append
+        comes at most once a second and only once PARTIAL_EVERY new frames
+        wait: the frames past the end of the file have no recorded trigger.
+
+        The worker never deletes the file. The parent does, once it holds
+        this worker's stop results (ProcessCameraManager._remove_partials).
         """
-        if self._stopping:
-            return
-        for cam, sink in self._sinks.items():
-            n = len(sink.block_ids)
-            w = self._partial_written[cam]
-            if n - w < PARTIAL_EVERY:
-                continue
-            ids = sink.block_ids[w:n]
-            ts = sink.timestamps[w:n]
-            k = min(len(ids), len(ts))
-            rec = np.empty(k, PARTIAL_DTYPE)
-            rec["block_id"] = ids[:k]
-            rec["timestamp_s"] = ts[:k]
-            try:
-                with open(sink.dir / "blockids.partial", "ab") as f:
-                    f.write(rec.tobytes())
-                self._partial_written[cam] = w + k
-            except OSError as e:
-                print(f"[w] cam{cam + 1}: blockids.partial append failed: {e}",
-                      flush=True)
+        with self._partial_lock:
+            if self._stopping:
+                return
+            for cam, sink in self._sinks.items():
+                n = len(sink.block_ids)
+                w = self._partial_written[cam]
+                if n - w < PARTIAL_EVERY:
+                    continue
+                ids = sink.block_ids[w:n]
+                ts = sink.timestamps[w:n]
+                k = min(len(ids), len(ts))
+                rec = np.empty(k, PARTIAL_DTYPE)
+                rec["block_id"] = ids[:k]
+                rec["timestamp_s"] = ts[:k]
+                try:
+                    with open(sink.dir / PARTIAL_NAME, "ab") as f:
+                        f.write(rec.tobytes())
+                    self._partial_written[cam] = w + k
+                except OSError as e:
+                    print(f"[w] cam{cam + 1}: {PARTIAL_NAME} append failed: "
+                          f"{e}", flush=True)
+
+    def _begin_stopping(self) -> None:
+        """No harvest from the status thread and no append to
+        blockids.partial from here on, and none still under way."""
+        with self._partial_lock:
+            self._stopping = True
 
     # -- stop ---------------------------------------------------------------------
 
@@ -426,8 +445,9 @@ class WorkerRouter:
         for it. The parent flushes once every camera has done one or the
         other, and the final decisions are routed before the encoders drain.
         Returns (count, timestamps, block_ids) per camera, in `cams` order.
+        blockids.partial stays for the parent to delete (write_partial).
         """
-        self._stopping = True
+        self._begin_stopping()
         for cam in self.cams:
             with self._locks[cam]:
                 self._collect_locked(cam)
@@ -485,18 +505,11 @@ class WorkerRouter:
                     f"this camera's blockids.npy.")
         for sink in sinks:
             sink.write_warnings_file()
-            try:
-                (sink.dir / "blockids.partial").unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                print(f"[w] cam{sink.cam + 1}: could not remove "
-                      f"blockids.partial: {e}", flush=True)
         return [(len(s.block_ids), s.timestamps, s.block_ids) for s in sinks]
 
     def abandon(self, timeout_s: float = sync_encode.ABANDON_TIMEOUT_S) -> None:
         """Tear down without draining, as SyncEncodeRouter.abandon does."""
-        self._stopping = True
+        self._begin_stopping()
         deadline = time.monotonic() + max(0.0, timeout_s)
         for cam in self.cams:
             with self._locks[cam]:
