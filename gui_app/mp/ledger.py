@@ -498,8 +498,8 @@ class Coordinator:
             return 0
         rb = self.layout.ring_bits
         dec = self._v.decision
-        # The bound goes out before the first bit, so a worker that reads a
-        # bit this publish rewrote also reads a bound that condemns the read.
+        # Stored before the first bit. A worker that reads a bit this publish
+        # rewrote then reads a bound ring_bits past its trigger, and refuses.
         self._v.hdr[H_DECIDING] = decided
         for t in range(prev + 1, decided + 1):
             released = t in released_now
