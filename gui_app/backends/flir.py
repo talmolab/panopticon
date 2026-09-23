@@ -549,6 +549,7 @@ class FlirCamera:
         self._fid_base_offset = 0
         #: The witness for the current triggered arm, filled at stops.
         self.witness = None
+        self._late_read_logged = False
         # With an edge counter and no exposure counter, a frame_id camera
         # keeps its last block ID per arm: frames acquired through the last
         # frame that reached the host (`_bid_tracked`).
@@ -850,7 +851,7 @@ class FlirCamera:
         """The witness of a triggered arm whose counters were just reset."""
         return {"edges": None, "exposures": None, "exposures_check": None,
                 "gap_edges": 0, "stopped_at": None, "error": None,
-                "rearms": 0, "id_frames": 0}
+                "rearms": 0, "id_frames": 0, "late_reads": 0}
 
     def _ctr_delta(self, later: int, earlier: int) -> int:
         """`later - earlier` for two reads of one counter, across a wrap of
@@ -891,13 +892,26 @@ class FlirCamera:
     def _read_before_end(self):
         """The witness counters just before EndAcquisition, the exposures
         and then the edges, or None when there is no witness or the read
-        fails."""
+        fails.
+
+        A failed read is counted in the witness (`late_reads`) and logged
+        once per camera. The stop then reads every counter after
+        EndAcquisition, so an edge that arrives while acquisition stops
+        counts as an ignored trigger."""
         w = self.witness
         if w is None or w["error"]:
             return None
         try:
             return self._read(("exposures", "edges"))
-        except Exception:
+        except Exception as e:
+            w["late_reads"] += 1
+            if not self._late_read_logged:
+                self._late_read_logged = True
+                print(f"[flir] {self.serial}: the trigger counters could not "
+                      f"be read while the camera streams ({type(e).__name__}: "
+                      f"{e}), so they are read after EndAcquisition; an edge "
+                      f"that arrives while acquisition stops then counts as "
+                      f"an ignored trigger", flush=True)
             return None
 
     def _read_counters_at_stop(self, before) -> None:
