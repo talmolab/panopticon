@@ -23,10 +23,12 @@ from gui_app.encode_worker import EncodeWorker
 from gui_app.align_worker import AlignWorker
 from gui_app.ui_workers import CallableWorker
 from gui_app import alignment
+from gui_app import recording_meta
 from gui_app import stim_trace
 from gui_app.calibration_worker import CalibrationWorker
-from gui_app.hardware_check import (HardwareCheckThread, format_report,
-                                    check_capacity)
+from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
+                                    format_report, installed_encoder,
+                                    invalidate_nvenc_cache, select_encoder)
 from gui_app.coverage_worker import CoverageWorker
 from gui_app import rig_setup
 from gui_app import settings
@@ -118,6 +120,28 @@ class MainWindow(QMainWindow):
     #: Files from an earlier take that this acquisition's start could not
     #: remove, one warning each (_sweep_stale_diagnostics).
     _sweep_warnings: tuple | list = ()
+    #: True from the moment a hardware check starts until its report arrives.
+    #: Record and Calibrate stay disabled meanwhile (_toggles_permitted).
+    _hw_check_pending = False
+    #: What the finalize itself found (raw.bin against its block IDs, the
+    #: block-ID rate check outside kick mode), for this recording's report.
+    _finalize_warnings: tuple | list = ()
+    #: Rate-check texts this recording has already reported, so the
+    #: alignment summary's copy of the same finding is not shown twice.
+    _reported_rate_warnings: frozenset | set = frozenset()
+    #: Why the post-hoc alignment left each camera out, shown with its result.
+    _align_notes: tuple | list = ()
+    #: The encoder and NVENC upload this acquisition was started with, for its
+    #: session_metadata.json (_arm_encoder_record).
+    _session_encoder = ""
+    _session_upload: dict | None = None
+    #: The all-cameras-silent alarm has been raised for the current silence.
+    _source_alarm_raised = False
+    #: A camera that reached its shutdown temperature, one warning each. They
+    #: always reach WARNINGS.txt and the post-session dialog.
+    _thermal_shutdown_warnings: tuple | list = ()
+    #: Cameras whose thermal-watch fallback has been logged this acquisition.
+    _thermal_logged: frozenset | set = frozenset()
 
     def __init__(self):
         super().__init__()
@@ -1284,6 +1308,9 @@ class MainWindow(QMainWindow):
         self._created_dirs = []
         self._capture_warnings = []
         self._sweep_warnings = []
+        self._finalize_warnings = []
+        self._reported_rate_warnings = set()
+        self._align_notes = []
         self._thermal_warnings = []
         self._thermal_reported = set()
         self._thermal_alert = None
@@ -1591,7 +1618,13 @@ class MainWindow(QMainWindow):
                          and rig.calibration_gain_db >= 0 else None))
         except AcquisitionStartRefused as e:
             # Raised only once the cameras are back in free-run preview with
-            # nothing recorded, so there is nothing to roll back.
+            # nothing recorded, so there is nothing to roll back. A refusal
+            # because the kick-out encoders could not be created makes the
+            # cached NVENC session count suspect (invalidate_nvenc_cache).
+            failures = list(getattr(self._camera_mgr, "last_encoder_failures",
+                                    []) or [])
+            if failures:
+                invalidate_nvenc_cache("; ".join(failures))
             return {"ok": False, "title": "Cannot start the acquisition",
                     "message": str(e)}
 
@@ -2439,12 +2472,12 @@ class MainWindow(QMainWindow):
                 # aligned. The cameras are left untouched for abandon().
                 print(f"[acq] stop incomplete, saving what was collected: {e}",
                       flush=True)
-                self._save_frametimes(e.results)
+                self._save_capture_record(e.results)
                 self._save_acquisition_metadata()
                 self._write_stim_trace()
                 self._finalized = True
                 raise
-            self._save_frametimes(cam_results)
+            self._save_capture_record(cam_results)
             # Read thermals BEFORE resume_preview: DeviceTemperature starts
             # decaying the moment the load comes off, and how hot a camera got
             # under load cannot be recovered after the fact.
@@ -2503,8 +2536,18 @@ class MainWindow(QMainWindow):
         # silently.
         # Capture-side problems (a retired camera, block-ID truncation) reach
         # the operator here or not at all: camera_manager drops the router right
-        # after reading them.
-        self._capture_warnings = list(getattr(self._camera_mgr, "last_warnings", []))
+        # after reading them. The finalize's own findings follow them.
+        self._capture_warnings = (
+            list(getattr(self._camera_mgr, "last_warnings", []) or [])
+            + list(self._finalize_warnings))
+        # RULE: an acquisition in which a real-time encoder could not be
+        # created or failed forgets the cached NVENC session count. REASON:
+        # the count the preflight passed on was wrong for this start, and a
+        # cache that is never re-probed passes the next start on it too.
+        failures = list(getattr(self._camera_mgr, "last_encoder_failures",
+                                []) or [])
+        if failures:
+            invalidate_nvenc_cache("; ".join(failures))
         if isinstance(_result, Exception):
             print(f"[acq] FINALIZE FAILED: {type(_result).__name__}: {_result}",
                   flush=True)
@@ -2582,44 +2625,153 @@ class MainWindow(QMainWindow):
         print(f"[hud] saved {n} co-detection frame indices to {path.name}",
               flush=True)
 
-    def _save_frametimes(self, cam_results: list[tuple[int, list[float], list[int]]]):
-        counts = [len(ts) for _, ts, _ in cam_results if ts]
-        if not counts:
-            return
-        min_frames = min(counts)
-        rig = self._session_rig()
-        realtime = rig.realtime_encode
+    def _save_capture_record(self, cam_results: list) -> None:
+        """Everything the finalize writes from the capture itself. Worker thread.
 
-        for i, (count, timestamps, block_ids) in enumerate(cam_results):
+        The frame times and block IDs, the RETIRED.json of each retired
+        camera, and the block-ID rate check outside kick mode. What they find
+        is kept in _finalize_warnings for this recording's report.
+        """
+        warnings = list(self._save_frametimes(cam_results) or [])
+        self._write_retired()
+        rate = self._finalize_rate_check()
+        self._reported_rate_warnings = set(self._reported_rate_warnings) | set(rate)
+        self._finalize_warnings = warnings + rate
+
+    def _save_frametimes(self, cam_results: list[tuple[int, list[float], list[int]]]
+                         ) -> list:
+        """Write each camera's frametimes.npy and blockids.npy. Worker thread.
+
+        Returns the warnings, one per camera whose raw.bin disagreed with its
+        own block IDs.
+
+        RULE: every camera keeps every frame it persisted, in every mode; no
+        camera is cut to another camera's length. REASON: cameras drop frames
+        independently, so frame i is not the same trigger on two cameras, and
+        the block IDs are what align them afterwards (the post-hoc alignment,
+        2_align.py). Cutting each raw.bin to the shortest camera's count
+        destroys the survivors' frames when one camera stops early, and in
+        raw mode gives equal-length videos whose frame i is a different
+        trigger on any camera that dropped one.
+
+        RULE: when a raw.bin and its camera's block IDs disagree, the block
+        IDs are cut to the whole frames raw.bin holds, never the reverse, and
+        the camera is named in a warning. REASON: blockids.npy records only
+        frames that were persisted; a frame on disk without a block ID cannot
+        be placed on the trigger timeline, so it is the one cut, and a
+        partial frame at the end of the file is cut with it.
+        """
+        rig = self._session_rig()
+        frame_size = int(rig.frame_width) * int(rig.frame_height)
+        warnings = []
+        for i, (_count, timestamps, block_ids) in enumerate(cam_results):
             if not timestamps:
                 continue
             cam = self._camera_names[i]
             cam_dir = self._video_dir / cam
+            n = len(timestamps)
+            if block_ids:
+                n = min(n, len(block_ids))
 
-            # Realtime: the mp4 carries every encoded frame, so save FULL
-            # per-camera frametimes + blockids — auto-alignment then trims them
-            # to the frames every camera captured. Raw mode truncates raw.bin
-            # (below) to the min count for positional cross-cam consistency, so
-            # its frametimes/blockids are truncated to match.
-            n = len(timestamps) if realtime else min_frames
+            raw_path = cam_dir / "raw.bin"
+            if raw_path.exists() and frame_size > 0:
+                size = raw_path.stat().st_size
+                on_disk = size // frame_size
+                keep = min(on_disk, n)
+                if keep * frame_size != size:
+                    with open(raw_path, "r+b") as f:
+                        f.truncate(keep * frame_size)
+                note = None
+                if on_disk < n:
+                    note = (f"{cam}: raw.bin holds {on_disk} whole frames but "
+                            f"{n} were recorded, so its block IDs and frame "
+                            f"times are cut to the {on_disk} frames on disk. "
+                            f"The frames it lost at the end are missing from "
+                            f"its video.")
+                    n = on_disk
+                elif on_disk > n:
+                    note = (f"{cam}: raw.bin holds {on_disk} frames but only "
+                            f"{n} have a block ID; the {on_disk - n} without "
+                            f"one cannot be placed on the trigger timeline and "
+                            f"were cut from raw.bin.")
+                elif size != keep * frame_size:
+                    print(f"[acq] {cam}: raw.bin ended in a partial frame; it "
+                          f"was cut to its {keep} whole frames", flush=True)
+                if note:
+                    warnings.append(note)
+                    print(f"[acq] WARNING: {note}", flush=True)
+            if n <= 0:
+                continue
+
             frame_nums = np.arange(1, n + 1, dtype=np.float64)
-            ts_arr = np.array(timestamps[:n])
+            ts_arr = np.array(timestamps[:n], dtype=np.float64)
             ts_arr -= ts_arr[0]
             np.save(cam_dir / "frametimes.npy", np.stack([frame_nums, ts_arr]))
             # Block ID = trigger ordinal; dropped frames show as gaps, so
             # cross-camera alignment survives a drop (see gui_app/alignment.py).
             if block_ids:
-                bids = np.asarray(block_ids, dtype=np.int64)
-                np.save(cam_dir / "blockids.npy", bids if realtime else bids[:n])
+                bids = np.asarray(block_ids[:n], dtype=np.int64)
+                np.save(cam_dir / "blockids.npy", bids)
+        return warnings
 
-            raw_path = cam_dir / "raw.bin"
-            if raw_path.exists():
-                frame_size = rig.frame_width * rig.frame_height
-                expected_size = min_frames * frame_size
-                actual_size = raw_path.stat().st_size
-                if actual_size > expected_size:
-                    with open(raw_path, "r+b") as f:
-                        f.truncate(expected_size)
+    def _write_retired(self) -> None:
+        """RETIRED.json beside each camera the capture retired. Worker thread.
+
+        2_align.py and this window's own alignment leave such a camera out of
+        the alignment, so a camera that stopped early cannot cut the cameras
+        that kept recording down to its length.
+        """
+        retired = dict(getattr(self._camera_mgr, "last_retired", {}) or {})
+        for name, reason in retired.items():
+            cam_dir = self._video_dir / name
+            if not cam_dir.is_dir():
+                continue
+            extra = {}
+            try:
+                bids = np.load(cam_dir / "blockids.npy")
+                extra = dict(frames=int(bids.size),
+                             last_block_id=int(bids[-1]) if bids.size else None)
+            except (OSError, ValueError):
+                extra = dict(frames=0, last_block_id=None)
+            try:
+                recording_meta.write_retired(cam_dir, reason, **extra)
+                print(f"[acq] {name}: RETIRED.json written ({reason})",
+                      flush=True)
+            except OSError as e:
+                print(f"[acq] could not write {name}/RETIRED.json: {e}",
+                      flush=True)
+
+    def _finalize_rate_check(self) -> list:
+        """The block-ID rate check of a recording made without kick-out.
+        Worker thread; returns its warnings.
+
+        RULE: it runs at every stop outside kick mode, from the block IDs and
+        frame times just saved. REASON: a camera that ignores triggers
+        (exposure over the ceiling) keeps gapless block IDs and the same frame
+        count as the others, so nothing else in these modes looks: the
+        post-hoc alignment finds nothing to trim and stops there. Kick mode
+        runs the same check in the router's stop and reports it through the
+        manager's warnings.
+        """
+        rig = self._session_rig()
+        if rig.realtime_encode and rig.realtime_kick:
+            return []
+        fps = self._acq_fps or rig.frame_rate
+        try:
+            an = alignment.analyse(self._video_dir, fps)
+        except Exception as e:
+            msg = (f"The block-ID rate check could not run on this recording "
+                   f"({e}), so a camera that ignored triggers would not be "
+                   f"detected. Run 2_align.py on {self._video_dir} to check "
+                   f"it.")
+            print(f"[acq] WARNING: {msg}", flush=True)
+            return [msg]
+        for name, why in an.rate_skipped.items():
+            print(f"[acq] block-ID rate check skipped {name}: {why}",
+                  flush=True)
+        for msg in an.rate_warnings:
+            print(f"[acq] WARNING: {msg}", flush=True)
+        return list(an.rate_warnings)
 
     def _on_encoding_done(self, results):
         self._sidebar.hide_progress()
@@ -2686,31 +2838,62 @@ class MainWindow(QMainWindow):
             # Write it down as well as showing it: a dialog is dismissed and
             # forgotten, and this is exactly what someone needs months later
             # when the data looks odd.
-            warnings_path = self._video_dir / "WARNINGS.txt"
             body = "\n\n".join(problems)
-            try:
-                warnings_path.write_text(body + "\n", encoding="utf-8")
-            except Exception as e:
-                print(f"[acq] could not write WARNINGS.txt: {e}", flush=True)
+            written = self._write_warnings_file(problems)
             QMessageBox.warning(
                 self, "Recording completed with problems",
-                f"{body}\n\nThis has also been written to:\n{warnings_path}")
+                f"{body}\n\nThis has also been written to:\n"
+                f"{written or self._video_dir / recording_meta.WARNINGS_NAME}")
 
         # Kick-out keeps every camera on the same triggers, so a kick-mode
-        # session is NOT auto-aligned, even after it dropped frames: the
-        # operator asked for the forced-drop and block-rate warnings to be
-        # reported (WARNINGS.txt, above) rather than followed by an
-        # unrequested re-encode. Only the explicit post-hoc mode (realtime_kick
-        # False) trims at stop. A kick session whose videos are genuinely
+        # session is NOT auto-aligned, even after it dropped frames: its
+        # forced-drop, kick-out and block-rate warnings are reported
+        # (WARNINGS.txt, above, from the router's stop) rather than followed
+        # by an unrequested re-encode. Every other mode (post-hoc alignment,
+        # and raw capture, whose cameras keep whatever frames they caught)
+        # runs the post-hoc alignment. A kick session whose videos are
         # unequal length - a retirement, a truncated tail - is flagged so the
         # operator can run 2_align.py by hand instead of it happening silently.
         rig = self._session_rig()
-        if rig.realtime_encode and not rig.realtime_kick:
-            if self._start_alignment():
-                return
-        elif rig.realtime_encode:
+        if rig.realtime_encode and rig.realtime_kick:
             self._warn_if_unequal_videos()
+        elif self._start_alignment():
+            return
         self._finish_to_idle()
+
+    def _thermal_shutdown_texts(self) -> list:
+        return [text for _idx, text in self._thermal_shutdown_warnings]
+
+    def _write_warnings_file(self, problems: list):
+        """Write this acquisition's WARNINGS.txt afresh; its path, or None.
+
+        The start removed the previous take's copy, and this is the first
+        writer, so it replaces rather than appends; the alignment appends
+        after it.
+        """
+        path = self._video_dir / recording_meta.WARNINGS_NAME
+        try:
+            path.write_text("\n\n".join(problems) + "\n", encoding="utf-8")
+        except Exception as e:
+            print(f"[acq] could not write WARNINGS.txt: {e}", flush=True)
+            return None
+        return path
+
+    def _append_warnings(self, problems: list):
+        """Append paragraphs to this acquisition's WARNINGS.txt; its path, or
+        None when it could not be written (the caller shows them anyway)."""
+        path = recording_meta.append_warning(self._video_dir,
+                                             "\n\n".join(problems))
+        if path is None:
+            print("[align] could not append to WARNINGS.txt", flush=True)
+        return path
+
+    @staticmethod
+    def _names_text(names) -> str:
+        names = list(names)
+        if len(names) <= 1:
+            return "".join(names)
+        return ", ".join(names[:-1]) + " and " + names[-1]
 
     def _warn_if_unequal_videos(self):
         """Flag a kick-mode session whose per-camera videos are not equal
