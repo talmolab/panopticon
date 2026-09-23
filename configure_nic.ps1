@@ -445,6 +445,9 @@ if ($applied.Count -eq 0) {
     Write-Host "No port was changed."
     exit 0
 }
+# From here on $Ports names only the ports this run asked the driver to
+# change, so the poll, the read-back and the link-state table cover those.
+$Ports = $applied
 
 # The adapter reset is not instant, and a fixed wait is not good enough: a 5 s
 # sleep read back the OLD value and reported "NOT APPLIED" for a change that had
@@ -458,8 +461,8 @@ while ((Get-Date) -lt $deadline) {
     # script itself causes -- otherwise reads as "every port already agrees"
     # and the poll prints "settled after 0s" without having seen one queue
     # count.
-    $now = @(Get-NetAdapterRss -Name $applied -ErrorAction SilentlyContinue)
-    if ($now.Count -eq $applied.Count -and
+    $now = @(Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue)
+    if ($now.Count -eq $Ports.Count -and
         -not ($now | Where-Object { $_.NumberOfReceiveQueues -ne $Queues })) {
         Write-Host ("  settled after {0:N0}s" -f `
             (60 - ($deadline - (Get-Date)).TotalSeconds)) -ForegroundColor DarkGray
@@ -478,8 +481,8 @@ Show-State "AFTER"
 # line for ports that were never read -- a verification that passes hardest
 # exactly when the instrument failed. That is the VERIFICATION RULE above,
 # inverted.
-$after  = @(Get-NetAdapterRss -Name $applied -ErrorAction SilentlyContinue)
-$silent = @($applied | Where-Object { $port = $_
+$after  = @(Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue)
+$silent = @($Ports | Where-Object { $port = $_
                                     -not ($after | Where-Object { $_.Name -eq $port }) })
 $bad = @()
 foreach ($r in $after) {
@@ -495,7 +498,7 @@ if ($silent.Count -gt 0) {
     Write-Host "so this run proves nothing about those ports. A port still resetting"
     Write-Host "reappears within a minute; check the link state below and re-run elevated."
 } elseif ($bad.Count -eq 0) {
-    Write-Host ("OK: {0} report {1} receive queues." -f ($applied -join ", "), $Queues) -ForegroundColor Green
+    Write-Host "OK: every port reports $Queues receive queues." -ForegroundColor Green
     Write-Host "Next: run a recording and compare each port's ReceivedDiscardedPackets"
     Write-Host "and per-core % DPC Time against the same numbers taken before this run."
     Write-Host "A setting that does not move those counters has changed nothing."
