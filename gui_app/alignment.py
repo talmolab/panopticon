@@ -36,6 +36,14 @@ ALIGN_TMP_NAME = "aligned_tmp.mp4"
 # this small is a failed encode whatever ffmpeg's exit status said.
 MIN_MP4_BYTES = 1024
 
+# Decoder output options. RULE: decode every coded frame exactly once, in
+# order. REASON: the alignment maps decoded frame n to blockids.npy[n], and
+# ffmpeg's default sync for a pipe output is constant frame rate, which
+# duplicates or drops frames wherever the container's timestamps are uneven
+# (a video re-muxed by another tool). Every later frame then maps to the
+# wrong trigger while the frame count can still look right.
+DECODE_OUTPUT_ARGS = ("-fps_mode", "passthrough")
+
 
 def _unwrap_blockids(b: np.ndarray, period: int = BLOCKID_WRAP) -> np.ndarray:
     """Undo 16-bit block-ID wrap-around so IDs are globally monotonic.
@@ -266,7 +274,8 @@ def _open_gray_reader(video: Path):
     Kept as a seam so tests can feed synthetic frames without a real mp4.
     """
     from imageio_ffmpeg import read_frames
-    gen = read_frames(str(video), pix_fmt="gray", bits_per_pixel=8)
+    gen = read_frames(str(video), pix_fmt="gray", bits_per_pixel=8,
+                      output_params=list(DECODE_OUTPUT_ARGS))
     meta = next(gen)
     w, h = meta["size"]
     return int(w), int(h), gen
@@ -281,7 +290,8 @@ def _log_tail(path: Path, n: int = 2000) -> str:
 
 def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
                     fps: int, quality: int, backend: str | None = None,
-                    stop=None, err_log: Path | None = None) -> int:
+                    stop=None, err_log: Path | None = None,
+                    expected_frames: int | None = None) -> int:
     """Re-encode only the selected frame indices, in order, into dst (gray).
 
     Raises unless ffmpeg exited 0 AND ``dst`` exists with a plausible size AND
@@ -289,6 +299,12 @@ def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
     copy of a camera's recording with ``dst``, so "frames were piped" is not
     good enough: a muxer error, disk-full during the ``+faststart`` rewrite or
     an encoder flush error all exit non-zero after consuming every input byte.
+
+    With ``expected_frames`` (the length of the camera's ``blockids.npy``)
+    the whole source is decoded, and a source holding any other number of
+    frames raises. Frame n of the video is block ID n only while the two
+    counts agree, so a mismatch means the selected indices would pick frames
+    from the wrong triggers.
 
     ffmpeg's stderr goes to ``align_error.log`` beside ``dst`` (removed on
     success) because the GUI runs under pythonw, where inherited stderr has
@@ -299,6 +315,7 @@ def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
     keep = set(int(i) for i in frame_idx)
     last = int(frame_idx[-1]) if frame_idx.size else -1
     err_log = Path(err_log) if err_log else dst.with_name("align_error.log")
+    count_all = expected_frames is not None
 
     w, h, frames = _open_gray_reader(video)
     cmd = [_ffmpeg_exe(), *ffmpeg_cmd.global_args("error"),
@@ -314,7 +331,7 @@ def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
                                     **ffmpeg_cmd.quiet_popen_kwargs())
             try:
                 for frame in frames:
-                    if n > last:
+                    if n > last and not count_all:
                         break
                     if stop is not None and stop():
                         stopped = True
@@ -323,6 +340,10 @@ def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
                     if n in keep:
                         proc.stdin.write(frame)
                         written += 1
+                        if n == last:
+                            # Every selected frame is in; the encoder can
+                            # finish while the rest of the source is counted.
+                            proc.stdin.close()
                     n += 1
             except OSError:
                 # ffmpeg died mid-stream; the exit-status check below reports
@@ -352,6 +373,11 @@ def extract_aligned(video: Path, frame_idx: np.ndarray, dst: Path,
         raise RuntimeError(
             f"decoded {written}/{frame_idx.size} selected frames (source has "
             f"{n} frames, index needs up to {last + 1})")
+    if count_all and n != expected_frames:
+        raise RuntimeError(
+            f"the video decodes to {n} frames but blockids.npy lists "
+            f"{expected_frames}, so its frame numbers are not its block IDs; "
+            f"original kept")
     err_log.unlink(missing_ok=True)
     return written
 
@@ -505,7 +531,8 @@ def align_recording(rec_dir, fps: int = 100, quality: int = 21,
             cam_dir = vid.parent
             tmp = cam_dir / ALIGN_TMP_NAME
             extract_aligned(vid, frame_index[c], tmp, fps, quality,
-                            backend=backend, stop=stop)
+                            backend=backend, stop=stop,
+                            expected_frames=int(blocks[c].size))
             os.replace(tmp, vid)  # atomic; original disjoint mp4 replaced
             video_replaced = True
             _rewrite_metadata(cam_dir, blocks[c], frame_index[c], common, fps)
