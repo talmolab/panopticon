@@ -2594,9 +2594,9 @@ class FlirBackend:
         opened, not a device high-water mark. `temp_status` is SFNC
         `DeviceTemperatureStatus`, read under every entry the selector can
         take, the worst word kept: it is translated to Ok, Critical or Error,
-        and the camera's own word is kept under `temp_status_camera`. A camera that reports no
-        shutdown temperature has no `temp_shutdown_c`, and the watch falls
-        back to its status."""
+        and the camera's own word is kept under `temp_status_camera`. A
+        camera that reports no shutdown temperature has no `temp_shutdown_c`,
+        and the watch falls back to its status."""
         try:
             return self._thermals(cam)
         except Exception as e:
