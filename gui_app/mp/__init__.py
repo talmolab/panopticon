@@ -9,7 +9,8 @@ only small records with the parent through named shared memory.
   preview and full-resolution segments.
 - `ledger`: the kick-out ledger. The parent's `Coordinator` is the only
   writer of release decisions; each worker's `WorkerLedger` announces what
-  its camera grabbed and reads back what to encode.
+  its camera grabbed and reads back what to encode. `RingGuard` keeps a
+  worker from overwriting an NV12 ring slot whose frame is still pending.
 
 Importing `shm` (and so `ledger`) raises `shm.UnsupportedPlatform` on any CPU
 other than x86-64: the protocol relies on aligned 8-byte loads and stores

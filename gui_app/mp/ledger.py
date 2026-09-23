@@ -653,6 +653,106 @@ class WorkerLedger:
                 out.append((t, False))
 
 
+class RingGuard:
+    """Occupancy of one camera's NV12 ring in a capture worker.
+
+    In process, the coordinator's forcing bounds how many frames wait for a
+    decision. Across processes that bound holds only while the coordinator
+    polls, so the worker checks the slot it is about to overwrite: if that
+    slot's frame still waits for a decision or for the encoder, the new
+    frame is dropped before it is copied or announced, and the loss is a gap
+    in blockids.npy rather than newer pixels under an older block ID.
+
+    Slots are written in ring order. A slot is busy from `claim` until its
+    frame is dropped (`drop`) or handed to the encoder (`hand_off`) and then
+    consumed. The encoder frees slots in hand-off order, so the guard needs
+    only the encoder's `consumed` count, read through `consumed_fn`. A count
+    of outstanding frames alone is not enough: a frame waiting in the encoder
+    queue behind a stall keeps its slot busy while later frames are dropped
+    around it.
+
+    One thread at a time mutates the guard (the grab thread, then the
+    control thread for the final harvest); `consumed_fn` is read from the
+    encoder thread's counter.
+    """
+
+    def __init__(self, n_slots: int, consumed_fn=None):
+        if int(n_slots) < 1:
+            raise ValueError("a ring needs at least one slot")
+        self.n_slots = int(n_slots)
+        self._busy = bytearray(self.n_slots)
+        self._next = 0
+        self._handed: deque = deque()
+        self._consumed_fn = consumed_fn
+        self._consumed_local = 0
+        self._consumed_seen = 0
+        self.copied = 0
+        self.dropped = 0
+        self.refused = 0
+
+    @property
+    def next_slot(self) -> int:
+        return self._next
+
+    @property
+    def consumed(self) -> int:
+        return int(self._consumed_fn()) if self._consumed_fn else self._consumed_local
+
+    @property
+    def outstanding(self) -> int:
+        """Frames copied and not yet dropped or consumed."""
+        return self.copied - self.dropped - self.consumed
+
+    def _sync(self) -> None:
+        consumed = self.consumed
+        while self._consumed_seen < consumed and self._handed:
+            self._busy[self._handed.popleft()] = 0
+            self._consumed_seen += 1
+
+    def slot_free(self) -> bool:
+        """True if the next slot may be written."""
+        if not self._busy[self._next]:
+            return True
+        self._sync()
+        return not self._busy[self._next]
+
+    def claim(self) -> int:
+        """Take the next slot for a new frame. Call only after slot_free()."""
+        if not self.slot_free():
+            raise RuntimeError(f"ring slot {self._next} still holds a frame "
+                               f"awaiting a decision or the encoder")
+        slot = self._next
+        self._busy[slot] = 1
+        self._next = (slot + 1) % self.n_slots
+        self.copied += 1
+        return slot
+
+    def refuse(self) -> None:
+        """Count a new frame dropped because slot_free() was False."""
+        self.refused += 1
+
+    def drop(self, slot: int) -> None:
+        """The frame in `slot` was dropped (by decision, or not entered)."""
+        if not self._busy[slot]:
+            raise RuntimeError(f"ring slot {slot} is not held")
+        self._busy[slot] = 0
+        self.dropped += 1
+
+    def hand_off(self, slot: int) -> None:
+        """The frame in `slot` was queued to the encoder. Call after the queue
+        accepted it (a refused put is a `drop`), in queue order: the guard
+        matches the encoder's consumed count to hand-offs one for one."""
+        if not self._busy[slot]:
+            raise RuntimeError(f"ring slot {slot} is not held")
+        self._handed.append(slot)
+
+    def mark_consumed(self, n: int = 1) -> None:
+        """Without a consumed_fn: the encoder finished `n` more queued frames."""
+        if self._consumed_fn is not None:
+            raise RuntimeError("this guard reads the encoder's own counter")
+        self._consumed_local += int(n)
+
+
 # -- named segments ---------------------------------------------------------------
 
 def create_shared(n_cams: int, max_lag: int, *, epoch: int | None = None,
