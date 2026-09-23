@@ -670,8 +670,8 @@ class FlirCamera:
         wrap the IDs alone do not tell which. The device clock counts the
         frame periods since the previous frame (`_id16_periods`). The cycle
         is learned once and kept for this camera across arms: 65536 once
-        the camera has shown both 0 and 65535, or 65535 when the clock
-        counts exactly that cycle's step, since 65536 would then need more
+        the camera has shown both 0 and 65535, or 65535 when the clock's
+        count equals that cycle's step, since 65536 would then need more
         frames than periods.
 
         The step is the clock's count whenever that is at least the step of
@@ -2448,9 +2448,13 @@ class FlirBackend:
         With both counters the count is exact: edges on the trigger line
         minus exposures started is the number of triggers the camera
         ignored, leaving out edges that arrived while a stall re-arm had the
-        stream down. With the edge counter alone the count mixes ignored
-        triggers with frames lost in transport, and the sentence says so
-        and makes no claim about alignment (`_edge_only_sentences`)."""
+        stream down. The sentence then says what those triggers did to the
+        block IDs (`_ignored_sentences`), and in trigger_counter mode a
+        CounterValue latch the recording did not settle gets its own
+        (`_latch_sentences`). With the edge counter alone the count mixes
+        ignored triggers with frames lost in transport, and the sentence
+        says so and makes no claim about alignment
+        (`_edge_only_sentences`)."""
         try:
             return self._witness_sentences(cam, int(frames_acquired))
         except Exception as e:
@@ -2590,7 +2594,7 @@ class FlirBackend:
         count at stop. A latch before the edge reads at least one below it,
         and so do triggers at the end that delivered no frame. The first
         image settles it when its count was `_ctr_first_excess` above the
-        frame ID and the camera ignored exactly that many triggers, because
+        frame ID and the camera ignored that many triggers in all, because
         a latch before the edge needs one more ignored trigger before that
         image. The ignored count settles it only when it is exact: both
         counters, no stall re-arm, the stop's edges read before
