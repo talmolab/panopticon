@@ -541,6 +541,7 @@ class FlirCamera:
         self._ctr_latch = 0
         self._ctr_first = True
         self._ctr_latch_known = False
+        self._ctr_first_excess = None
         self._ctr_name = None
         self._last_counter = None
         # Whether the frame ID restarts at every arm and counts frames, and
@@ -712,11 +713,13 @@ class FlirCamera:
         """The trigger ordinal from the image's CounterValue chunk: rising
         edges on the trigger line since the counter was reset at arm.
 
-        The chunk is expected to carry the count including the edge that
+        The chunk is taken to carry the count including the edge that
         triggered the image, so the first trigger reads 1. The recording's
-        first image decides whether the camera latches the count before the
+        first image can prove that the camera latches the count before the
         edge instead (`_first_counter_image`); from then on 1 is added, and
-        the log says so. A counter narrower than 2**31 is unwrapped here."""
+        the log says so. When it proves neither, the stop checks the count
+        (`_latch_sentences`). A counter narrower than 2**31 is unwrapped
+        here."""
         name = self._ctr_name
         if name is None:
             v, name = _read_chunk(self._api, img, "CounterValue")
@@ -736,27 +739,30 @@ class FlirCamera:
         return v + self._ctr_latch + self._ctr_acc
 
     def _first_counter_image(self, img, v: int) -> None:
-        """Decide from the recording's first image, whose chunk count is
-        `v`, whether the camera latches CounterValue before the edge.
+        """Check the recording's first image, whose chunk count is `v`, for
+        proof that the camera latches CounterValue before the edge.
 
-        A count that includes the edge is at least the image's ordinal among
-        the frames the camera acquired, and a count latched before the edge
-        is at least one less. So 0 proves the latch, and so does a count
-        below the frame ID on a camera whose frame ID restarts at every arm
-        and counts frames; a count at or above that frame ID shows the
-        count includes the edge. Without such a frame ID a count above 0
-        decides nothing (the first trigger's frame may have been lost), and
-        `_latch_sentences` checks the last image at stop instead. The frame
-        ID is one more SDK call, on this image only."""
+        The image's trigger is edge T: its ordinal among the frames the
+        camera acquired, plus the triggers it ignored before it. A count
+        that includes the edge reads T, and one latched before the edge
+        reads T - 1. So 0 proves the latch before the edge, and so does a
+        count below the frame ID on a camera whose frame ID restarts at
+        every arm and counts frames. Any other count fits both, because a
+        count latched before the edge also reads T when the camera ignored
+        one more trigger before this image. That count is taken to include
+        the edge, `_ctr_first_excess` keeps how far it is above the frame
+        ID, and `_latch_sentences` checks it at stop. The frame ID is one
+        more SDK call, on this image only."""
         if v == 0:
             fid = None
         elif self._fid_evidence:
             fid = self._api.image_frame_id(img) + self._fid_base_offset
+            if v >= fid:
+                self._ctr_first_excess = v - fid
+                return
         else:
             return
         self._ctr_latch_known = True
-        if fid is not None and v >= fid:
-            return
         self._ctr_latch = 1
         print(f"[flir] {self.serial}: the first image's CounterValue chunk "
               f"reads {v}" + (f" on the camera's frame {fid}"
@@ -830,6 +836,7 @@ class FlirCamera:
         self._ctr_latch = 0
         self._ctr_first = True
         self._ctr_latch_known = False
+        self._ctr_first_excess = None
         self._last_counter = None
         if not self.counters:
             return
@@ -2411,16 +2418,28 @@ class FlirBackend:
                     f"what Panopticon set them to count on this model, and "
                     f"this recording has no trigger witness for this camera."
                     f"{ids} Send the output of 'uv run probe_flir.py'."]
-        return (self._ignored_sentences(cam, w, edges, frames)
-                + self._latch_sentences(cam, w))
+        latch = self._latch_sentences(cam, w)
+        return (self._ignored_sentences(cam, w, edges, frames, bool(latch))
+                + latch)
 
-    def _ignored_sentences(self, cam, w, edges: int, frames: int) -> list:
+    #: What a trigger-counter gap means: when nothing questions the block
+    #: IDs, and when the camera's latch warning follows.
+    _GAP_DROPPED = "which alignment drops from every camera."
+    _GAP_IN_DOUBT = ("Alignment drops a gap from every camera only if the "
+                     "block IDs name the right triggers, and the next warning "
+                     "about this camera questions that.")
+
+    def _ignored_sentences(self, cam, w, edges: int, frames: int,
+                           latch_doubt: bool = False) -> list:
         """The ignored-trigger count from counters that passed the
-        plausibility check. `edges` leaves out the re-arm down time."""
+        plausibility check. `edges` leaves out the re-arm down time.
+        `latch_doubt` is True when `_latch_sentences` questions whether the
+        trigger-counter block IDs name the right triggers."""
         exposures = w["exposures"]
         line = cam.trigger_line
         if exposures is None:
-            return self._edge_only_sentences(cam, w, edges, frames)
+            return self._edge_only_sentences(cam, w, edges, frames,
+                                             latch_doubt)
         # Below 0 only when an edge landed between the two reads that bound
         # a re-arm window, which counts it as down time.
         ignored = max(0, cam._ctr_delta(w["edges"], exposures)
@@ -2432,9 +2451,10 @@ class FlirBackend:
             return []
         if cam.block_id_source == "trigger_counter":
             return [f"{what} Its block IDs count the edges, so each ignored "
-                    f"trigger is a gap, which alignment drops from every "
-                    f"camera. Lower camera.exposure_us to keep those "
-                    f"triggers."]
+                    f"trigger is a gap"
+                    + (f". {self._GAP_IN_DOUBT}" if latch_doubt
+                       else f", {self._GAP_DROPPED}")
+                    + " Lower camera.exposure_us to keep those triggers."]
         return [f"{what} Its block IDs count the frames it acquired, so from "
                 f"the first ignored trigger on they name later triggers than "
                 f"the other cameras' do, and its frames are paired with the "
@@ -2445,26 +2465,38 @@ class FlirBackend:
 
     @staticmethod
     def _latch_sentences(cam, w) -> list:
-        """In trigger_counter mode, when the first image did not show
-        whether CounterValue is latched before the edge: the last image's
-        count against the edges counted at stop.
+        """In trigger_counter mode, when the first image did not prove how
+        CounterValue is latched: the check of the count taken to include
+        the edge.
 
-        With a count that includes the edge, a last image on the last
-        trigger reads the edge count. A last image one or more below it is
-        what a latch before the edge gives (and then every block ID of the
-        recording is one trigger early), and also what triggers at the end
-        that delivered no frame give. The sentence names both."""
+        With such a count, a last image on the last trigger reads the edge
+        count at stop. A latch before the edge reads at least one below it,
+        and so do triggers at the end that delivered no frame. The first
+        image settles it when its count was `_ctr_first_excess` above the
+        frame ID and the camera ignored exactly that many triggers, because
+        a latch before the edge needs one more ignored trigger before that
+        image. The ignored count settles it only when it is exact: both
+        counters, no stall re-arm, the stop's edges read before
+        EndAcquisition, and no exposure between that stop's two exposure
+        reads. Otherwise the sentence names both causes."""
         if (cam.block_id_source != "trigger_counter" or cam._ctr_latch_known
                 or cam._last_counter is None):
             return []
         lag = cam._ctr_delta(w["edges"], cam._last_counter)
         if lag <= 0:
             return []
+        excess = cam._ctr_first_excess
+        exposures = w["exposures"]
+        if (excess is not None and exposures is not None and not w["rearms"]
+                and not w["late_reads"]
+                and w["exposures_check"] == exposures
+                and cam._ctr_delta(w["edges"], exposures) == excess):
+            return []
         return [f"its first image did not show whether it latches the "
                 f"CounterValue chunk before the trigger edge, and its last "
                 f"image's count ({cam._last_counter}) is {lag} below the "
-                f"{w['edges']} edges it counted by the stop. Its last "
-                f"trigger(s) delivering no frame gives this, and so does a "
+                f"{w['edges']} edges it counted by the stop. Its last {lag} "
+                f"trigger(s) delivering no frame would give this. So would a "
                 f"latch before the edge, which makes every block ID of this "
                 f"camera one trigger early. Send the output of 'uv run "
                 f"probe_flir.py'."]
@@ -2499,8 +2531,9 @@ class FlirBackend:
                     f"than the {edges} edges on {line}", True)
         return None
 
-    @staticmethod
-    def _edge_only_sentences(cam, w, edges: int, frames: int) -> list:
+    @classmethod
+    def _edge_only_sentences(cls, cam, w, edges: int, frames: int,
+                             latch_doubt: bool = False) -> list:
         """The witness of a camera with an edge counter and no exposure
         counter. Neither branch can tell an ignored trigger from a frame
         lost in transport, so neither says the recording is misaligned.
@@ -2518,10 +2551,11 @@ class FlirBackend:
             return [f"its trigger input ({line}) counted {edges} edges but "
                     f"only {frames} frames reached the host, so "
                     f"{unexplained} trigger(s) were ignored or their frames "
-                    f"were lost in transport; this camera has no exposure "
+                    f"were lost in transport. This camera has no exposure "
                     f"counter to tell the two apart. Its block IDs count the "
-                    f"edges, so each is a gap, which alignment drops from "
-                    f"every camera."]
+                    f"edges, so each is a gap"
+                    + (f". {cls._GAP_IN_DOUBT}" if latch_doubt
+                       else f", {cls._GAP_DROPPED}")]
         acquired = w["id_frames"]
         unexplained = edges - acquired
         if unexplained <= 0:
