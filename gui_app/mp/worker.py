@@ -1122,6 +1122,11 @@ def worker_main(args: dict, conn, log_conn, gate) -> None:
     si = args.get("switch_interval")
     if si:
         sys.setswitchinterval(float(si))
+    from gui_app.mp.winjob import opt_out_of_power_throttling
+    why = opt_out_of_power_throttling()
+    if why:
+        print(f"[w{args.get('worker')}] power throttling left as Windows "
+              f"sets it: {why}", flush=True)
     from PyQt5.QtCore import QCoreApplication
     app = QCoreApplication.instance() or QCoreApplication([])
     wid = args.get("worker")

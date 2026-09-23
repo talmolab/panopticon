@@ -74,6 +74,56 @@ def _kernel32():
     return k32, EXTENDED_LIMIT
 
 
+#: SetProcessInformation's ProcessPowerThrottling class and its state bit.
+_PROCESS_POWER_THROTTLING = 4
+_PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1
+_PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1
+
+
+def opt_out_of_power_throttling() -> str:
+    """Keep this process out of Windows' EcoQoS execution-speed throttling.
+
+    RULE: every capture worker calls this once, at start. REASON: Windows may
+    run a process it judges to be background work (one with no window of its
+    own, as a worker has) at reduced clock and on efficiency cores, where the
+    grab loop runs slower than the trigger; the GUI or the probe that
+    spawned it is a foreground process and is not throttled. Setting the
+    EXECUTION_SPEED bit in ControlMask and clearing it in StateMask opts the
+    process out.
+
+    Returns "" on success, or why it could not be applied (a platform
+    without the call, an older Windows); a worker logs that and carries on.
+    """
+    if sys.platform != "win32":
+        return "power throttling exists only on Windows"
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+        _fields_ = [("Version", wintypes.ULONG),
+                    ("ControlMask", wintypes.ULONG),
+                    ("StateMask", wintypes.ULONG)]
+
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        fn = k32.SetProcessInformation
+    except (OSError, AttributeError) as e:
+        return f"SetProcessInformation is unavailable: {e}"
+    fn.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                   wintypes.DWORD]
+    fn.restype = wintypes.BOOL
+    k32.GetCurrentProcess.argtypes = []
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    state = PROCESS_POWER_THROTTLING_STATE(
+        _PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        _PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0)
+    if not fn(k32.GetCurrentProcess(), _PROCESS_POWER_THROTTLING,
+              ctypes.byref(state), ctypes.sizeof(state)):
+        return (f"SetProcessInformation(ProcessPowerThrottling) failed: "
+                f"{ctypes.WinError(ctypes.get_last_error())}")
+    return ""
+
+
 class WorkerJob:
     """A kill-on-close job object for this process's capture workers."""
 
