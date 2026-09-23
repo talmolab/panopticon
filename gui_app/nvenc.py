@@ -284,7 +284,8 @@ _upload_cfg = {"upload": "host", "context": "shared"}
 
 _stats_lock = threading.Lock()
 _stats = {"pinned_encoders": 0, "pinned_bytes": 0, "own_contexts": 0,
-          "shared_context_retained": False, "host_fallbacks": 0}
+          "shared_context_retained": False, "host_fallbacks": 0,
+          "pinned_disabled": ""}
 
 _shared_ctx = 0
 _shared_ctx_lock = threading.Lock()
@@ -304,8 +305,10 @@ def configure_upload(upload: str = "host", context: str = "shared") -> dict:
     a CUDA context of its own. An own context costs GPU memory (a few hundred
     MiB each), and encoders in separate contexts share no driver locks.
 
-    Encoders that already exist keep the path they were built with. Returns
-    the previous setting, so a caller can restore it. Raises ValueError for a
+    Encoders that already exist keep the path they were built with. A pinned
+    path whose first encode failed stays off for the process, whatever this
+    is set to (upload_stats()["pinned_disabled"] says why). Returns the
+    previous setting, so a caller can restore it. Raises ValueError for a
     value outside UPLOAD_MODES or CONTEXT_MODES.
     """
     if upload not in UPLOAD_MODES:
@@ -347,7 +350,9 @@ def upload_stats() -> dict:
     and return to 0 once every pinned encoder is closed.
     shared_context_retained says the primary context is held (once per
     process). host_fallbacks counts pinned encoders that fell back to the
-    host upload since the process started.
+    host upload since the process started. pinned_disabled is empty, or the
+    reason the pinned path is off for the rest of the process: its first
+    encode failed, so every later pinned encoder gets the host upload.
     """
     with _stats_lock:
         return dict(_stats)
@@ -694,8 +699,15 @@ def _warm_pinned(context: str) -> None:
     Same hazard as _warm(): concurrent first Encodes can wedge the process in
     the import machinery. In the decoupled mode every grab thread creates its
     encoder at once, so the first caller warms the path under this lock while
-    the rest wait. A failure is logged and not retried; the real encoders
-    still report their own errors.
+    the rest wait. A setup failure is logged and not retried; each real
+    encoder then tries its own setup and falls back on its own.
+
+    RULE: a pinned encoder that is built but fails to encode or to end its
+    stream turns the pinned path off for the process. REASON: the library
+    refuses page-locked input, so every real pinned encoder would fail on
+    its first frame, and each camera would spill raw frames for the whole
+    recording. With the path off, every encoder gets the host upload and a
+    note, and the video is unchanged.
     """
     global _pinned_warm_done
     if _pinned_warm_done:
@@ -708,15 +720,23 @@ def _warm_pinned(context: str) -> None:
             # 256x256 for the reason given in _warm().
             enc = _build_pinned(256, 256, 21, 100, "P3", "low_latency", [],
                                 context, log=False)
-            enc.Encode(np.full(256 * 384, 128, np.uint8))
-            try:
-                enc.EndEncode()
-            except Exception:
-                pass
-            print("[nvenc] pinned upload warmed (first Encode done "
-                  "single-threaded)", flush=True)
         except Exception as e:
             print(f"[nvenc] pinned upload warmup skipped: {e}", flush=True)
+        try:
+            if enc is not None:
+                try:
+                    enc.Encode(np.full(256 * 384, 128, np.uint8))
+                    enc.EndEncode()
+                except Exception as e:
+                    why = f"a pinned encoder failed its first encode: {e}"
+                    with _stats_lock:
+                        _stats["pinned_disabled"] = why
+                    print(f"[nvenc] WARNING: pinned upload disabled for this "
+                          f"process; every encoder uses the host upload ({why})",
+                          flush=True)
+                else:
+                    print("[nvenc] pinned upload warmed (first Encode done "
+                          "single-threaded)", flush=True)
         finally:
             if enc is not None:
                 enc.Close()
@@ -728,7 +748,7 @@ def _warm_pinned(context: str) -> None:
 
 def _create_pinned(width, height, qp, fps, preset, tuning, notes, context):
     """A pinned encoder, or the host path for this encoder when the pinned
-    setup fails.
+    setup fails or the pinned path is off for the process.
 
     RULE: a pinned setup failure never fails the encoder; it falls back to the
     host upload, prints why, and adds a note the recording's WARNINGS.txt
@@ -737,11 +757,14 @@ def _create_pinned(width, height, qp, fps, preset, tuning, notes, context):
     real-time video.
     """
     _warm_pinned(context)
-    try:
-        return _build_pinned(width, height, qp, fps, preset, tuning, notes,
-                             context)
-    except _PinnedSetupError as e:
-        reason = str(e)
+    with _stats_lock:
+        reason = _stats["pinned_disabled"]
+    if not reason:
+        try:
+            return _build_pinned(width, height, qp, fps, preset, tuning,
+                                 notes, context)
+        except _PinnedSetupError as e:
+            reason = str(e)
     note = (f"real-time encode uses the host upload, not the configured "
             f"pinned upload ({reason}). The video is the same; each Encode "
             f"holds the GIL longer, so grab threads can fall behind.")
@@ -838,9 +861,9 @@ def pinned_upload_matches_host(width: int, height: int,
         try:
             ok, why = _stalled_encode(pinned, frames, frame, reference, want)
         except Exception as e:
-            print(f"[nvenc] pinned upload check could not run ({where}): {e}",
-                  flush=True)
-            return None
+            # The pinned encoder exists but cannot encode, so every real
+            # pinned encoder would fail on its first frame.
+            ok, why = False, f"the pinned encoder failed to encode: {e}"
         if ok:
             print(f"[nvenc] pinned upload check passed ({where}): {why}",
                   flush=True)
