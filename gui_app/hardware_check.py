@@ -286,14 +286,16 @@ def nvenc_probe_error() -> str:
 def invalidate_nvenc_cache(reason: str = "") -> None:
     """Forget the cached session count so the next preflight re-probes.
 
-    RULE: an NVENC init failure during a recording invalidates this cache.
-    REASON: the cache keeps the HIGHEST count ever confirmed, and the early
-    return means that once a probe granted enough sessions no later Record
-    re-probes. Sessions taken afterwards by another process — an orphaned
-    h264_nvenc ffmpeg from a tail merge, a browser's hardware encode — are
-    then invisible to preflight, while the router's partial-failure path drops
-    each camera beyond the cap onto raw.bin at ~129 GiB per 10 min with the
-    4.6 KB/frame disk budget.
+    RULE: an NVENC init failure during a recording invalidates this cache;
+    the main window calls this after an acquisition whose camera manager
+    reports `last_encoder_failures`, and after a start refused because the
+    kick-out encoders could not be created. REASON: the early return means
+    that once a probe granted enough sessions no later Record re-probes.
+    Sessions taken afterwards by another process (an orphaned h264_nvenc
+    ffmpeg from a tail merge, a browser's hardware encode) are then invisible
+    to preflight, while the decoupled mode drops each camera beyond the cap
+    onto raw.bin, which holds every frame whole, with a disk budget sized for
+    H.264.
 
     Sessions are free once a recording has finished, so calling this at the
     end of an acquisition that reported an encoder failure costs one probe and
@@ -359,7 +361,12 @@ def nvenc_session_capacity(width: int, height: int, want: int,
                 return _nvenc_sessions if _nvenc_sessions is not None else -1
             if got < 0:
                 got = nvenc.probe_max_sessions(width, height, limit=limit)
-            _nvenc_sessions = max(got, _nvenc_sessions or 0)
+            # RULE: the cache holds the latest probe, never the highest count
+            # ever seen. REASON: a probe runs only when the cached count is
+            # short of what a start needs, and a max() would answer that
+            # start with the old, higher count while the fresh probe says
+            # another process now holds sessions.
+            _nvenc_sessions = got
             _nvenc_saturated = (got >= limit)
         print(f"[hw] NVENC sessions: {_nvenc_sessions}"
               + (" (at least — probe stopped at its limit)" if _nvenc_saturated
