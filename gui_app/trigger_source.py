@@ -25,6 +25,7 @@ Nothing here opens a port, reads a camera or imports a vendor SDK.
 """
 import time
 
+from gui_app.frame_sync import source_name
 from gui_app.grab_thread import PRE_TRIGGER_GRACE_S, SOURCE_SILENT_S
 from gui_app.session_config import TRIGGER_SOURCES
 
@@ -118,7 +119,8 @@ class BoardTriggerSource(TriggerSource):
 
     def describe(self) -> str:
         port = getattr(self.teensy, "port", None)
-        return f"the trigger board on {port}" if port else "the trigger board"
+        name = source_name(self.kind)
+        return f"{name} on {port}" if port else name
 
 
 class ExternalTriggerSource(TriggerSource):
@@ -146,7 +148,7 @@ class ExternalTriggerSource(TriggerSource):
         return True
 
     def describe(self) -> str:
-        return "your trigger source"
+        return source_name(self.kind)
 
     # ------------------------------------------------------------- arming
     @staticmethod

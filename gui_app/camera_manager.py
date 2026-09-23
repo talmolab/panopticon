@@ -7,6 +7,7 @@ import numpy as np
 from pathlib import Path
 from PyQt5.QtCore import QObject, pyqtSignal
 from gui_app.backends import load_backend
+from gui_app.frame_sync import source_name
 from gui_app.grab_thread import GrabThread, SOURCE_SILENT_S
 
 #: Bounds on stop_acquisition, each applied to its PHASE as one shared
@@ -1098,7 +1099,9 @@ class CameraManager(QObject):
                                  fps=fps, max_lag=kick_max_lag,
                                  pin_encoders=self.pin_encoder_threads,
                                  enc_pcores=self.encoder_pcores,
-                                 encoder_factory=self.encoder_factory)
+                                 encoder_factory=self.encoder_factory,
+                                 rate_hints={"source_hint": source_name(
+                                     self.trigger_source)})
             if not router.available:
                 self._start_grab_threads()      # back to preview
                 # Reported like a mid-session encoder failure: the cached
@@ -1517,18 +1520,26 @@ class CameraManager(QObject):
         if not stalled:
             return []
         names = ", ".join(self._cn(i) for i, _gt in stalled)
+        # The source the operator has to check: an external source is not
+        # the board, and it has no USB cable or stimulation pins of ours.
+        # Read with getattr: ProcessCameraManager borrows this method.
+        kind = getattr(self, "trigger_source", "board")
+        external = kind == "external"
+        source = source_name(kind)
         if not any(getattr(gt, "frames_retrieved", 0)
                    or getattr(gt, "frame_count", 0)
                    or getattr(gt, "failed_grabs", 0) for gt in threads):
             # No camera delivered a single result, good or failed: the
-            # triggers never reached any camera, which a board that stops
+            # triggers never reached any camera, which a source that stops
             # mid-run cannot explain.
-            msg = (f"No camera received a frame after the trigger board "
-                   f"started ({names}), so nothing was recorded, and no "
-                   f"camera was retired for it. Check that the trigger board "
-                   f"is running and wired to every camera, and that each "
-                   f"camera's trigger input (its trigger line and source "
-                   f"settings) matches the line the board drives.")
+            started = ("the recording started" if external
+                       else f"{source} started")
+            msg = (f"No camera received a frame after {started} ({names}), "
+                   f"so nothing was recorded, and no camera was retired for "
+                   f"it. Check that {source} is running and wired to every "
+                   f"camera, and that each camera's trigger input (its "
+                   f"trigger line and source settings) matches the line it "
+                   f"drives.")
             print(f"[acq] WARNING: {msg}", flush=True)
             return [msg]
         start = self._board_started_t
@@ -1553,14 +1564,19 @@ class CameraManager(QObject):
                        + ", ".join(self._cn(i) for i, _gt in rearmed) + ").")
         else:
             handled = ", so no camera was re-armed or retired for it."
+        if external:
+            cause = f"{source} stopped"
+            check = f"Check {source} and its cables."
+        else:
+            cause = f"{source} reset, or lost USB or power"
+            check = (f"Check {source} and its USB cable. A board that lost "
+                     f"power leaves its output pins undriven, stimulation "
+                     f"pins included.")
         msg = (f"Every active camera stopped receiving frames at the same "
                f"time{when} ({names}). A silence shared by every camera "
-               f"comes from the trigger source (the trigger board reset, or "
-               f"lost USB or power) or from the network to all of "
-               f"them{handled} Triggers during the silence are missing from "
-               f"every camera. Check the trigger board and its USB cable. A "
-               f"board that lost power leaves its output pins undriven, "
-               f"stimulation pins included.")
+               f"comes from the trigger source ({cause}) or from the network "
+               f"to all of them{handled} Triggers during the silence are "
+               f"missing from every camera. {check}")
         print(f"[acq] WARNING: {msg}", flush=True)
         return [msg]
 

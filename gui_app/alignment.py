@@ -34,8 +34,9 @@ import numpy as np
 from gui_app.frame_sync import (BLOCK_RATE_MIN_FRAMES, BLOCK_RATE_MIN_SECONDS,
                                 BLOCKID_WRAP)
 from gui_app.frame_sync import block_rate_warnings as _block_rate_warnings
+from gui_app.frame_sync import source_name
 from gui_app import ffmpeg_cmd
-from gui_app.recording_meta import camera_sort_key
+from gui_app.recording_meta import camera_sort_key, trigger_source
 
 # Name of the per-camera re-encode target. It sits beside the real mp4 while
 # ffmpeg writes it, so every mp4 lookup must exclude it and every run must
@@ -295,7 +296,11 @@ def block_rate_check(rec_dir: Path, names, blocks, fps: int):
         ids.append(b)
         times.append(ft[1])
         checked.append(nm)
-    warnings = _block_rate_warnings(ids, times, fps, checked) if checked else []
+    # The advice names the source session_metadata.json records: with an
+    # external source this check is the only test of the operator's rate.
+    hints = {"source_hint": source_name(trigger_source(rec_dir))}
+    warnings = (_block_rate_warnings(ids, times, fps, checked, hints=hints)
+                if checked else [])
     return warnings, checked, skipped
 
 
