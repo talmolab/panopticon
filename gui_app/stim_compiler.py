@@ -948,16 +948,46 @@ def _settle_timed_out_upload(proc, grace_s: float) -> str:
             "Apply again.")
 
 
+class UploadResult(tuple):
+    """``(ok, message)`` from upload(), plus whether the board may have been
+    written.
+
+    Unpacks as the two-tuple every caller takes. ``touched_board`` is False
+    only for a failure that came before anything could write the board's
+    flash: no arduino-cli, a compile error, a compile timeout. Any later
+    failure may have left the flash half-written, so what the board carries
+    is unknown and must not be trusted from a record of an earlier flash.
+    """
+
+    def __new__(cls, ok: bool, message: str, touched_board: bool):
+        result = super().__new__(cls, (bool(ok), str(message)))
+        result.touched_board = bool(touched_board)
+        return result
+
+
 def upload(ino_content: str, port: str, *,
            compile_timeout_s: float = COMPILE_TIMEOUT_S,
            upload_timeout_s: float = UPLOAD_TIMEOUT_S,
-           flash_grace_s: float = FLASH_GRACE_S) -> tuple[bool, str]:
-    """Compile and upload the .ino to the Arduino. Returns (success, message).
+           flash_grace_s: float = FLASH_GRACE_S) -> UploadResult:
+    """Compile and upload the .ino to the Arduino.
+
+    Returns an UploadResult: ``ok, message = upload(...)`` as before, with
+    ``.touched_board`` saying whether a failure may have written the board.
 
     With port ``"sim"`` nothing is compiled or flashed: the sketch is handed to
     the simulated board when that module is present and reported as accepted
     otherwise, so the GUI's Apply path runs end to end with no hardware.
     """
+    ok, message, stage = _upload(ino_content, port,
+                                 compile_timeout_s=compile_timeout_s,
+                                 upload_timeout_s=upload_timeout_s,
+                                 flash_grace_s=flash_grace_s)
+    return UploadResult(ok, message, touched_board=ok or stage == "upload")
+
+
+def _upload(ino_content: str, port: str, *, compile_timeout_s: float,
+            upload_timeout_s: float, flash_grace_s: float) -> tuple[bool, str, str]:
+    """upload()'s work. Returns (ok, message, stage the failure happened in)."""
     if is_sim_port(port):
         try:
             from gui_app.backends import sim_board
@@ -966,14 +996,14 @@ def upload(ino_content: str, port: str, *,
         accept = getattr(sim_board, "accept_upload", None)
         if accept is not None:
             accept(ino_content)
-        return True, "Simulated board: sketch accepted, nothing flashed."
+        return True, "Simulated board: sketch accepted, nothing flashed.", "upload"
 
     # Resolve at call time, not import time: the tool may be installed while the
     # GUI is open, and a missing tool should read as "install this" rather than
     # as a generic upload failure.
     cli = find_arduino_cli()
     if cli is None:
-        return False, arduino_cli_help()
+        return False, arduino_cli_help(), "compile"
 
     tmp = Path(tempfile.mkdtemp())
     sketch_dir = tmp / "panopticon_stim"
@@ -991,7 +1021,7 @@ def upload(ino_content: str, port: str, *,
                 f"runs whatever it ran before.\n\n"
                 f"If the error mentions a missing core, install it:\n"
                 f"    arduino-cli core install arduino:avr\n\n"
-                f"{err}\n{out}")
+                f"{err}\n{out}"), stage
         stage = "upload"
         rc, out, err = _run_cli(
             [str(cli), "upload", "--fqbn", FQBN, "--port", port, str(sketch_dir)],
@@ -1007,8 +1037,9 @@ def upload(ino_content: str, port: str, *,
                 f"firmware in an UNKNOWN state, which means the stim/laser pin "
                 f"state is also unknown. Power-cycle the board before relying "
                 f"on it.\n\n"
-                f"{err}\n{out}")
-        return True, "Upload successful — Arduino will restart and wait for record command."
+                f"{err}\n{out}"), stage
+        return (True, "Upload successful — Arduino will restart and wait for "
+                      "record command.", stage)
     except subprocess.TimeoutExpired as e:
         proc = getattr(e, "process", None)
         if stage == "compile":
@@ -1021,13 +1052,13 @@ def upload(ino_content: str, port: str, *,
                     pass
             return False, (f"Timed out after {e.timeout:.0f} s during compile. "
                            f"Nothing was flashed; the board still runs whatever "
-                           f"it ran before.")
+                           f"it ran before."), stage
         advice = (_settle_timed_out_upload(proc, flash_grace_s) if proc is not None
                   else "Power-cycle the board and Apply again.")
         return False, (f"Timed out after {e.timeout:.0f} s during upload on "
-                       f"{port}.\n\n{advice}")
+                       f"{port}.\n\n{advice}"), stage
     except Exception as e:
         return False, (f"{type(e).__name__}: {e}\n\n"
-                       f"arduino-cli used: {cli}")
+                       f"arduino-cli used: {cli}"), stage
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

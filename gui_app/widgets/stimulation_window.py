@@ -945,7 +945,11 @@ class _UploadWorker(QThread):
         self._port = port
 
     def run(self):
-        self.done.emit(*stim_compiler.upload(self.ino, self._port))
+        result = stim_compiler.upload(self.ino, self._port)
+        # Read by the done slot, which runs after this assignment: a failure
+        # that may have written the flash leaves the board's contents unknown.
+        self.touched_board = getattr(result, "touched_board", True)
+        self.done.emit(*result)
 
 
 # ── StimulationWindow ─────────────────────────────────────────────────────────
@@ -995,9 +999,10 @@ class StimulationWindow(QDialog):
                  get_safe_pins: Callable[[], list] = lambda: list(
                      STANDALONE_SAFE_LOW_PINS),
                  get_trigger_pins: Callable[[], list] = lambda: [],
-                 get_serial: Callable[[], object] = lambda: None,
+                 get_serial: Callable[[], object] | None = None,
                  release_serial: Callable[[], None] = lambda: None,
                  on_applied: Callable[[str], None] = lambda ino: None,
+                 on_upload_failed: Callable[[bool], None] = lambda touched: None,
                  parent=None):
         super().__init__(parent)
         self._get_port       = get_port
@@ -1019,12 +1024,21 @@ class StimulationWindow(QDialog):
         # silently break cross-camera block-ID alignment. Defaults to empty so a
         # bare editor still works, but main_window MUST pass the profile's pins.
         self._get_trigger_pins = get_trigger_pins
-        self._get_serial     = get_serial
+        # The main window's shared link, or None for an editor opened on its
+        # own. A shared link that cannot be opened is reported, never replaced
+        # by a private one: a second controller would reset the board for the
+        # test and leave the main window's link closed for the next Record.
+        self._serial_is_shared = get_serial is not None
+        self._get_serial     = get_serial if get_serial is not None else (lambda: None)
         self._release_serial = release_serial
         # Called with the .ino source after a successful Apply. The main window
         # keeps it for the session so it can put this paradigm back on the board
         # after a calibration has reflashed it away.
         self._on_applied = on_applied
+        # Called with touched_board after a failed Apply. When the flash may
+        # have been written, the main window forgets its record of what the
+        # board carries, so the next launch reflashes instead of trusting it.
+        self._on_upload_failed = on_upload_failed
         self._test_owns_serial = False
         self._selected_block: BlockItem | None   = None
         self._upload_worker:  _UploadWorker | None = None
@@ -1591,6 +1605,9 @@ class StimulationWindow(QDialog):
         self._test_btn.setEnabled(True)
         worker, self._upload_worker = self._upload_worker, None
         ino = getattr(worker, "ino", None)
+        # A worker that cannot say is treated as having written the flash:
+        # an unknown board must be reflashed, never trusted.
+        touched = bool(getattr(worker, "touched_board", True))
         if worker is not None:
             # done is emitted from inside run(), so the thread is still
             # winding down when this slot runs; wait for it before the object
@@ -1601,8 +1618,24 @@ class StimulationWindow(QDialog):
         if not ok:
             self._test_after_upload = False
             self._apply_failed = True
-            self._set_status("Upload failed — see details.", error=True,
-                             kind="notice")
+            if touched:
+                # The flash may be half-written, so nothing this editor
+                # uploaded before is known to be on the board any more.
+                self._uploaded_ino = None
+            try:
+                self._on_upload_failed(touched)
+            except Exception as e:
+                print(f"[stim] could not report the failed upload: {e}",
+                      flush=True)
+            # RULE: whoever released the port reclaims it on every path out.
+            # REASON: left released, the next Record reopens it, and the
+            # open resets the board and floats the laser pin inside the
+            # experiment.
+            reclaimed = self._get_serial() is not None
+            self._set_status("Upload failed — see details." + (
+                "" if reclaimed or not self._serial_is_shared else
+                " The serial port could not be reopened."), error=True,
+                kind="notice")
             QMessageBox.critical(self, "Upload failed", msg)
             return
         self._apply_failed = False
@@ -1619,10 +1652,15 @@ class StimulationWindow(QDialog):
         # Retake the port straight away. Reopening resets the board, so letting
         # the next Record do it would put that flash back into the experiment;
         # here it lands during Apply, alongside the reset avrdude already did.
-        self._get_serial()
+        reclaimed = self._get_serial() is not None
         if self._test_after_upload:
             self._test_after_upload = False
             self._begin_test()
+        elif not reclaimed and self._serial_is_shared:
+            self._set_status(
+                "Upload successful, but the serial port could not be "
+                "reopened. Record reopens it, which resets the board: key "
+                "off the laser first.", error=True, kind="notice")
         else:
             self._set_status("Upload successful — press Record to run paradigm.")
 
@@ -1635,6 +1673,14 @@ class StimulationWindow(QDialog):
             QMessageBox.information(
                 self, "Busy",
                 "Stop the current acquisition before running a stimulation test.")
+            return
+        if self._apply_failed:
+            # The same refusal record_blocker() gives Record and Calibrate: a
+            # Test drives the laser pin with whatever the board now carries.
+            QMessageBox.warning(
+                self, "Apply first",
+                "The last Apply failed, so what the trigger board carries is "
+                "unknown.\n\nPress Apply and let it succeed before testing.")
             return
         blocks, edges = self._canvas.get_workflow()
         if not blocks:
@@ -1677,10 +1723,21 @@ class StimulationWindow(QDialog):
         shared = self._get_serial()
         if shared is not None:
             self._test_serial, self._test_owns_serial = shared, False
+        elif self._serial_is_shared:
+            self._set_status(f"Could not open {port}.", error=True)
+            QMessageBox.critical(
+                self, "Serial port",
+                f"The trigger board's serial port {port} could not be opened, "
+                f"so the test did not start.\n\nClose the Arduino Serial "
+                f"Monitor or any other app holding it, check the cable, then "
+                f"test again.")
+            return
         else:
             self._test_serial = TeensyController(port=port)
             self._test_owns_serial = True
-            if not self._test_serial.open():
+            # One attempt: this runs on the UI thread, and each failed open
+            # waits a second.
+            if not self._test_serial.open(retries=1):
                 self._test_serial = None
                 self._set_status(f"Could not open {port}.", error=True)
                 QMessageBox.critical(
