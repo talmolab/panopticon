@@ -767,9 +767,9 @@ def _warm_pinned(context: str) -> None:
     encoder then tries its own setup and falls back on its own.
 
     RULE: a pinned encoder that is built but fails to encode or to end its
-    stream turns the pinned path off for the process. REASON: the library
-    refuses page-locked input, so every real pinned encoder would fail on
-    its first frame, and each camera would spill raw frames for the whole
+    stream turns the pinned path off for the process. REASON: a library that
+    fails the warm-up's encode fails every real pinned encoder on its first
+    frame, and each camera would then spill raw frames for the whole
     recording. With the path off, every encoder gets the host upload and a
     note, and the video is unchanged.
     """
