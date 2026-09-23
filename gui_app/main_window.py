@@ -49,20 +49,20 @@ CALIBRATION_SCRIPT = Path(__file__).parent.parent / "1_calibrate.py"
 #: the alignment archive and the stimulation record count as data too: a
 #: directory whose mp4s were moved away for labelling still holds what makes
 #: them interpretable, and without these patterns it reads as empty. Without
-#: stim_paradigm.json here, a new take into such a directory got no overwrite
-#: prompt and inherited the old take's paradigm.
+#: stim_paradigm.json here, a new take into such a directory would get no
+#: overwrite prompt and would inherit the old take's paradigm.
 DATA_PATTERNS = ("*.mp4", "raw.bin", "stream.h264", "blockids.npy",
                  "frametimes.npy", "alignment.npz", "stim_paradigm.json")
+
+#: Files an agreed overwrite keeps. calibration.toml is the calibration Solve
+#: copied beside the recording; it belongs to the session, not to the take
+#: being replaced, and the overwrite prompt names it as kept.
+KEPT_ON_OVERWRITE = ("calibration.toml",)
 
 #: The previous run's session-level files a committed start removes. The stim
 #: files are among them because stim_trace.write_trace builds the trace from
 #: whatever stim_paradigm.json it finds: one left from a stimulated take would
 #: label every frame of a new, unstimulated take as stimulated.
-#: Files an agreed overwrite keeps. calibration.toml is the calibration Solve
-#: copied beside the recording; it belongs to the session, not to the take
-#: being replaced, and the overwrite prompt never offered to delete it.
-KEPT_ON_OVERWRITE = ("calibration.toml",)
-
 STALE_SESSION_FILES = ("WARNINGS.txt", "codet_frames.json",
                        "stim_paradigm.json", "stim_paradigm.ino",
                        "stim_trace.csv")
@@ -421,12 +421,11 @@ class MainWindow(QMainWindow):
     def _reset_toggles(self):
         """Both toggles off, with the shared gate set from every owner.
 
-        RULE: the one way this window resets the toggles. REASON: the
-        sidebar's reset used to force the gate open, which reopened Record
-        and Calibrate in the middle of an editor flash whenever an encode, an
-        alignment or a refused start happened to finish during it; the start
-        path still refused, but only through a dialog on a control that
-        should not have been live.
+        RULE: the one way this window resets the toggles. REASON: a reset
+        that forces the gate open reopens Record and Calibrate in the middle
+        of an editor flash whenever an encode, an alignment or a refused
+        start finishes during it; the start path still refuses, but only
+        through a dialog on a control that should not be live.
         """
         self._sidebar.reset_toggles(self._toggles_permitted())
 
@@ -1135,9 +1134,9 @@ class MainWindow(QMainWindow):
         RULE: stim_paradigm.json, stim_paradigm.ino and the auto-stop come
         from the canvas as it was when the last check passed, and the .ino is
         the sketch this recording flashes. REASON: the editor stays live
-        while the start worker runs for seconds, and a block nudged then was
-        written as the recording's provenance, its firmware and its stop time
-        although the board ran the sketch checked a moment before.
+        while the start worker runs for seconds, and a block nudged then
+        would become the recording's provenance, its firmware and its stop
+        time although the board runs the sketch checked a moment before.
 
         None when there is nothing to record: a calibration (always
         stimulation-free), no editor, or an empty canvas.
@@ -1691,6 +1690,9 @@ class MainWindow(QMainWindow):
             return ""
         print(f"[acq] the board acked with sketch {heard}, not the {label} "
               f"sketch {want_id}: refusing", flush=True)
+        # Whatever this machine recorded about the board is now known to be
+        # wrong, so the next start cannot skip the flash on it either.
+        settings.set_board_sketch_hint("")
         return (f"The trigger board is running sketch {heard}, not the "
                 f"{label} sketch this {acq_type} needs ({want_id}).\n\nThe "
                 f"start has been rolled back. Start again: Panopticon flashes "
@@ -3179,7 +3181,7 @@ class MainWindow(QMainWindow):
         attempt does not retry after it, and no start can be written between
         the stop and the close; _quitting keeps a worker that has not reached
         the board yet from sending one at all. A stop followed by a separate
-        close left a gap in which a queued start went out after the stop.
+        close leaves a gap in which a queued start goes out after the stop.
 
         The warning comes before the window goes, while there is something to
         show it on. ``is_open`` proves nothing: pyserial keeps it True after

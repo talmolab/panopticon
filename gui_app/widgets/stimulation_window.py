@@ -130,9 +130,9 @@ def parse_workflow(blocks, edges) -> tuple[list[dict], list[dict]]:
     """Validate a saved graph into plain dicts, or raise ValueError.
 
     RULE: a file is parsed whole before anything on the canvas changes.
-    REASON: the canvas used to be cleared first and rebuilt block by block, so
-    a hand-edited file with one bad block left the blocks before it on a
-    wiped canvas, one Apply away from the board.
+    REASON: a canvas cleared first and rebuilt block by block leaves, for a
+    hand-edited file with one bad block, the blocks before it on a wiped
+    canvas, one Apply away from the board.
 
     Checks the shape only: every block has an id no other block uses and
     numeric pin, freq, pw, dur, x and y (a whole-number pin); every edge has a

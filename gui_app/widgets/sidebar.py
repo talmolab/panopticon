@@ -599,9 +599,9 @@ class SidebarWidget(QWidget):
 
         RULE: a caller that shares the gate passes what every owner permits.
         REASON: the gate is one switch shared by the state machine, a solve
-        and a firmware upload, and forcing it open here reopened Record and
+        and a firmware upload, and forcing it open here reopens Record and
         Calibrate in the middle of an editor flash that an encode or a solve
-        happened to finish during."""
+        finishes during."""
         self._calibrate_toggle.setChecked(False)
         self._record_toggle.setChecked(False)
         self._toggles_gate = bool(enabled)
