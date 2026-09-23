@@ -801,6 +801,17 @@ class GrabThread(QThread):
             pass
 
     def run(self):
+        if not self._running:
+            # stop() or abandon() landed before this thread was scheduled.
+            # RULE: return before touching the camera. REASON: a thread the
+            # manager gave up waiting for can be scheduled after another
+            # thread has taken the camera over, and a StartGrabbing and
+            # StopGrabbing from this one would then stop that thread's stream.
+            self.retrieve_loop_exited = True
+            self.ready.set()
+            print(f"[grab{self._cam_index}] stopped before it started; the "
+                  f"camera was not touched", flush=True)
+            return
         # Hybrid-CPU placement. 9 grab + 9 encoder + Qt is ~19 busy threads on
         # 8 P-cores, so Windows must put most of them on E-cores and picks
         # differently every launch. A grab thread on an E-core runs a few
