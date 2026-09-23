@@ -85,6 +85,13 @@ class MainWindow(QMainWindow):
     #: unplugged or held by another program; each failed attempt sleeps a
     #: second, and the operator is waiting on a dialog either way.
     START_SERIAL_RETRIES = 2
+    #: Serial open attempts on the UI thread: at launch, after a flash, after
+    #: an editor Apply and at a Test. RULE: one. REASON: each failed attempt
+    #: sleeps a second on the UI thread, and ten of them read as a hung
+    #: window, which invites a Task Manager kill in the middle of the
+    #: firmware path. A failure is reported, and the next start retries on
+    #: its worker with START_SERIAL_RETRIES.
+    UI_SERIAL_RETRIES = 1
 
     def __init__(self):
         super().__init__()
@@ -538,6 +545,17 @@ class MainWindow(QMainWindow):
                 "once it has finished: the profile names the serial port, and "
                 "changing it under a running upload leaves the board in an "
                 "unknown state.")
+            return
+        if self._stim_window is not None and self._stim_window.is_testing():
+            # The test drives the board through this window's link, and only
+            # the editor's Stop Test ends a looping chain.
+            self._refuse_profile_switch()
+            QMessageBox.information(
+                self, "Stop the stimulation test first",
+                "A stimulation test is driving the trigger board. Stop it in "
+                "the Stimulation editor, then switch profiles: a profile "
+                "names the serial port, and switching can close the link the "
+                "test's stop has to go out on.")
             return
         # RULE: every refusal is answered BEFORE _begin_busy and before the new
         # profile is adopted. REASON: a return placed between them leaves the
@@ -1569,6 +1587,26 @@ class MainWindow(QMainWindow):
                   flush=True)
         print("[stim] paradigm applied and held for this session", flush=True)
 
+    def _on_stim_upload_failed(self, touched_board: bool):
+        """Forget what the board carries after an editor Apply failed on it.
+
+        RULE: a failed flash that may have written the board clears the
+        board-sketch hint, like this window's own failed flashes. REASON: the
+        hint is what lets the next launch skip its clean flash, so a hint
+        left claiming the pre-Apply sketch hands the next session a board
+        whose flash may be half-written and missing its allStimLow() guard. A
+        failure that never reached the board (a compile error) leaves the
+        record true and keeps it.
+        """
+        if not touched_board:
+            print("[stim] Apply failed before reaching the board; its "
+                  "contents are unchanged", flush=True)
+            return
+        settings.set_board_sketch_hint("")
+        self._board_id_stale = True
+        print("[stim] Apply failed on the board; its contents are unknown "
+              "until the next flash", flush=True)
+
     def _sketch_for(self, acq_type: str):
         """(source, label) of the firmware this acquisition must run under."""
         blank = stim_compiler.recording_only_sketch(
@@ -1814,8 +1852,13 @@ class MainWindow(QMainWindow):
         # can already be under way, and assigning over a running _fw_op drops
         # the last reference to a live QThread (a qFatal) and puts a second
         # arduino-cli on a port the first avrdude holds.
+        # The editor's Apply and Test run with this window idle and not busy,
+        # and both need the port: a flash on top of an Apply puts two
+        # avrdudes on one board, and one under a Test closes its link.
+        editor_busy = self._stim_window is not None and (
+            self._stim_window.is_uploading() or self._stim_window.is_testing())
         if (self._busy or self._state != State.IDLE
-                or self._worker_busy(self._fw_op)):
+                or self._worker_busy(self._fw_op) or editor_busy):
             print("[acq] busy; deferring the launch firmware check", flush=True)
             QTimer.singleShot(1000, self._ensure_clean_firmware)
             return
@@ -1888,16 +1931,20 @@ class MainWindow(QMainWindow):
         recording #1.
 
         Non-fatal, though: one attempt here, and if the board is not reachable
-        yet the next _teensy_connection() call retries with the full count.
+        yet the next start retries on its worker.
         """
-        if self._teensy_connection(retries=1) is None:
+        if self._teensy_connection(retries=self.UI_SERIAL_RETRIES) is None:
             print(f"[acq] trigger board not reachable on {self._profile.serial_port} "
                   f"at startup; will retry on first use", flush=True)
             return
         self._confirm_board_identity()
 
-    def _teensy_connection(self, retries: int = 10) -> TeensyController | None:
+    def _teensy_connection(self, retries: int | None = None
+                           ) -> TeensyController | None:
         """The one serial link to the trigger board, kept open for the session.
+
+        ``retries`` defaults to UI_SERIAL_RETRIES, because every caller but
+        the start worker is on the UI thread.
 
         Opening the port resets the Arduino, and during the reset + bootloader
         every pin floats — long enough for a connected laser to fire. Holding
@@ -1916,6 +1963,8 @@ class MainWindow(QMainWindow):
             self._teensy = TeensyController(port=self._profile.serial_port)
         if not self._teensy.is_open:
             print(f"[acq] opening teensy on {self._profile.serial_port}", flush=True)
+            if retries is None:
+                retries = self.UI_SERIAL_RETRIES
             if not self._teensy.open(retries=retries):
                 return None
         return self._teensy
@@ -2719,11 +2768,22 @@ class MainWindow(QMainWindow):
                     self._state in (State.RECORDING, State.CALIBRATING)
                     or self._busy
                     or (self._fw_op is not None and self._fw_op.isRunning())),
+                # Narrower than is_busy: only an acquisition or a flash takes
+                # the board from a Test. A Test ending during camera work (a
+                # profile switch, a trace rebuild) still sends its stop,
+                # because that write is the only thing that ends a looping
+                # chain.
+                board_taken=self._board_taken_from_test,
                 get_safe_pins=lambda: self._profile.stim_safe_pins,
                 get_trigger_pins=lambda: self._profile.trigger_pins,
-                get_serial=self._teensy_connection,
+                # The editor reclaims on the UI thread after every Apply and at
+                # Test, so one attempt: each failed open waits a second, and the
+                # start worker keeps its own retry count.
+                get_serial=lambda: self._teensy_connection(
+                    retries=self.UI_SERIAL_RETRIES),
                 release_serial=self.release_serial_port,
                 on_applied=self._on_stim_applied,
+                on_upload_failed=self._on_stim_upload_failed,
                 parent=self,
             )
             # The editor's Apply runs with this window at IDLE and not busy,
@@ -2734,6 +2794,17 @@ class MainWindow(QMainWindow):
                 self._on_stim_upload_state)
         self._stim_window.show()
         self._stim_window.raise_()
+
+    def _board_taken_from_test(self) -> bool:
+        """True while an acquisition or a firmware flash holds the board.
+
+        The editor's Test skips its stop only on this: an acquisition's own
+        start replaced the test's configuration and a stop would cut its
+        camera triggers, and a flash has released the port. Anything else the
+        window is busy with leaves the board to the test.
+        """
+        return (self._state in (State.RECORDING, State.CALIBRATING)
+                or self._worker_busy(self._fw_op))
 
     def _on_stim_upload_state(self, uploading: bool):
         """Grey the acquisition toggles for the duration of an editor flash.
