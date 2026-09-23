@@ -9,18 +9,18 @@ Tracks:
   - ``glow``          : per-camera decaying pulse, set to 1.0 on each detection
   - ``shared``        : pairwise co-detection counts (board seen by both cams in
                         the same detection tick)
-  - ``per_cam_covis`` : per-camera co-visibility coverage (ticks where this cam
+  - ``per_cam_frames``: per-camera co-detection ticks (ticks where this cam
                         detected the board AND at least one other cam did too)
   - ``grid_cells_hit``: how many of the 2x2 FOV cells that camera has seen the
                         board in, binned by the marker centroid
-  - ``ready``         : ALL THREE of — every camera has >= ``min_per_cam_shared``
-                        co-visible detections; every camera has hit
+  - ``ready``         : ALL THREE of: every camera has >= ``min_per_cam_shared``
+                        co-detection ticks; every camera has hit
                         >= ``MIN_GRID_CELLS`` of its 4 grid cells; and the
                         co-visibility graph is ONE CONNECTED COMPONENT over the
-                        pairs with >= ``min_edge`` co-detections. Note the last
-                        one is a connectivity test, not a per-pair test: the
-                        board is one-sided, so opposed cameras can never
-                        co-detect and "every pair connected" could never fill.
+                        pairs with >= ``min_edge`` co-detections. The last one
+                        is a connectivity test, not a per-pair test: the board
+                        is one-sided, so opposed cameras can never co-detect
+                        and "every pair connected" could never fill.
                         ``ready`` LATCHES: detection, glow decay, counting and
                         ``codet_frames`` all keep running afterwards, because
                         the hinted solve decodes only the frames listed in
@@ -136,7 +136,6 @@ class BoardDetector:
         n = self.n
         self.glow = np.zeros(n)
         self.shared = np.zeros((n, n), dtype=int)
-        self.per_cam_covis = np.zeros(n, dtype=int)   # partner-weighted: display
         self.per_cam_frames = np.zeros(n, dtype=int)  # ticks: what READY uses
         #: Connected components of the co-visibility graph, refreshed each tick.
         #: One component is the READY condition; more than one means the solve
@@ -193,34 +192,14 @@ class BoardDetector:
                         self.grid_cells_hit[i] = int(self.grid_covered[i].sum())
 
         if len(seen) >= 2:
-            # Weighted by PARTNER COUNT, not 1 per tick. A tick in which three
-            # cameras see the board yields three pairwise constraints, not one,
-            # and pairwise constraints are what stereo calibration consumes — so
-            # a camera that co-sees with two others is making twice the progress
-            # of one that co-sees with a single neighbour. Counting ticks
-            # flattened that distinction and let a camera reach its target while
-            # only ever pairing with the same partner, which is exactly how a
-            # co-visibility graph ends up in disconnected clusters that each
-            # look well covered. Connectivity is still enforced separately in
-            # _update_ready(); this only makes the per-camera number mean
-            # "constraints gathered" rather than "moments seen".
-            partners = len(seen) - 1
             for i in seen:
-                # TWO counters, deliberately. `per_cam_frames` counts TICKS and
-                # is what READY thresholds on, because the solve consumes
-                # FRAMES: 1_calibrate.py caps intrinsics at 60 per camera.
-                # `per_cam_covis` is partner-weighted and is for the display
-                # and the bridge hint -- it says how many pairwise constraints
-                # this camera has gathered, which is the right thing to steer
-                # by but the WRONG thing to threshold.
-                #
-                # Threshold FRAMES, never the partner-weighted number: at nine
-                # cameras all seeing the board partners=8, so a target of 120 is
-                # met in FIFTEEN ticks -- a 16.7x drop in the actual bar, which
-                # would greenlight a calibration on almost no data and produce a
-                # confident, badly-conditioned solve.
+                # RULE: count one per tick, never one per partner. REASON: the
+                # solve consumes frames, and READY thresholds this count
+                # against min_per_cam_shared. Weighting by partner count would
+                # meet the bar N-1 times sooner with N cameras in view and pass
+                # a calibration on a fraction of the frames it needs. How the
+                # partners connect is the graph test in _update_ready().
                 self.per_cam_frames[i] += 1
-                self.per_cam_covis[i] += partners
             for a in range(len(seen)):
                 for b in range(a + 1, len(seen)):
                     self.shared[seen[a], seen[b]] += 1
@@ -260,26 +239,6 @@ class BoardDetector:
         for i in range(self.n):
             groups.setdefault(find(i), []).append(i)
         return sorted(groups.values(), key=lambda g: (-len(g), g[0]))
-
-    def bridge_hint(self):
-        """The pair most worth working next, or None once the graph is joined.
-
-        Across every pair of components, the two cameras with the most shared
-        detections are the ones already closest to forming an edge, so naming
-        them turns "the graph is in pieces" into an instruction.
-        """
-        comps = self.components
-        if len(comps) < 2:
-            return None
-        best = None
-        for a_idx in range(len(comps)):
-            for b_idx in range(a_idx + 1, len(comps)):
-                for i in comps[a_idx]:
-                    for j in comps[b_idx]:
-                        n = int(self.shared[i, j])
-                        if best is None or n > best[2]:
-                            best = (i, j, n)
-        return best
 
     def _update_ready(self):
         """Recompute components and READY. READY latches: every input is
