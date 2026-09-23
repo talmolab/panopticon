@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gui_app.alignment import _unwrap_blockids
+from gui_app.alignment import _unwrap_blockids, camera_dirs
 
 TRACE_NAME = "stim_trace.csv"
 PARADIGM_NAME = "stim_paradigm.json"
@@ -172,7 +172,8 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float):
 def _pick_blockids(recording_dir: Path):
     """Any camera's block IDs will do — kick-out makes them identical — but check
     that assumption rather than trusting it, and say so if it fails."""
-    files = sorted(recording_dir.glob("cam*/blockids.npy"))
+    files = [d / "blockids.npy" for d in camera_dirs(recording_dir)
+             if (d / "blockids.npy").exists()]
     if not files:
         return None, "no blockids.npy (recording never stopped cleanly?)"
     arrays = {f.parent.name: np.load(f) for f in files}

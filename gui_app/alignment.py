@@ -76,9 +76,26 @@ def _unwrap_blockids(b: np.ndarray, period: int = BLOCKID_WRAP) -> np.ndarray:
     return b
 
 
+def camera_sort_key(name: str) -> tuple:
+    """Sort key that orders camera names by number: cam2 before cam10.
+
+    A string sort puts cam10 between cam1 and cam2, so on a rig with ten or
+    more cameras every per-camera list built from it (the alignment index
+    rows, the stim-trace columns, the calibration sections) stops following
+    the camera numbering. Names with no number after ``cam`` sort after the
+    numbered ones, by name.
+    """
+    tail = name[3:] if name.startswith("cam") else name
+    if tail.isascii() and tail.isdigit():
+        return (0, int(tail), name)
+    return (1, 0, name)
+
+
 def camera_dirs(rec_dir: Path) -> list[Path]:
-    return sorted(d for d in Path(rec_dir).iterdir()
-                  if d.is_dir() and d.name.startswith("cam"))
+    """The cam*/ directories of an acquisition, in camera-number order."""
+    return sorted((d for d in Path(rec_dir).iterdir()
+                   if d.is_dir() and d.name.startswith("cam")),
+                  key=lambda d: camera_sort_key(d.name))
 
 
 def video_for(cam_dir: Path):
