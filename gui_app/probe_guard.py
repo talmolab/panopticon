@@ -231,6 +231,18 @@ def find_others(rows: list[tuple[int, int, str]]) -> list[tuple[int, str]]:
     return out
 
 
+def other_panopticons() -> list[tuple[int, str]] | None:
+    """(pid, command line) of every other Panopticon process, or None when
+    the process table cannot be read.
+
+    The one scan every caller uses: the GUI's single-instance check asks
+    this, and refuse_if_panopticon_running applies the same find_others to
+    the same table, so a process one of them counts the other counts too.
+    """
+    rows = _process_table()
+    return None if rows is None else find_others(rows)
+
+
 def _release_lock() -> None:
     """Drop the lock on exit, but only while it still names this process.
 
