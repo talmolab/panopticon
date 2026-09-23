@@ -1368,6 +1368,26 @@ def _environment_metadata() -> dict:
     return env
 
 
+def _camera_identity(camera_info, profile) -> dict:
+    """camera_serials, camera_models and camera_backend for the metadata.
+
+    The lists are in cam1..camN order, one entry per opened camera, with
+    None where the backend did not report a value. The backend name is the
+    one every camera reports, else the profile's.
+    """
+    backend = profile.camera_backend if profile is not None else None
+    if camera_info is None:
+        return dict(camera_serials=None, camera_models=None,
+                    camera_backend=backend)
+    infos = [info if isinstance(info, dict) else {} for info in camera_info]
+    named = {info.get("backend") for info in infos if info.get("backend")}
+    if len(named) == 1:
+        backend = named.pop()
+    return dict(camera_serials=[info.get("serial") for info in infos],
+                camera_models=[info.get("model") for info in infos],
+                camera_backend=backend)
+
+
 METADATA_FILENAME = "session_metadata.json"
 
 
@@ -1473,9 +1493,26 @@ class SessionConfig:
         """Trigger/encode frame rate for an acquisition type."""
         return self.calibration_frame_rate if acq_type == "calibration" else self.frame_rate
 
-    def metadata(self, acq_type: str | None = None) -> dict:
-        """The session_metadata.json contents for ``acq_type``."""
+    def metadata(self, acq_type: str | None = None, camera_info=None,
+                 encoder: str | None = None) -> dict:
+        """The session_metadata.json contents for ``acq_type``.
+
+        ``camera_info`` is the opened cameras in cam1..camN order, one dict
+        each with ``serial``, ``model`` and ``backend``
+        (``CameraManager.camera_info``). It becomes ``camera_serials``,
+        ``camera_models`` and ``camera_backend``, the only record of which
+        physical camera each name was: without it a camera swapped between a
+        calibration and a recording leaves nothing on disk that shows the
+        extrinsics now describe another camera. None writes None for the two
+        lists, and the profile's camera_backend.
+
+        ``encoder`` is the encoder actually installed for this acquisition
+        (``nvenc``, ``x264`` or ``raw``), which can differ from the profile's
+        ``encoder`` selection (``encoder_requested``): ``auto`` resolves at
+        launch. None records that the caller did not say.
+        """
         now = datetime.now()
+        prof = self.profile
         # The GPU driver and the NVENC session count are recorded because both
         # are silent failure sources that move underneath a working rig: the
         # driver's concurrent-session cap changes across generations, and one
@@ -1501,6 +1538,20 @@ class SessionConfig:
             # undiagnosable afterwards. `temp_max_c` is the one to read —
             # `temp_c` decays as soon as the load comes off.
             camera_thermals=self.camera_thermals,
+            **_camera_identity(camera_info, prof),
+            # The quality the encoders were given, so a post-hoc re-encode
+            # (2_align.py, 0_encode.py) can match it instead of assuming the
+            # code default.
+            quality=prof.quality if prof else None,
+            encoder=encoder,
+            encoder_requested=prof.encoder if prof else None,
+            # Profile fields whose effect is invisible in the videos, so the
+            # file is the only place a session's setting can be read back.
+            camera=(prof.camera.to_dict() if prof and prof.camera else None),
+            capture_processes=prof.capture_processes if prof else None,
+            thermal_warn_margin_c=prof.thermal_warn_margin_c if prof else None,
+            nvenc_upload=prof.nvenc_upload if prof else None,
+            nvenc_context=prof.nvenc_context if prof else None,
             **_environment_metadata(),
         )
         if acq_type is not None:
@@ -1510,8 +1561,11 @@ class SessionConfig:
             meta["acq_fps"] = self.rate_for(acq_type)
         return meta
 
-    def save_metadata(self, acq_type: str | None = None) -> Path:
+    def save_metadata(self, acq_type: str | None = None, camera_info=None,
+                      encoder: str | None = None) -> Path:
         """Write session_metadata.json and return its path.
+
+        ``camera_info`` and ``encoder`` go to ``metadata``.
 
         With ``acq_type`` the file goes into ``video_dir(acq_type)``, beside
         the videos it describes, so a calibration and a recording in the same
@@ -1522,7 +1576,8 @@ class SessionConfig:
         ``acq_type`` only the session-level file is written and overwritten,
         which is the older layout.
         """
-        meta = self.metadata(acq_type)
+        meta = self.metadata(acq_type, camera_info=camera_info,
+                             encoder=encoder)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         session_copy = self.session_dir / METADATA_FILENAME
         if acq_type is None:
