@@ -91,8 +91,8 @@ _SHAPE_OVERRIDES: dict = {}
 
 #: Buffers that really exist per camera. The grab loop holds one image at a
 #: time, and a small pool turns a leaked image into a named failure at once.
-#: `StreamBufferCountManual` is modelled separately, as the depth of the
-#: host queue.
+#: `StreamBufferCountManual` is modelled separately, as the host pool: the
+#: frames queued for `next_image` plus the images the application holds.
 PHYSICAL_BUFFERS = 4
 
 #: Host queue depth when `StreamBufferCountMode` is left at `Auto`.
@@ -503,6 +503,8 @@ class _FakeCamera:
         self._views: list = []
         self._free: deque = deque()
         self._held: set = set()
+        #: Frames on the host waiting for `next_image`, oldest first.
+        self._queue: deque = deque()
         self._acq = None
         self._latch = 0
         # ------------------------------------------------- introspection
@@ -1149,6 +1151,8 @@ class _FakeCamera:
         # trigger that has already passed.
         self._next = self.board.ordinal_now(st) + 1
         self._train_epoch = st.epoch_v
+        self._due_key = None
+        self._queue = deque()
         self.streaming = True
         self.begins += 1
 
@@ -1168,6 +1172,7 @@ class _FakeCamera:
             self.stats = dict.fromkeys(_STAT_KEYS, 0)
         self._buffers, self._addr, self._views = [], [], []
         self._free = deque()
+        self._queue = deque()
 
     # ---------------------------------------------------------- acquisition
     def next_image(self, timeout_ms: int):
@@ -1184,17 +1189,12 @@ class _FakeCamera:
             self.api._misuse(
                 f"{self}: all {PHYSICAL_BUFFERS} buffers are held by images "
                 f"that were never released")
-        if self._acq["frames_left"] == 0 or self._other_trigger_armed():
-            self._wait(deadline)
-            raise FlirTimeout(f"{self.serial}: no image within {timeout_ms} ms")
         if self.val_or("TriggerMode", "FrameStart", "Off") == "Off":
+            if self._acq["frames_left"] == 0 or self._other_trigger_armed():
+                self._wait(deadline)
+                raise FlirTimeout(f"{self.serial}: no image within "
+                                  f"{timeout_ms} ms")
             return self._next_freerun(deadline, timeout_ms)
-        source = self.val_or("TriggerSource", "FrameStart", "Software")
-        if source != f.wired_line or not self._line_is_input(source):
-            # No signal reaches that input, so no trigger ever arrives.
-            self._wait(deadline)
-            raise FlirTimeout(f"{self.serial}: no image within {timeout_ms} "
-                              f"ms (TriggerSource {source} carries no pulses)")
         return self._next_triggered(deadline, timeout_ms)
 
     def _other_trigger_armed(self) -> bool:
@@ -1207,6 +1207,22 @@ class _FakeCamera:
                    for sel in ("AcquisitionStart", "FrameBurstStart")
                    if sel in selector.entries)
 
+    def _deaf_reason(self):
+        """Why the camera takes no pulse from its trigger wire now, or None
+        when it takes each one."""
+        if self.val_or("TriggerMode", "FrameStart", "Off") == "Off":
+            return "TriggerMode is Off"
+        if self._other_trigger_armed():
+            return ("an AcquisitionStart or FrameBurstStart trigger is armed "
+                    "and never fires")
+        source = self.val_or("TriggerSource", "FrameStart", "Software")
+        if source != self.faults.wired_line or not self._line_is_input(source):
+            # No signal reaches that input.
+            return f"TriggerSource {source} carries no pulses"
+        if self._acq["frames_left"] == 0:
+            return "the acquisition's frame count is used up"
+        return None
+
     def _next_freerun(self, deadline: float, timeout_ms: int):
         rate = self._resulting_rate()
         v = self._fr_v + 1.0 / rate
@@ -1217,10 +1233,14 @@ class _FakeCamera:
             raise FlirTimeout(f"{self.serial}: no free-run image within "
                               f"{timeout_ms} ms")
         self._wait(due)
+        buf = self._take_buffer()
         self._fr_v = v
         self.acquired += 1
         self.stats["started"] += 1
-        return self._deliver(v, v, incomplete=False)
+        self.stats["received"] += 1
+        if self._acq["frames_left"]:
+            self._acq["frames_left"] -= 1
+        return self._hand_out(self._frame(v, v, incomplete=False), buf)
 
     def _reanchor(self, st) -> None:
         """Count in the pulse train the board runs now. Every camera is armed
@@ -1245,85 +1265,137 @@ class _FakeCamera:
         return sim_board.SimBoard.real_time_of(v, st)
 
     def _next_triggered(self, deadline: float, timeout_ms: int):
-        f = self.faults
-        board = self.board
-        due_key, due = None, 0.0
         while True:
+            due = self._walk()
+            if self._queue:
+                buf = self._take_buffer()
+                frame = (self._queue.pop()
+                         if self._acq["handling"] == "NewestFirst"
+                         else self._queue.popleft())
+                return self._hand_out(frame, buf)
+            now = time.perf_counter()
+            reason = self._deaf_reason()
+            if now >= deadline:
+                why = reason or ("no trigger due" if due is None else "")
+                raise FlirTimeout(f"{self.serial}: no image within "
+                                  f"{timeout_ms} ms"
+                                  + (f" ({why})" if why else ""))
+            if reason is not None:
+                # Nothing can reach the queue before the deadline.
+                self._wait(deadline)
+            elif due is None:
+                # Keep watching the board, because a waiting camera delivers
+                # the first pulse of a train that starts during its wait.
+                self._wait(min(deadline, now + POLL_S))
+            else:
+                self._wait(min(due, deadline, now + POLL_S))
+
+    def _walk(self):
+        """Bring the host queue up to now.
+
+        Every trigger that has reached the camera since the last walk goes,
+        in order, through acquisition and into the host pool, as the faults
+        and `StreamBufferHandlingMode` decide. `next_image` and
+        `image_release` both walk, because those are the moments the pool's
+        free room changes. Returns the `perf_counter` time at which the next
+        trigger arrives, or None when none is due.
+        """
+        if not self.streaming:
+            return None
+        board = self.board
+        with self.lock:
             st = board.state()
             self._reanchor(st)
-            i = self._next
+            if self._deaf_reason() is not None:
+                # The pulses fired so far pass the camera without effect.
+                self._next = max(self._next, board.ordinal_now(st) + 1)
+                return None
             now = time.perf_counter()
-            if st.fps <= 0 or board.exhausted(i, st):
-                # Nothing is due. Keep watching the board, because a camera
-                # that is already waiting delivers the moment a new train's
-                # first pulse arrives.
-                if now >= deadline:
-                    raise FlirTimeout(f"{self.serial}: no image within "
-                                      f"{timeout_ms} ms (no trigger due)")
-                self._wait(min(deadline, now + POLL_S))
-                continue
-            key = (i, st.epoch_v, st.stop_v)
-            if key != due_key:
-                # Once per trigger, so a jittered arrival time is drawn once.
-                due_key, due = key, self._due_real(i, st)
-            if due > now:
-                if now >= deadline:
-                    raise FlirTimeout(f"{self.serial}: no image within "
-                                      f"{timeout_ms} ms")
-                self._wait(min(due, deadline, now + POLL_S))
-                continue
-            self._next = i + 1
-            tv = sim_board.SimBoard.trigger_v(i, st)
-            if f.dead_after and i >= f.dead_after:
-                continue
-            lo, hi = self._stall_span(st)
-            if lo <= i <= hi:
-                self._consume_id()
-                self.stats["incomplete"] += 1
-                continue
-            if not board.fired(i):
-                continue
-            if ((f.ignore_every and i % f.ignore_every == 0)
-                    or tv - self._last_acq_v < self._min_interval_s() - 1e-9):
-                self.ignored += 1
-                continue
-            self._last_acq_v = tv
-            self.acquired += 1
-            self.stats["started"] += 1
-            if i in f.drop_triggers or (f.drop_every and i % f.drop_every == 0):
-                self._consume_id()
-                self.stats["incomplete"] += 1
-                if self.interface == "GigE":
-                    self.stats["missed_packets"] += 3
-                    self.stats["resend_requests"] += 1
-                    self.stats["resend_requested_packets"] += 3
-                continue
-            if f.underrun_every and i % f.underrun_every == 0:
-                self._consume_id()
-                self.stats["lost"] += 1
-                continue
-            handling = self._acq["handling"]
-            backlog = board.ordinal_now() - i
-            if handling in ("NewestOnly", "NewestFirst") and backlog > 0:
-                self._consume_id()
+            while st.fps > 0 and not board.exhausted(self._next, st):
+                i = self._next
+                key = (i, st.epoch_v, st.stop_v)
+                if key != self._due_key:
+                    # Once per trigger, so a jittered arrival is drawn once.
+                    self._due_key, self._due = key, self._due_real(i, st)
+                if self._due > now:
+                    return self._due
+                self._next = i + 1
+                self._take_trigger(i, st)
+            return None
+
+    def _take_trigger(self, i: int, st) -> None:
+        """Trigger `i` of the train `st` reaching the camera: acquired or
+        not, then queued on the host or lost."""
+        f = self.faults
+        acq = self._acq
+        if not self.board.fired(i) or acq["frames_left"] == 0:
+            return
+        if f.dead_after and i >= f.dead_after:
+            return
+        lo, hi = self._stall_span(st)
+        if lo <= i <= hi:
+            self._consume_id()
+            self.stats["incomplete"] += 1
+            return
+        tv = sim_board.SimBoard.trigger_v(i, st)
+        if ((f.ignore_every and i % f.ignore_every == 0)
+                or tv - self._last_acq_v < self._min_interval_s() - 1e-9):
+            self.ignored += 1
+            return
+        self._last_acq_v = tv
+        self.acquired += 1
+        self.stats["started"] += 1
+        if acq["frames_left"]:
+            acq["frames_left"] -= 1
+        if i in f.drop_triggers or (f.drop_every and i % f.drop_every == 0):
+            self._consume_id()
+            self.stats["incomplete"] += 1
+            if self.interface == "GigE":
+                self.stats["missed_packets"] += 3
+                self.stats["resend_requests"] += 1
+                self.stats["resend_requested_packets"] += 3
+            return
+        if f.underrun_every and i % f.underrun_every == 0:
+            self._consume_id()
+            self.stats["lost"] += 1
+            return
+        incomplete = bool(f.incomplete_every
+                          and self.acquired % f.incomplete_every == 0)
+        if incomplete:
+            self.stats["incomplete"] += 1
+        v = tv + self.val_or("TriggerDelay", "FrameStart", 0.0) * 1e-6
+        if self.val_or("TriggerActivation", "FrameStart",
+                       "RisingEdge") == "FallingEdge":
+            v += 0.5 / st.fps
+        self._enqueue(self._frame(v, tv, incomplete))
+
+    def _enqueue(self, frame: tuple) -> None:
+        """Put an acquired frame into the host pool.
+
+        The pool is `StreamBufferCountManual` buffers, shared by the frames
+        waiting in the queue and the images the application holds. With no
+        free buffer, OldestFirst keeps the frames it has and loses the new
+        one (`StreamLostFrameCount`). The other modes discard the oldest
+        queued frame to make room (`StreamDroppedFrameCount`). NewestOnly
+        keeps one frame at most, and NewestFirst hands out the newest first.
+        """
+        acq = self._acq
+        q = self._queue
+        mode = acq["handling"]
+        if mode == "NewestOnly":
+            while q:
+                q.popleft()
                 self.stats["dropped"] += 1
-                continue
-            if backlog >= self._acq["nbuf"]:
-                # The host queue is full: OldestFirst loses the new frame,
-                # OldestFirstOverwrite discards the oldest one queued.
-                self._consume_id()
-                self.stats["dropped" if handling == "OldestFirstOverwrite"
-                           else "lost"] += 1
-                continue
-            incomplete = bool(f.incomplete_every
-                              and self.acquired % f.incomplete_every == 0)
-            if incomplete:
-                self.stats["incomplete"] += 1
-            v = tv + self.val_or("TriggerDelay", "FrameStart", 0.0) * 1e-6
-            if self.val_or("TriggerActivation", "FrameStart",
-                           "RisingEdge") == "FallingEdge":
-                v += 0.5 / st.fps
-            return self._deliver(v, tv, incomplete=incomplete)
+        if acq["nbuf"] - len(q) - len(self._held) <= 0:
+            if mode == "OldestFirst" or not q:
+                # With nothing queued, the application holds every buffer and
+                # there is no frame to overwrite.
+                self.stats["lost"] += 1
+                return
+            q.popleft()
+            self.stats["dropped"] += 1
+        q.append(frame)
+        self.stats["received"] += 1
 
     def _consume_id(self) -> int:
         f = self.faults
@@ -1354,13 +1426,14 @@ class _FakeCamera:
         self._views[i] = []
         return i
 
-    def _deliver(self, v: float, trigger_v: float, incomplete: bool) -> int:
+    def _frame(self, v: float, trigger_v: float, incomplete: bool) -> tuple:
+        """`(frame_id, timestamp, chunk, incomplete)` of a frame acquired at
+        trigger time `trigger_v` and stamped at `v`, in virtual seconds.
+        Consumes the frame ID."""
         f = self.faults
         acq = self._acq
         fid = self._consume_id()
         ns = self._device_ns(v)
-        buf = self._take_buffer()
-        self._buffers[buf][0] = fid & 0xFF
         chunk = None
         if acq["chunks"] is not None:
             enabled = acq["chunks"]
@@ -1379,15 +1452,19 @@ class _FakeCamera:
                 chunk["Width"] = acq["width"]
             if "Height" in enabled:
                 chunk["Height"] = acq["height"]
-        img = _FakeImage(self, buf, fid,
-                         0 if f.ts_zero else self._ts_units(ns), chunk,
-                         incomplete, acq["width"], acq["height"], acq["bits"],
+        return fid, 0 if f.ts_zero else self._ts_units(ns), chunk, incomplete
+
+    def _hand_out(self, frame: tuple, buf: int) -> int:
+        """Give a frame to the application as an image in buffer `buf`."""
+        fid, timestamp, chunk, incomplete = frame
+        f = self.faults
+        acq = self._acq
+        self._buffers[buf][0] = fid & 0xFF
+        img = _FakeImage(self, buf, fid, timestamp, chunk, incomplete,
+                         acq["width"], acq["height"], acq["bits"],
                          acq["stride"], (f.padding_x, f.padding_y))
         self.stats["delivered"] += 1
-        self.stats["received"] += 1
         self.handed += 1
-        if acq["frames_left"]:
-            acq["frames_left"] -= 1
         return self.api._register_image(img)
 
 
@@ -1839,8 +1916,12 @@ class FakeSpinC:
 
     def image_release(self, image) -> None:
         img = self._image(image, "spinImageRelease")
-        del self._images[image]
         cam = img.cam
+        # Frames that reached the host while this image was held found one
+        # free buffer fewer, so the queue catches up before the buffer
+        # returns to the pool.
+        cam._walk()
+        del self._images[image]
         cam._held.discard(image)
         if cam.streaming:
             cam._free.append(img.buf)
