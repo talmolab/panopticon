@@ -17,7 +17,7 @@ from PyQt5.QtGui import QPalette, QColor, QIcon, QCursor
 from gui_app.camera_manager import (AcquisitionStartRefused,
                                     AcquisitionStopIncomplete, CameraManager,
                                     CameraOpenError)
-from gui_app.grab_thread import ring_slots
+from gui_app.grab_thread import SOURCE_SILENT_S, ring_slots
 from gui_app.serial_controller import TeensyController
 from gui_app.encode_worker import EncodeWorker
 from gui_app.align_worker import AlignWorker
@@ -797,10 +797,24 @@ class MainWindow(QMainWindow):
 
         Also worth knowing while aiming the rig: a large lag means the preview
         is showing you the past, not the present.
+
+        RULE: silence is checked before lag. REASON: the lag figures and the
+        frame rates are computed as frames arrive, so with no frame arriving
+        they hold their last values and read as healthy; a camera that has
+        stopped delivering is the worse news.
         """
-        if self._state != State.RECORDING:
+        if self._state not in (State.RECORDING, State.CALIBRATING):
             return
-        msg = self._frontier_health_text() or self._delivery_health_text()
+        silence = self._silence_health_text()
+        if self._state != State.RECORDING and silence is None:
+            return
+        lag = (self._frontier_health_text() or self._delivery_health_text()
+               if self._state == State.RECORDING else None)
+        if silence and lag and lag.startswith(self._HEALTHY):
+            # A camera delivering nothing is not healthy, whatever the lag
+            # figures it left behind say.
+            lag = None
+        msg = "  |  ".join(m for m in (silence, lag) if m) or None
         if msg is None:
             return
         # An overheating camera outranks a lag report: lag costs alignment,
@@ -825,6 +839,12 @@ class MainWindow(QMainWindow):
             return None
         live = [(n, i) for i, n in enumerate(lags) if n >= 0]
         if not live:
+            # RULE: never fall back to the delivery text here. REASON: it is
+            # computed from the last frame each camera delivered, so with every
+            # camera retired it reads "healthy" for the rest of the session.
+            if lags:
+                return ("EVERY CAMERA IS RETIRED: nothing is being recorded. "
+                        "Stop the recording.")
             return None
         retired = [self._camera_label(i + 1) for i, n in enumerate(lags) if n < 0]
         tail = f"  |  RETIRED: {', '.join(retired)}" if retired else ""
@@ -832,8 +852,8 @@ class MainWindow(QMainWindow):
         cap = max(1, int(self._session_rig().kick_max_lag))
         name = self._camera_label(idx + 1)
         if worst < cap * 0.25:
-            return (f"Capture healthy — every camera within {worst} trigger(s) "
-                    f"of the leader{tail}")
+            return (f"{self._HEALTHY} — every camera within {worst} "
+                    f"trigger(s) of the leader{tail}")
         if worst < cap * 0.75:
             return (f"CAPTURE FALLING BEHIND: {name} is {worst} triggers "
                     f"behind the leader (cap {cap}). Close other "
@@ -853,13 +873,85 @@ class MainWindow(QMainWindow):
         worst = max(lags)
         name = self._camera_label(lags.index(worst) + 1)
         if worst < 0.25:
-            return (f"Capture healthy — keeping up with the trigger "
+            return (f"{self._HEALTHY} — keeping up with the trigger "
                     f"(max lag {worst * 1000:.0f} ms)")
         if worst < 1.0:
             return (f"CAPTURE FALLING BEHIND: {name} is {worst:.2f} s behind "
                     f"real time and growing. Close other applications.")
         return (f"CAPTURE {worst:.1f} s BEHIND REAL TIME ({name}). Frames will "
                 f"be lost when the buffer pool fills. Stop and investigate.")
+
+    def _silence_health_text(self):
+        """Which cameras have delivered nothing for a while, or None.
+
+        Every active camera silent at once is the trigger source, not the
+        cameras (CameraManager.source_silent), so it raises the alarm as
+        well. A camera the kick-out router retired is left out: it is silent
+        for good, and the lag text names it.
+        """
+        try:
+            secs = list(self._camera_mgr.seconds_since_frame())
+            all_silent = bool(self._camera_mgr.source_silent())
+            lags = list(self._camera_mgr.frontier_lags or [])
+        except Exception:
+            return None
+        if all_silent:
+            worst = max(secs) if secs else 0.0
+            self._raise_source_alarm(worst)
+            return (f"NO FRAMES FROM ANY CAMERA for {worst:.0f} s: the trigger "
+                    f"board may have stopped. Check the board, its USB cable"
+                    + (" and the laser" if self._profile.stim_safe_pins
+                       else "") + ".")
+        # The silence is over (or never started), so the next one alarms.
+        self._source_alarm_raised = False
+        silent = [(s, i) for i, s in enumerate(secs)
+                  if s > SOURCE_SILENT_S and not (i < len(lags) and lags[i] < 0)]
+        if not silent:
+            return None
+        silent.sort(reverse=True)
+        names = ", ".join(self._camera_label(i + 1) for _s, i in silent)
+        return f"NO FRAMES from {names} for {silent[0][0]:.0f} s"
+
+    def _raise_source_alarm(self, silent_s: float):
+        """One modal per silence: every camera stopped receiving frames.
+
+        RULE: the alarm names the trigger board and, on a profile with
+        stimulation pins, the laser. REASON: cameras stop together when what
+        they share stops, and on the board path that is the board (reset,
+        unplugged, or without power). The capture path neither re-arms nor
+        retires cameras while all of them are silent, so nothing else tells
+        the operator, and a board without power leaves its stimulation pins
+        undriven, which a laser driver can read as on.
+        """
+        if self._source_alarm_raised:
+            return
+        self._source_alarm_raised = True
+        teensy = self._teensy
+        try:
+            alive = teensy is not None and bool(teensy.port_alive())
+        except Exception:
+            alive = False
+        port = self._profile.serial_port or "(none)"
+        if alive:
+            link = (f"The trigger board's serial link on {port} still answers, "
+                    f"so the board may have reset or stopped triggering, or "
+                    f"the network to every camera is down.")
+        else:
+            link = (f"The trigger board's serial link on {port} is gone: the "
+                    f"board was unplugged, reset, or lost power.")
+        pins = list(self._profile.stim_safe_pins or [])
+        laser = (f"\n\nA board without power leaves its stimulation pins "
+                 f"{', '.join(str(p) for p in pins)} undriven, and a laser "
+                 f"driver can read an undriven input as on. Check the laser "
+                 f"now." if pins else "")
+        text = (f"No camera has received a frame for {silent_s:.0f} s.\n\n"
+                f"{link} No camera is re-armed or retired while all of them are "
+                f"silent, and every trigger in the silence is missing from "
+                f"every camera.{laser}\n\nStop the recording, then check the "
+                f"trigger board and its USB cable.")
+        print(f"[acq] ALARM: every camera silent for {silent_s:.1f} s; board "
+              f"link {'answers' if alive else 'is gone'}", flush=True)
+        QMessageBox.critical(self, "No frames from any camera", text)
 
     def _start_thermal_watch(self):
         """Begin polling temperatures for this acquisition, if enabled."""
@@ -1472,6 +1564,7 @@ class MainWindow(QMainWindow):
         self._thermal_shutdown_warnings = []
         self._thermal_logged = frozenset()
         self._thermal_alert = None
+        self._source_alarm_raised = False
         self._finalized = False
 
         raw_paths = [self._video_dir / cam / "raw.bin"
