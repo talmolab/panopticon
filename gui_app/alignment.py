@@ -22,15 +22,10 @@ from pathlib import Path
 
 import numpy as np
 
+# BLOCKID_WRAP is defined once, in frame_sync, which unwraps the same IDs live.
+from gui_app.frame_sync import BLOCKID_WRAP
 from gui_app.frame_sync import block_rate_warnings as _block_rate_warnings
 from gui_app import ffmpeg_cmd
-
-# GigE Vision 16-bit block IDs cycle through 1..65535 (0 is reserved "no block
-# id"), so they wrap 65535 -> 1 every 65535 triggers unless extended 64-bit IDs
-# are enabled. camera_manager tries to enable the 64-bit mode; this is the
-# software safety net that unwraps a stream that wrapped anyway (and recovers
-# recordings made before the 64-bit mode was set).
-BLOCKID_WRAP = 65535
 
 # Name of the per-camera re-encode target. It sits beside the real mp4 while
 # ffmpeg writes it, so every mp4 lookup must exclude it and every run must
@@ -44,6 +39,12 @@ MIN_MP4_BYTES = 1024
 
 def _unwrap_blockids(b: np.ndarray, period: int = BLOCKID_WRAP) -> np.ndarray:
     """Undo 16-bit block-ID wrap-around so IDs are globally monotonic.
+
+    GigE Vision 16-bit block IDs cycle through 1..65535 (0 is reserved "no
+    block id"), so they wrap 65535 -> 1 every 65535 triggers unless extended
+    64-bit IDs are enabled. The camera backend tries to enable the 64-bit
+    mode; this unwraps a stream that wrapped anyway, including recordings made
+    before the 64-bit mode was set.
 
     All cameras are hardware-triggered together and start at block ID 1, so they
     wrap at the same trigger; unwrapping each stream independently yields trigger
@@ -98,19 +99,27 @@ def camera_dirs(rec_dir: Path) -> list[Path]:
                   key=lambda d: camera_sort_key(d.name))
 
 
-def video_for(cam_dir: Path):
+def video_for(cam_dir: Path, acq_type: str | None = None):
     """The one mp4 that is this camera's recording, or None.
 
-    The re-encode scratch file is excluded and candidates are sorted, so the
-    answer does not depend on directory enumeration order. More than one
-    candidate is an error rather than a guess: under --replace the wrong pick
-    would be re-encoded while the real recording stayed the superset.
+    With ``acq_type`` (``"recording"`` or ``"calibration"``) the candidates
+    are the mp4s whose name carries it, which is how every writer names its
+    output (``<date>-<session>-<cam>-<acq_type>.mp4``). Without it a name
+    carrying ``recording`` is preferred, and any mp4 is accepted when none
+    does. The re-encode scratch file is never a candidate, and candidates are
+    sorted, so the answer does not depend on directory enumeration order.
+    More than one candidate is an error rather than a guess: under --replace
+    the wrong pick would be re-encoded while the real recording stayed the
+    superset.
     """
     cam_dir = Path(cam_dir)
     mp4s = sorted(f for f in cam_dir.iterdir()
-                  if f.suffix == ".mp4" and f.name != ALIGN_TMP_NAME)
-    preferred = [f for f in mp4s if "recording" in f.name]
-    cands = preferred or mp4s
+                  if f.suffix == ".mp4" and f.name != ALIGN_TMP_NAME
+                  and f.is_file())
+    if acq_type is not None:
+        cands = [f for f in mp4s if acq_type in f.name]
+    else:
+        cands = [f for f in mp4s if "recording" in f.name] or mp4s
     if len(cands) > 1:
         raise ValueError(f"{cam_dir}: {len(cands)} mp4 candidates, cannot tell "
                          f"which is the recording: "
@@ -243,11 +252,6 @@ class Analysis:
 
 def analyse(rec_dir, fps: int = 100) -> Analysis:
     return Analysis(rec_dir, fps)
-
-
-def summarize(rec_dir, fps: int = 100) -> dict:
-    """Read-only summary (block-ID intersection + block-rate check), nothing written."""
-    return analyse(rec_dir, fps).summary()
 
 
 def _ffmpeg_exe() -> str:
