@@ -451,6 +451,31 @@ class TeensyController:
         if ser is not None and ser.is_open:
             ser.close()
 
+    def port_alive(self) -> bool:
+        """False when the link is closed or the device behind it is gone.
+
+        pyserial keeps ``is_open`` True after the USB device disappears, so
+        the port is asked for its input count, which raises on a vanished
+        device. Asked without waiting: while another thread holds the link
+        for an exchange, that exchange reports its own failure, so the link
+        counts as alive here. A stand-in port with no device behind it (the
+        simulated board) has no input count and counts as alive while open.
+        """
+        ser = self._ser
+        if ser is None or not ser.is_open:
+            return False
+        if not self._lock.acquire(blocking=False):
+            return True
+        try:
+            ser.in_waiting
+        except AttributeError:
+            return True
+        except (serial.SerialException, OSError):
+            return False
+        finally:
+            self._lock.release()
+        return True
+
     @property
     def port(self) -> str:
         return self._port
