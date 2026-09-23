@@ -14,9 +14,9 @@ everything outside it, so ``align_recording`` refuses to replace while such a
 camera takes part, unless the caller excludes it (its files stay as recorded)
 or asks for ``truncate_to_shortest``.
 
-Imports are limited to numpy + (lazily) imageio-ffmpeg, both project
-dependencies, so this module is importable from the GUI venv and from the
-``2_align.py`` CLI alike. Decoding goes through the bundled ffmpeg rather than
+Imports are numpy, (lazily) imageio-ffmpeg and gui_app modules without Qt,
+so this module is importable from the GUI and from the ``2_align.py`` CLI
+alike. Decoding goes through the bundled ffmpeg rather than
 OpenCV: a mono source decodes straight to one gray plane instead of a BGR
 triple that is converted back per frame.
 """

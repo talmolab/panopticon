@@ -201,7 +201,7 @@ def main() -> int:
         return 1
     print_table(an)
     would_refuse = alignment.refusal_reason(an, args.truncate_to_shortest)
-    if would_refuse and not args.replace:
+    if would_refuse and (args.dry_run or not args.replace):
         print(f"\nNOTE: --replace would be refused. {would_refuse}")
 
     if args.dry_run:
