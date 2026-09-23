@@ -15,10 +15,67 @@ Rules and their reasons:
 - ``board_legacy: true`` on a build without ``setLegacyPattern`` raises. A
   legacy-printed board detected with the current layout returns every marker
   and ZERO charuco corners, silently, so refusing is the only safe answer.
-- ``cv2`` is imported inside the functions, not at module level, so importing
-  this module (and ``board_detector``) costs nothing on a host without OpenCV;
-  the HUD self-disables and the tests run with numpy only.
+- A board config missing a required key, or holding one that is not a
+  number, raises ``ValueError`` naming the key, before any OpenCV call. The
+  solve maps that to ``BAD_BOARD_CONFIG`` and the HUD reports it, instead of
+  a ``KeyError`` traceback from deep inside the board constructor.
+- ``cv2`` and ``yaml`` are imported inside the functions, not at module level,
+  so importing this module (and ``board_detector``) costs nothing on a host
+  without OpenCV; the HUD self-disables and the tests run with numpy only.
 """
+
+#: Keys every board config must define, with the type each is read as.
+REQUIRED_KEYS = {"board_x": int, "board_y": int,
+                 "square_length": float, "marker_length": float}
+
+
+def check_board_config(cfg) -> None:
+    """Raise ``ValueError`` unless ``cfg`` is a mapping with every required key.
+
+    Each required key must be present and convertible to its type (the
+    squares-per-side counts to int, the lengths to float), because the board
+    constructor reads them that way and a missing key would otherwise surface
+    as a ``KeyError`` with no hint of which file is wrong.
+    """
+    if not isinstance(cfg, dict):
+        raise ValueError("the board config must be a YAML mapping of keys to "
+                         "values, got {}".format(type(cfg).__name__))
+    missing = [k for k in REQUIRED_KEYS if cfg.get(k) is None]
+    if missing:
+        raise ValueError("the board config lacks {} (required: {})".format(
+            ", ".join(missing), ", ".join(REQUIRED_KEYS)))
+    for key, kind in REQUIRED_KEYS.items():
+        value = cfg[key]
+        try:
+            ok = not isinstance(value, bool) and kind(value) > 0
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise ValueError("board config {} = {!r} is not a positive "
+                             "number".format(key, value))
+
+
+def load_board_config(path) -> dict:
+    """Read and check a board config YAML; the solve and the HUD both use it.
+
+    Raises ``ValueError`` for a file that is unreadable, is not YAML, or fails
+    ``check_board_config``, with the path in the message.
+    """
+    import yaml
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+    except OSError as e:
+        raise ValueError("cannot read the board config {}: {}".format(
+            path, e)) from None
+    except yaml.YAMLError as e:
+        raise ValueError("the board config {} is not valid YAML: {}".format(
+            path, e)) from None
+    try:
+        check_board_config(cfg)
+    except ValueError as e:
+        raise ValueError("{}: {}".format(path, e)) from None
+    return cfg
 
 
 def dictionary_name(cfg: dict) -> str:
@@ -91,14 +148,14 @@ def apply_legacy_pattern(board, legacy: bool):
 def make_board(cfg: dict):
     """Build ``(board, aruco_dict)`` from a board config dict.
 
-    Required keys: ``board_x``, ``board_y``, ``square_length``,
-    ``marker_length``. Optional: ``marker_bits`` (4), ``dict_size`` (1000),
-    ``board_legacy`` (False). Absolute lengths do not affect detection, only
-    the solve's scale, so the HUD passes the real values to stay identical to
-    the solve.
+    Required keys: ``REQUIRED_KEYS``, checked by ``check_board_config``.
+    Optional: ``marker_bits`` (4), ``dict_size`` (1000), ``board_legacy``
+    (False). Absolute lengths do not affect detection, only the solve's scale,
+    so the HUD passes the real values to stay identical to the solve.
     """
     import cv2
     aruco = cv2.aruco
+    check_board_config(cfg)
     aruco_dict = resolve_dictionary(cfg)
     bx, by = int(cfg["board_x"]), int(cfg["board_y"])
     sq, mk = float(cfg["square_length"]), float(cfg["marker_length"])
