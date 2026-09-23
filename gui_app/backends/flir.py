@@ -73,11 +73,12 @@ UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
 ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
-names, the CounterValue chunk's timing, whether a model's counters can be
-read while it streams, how long after its edge and its TriggerDelay a
-camera counts the exposure (the witness assumes less than one register
-read), whether a trigger whose delayed exposure has not started when
-EndAcquisition runs is still exposed (if not, the witness counts it as
+names, the CounterValue chunk's timing, which counter the chunk carries on a
+model without ChunkCounterSelector (`_select_edge_counter`), whether a
+model's counters can be read while it streams, how long after its edge and
+its TriggerDelay a camera counts the exposure (the witness assumes less than
+one register read), whether a trigger whose delayed exposure has not started
+when EndAcquisition runs is still exposed (if not, the witness counts it as
 ignored), whether a camera keeps exposing while its host has stopped taking
 frames (a stall), which temperature status and threshold nodes a model has,
 and which DeviceTemperatureSelector entry its DeviceTemperatureStatus and
@@ -624,7 +625,8 @@ class FlirCamera:
         stream was down are not counted as ignored triggers
         (`_note_restart_counters`). A camera without an exposure counter also
         has its edges read just before BeginAcquisition
-        (`_note_begin_counters`)."""
+        (`_note_begin_counters`). In trigger-counter mode the edge counter is
+        selected just before BeginAcquisition (`_select_edge_counter`)."""
         if strategy != GRAB_STRATEGY:
             raise ValueError(f"{self.who}: grab strategy {strategy!r}; the "
                              f"FLIR backend runs {GRAB_STRATEGY} only")
@@ -646,6 +648,8 @@ class FlirCamera:
         self._verify = True
         if rearm:
             self._note_begin_counters()
+        if self._triggered:
+            self._select_edge_counter()
         self._api.begin(self.handle)
         self._grabbing = True
         if rearm:
@@ -978,6 +982,23 @@ class FlirCamera:
             print(f"[flir] {self.serial}: the trigger counters "
                   f"{self.witness['error']}; this acquisition has no trigger "
                   f"witness", flush=True)
+
+    def _select_edge_counter(self) -> None:
+        """In trigger-counter mode, leave CounterSelector on the edge
+        counter for BeginAcquisition.
+
+        The block IDs come from the CounterValue chunk, which
+        ChunkCounterSelector points at the edge counter. A model without
+        ChunkCounterSelector may fill the chunk from the counter
+        CounterSelector names when acquisition starts, and the witness reads
+        leave it on the exposure counter (the reset ends on it, and so does
+        a stop's last read). Such a chunk would count exposures, so a
+        trigger the camera ignored would leave no gap. A failed write
+        refuses the arm, as a failed counter reset does. The reads made
+        while the camera streams end on the edge counter too."""
+        if self.block_id_source != "trigger_counter" or not self.counters:
+            return
+        self.nodes.sete("CounterSelector", EDGE_COUNTER)
 
     @staticmethod
     def _new_witness() -> dict:
