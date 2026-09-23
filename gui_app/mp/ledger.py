@@ -14,7 +14,7 @@ Layout (`Layout` computes the offsets; every region starts 8-byte aligned):
 
     header      16 x int64: magic, version, n_cams, max_lag, ring_bits,
                 decided_upto, epoch, coord_heartbeat_ns, flushed, state,
-                reason_bytes, size, spare x 4
+                reason_bytes, size, deciding_upto, spare x 3
     per camera  int64 arrays: frontier, announces, eos, retire_req,
                 retired, retired_at
     presence    n_cams x ring_bytes  "camera c holds trigger T" (worker writes)
@@ -29,8 +29,9 @@ reader keeps; x86-64 preserves both, which is why `shm` refuses other CPUs.
 
 - Announce: presence bit, then `frontier`. The coordinator reads `frontier`
   first and scans bits up to it, so it never reads past a bit not yet set.
-- Decide: decision bits, then `decided_upto`. A worker reads `decided_upto`
-  first, then bits at or below it.
+- Decide: `deciding_upto`, decision bits, then `decided_upto`. A worker reads
+  `decided_upto` first, then bits at or below it, then `deciding_upto` (see
+  the ring, below).
 - Retire: `retired_at`, then `retired`. `retired_at` is the `decided_upto`
   already published, so every trigger at or below it was decided with the
   camera still in the set. A worker reads `decided_upto`, then `retired`, then
@@ -44,20 +45,28 @@ reader keeps; x86-64 preserves both, which is why `shm` refuses other CPUs.
   knows no later trigger will be decided, and drops what it still holds.
 
 A worker's harvest therefore loads `flushed`, `decided_upto`, `retired`,
-`retired_at`, the decision bits, and `decided_upto` again (the lag check
-below), in that order.
+`retired_at`, the decision bits, and `deciding_upto`, in that order.
 
-The ring. Bits are indexed `T % ring_bits`. A worker keeps every trigger
-whose presence bit it has set within `ring_bits` of the newest (announce
-refuses a trigger that would alias an older bit still set), and clears a bit
-once the trigger is decided. The coordinator scans only the last `ring_bits`
-triggers below a camera's frontier. Together these mean a bit the coordinator
-reads belongs to exactly one trigger. A worker whose harvest falls `ring_bits`
-behind `decided_upto` would read a bit already reused, so harvest stops there
-and sets `lag_error`; the caller retires the camera. While its camera is
-stalled the coordinator keeps deciding at the trigger rate (forcing), so a
-worker harvests on its grab loop's timeouts too, not only when a frame
-arrives: a harvest must come at least every `ring_bits / fps` seconds.
+The ring. Bits are indexed `T % ring_bits`, so trigger T shares its bit with
+T + ring_bits. These rules tie every bit a reader keeps to one trigger:
+
+- A worker keeps its pending triggers within `ring_bits` of the newest.
+  Announce refuses a trigger that would alias an older bit still set, and a
+  worker clears a bit once its trigger is decided.
+- The coordinator scans only the last `ring_bits` triggers below a camera's
+  frontier. The bit of any older trigger was cleared before that frontier was
+  stored.
+- A publish can rewrite a decision bit while a worker reads it. The publish
+  stores `deciding_upto` before its first bit, and the harvest loads it after
+  its last. A bit a later trigger already took therefore shows up as a
+  `deciding_upto` at least `ring_bits` past the trigger read. Harvest then
+  stops, returns nothing and sets `lag_error`, and the caller retires the
+  camera.
+
+While its camera is stalled the coordinator keeps deciding at the trigger
+rate (forcing), so a worker harvests on its grab loop's timeouts too, not only
+when a frame arrives: a harvest must come at least every `ring_bits / fps`
+seconds.
 
 Workers read `retire_req`, `retired` and the decision bits of their own
 cameras only, and each presence bitmap has one writer at a time: the camera's
@@ -82,7 +91,8 @@ VERSION = 2
 HEADER_SLOTS = 16
 HEADER_BYTES = HEADER_SLOTS * 8
 (H_MAGIC, H_VERSION, H_NCAMS, H_MAXLAG, H_RINGBITS, H_DECIDED, H_EPOCH,
- H_COORD_HB, H_FLUSHED, H_STATE, H_REASON_BYTES, H_SIZE) = range(12)
+ H_COORD_HB, H_FLUSHED, H_STATE, H_REASON_BYTES, H_SIZE,
+ H_DECIDING) = range(13)
 
 #: Bytes of UTF-8 retirement reason per camera, NUL-padded.
 REASON_BYTES = 256
@@ -188,6 +198,7 @@ def init_segment(buf, n_cams: int, max_lag: int, *, epoch: int) -> Layout:
     hdr[H_MAXLAG] = layout.max_lag
     hdr[H_RINGBITS] = layout.ring_bits
     hdr[H_DECIDED] = 0
+    hdr[H_DECIDING] = 0
     hdr[H_EPOCH] = epoch
     hdr[H_STATE] = LedgerState.OPEN
     hdr[H_REASON_BYTES] = REASON_BYTES
@@ -443,6 +454,9 @@ class Coordinator:
             return 0
         rb = self.layout.ring_bits
         dec = self._v.decision
+        # The bound goes out before the first bit, so a worker that reads a
+        # bit this publish rewrote also reads a bound that condemns the read.
+        self._v.hdr[H_DECIDING] = decided
         for t in range(prev + 1, decided + 1):
             released = t in released_now
             _set_bit(dec, t % rb, released)
@@ -578,9 +592,14 @@ class WorkerLedger:
     # -- reading decisions ------------------------------------------------------
 
     def check_lag(self, trigger: int) -> bool:
-        """False if the coordinator is ring_bits past `trigger`, so its bit may
-        already hold a later trigger's decision. The caller retires the camera."""
-        behind = self.decided_upto - int(trigger)
+        """False if the coordinator is deciding ring_bits or more past
+        `trigger`, so its bit may already hold a later trigger's decision. The
+        caller retires the camera.
+
+        Reads `deciding_upto`, not `decided_upto`: a publish rewrites bits
+        before it stores `decided_upto`, so only the bound it stores first
+        covers a publish still in progress."""
+        behind = int(self._v.hdr[H_DECIDING]) - int(trigger)
         if behind >= self.layout.ring_bits:
             self.lag_error = (f"cam{self.cam + 1} is {behind} triggers behind the "
                               f"coordinator; the ring holds {self.layout.ring_bits}")
@@ -630,10 +649,11 @@ class WorkerLedger:
                 break
             got.append((t, _bit(v.decision, t % rb)))
         if got:
-            # A bit is reused once decided_upto passes its trigger by ring_bits.
-            # Checked after the bits were read, so a coordinator that moved on
-            # during the reads is caught too.
-            after = int(hdr[H_DECIDED])
+            # A publish stores deciding_upto before it rewrites any bit, so a
+            # bit read here that a later trigger already took implies a
+            # deciding_upto at least ring_bits past the oldest trigger read.
+            # Loaded after the bits, it catches a publish still in progress.
+            after = int(hdr[H_DECIDING])
             behind = after - got[0][0]
             if behind >= rb:
                 self.lag_error = (
