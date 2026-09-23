@@ -273,9 +273,9 @@ def _check_gop(report: HardwareReport) -> None:
 
     RULE: measure the GOP from the bitstream, not from the options the
     encoder was given, and measure it in the upload mode the recording uses.
-    REASON: an encoder library drops an unrecognised option silently, and the
-    result is a recording with one IDR that nobody notices until they scrub
-    it. `nvenc.gop_is_honoured` builds its encoder through the same factory
+    REASON: an encoder library ignores an unrecognised option without an
+    error, and the result is a recording with one IDR that nobody notices
+    until they scrub it. `nvenc.gop_is_honoured` builds its encoder through the same factory
     and upload setting as a recording, so it proves the configured path only
     when `configure_nvenc_upload` ran first.
     """
@@ -659,7 +659,7 @@ class EncoderChoice:
     `blocking` non-empty means the start must be refused: no path on this
     machine can encode the open cameras in real time, and the remaining option
     (raw) writes every frame whole, hundreds of times the H.264 rate, so it is
-    chosen deliberately in the profile or not at all.
+    chosen in the profile or not at all.
     """
     encoder: str = "nvenc"
     reason: str = ""
@@ -798,7 +798,7 @@ def select_encoder(profile, n_cams: int, fps: int, width: int,
                 "run would encode in real time and every camera that could not "
                 "get an encoder would fall back to raw.bin one by one. Set "
                 "`realtime_encode: false` in the rig profile to write raw "
-                f"frames deliberately ({_raw_ratio(width, height)} the disk), "
+                f"frames ({_raw_ratio(width, height)} the disk), "
                 "or set `encoder` to `auto`, `nvenc` or `x264`."))
 
     if want in ("nvenc", "auto"):
