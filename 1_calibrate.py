@@ -853,11 +853,69 @@ def chain_extrinsics(cam_names, tree_edges, pairwise, ref_cam):
 
 
 # ---------------------------------------------------------------------------
+# Pair quality bands
+# ---------------------------------------------------------------------------
+
+#: Stereo RMS bands in pixels, used by the plot, the warnings and the report
+#: alike. A pair below RMS_GOOD_PX is good; one from RMS_POOR_PX up is poor
+#: and warned about; in between it is worth a look. A well-conditioned
+#: ChArUco solve reports about 1 px or less per pair (camera-calibration
+#: guidance such as MathWorks' treats a mean reprojection error under 1 px as
+#: acceptable), and a pair several pixels off points to a board config that
+#: does not match the printed board or intrinsics fitted on a narrow spread
+#: of views.
+RMS_GOOD_PX = 1.5
+RMS_POOR_PX = 3.0
+#: Bar colour per band in reprojection_error_histogram.png.
+GRADE_COLOURS = {"good": "#4CAF50", "check": "#FF9800", "poor": "#F44336"}
+
+
+def rms_grade(rms) -> str:
+    """``"good"``, ``"check"`` or ``"poor"`` for a stereo RMS in pixels."""
+    rms = float(rms)
+    if rms < RMS_GOOD_PX:
+        return "good"
+    if rms < RMS_POOR_PX:
+        return "check"
+    return "poor"
+
+
+def pair_quality_warnings(pairwise) -> list[str]:
+    """The warning text for each pair that is poor or under-observed.
+
+    A poor pair warns whatever its frame count; a pair below
+    MIN_TREE_FRAMES shared frames warns that it cannot be a full-strength
+    tree edge.
+    """
+    out = []
+    for (ca, cb), (_, _, rms, n) in sorted(pairwise.items()):
+        if rms_grade(rms) == "poor":
+            out.append("{}-{}: stereo RMS {:.1f} px is poor ({} px or more); "
+                       "check that the board config matches the printed "
+                       "board, and record the board across more of both "
+                       "cameras' views".format(ca, cb, rms, RMS_POOR_PX))
+        elif n < MIN_TREE_FRAMES:
+            out.append("{}-{}: only {} shared frames ({}+ needed for a "
+                       "full-strength tree edge)".format(
+                           ca, cb, n, MIN_TREE_FRAMES))
+    return out
+
+
+def median_pair_rms(pairwise, cams):
+    """Median stereo RMS over the pairs whose cameras are both in ``cams``,
+    or None when there is no such pair."""
+    cams = set(cams)
+    values = [float(rms) for (a, b), (_, _, rms, _) in pairwise.items()
+              if a in cams and b in cams]
+    return float(np.median(values)) if values else None
+
+
+# ---------------------------------------------------------------------------
 # Reprojection error histogram
 # ---------------------------------------------------------------------------
 
 def save_reprojection_histogram(path, pair_rms):
-    """Save a pairwise stereo RMS bar chart as PNG."""
+    """Save a pairwise stereo RMS bar chart as PNG, coloured by ``rms_grade``."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -872,14 +930,16 @@ def save_reprojection_histogram(path, pair_rms):
         return
 
     fig, ax = plt.subplots(figsize=(max(6, len(labels) * 0.8), 4))
-    colors = ["#4CAF50" if v < 10 else "#FF9800" if v < 20 else "#F44336"
-              for v in values]
+    colors = [GRADE_COLOURS[rms_grade(v)] for v in values]
     ax.bar(range(len(labels)), values, color=colors)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Stereo RMS (px)")
     ax.set_title("Pairwise calibration quality")
-    ax.axhline(10, color="gray", linestyle="--", alpha=0.5, label="good (<10px)")
+    ax.axhline(RMS_GOOD_PX, color="gray", linestyle="--", alpha=0.5,
+               label="good (< {:g} px)".format(RMS_GOOD_PX))
+    ax.axhline(RMS_POOR_PX, color="gray", linestyle=":", alpha=0.7,
+               label="poor ({:g} px or more)".format(RMS_POOR_PX))
     ax.legend(fontsize=8)
     fig.tight_layout()
     path = Path(path)
@@ -909,9 +969,11 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
     ``partial`` is true when any of them is non-empty, so a consumer can tell a
     full solve from one that quietly lost cameras.
 
-    ``pairing`` (``"block_id"`` or ``"frame_index"``) and ``codetections``
-    (pair -> views shared before the pose-diverse cap) are recorded when
-    given.
+    Each pair carries its ``grade`` (``rms_grade``), and the report carries
+    the bands (``rms_bands_px``) and the median over the solved cameras'
+    pairs (``pair_rms_median``). ``pairing`` (``"block_id"`` or
+    ``"frame_index"``) and ``codetections`` (pair -> views shared before
+    the pose-diverse cap) are recorded when given.
     """
     tree_rows = []
     for a, b in tree:
@@ -920,7 +982,7 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                           "rms": float(entry[2]), "frames": int(entry[3])})
     pairs = {}
     for (a, b), (_, _, rms, n) in sorted(pairwise.items()):
-        row = {"rms": float(rms), "frames": int(n)}
+        row = {"rms": float(rms), "frames": int(n), "grade": rms_grade(rms)}
         if codetections and (a, b) in codetections:
             row["codetections"] = int(codetections[(a, b)])
         pairs["{}-{}".format(a, b)] = row
@@ -941,8 +1003,12 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                              "detections": int(s["detections"])}
                        for cam, s in intrinsic_stats.items() if cam in active},
         "pairs": pairs,
+        "rms_bands_px": {"good_below": RMS_GOOD_PX, "poor_from": RMS_POOR_PX},
         "warnings": list(warnings),
     }
+    median = median_pair_rms(pairwise, active)
+    if median is not None:
+        report["pair_rms_median"] = median
     if pairing is not None:
         report["pairing"] = pairing
     return report
@@ -1192,16 +1258,19 @@ def main():
     extrinsics = chain_extrinsics(active, tree, pairwise, ref)
 
     # --- Quality summary + histogram ---
-    print("\nPairwise quality:")
+    print("\nPairwise quality (good < {:g} px, poor from {:g} px):".format(
+        RMS_GOOD_PX, RMS_POOR_PX))
     pair_rms = {}
     for (ca, cb), (_, _, rms, n) in sorted(pairwise.items()):
         pair_rms["{}-{}".format(ca, cb)] = rms
-        print("  {}-{}: RMS={:.1f}px  ({} frames)".format(ca, cb, rms, n))
-        if rms > 20:
-            warn("{}-{}: high stereo RMS ({:.1f}px)".format(ca, cb, rms), warnings)
-        elif n < MIN_TREE_FRAMES:
-            warn("{}-{}: only {} shared frames ({}+ needed for a full-strength "
-                 "tree edge)".format(ca, cb, n, MIN_TREE_FRAMES), warnings)
+        print("  {}-{}: RMS={:.2f}px  {}  ({} frames)".format(
+            ca, cb, rms, rms_grade(rms), n))
+    median = median_pair_rms(pairwise, active)
+    if median is not None:
+        print("  Median pair RMS over the solved cameras: {:.2f}px  {}".format(
+            median, rms_grade(median)))
+    for w in pair_quality_warnings(pairwise):
+        warn(w, warnings)
 
     for cam in active:
         keys = all_dets[cam][0]
