@@ -92,6 +92,10 @@ class MainWindow(QMainWindow):
     #: firmware path. A failure is reported, and the next start retries on
     #: its worker with START_SERIAL_RETRIES.
     UI_SERIAL_RETRIES = 1
+    #: Set by closeEvent once the operator has agreed to quit, and never
+    #: cleared. The start path reads it so that nothing reaches the trigger
+    #: board after the quit has stood it down.
+    _quitting = False
 
     def __init__(self):
         super().__init__()
@@ -105,6 +109,7 @@ class MainWindow(QMainWindow):
             QApplication.instance().setWindowIcon(icon)
 
         self._state = State.IDLE
+        self._quitting = False
         self._acq_type = ""
         self._acq_fps = 0
         self._camera_names: list[str] = []
@@ -934,6 +939,9 @@ class MainWindow(QMainWindow):
 
     def _on_capacity_checked(self, result):
         """Answer the capacity preflight, then carry the start on. UI thread."""
+        if self._quitting:
+            QApplication.restoreOverrideCursor()
+            return
         self._end_busy()
         self._sidebar.set_status("IDLE", "#888")
         acq_type = self._acq_type
@@ -1142,6 +1150,8 @@ class MainWindow(QMainWindow):
         still refuse, and a start refused because the port was busy - the
         common one - must not have destroyed the data it was going to replace.
         """
+        if self._quitting:
+            return
         refusal = self._stim_refusal(acq_type)
         if refusal:
             self._refuse_start(*refusal)
@@ -1367,6 +1377,8 @@ class MainWindow(QMainWindow):
         it removes are the ones a refused start needs to leave behind.
         """
         rig = self._session_rig()
+        if self._quitting:
+            return self._quit_during_start()
         teensy = self._teensy_connection(retries=self.START_SERIAL_RETRIES)
         if teensy is None:
             # Nothing has been started, so there is nothing to stand down: no
@@ -1437,9 +1449,18 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[acq] pinning report unavailable: {e}", flush=True)
 
+        # The last moment a quit can still keep the start off the board. A
+        # quit that lands after this is serialised by the controller: its stop
+        # runs after this start and the start does not retry after it.
+        if self._quitting:
+            return self._quit_during_start()
         print(f"[acq] sending start_triggers "
               f"pins={self._profile.trigger_pins} fps={fps}", flush=True)
         if not teensy.start_triggers(self._profile.trigger_pins, fps):
+            if self._quitting:
+                # The quit closed the link under this start; the board is
+                # already stood down.
+                return self._quit_during_start()
             # The board never confirmed the config, even after a forced reset.
             # Recording now would produce a full-length session with no frames.
             return self._rollback_acquisition(
@@ -1461,8 +1482,26 @@ class MainWindow(QMainWindow):
         print("[acq] start_acquisition done", flush=True)
         return {"ok": True}
 
+    def _quit_during_start(self) -> dict:
+        """The start's answer when the window is quitting: send nothing.
+
+        The cameras are left as they are. closeEvent has stood the board down
+        and abandon() tears the cameras down once this worker returns, which
+        is sooner than a rollback's full stop would let it.
+        """
+        print("[acq] quitting: the start stops here and sends nothing to the "
+              "board", flush=True)
+        return {"ok": False, "quitting": True, "title": "Quitting",
+                "message": "Panopticon is closing; the acquisition was not "
+                           "started."}
+
     def _on_acquisition_started(self, result):
         """Finish the start on the UI thread: dialogs, state, HUD."""
+        if self._quitting:
+            # Delivered after the quit: the board is stood down and the
+            # cameras belong to abandon(), so nothing here may start a state.
+            QApplication.restoreOverrideCursor()
+            return
         self._end_busy()
         if not isinstance(result, dict):
             # CallableWorker delivers a raised exception AS the result, and
@@ -2917,26 +2956,16 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
+        # From here on no start may reach the board: a start worker checks
+        # this immediately before it claims the port and before it sends the
+        # start, and a start result delivered after this point is dropped.
+        self._quitting = True
         self._display_timer.stop()
         self._thermal_timer.stop()
         # No bound at close: the loop exits after at most one detection pass,
         # and there is no later moment at which a straggler could be joined.
         self._stop_coverage_hud(timeout_ms=0)
-        # Always stand the board down, not just mid-acquisition: stop_triggers
-        # drives the stim pins LOW as well as the camera pins, so quitting can
-        # never leave a paradigm — or a laser — running.
-        try:
-            if self._teensy is not None:
-                if self._teensy.is_open:
-                    # Warn BEFORE the window goes, while there is still something
-                    # to show the dialog on. `is_open` is not proof of anything:
-                    # pyserial keeps it True after the USB device disappears, so
-                    # an unplugged cable looks healthy right up until the write.
-                    self._warn_if_not_stood_down(
-                        self._teensy.stop_triggers(self._profile.trigger_pins))
-                self._teensy.close()
-        except Exception as e:
-            print(f"[quit] standing the board down failed: {e}", flush=True)
+        self._stand_down_board_for_quit()
 
         if busy:
             self._abandon_and_cleanup()
@@ -2944,6 +2973,37 @@ class MainWindow(QMainWindow):
             self._join_retired_workers()
             self._camera_mgr.close_all()
         event.accept()
+
+    def _stand_down_board_for_quit(self):
+        """Stop the board and close its link, as the last word to it.
+
+        Always, not just mid-acquisition: the stop drives the stim pins LOW as
+        well as the camera pins, so quitting can never leave a paradigm (or a
+        laser) running.
+
+        RULE: stop_and_close(), one step on the controller, after _quitting
+        is set. REASON: a start worker may be waiting for its ack on the same
+        controller. The controller runs this stop after that attempt and the
+        attempt does not retry after it, and no start can be written between
+        the stop and the close; _quitting keeps a worker that has not reached
+        the board yet from sending one at all. A stop followed by a separate
+        close left a gap in which a queued start went out after the stop.
+
+        The warning comes before the window goes, while there is something to
+        show it on. ``is_open`` proves nothing: pyserial keeps it True after
+        the USB device disappears, so an unplugged cable looks healthy right
+        up until the write.
+        """
+        try:
+            if self._teensy is None:
+                return
+            if self._teensy.is_open:
+                self._warn_if_not_stood_down(
+                    self._teensy.stop_and_close(self._profile.trigger_pins))
+            else:
+                self._teensy.close()
+        except Exception as e:
+            print(f"[quit] standing the board down failed: {e}", flush=True)
 
     def _abandon_and_cleanup(self):
         """Kill in-flight ffmpeg/solve subprocesses, tear down capture without
