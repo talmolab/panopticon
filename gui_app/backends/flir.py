@@ -67,8 +67,9 @@ ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
 names, the CounterValue chunk's timing, whether a model's counters can be
 read while it streams, whether a trigger whose delayed exposure has not
 started when EndAcquisition runs is still exposed (if not, the witness
-counts it as ignored), and which temperature status and threshold nodes a
-model has.
+counts it as ignored), whether a camera keeps exposing while its host has
+stopped taking frames (a stall), and which temperature status and threshold
+nodes a model has.
 """
 from __future__ import annotations
 
@@ -858,7 +859,8 @@ class FlirCamera:
         """The witness of a triggered arm whose counters were just reset."""
         return {"edges": None, "exposures": None, "exposures_check": None,
                 "gap_edges": 0, "stopped_at": None, "error": None,
-                "rearms": 0, "id_frames": 0, "late_reads": 0}
+                "rearms": 0, "id_frames": 0, "late_reads": 0,
+                "ignored_by_rearm": 0}
 
     def _ctr_delta(self, later: int, earlier: int) -> int:
         """`later - earlier` for two reads of one counter, across a wrap of
@@ -893,6 +895,11 @@ class FlirCamera:
         down = self._ctr_delta(now["edges"], before["edges"])
         if "exposures" in now and "exposures" in before:
             down -= self._ctr_delta(now["exposures"], before["exposures"])
+            # The triggers ignored so far all came in an acquisition that
+            # ended in a stall re-arm (`_ignored_sentences`).
+            upto = (self._ctr_delta(before["edges"], before["exposures"])
+                    - w["gap_edges"])
+            w["ignored_by_rearm"] = max(w["ignored_by_rearm"], upto)
         w["gap_edges"] += max(0, down)
         w["rearms"] += 1
 
@@ -904,7 +911,10 @@ class FlirCamera:
         A failed read is counted in the witness (`late_reads`) and logged
         once per camera. The stop then reads every counter after
         EndAcquisition, so an edge that arrives while acquisition stops
-        counts as an ignored trigger."""
+        counts as an ignored trigger. At a stall re-arm such an edge falls
+        in the acquisition that ended there, whose ignored triggers the
+        witness words as not proven to shift the block IDs
+        (`_ignored_sentences`)."""
         w = self.witness
         if w is None or w["error"]:
             return None
@@ -2434,7 +2444,18 @@ class FlirBackend:
         """The ignored-trigger count from counters that passed the
         plausibility check. `edges` leaves out the re-arm down time.
         `latch_doubt` is True when `_latch_sentences` questions whether the
-        trigger-counter block IDs name the right triggers."""
+        trigger-counter block IDs name the right triggers.
+
+        In frame_id mode an ignored trigger shifts every later block ID of
+        its acquisition, except one ignored after the last frame the camera
+        delivered before a stall re-arm: grab_thread realigns the re-armed
+        camera from its device clock, so that one shifts nothing. The
+        witness has no count per frame, only one per acquisition, so when
+        every ignored trigger came in an acquisition that ended in a re-arm
+        (`ignored_by_rearm`) the sentence says the alignment is unproven.
+        One ignored in the last acquisition is certain to shift IDs. Whether
+        a stalled camera ignores triggers at all, or keeps exposing them, is
+        one of the module's UNKNOWNS."""
         exposures = w["exposures"]
         line = cam.trigger_line
         if exposures is None:
@@ -2449,19 +2470,30 @@ class FlirBackend:
                 f"{ignored} trigger(s).")
         if ignored <= 0:
             return []
+        advice = (" Lower camera.exposure_us, or set camera.flir."
+                  "block_id_source: trigger_counter so an ignored trigger "
+                  "becomes a gap.")
         if cam.block_id_source == "trigger_counter":
             return [f"{what} Its block IDs count the edges, so each ignored "
                     f"trigger is a gap"
                     + (f". {self._GAP_IN_DOUBT}" if latch_doubt
                        else f", {self._GAP_DROPPED}")
                     + " Lower camera.exposure_us to keep those triggers."]
+        if ignored <= w["ignored_by_rearm"]:
+            return [f"{what} All of them came before a stall re-arm. One "
+                    f"ignored after the last frame the camera delivered "
+                    f"before the re-arm shifts no block ID, because the "
+                    f"re-arm realigns the camera from its device clock. One "
+                    f"ignored earlier makes its block IDs from that trigger "
+                    f"on, the re-armed ones included, name later triggers "
+                    f"than the other cameras' do. The witness cannot tell "
+                    f"the two apart, so this camera's frames are not proven "
+                    f"aligned." + advice]
         return [f"{what} Its block IDs count the frames it acquired, so from "
                 f"the first ignored trigger on they name later triggers than "
                 f"the other cameras' do, and its frames are paired with the "
                 f"wrong instants. Do not use this recording for 3D "
-                f"reconstruction. Lower camera.exposure_us, or set "
-                f"camera.flir.block_id_source: trigger_counter so an ignored "
-                f"trigger becomes a gap."]
+                f"reconstruction." + advice]
 
     @staticmethod
     def _latch_sentences(cam, w) -> list:
