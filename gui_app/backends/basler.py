@@ -335,6 +335,32 @@ class BaslerBackend:
                 pass
         return out
 
+    @classmethod
+    def set_packet_size(cls, cam, n: int) -> int:
+        """Write GevSCPSPacketSize (stream packet size, bytes) and return the
+        value read back. For `probe_network.py --sweep`, which looks for the
+        MTU wall in each camera's path. A camera without the node raises, and
+        a write error propagates, so the sweep reports that size as failed.
+        """
+        node = cls._require_node(
+            cam, "GevSCPSPacketSize",
+            hint="the packet-size sweep applies to GigE cameras only")
+        node.SetValue(int(n))
+        return int(node.GetValue())
+
+    @staticmethod
+    def device_address(device):
+        """The IPv4 address of an `enumerate_devices()` entry as dotted text,
+        or None for a device without one (a USB3 camera). Never raises."""
+        try:
+            available = getattr(device, "IsIpAddressAvailable", None)
+            if available is not None and not available():
+                return None
+            addr = device.GetIpAddress()
+        except Exception:
+            return None
+        return str(addr) if addr else None
+
     @staticmethod
     def _optional_node(cam, name):
         """The camera node map's `name`, or None when absent/unimplemented."""
@@ -347,14 +373,16 @@ class BaslerBackend:
         return node
 
     @classmethod
-    def _require_node(cls, cam, name):
-        """Like _optional_node, but a missing node is a configuration error."""
+    def _require_node(cls, cam, name, hint=None):
+        """Like _optional_node, but a missing node is a configuration error.
+        `hint` replaces the default advice at the end of the message."""
         node = cls._optional_node(cam, name)
         if node is None:
+            advice = hint or ("remove the profile setting that asks for it or "
+                              "use a camera that implements it")
             raise RuntimeError(
                 f"{name} is not available on this camera (a GigE Vision "
-                f"transport feature); remove the profile setting that asks "
-                f"for it or use a camera that implements it")
+                f"transport feature); {advice}")
         return node
 
     # ------------------------------------------------------------------- modes
