@@ -94,11 +94,12 @@ STOP_RESULTS_S = (sync_encode.DRAIN_SENTINEL_TIMEOUT_S
 PARTIAL_NAME = wk.PARTIAL_NAME
 #: What the session warnings say about blockids.partial for a camera whose
 #: worker gave no results.
-PARTIAL_NOTE = ("blockids.partial beside the stream lists, in encoder order, "
-                "the block ID and timestamp of the frames the capture process "
-                "had handed to the encoder at its last append (about once a "
-                "second): entry i is frame i of the stream, and the stream's "
-                "frames past the end of the file have no recorded trigger.")
+PARTIAL_NOTE = (f"blockids.partial beside the stream lists, in encoder order, "
+                f"the block ID and timestamp of the frames the capture "
+                f"process had handed to the encoder by its last append (one "
+                f"every {wk.PARTIAL_EVERY} frames, at most once a second): "
+                f"entry i is frame i of the stream, and the stream's frames "
+                f"past the end of the file have no recorded trigger.")
 
 
 def split_contiguous(n: int, groups: int) -> list:
