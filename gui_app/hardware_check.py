@@ -4,7 +4,9 @@ Two jobs, and the difference matters. `run_hardware_check` is the launch-time
 survey (CPU, RAM, disk, which H.264 paths actually work) that also probes the
 NVENC session cap and benches libx264, so Record never pays for either.
 `check_capacity` is the refuse-or-warn gate run at acquisition start against
-the camera count that is really open.
+the camera count that is really open. `HardwareCheckThread` runs the survey
+at launch, and the encoder half of it again after a profile switch, with the
+profile's NVENC upload applied first (`configure_nvenc_upload`).
 
 RULE: every capability here is MEASURED, never inferred from a version string
 or a compiled-in feature list. REASON: the whole point of a preflight is to
@@ -14,6 +16,7 @@ than no check, because the warning it owns never fires.
 import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +25,7 @@ import numpy as np
 import psutil
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from gui_app import cpu_encode, encoders, ffmpeg_cmd
+from gui_app import cpu_encode, cuda_driver, encoders, ffmpeg_cmd
 
 #: Bytes one real-time H.264 frame costs at the rig's qp, measured on real
 #: recordings -- which are NVENC recordings. Named because the disk budget is
@@ -72,6 +75,18 @@ class HardwareReport:
     #: What `select_encoder` installed for this session, "" when not run.
     encoder: str = ""
     encoder_reason: str = ""
+    #: How NVENC receives each frame from here on (`configure_nvenc_upload`),
+    #: "" when the upload was not configured. The context is "" for the host
+    #: upload, which runs in PyNvVideoCodec's own context.
+    nvenc_upload: str = ""
+    nvenc_context: str = ""
+    nvenc_upload_reason: str = ""
+    #: The camera SDK the profile's backend drives, its version and location,
+    #: or why it cannot be loaded (`backends.sdk_report`); "" when not asked.
+    camera_sdk: str = ""
+    #: False for the encoder-only check a profile switch runs: the host
+    #: survey (CPU, RAM, disk) is not repeated and its fields stay empty.
+    survey: bool = True
     warnings: list = field(default_factory=list)
 
 
@@ -198,23 +213,7 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
     report.has_nvenc = check_nvenc()
     report.nvenc_runtime = check_nvenc_runtime()
     _ffmpeg_nvenc_ok = report.has_nvenc
-
-    # RULE: measure the GOP from the bitstream at launch, not from the options
-    # the encoder was given. REASON: an encoder library drops an unrecognised
-    # option silently, and the result is a recording with one IDR that nobody
-    # notices until they scrub it. Cheap enough to do every launch.
-    if report.nvenc_runtime:
-        try:
-            from gui_app import nvenc
-            report.nvenc_gop_ok = nvenc.gop_is_honoured()
-        except Exception:
-            report.nvenc_gop_ok = None
-        if report.nvenc_gop_ok is False:
-            report.warnings.append(
-                "NVENC ignores the GOP setting on this build, so recordings "
-                "would hold one keyframe and be unseekable in the labeler. "
-                "Check the keyword names in gui_app/nvenc.py against the "
-                "installed PyNvVideoCodec before recording.")
+    _check_gop(report)
 
     if report.cpu_cores < 4:
         report.warnings.append(
@@ -269,7 +268,232 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
     return report
 
 
-_nvenc_sessions: int | None = None    # highest count CONFIRMED grantable
+def _check_gop(report: HardwareReport) -> None:
+    """Measure whether the real-time encoder applies its GOP, into `report`.
+
+    RULE: measure the GOP from the bitstream, not from the options the
+    encoder was given, and measure it in the upload mode the recording uses.
+    REASON: an encoder library drops an unrecognised option silently, and the
+    result is a recording with one IDR that nobody notices until they scrub
+    it. `nvenc.gop_is_honoured` builds its encoder through the same factory
+    and upload setting as a recording, so it proves the configured path only
+    when `configure_nvenc_upload` ran first.
+    """
+    if not report.nvenc_runtime:
+        return
+    try:
+        from gui_app import nvenc
+        report.nvenc_gop_ok = nvenc.gop_is_honoured()
+    except Exception:
+        report.nvenc_gop_ok = None
+    if report.nvenc_gop_ok is False:
+        report.warnings.append(
+            "NVENC ignores the GOP setting on this build, so recordings "
+            "would hold one keyframe and be unseekable in the labeler. "
+            "Check the keyword names in gui_app/nvenc.py against the "
+            "installed PyNvVideoCodec before recording.")
+
+
+def run_encoder_check() -> HardwareReport:
+    """The NVENC half of `run_hardware_check`, for a profile switch.
+
+    The host survey (CPU, RAM, disk speed, ffmpeg's h264_nvenc) describes the
+    machine, not the profile, so it is not repeated. The GOP is measured
+    again, because the new profile can select another upload path.
+    """
+    report = HardwareReport(survey=False)
+    report.has_nvenc = bool(_ffmpeg_nvenc_ok)
+    report.nvenc_runtime = check_nvenc_runtime()
+    _check_gop(report)
+    return report
+
+
+# --- NVENC upload path (gui_app.nvenc.configure_upload) ---------------------
+@dataclass
+class UploadChoice:
+    """How NVENC receives each frame from now on, and why.
+
+    `upload` and `context` are what `nvenc.configure_upload` was given.
+    `warnings` is non-empty when that differs from what the profile asked
+    for; each one names the reason and the setting used instead.
+    """
+    upload: str = "host"
+    context: str = "shared"
+    reason: str = ""
+    warnings: list = field(default_factory=list)
+
+
+def _mib(nbytes: float) -> str:
+    return f"{nbytes / 2 ** 20:.0f} MiB"
+
+
+def own_context_headroom(n_cams: int, drv=None) -> tuple:
+    """Whether the GPU has free memory for one more CUDA context per camera.
+
+    Returns (True, detail) when it has, (False, detail) when it has not, and
+    (None, reason) when it could not be measured. `drv` is a
+    `cuda_driver.Driver`, or None for the process's driver.
+
+    RULE: the cost of a context is measured on this GPU, never assumed.
+    REASON: it depends on the GPU, the driver and the CUDA version, so a
+    constant would be one machine's number. A measurement context is created,
+    then a second one, and the drop in free device memory between the two
+    reads is one context's cost. Both are destroyed before returning.
+
+    Only the contexts are counted. The encoders' own GPU memory is needed
+    whatever the upload mode, so it is not part of this choice.
+    """
+    try:
+        drv = drv if drv is not None else cuda_driver.get()
+    except cuda_driver.CudaUnavailable as e:
+        return None, f"the CUDA driver could not be loaded ({e})"
+    probe = extra = 0
+    try:
+        probe = drv.ctx_create(0)
+        drv.ctx_push(probe)
+        try:
+            free0, total = drv.mem_info()
+        finally:
+            drv.ctx_pop()
+        extra = drv.ctx_create(0)
+        drv.ctx_push(probe)
+        try:
+            free1, _total = drv.mem_info()
+        finally:
+            drv.ctx_pop()
+    except Exception as e:
+        return None, (f"the GPU memory a context takes could not be measured "
+                      f"({type(e).__name__}: {e})")
+    finally:
+        for ctx in (extra, probe):
+            if ctx:
+                try:
+                    drv.ctx_destroy(ctx)
+                except Exception as e:
+                    print(f"[hw] WARNING: a measurement CUDA context could not "
+                          f"be destroyed: {e}", flush=True)
+    per_ctx = max(0, int(free0) - int(free1))
+    # Both measurement contexts are gone now, so what they held is free again.
+    free = int(free1) + 2 * per_ctx
+    need = max(1, int(n_cams)) * per_ctx
+    detail = (f"{n_cams} contexts of {_mib(per_ctx)} each need {_mib(need)}, "
+              f"and {_mib(free)} of {_mib(total)} is free")
+    return free >= need, detail
+
+
+def configure_nvenc_upload(profile, n_cams: int, width: int, height: int,
+                           drv=None) -> UploadChoice:
+    """Apply the profile's `nvenc_upload` and `nvenc_context` to gui_app.nvenc.
+
+    The one place the profile reaches `nvenc.configure_upload`. Never raises.
+
+    RULE: called before any encoder is created and before the GOP check, at
+    launch and again after a profile switch. REASON: the setting applies to
+    every encoder created after it and never to one that exists, and the GOP
+    check proves only the path it runs on.
+
+    RULE: the pinned upload is used only after `nvenc.pinned_upload_matches_
+    host` passes at this frame size. REASON: the events that keep a staging
+    buffer from being rewritten under its upload rely on PyNvVideoCodec
+    copying on the encoder's stream, which only that check shows; any other
+    answer puts the host upload back, with a warning.
+
+    RULE: context 'own' needs free GPU memory for one extra context per
+    camera (`own_context_headroom`). REASON: an own context that cannot be
+    created costs that encoder the pinned path, one camera at a time; the
+    shared context costs no memory, so it is used instead, with a warning.
+    """
+    from gui_app import nvenc
+    up = str(getattr(profile, "nvenc_upload", "host") or "host")
+    ctx = str(getattr(profile, "nvenc_context", "shared") or "shared")
+    choice = UploadChoice(upload=up, context=ctx)
+
+    def use_host(reason: str) -> UploadChoice:
+        nvenc.configure_upload("host", "shared")
+        choice.upload, choice.context, choice.reason = "host", "shared", reason
+        return choice
+
+    if up not in nvenc.UPLOAD_MODES or ctx not in nvenc.CONTEXT_MODES:
+        choice.warnings.append(
+            f"nvenc_upload {up!r} / nvenc_context {ctx!r} is not a setting "
+            f"this build knows ({', '.join(nvenc.UPLOAD_MODES)} / "
+            f"{', '.join(nvenc.CONTEXT_MODES)}), so NVENC uses the host "
+            f"upload.")
+        return use_host("the profile's setting is unknown")
+    if up == "host":
+        return use_host("the profile's nvenc_upload")
+    if not nvenc.available():
+        # Nothing records through NVENC here, so the setting has no effect;
+        # the report's NVENC line already says why.
+        return use_host("NVENC is unavailable, so the upload setting has no "
+                        "effect")
+    if ctx == "own":
+        ok, detail = own_context_headroom(n_cams, drv)
+        if ok is not True:
+            choice.context = "shared"
+            why = (f"the GPU is short of memory for them: {detail}"
+                   if ok is False else detail)
+            choice.warnings.append(
+                f"nvenc_context: own gives each of the {n_cams} encoders a "
+                f"CUDA context of its own, but {why}. The pinned upload runs "
+                f"in the shared context instead.")
+            print(f"[hw] WARNING: {choice.warnings[-1]}", flush=True)
+        else:
+            print(f"[hw] GPU memory for own contexts: {detail}", flush=True)
+    # The check builds its own host and pinned encoders whatever is
+    # configured, so the pinned setting is applied only once it has passed.
+    verdict = nvenc.pinned_upload_matches_host(width, height, choice.context)
+    if verdict is True:
+        nvenc.configure_upload("pinned", choice.context)
+    else:
+        state = ("failed" if verdict is False
+                 else "could not run (see the [nvenc] lines in the log)")
+        choice.warnings.append(
+            f"nvenc_upload: pinned needs the launch check that PyNvVideoCodec "
+            f"copies each staging buffer on the encoder's stream, and at "
+            f"{width}x{height} it {state}. NVENC uses the host upload for "
+            f"this session.")
+        print(f"[hw] WARNING: {choice.warnings[-1]}", flush=True)
+        return use_host("the pinned upload check did not pass")
+    choice.reason = ("the profile's nvenc_upload; the pinned upload check "
+                     "passed")
+    return choice
+
+
+def usbfs_warning(profile, n_cams: int, platform: str | None = None,
+                  param: Path = Path("/sys/module/usbcore/parameters/"
+                                     "usbfs_memory_mb")) -> str:
+    """Linux: a warning when usbfs cannot hold the buffers USB3 cameras queue.
+
+    On Linux a USB3 camera's image buffers come out of the kernel's usbfs
+    pool (`usbfs_memory_mb`, 16 by default), and a pool smaller than the
+    buffers the profile queues makes the camera fail to stream. 0 means no
+    limit. Returns "" on other systems, when the limit covers the buffers,
+    and when it cannot be read. Which cameras are USB3 is not known before
+    they are opened, so this is a warning, not a refusal.
+    """
+    platform = sys.platform if platform is None else platform
+    if not platform.startswith("linux"):
+        return ""
+    try:
+        limit_mb = int(Path(param).read_text().strip())
+    except (OSError, ValueError):
+        return ""
+    w = int(getattr(profile, "frame_width", 0) or 0)
+    h = int(getattr(profile, "frame_height", 0) or 0)
+    bufs = int(getattr(profile, "max_num_buffer", 0) or 0)
+    need_mb = max(1, int(n_cams)) * bufs * w * h / 2 ** 20
+    if limit_mb == 0 or need_mb <= limit_mb:
+        return ""
+    return (f"usbfs_memory_mb is {limit_mb} MB, and {n_cams} cameras x "
+            f"{bufs} buffers of {w}x{h} need {need_mb:.0f} MB. USB3 cameras "
+            f"on this system draw their buffers from usbfs and fail to "
+            f"stream when it is short. Raise "
+            f"/sys/module/usbcore/parameters/usbfs_memory_mb above "
+            f"{need_mb:.0f}, or 0 for no limit.")
+
+
+_nvenc_sessions: int | None = None    # what the latest probe granted
 _nvenc_saturated = False              # last probe stopped at its limit, not at a failure
 _nvenc_probe_error = ""               # why the last probe could not answer at all
 
@@ -383,11 +607,24 @@ def nvenc_session_capacity(width: int, height: int, want: int,
 #: geometry. Filled by `run_x264_bench` at launch; read by the preflight and
 #: by the report text, both of which must never bench on the UI thread.
 _x264_bench: dict = {}
+#: (width, height, fps) the cached bench was measured at, None before one ran.
+_x264_bench_key: tuple | None = None
 
 
 def x264_bench_fps(preset: str = "ultrafast") -> float:
     """Benched frames per second per core, or -1.0 when never measured."""
     return _x264_bench.get(preset, -1.0)
+
+
+def x264_bench_is_for(width: int, height: int, fps: int) -> bool:
+    """Whether the cached bench was measured at this geometry and rate.
+
+    A profile switch re-benches only when this is False: the rate per core
+    depends on the frame size, so a bench measured for another profile's
+    geometry answers the wrong question.
+    """
+    return bool(_x264_bench) and _x264_bench_key == (int(width), int(height),
+                                                      int(fps))
 
 
 def run_x264_bench(width: int, height: int, fps: int,
@@ -398,11 +635,13 @@ def run_x264_bench(width: int, height: int, fps: int,
     REASON: each preset runs a real 2 s encode, and the window is frozen for
     the whole of it with no busy indicator.
     """
+    global _x264_bench_key
     for preset in presets:
         _x264_bench[preset] = cpu_encode.x264_bench(width, height, fps,
                                                     preset=preset)
         print(f"[hw] libx264 {preset}: {_x264_bench[preset]:.1f} fps per core "
               f"at {width}x{height}", flush=True)
+    _x264_bench_key = (int(width), int(height), int(fps))
     return dict(_x264_bench)
 
 
@@ -839,16 +1078,21 @@ def check_capacity(n_cams: int, width: int, height: int,
 
 
 def format_report(report: HardwareReport) -> str:
-    lines = [
-        "Hardware Check Results",
-        "=" * 40,
-        f"CPU:   {report.cpu_cores} cores / {report.cpu_threads} threads",
-        f"RAM:   {report.ram_total_gb:.1f} GB total, {report.ram_available_gb:.1f} GB available",
-    ]
-    if report.disk_free_gb >= 0:
-        lines.append(f"Disk:  {report.disk_free_gb:.0f} GB free")
-    if report.disk_write_mb_s >= 0:
-        lines[-1] += f", {report.disk_write_mb_s:.0f} MB/s write"
+    if report.survey:
+        lines = [
+            "Hardware Check Results",
+            "=" * 40,
+            f"CPU:   {report.cpu_cores} cores / {report.cpu_threads} threads",
+            f"RAM:   {report.ram_total_gb:.1f} GB total, {report.ram_available_gb:.1f} GB available",
+        ]
+        if report.disk_free_gb >= 0:
+            lines.append(f"Disk:  {report.disk_free_gb:.0f} GB free")
+        if report.disk_write_mb_s >= 0:
+            lines[-1] += f", {report.disk_write_mb_s:.0f} MB/s write"
+    else:
+        lines = ["Encoder Check Results (profile switch)", "=" * 40]
+    if report.camera_sdk:
+        lines.append(f"Camera SDK: {report.camera_sdk}")
     # Both NVENC libraries, named, because the remedy differs per path.
     lines.append(
         f"NVENC: real-time (PyNvVideoCodec) "
@@ -862,6 +1106,13 @@ def format_report(report: HardwareReport) -> str:
         lines.append("       GOP verified from the bitstream: one keyframe per second")
     if report.nvenc_sessions >= 0:
         lines.append(f"       {report.nvenc_sessions} concurrent encode sessions granted")
+    if report.nvenc_upload:
+        where = (f", {report.nvenc_context} CUDA context"
+                 if report.nvenc_upload == "pinned" and report.nvenc_context
+                 else "")
+        lines.append(f"       upload: {report.nvenc_upload}{where}"
+                     + (f" ({report.nvenc_upload_reason})"
+                        if report.nvenc_upload_reason else ""))
     # The CPU fallback's measured ceiling, so the operator can compare it with
     # the cameras they intend to run instead of discovering it mid-recording.
     # Every preset this report actually measured, rather than the launch
@@ -901,49 +1152,102 @@ class HardwareCheckThread(QThread):
     encodes — and at Record they execute on the Qt main thread, freezing the
     window with no busy indicator, once per Record for as long as the count is
     short.
+
+    `survey=False` is the check a profile switch runs: the host survey is
+    skipped, and the NVENC upload, the GOP check, the bench (only when the
+    frame size or rate changed) and the encoder selection run for the new
+    profile.
+
+    The report is emitted on `report_ready`, once, whatever happens inside:
+    the window keeps Record and Calibrate disabled until it arrives. The
+    thread's `finished` is QThread's own.
     """
 
-    #: The report. RULE: new code connects `report_ready`. REASON: `finished`
-    #: shadows QThread.finished, so anything relying on the built-in signal
-    #: (deleteLater patterns, wait helpers) silently gets this one instead;
-    #: `finished` is kept only until the main_window connection moves across,
-    #: exactly as CalibrationWorker keeps its own.
     report_ready = pyqtSignal(object)
-    finished = pyqtSignal(object)
 
-    def __init__(self, output_dir: str = "", profile=None, n_cams: int = 0):
+    def __init__(self, output_dir: str = "", profile=None, n_cams: int = 0,
+                 survey: bool = True):
         super().__init__()
         self._output_dir = output_dir
         self._profile = profile
         self._n_cams = int(n_cams)
+        self._survey = bool(survey)
 
     def run(self):
-        report = run_hardware_check(self._output_dir)
-        if self._profile is not None:
-            try:
-                self._preflight_encoders(report)
-            except Exception as e:
-                # A broken encoder preflight must not cost the operator the
-                # rest of the report, which is what warns about RAM and disk.
-                #
-                # RULE: the bench result is dropped with it. REASON: the bench
-                # runs before the selection, so a selection that raised would
-                # otherwise leave a cache that check_capacity reads as "the CPU
-                # path is live" while the GPU factory is still installed.
-                _x264_bench.clear()
-                report.x264_fps_per_core.clear()
-                report.x264_max_cams.clear()
-                print(f"[hw] encoder preflight failed: {e}", flush=True)
-        self.report_ready.emit(report)
-        self.finished.emit(report)
+        report = HardwareReport(survey=self._survey)
+        try:
+            report = self._check()
+        except Exception as e:
+            print(f"[hw] hardware check failed: {type(e).__name__}: {e}",
+                  flush=True)
+            report.warnings.append(
+                f"The hardware check could not finish ({type(e).__name__}: "
+                f"{e}). Its findings are incomplete; the capacity check still "
+                f"runs when an acquisition starts.")
+        finally:
+            self.report_ready.emit(report)
+
+    def _geometry(self):
+        """(cameras, frame rate, width, height) the checks size themselves to:
+        the open cameras, else the profile's, with RigProfile's defaults for
+        a profile object that lacks a field."""
+        from gui_app.session_config import RigProfile
+        p, d = self._profile, RigProfile()
+        n_cams = self._n_cams or int(getattr(p, "n_cameras", 0) or 1)
+        fps = int(getattr(p, "frame_rate", 0) or d.frame_rate)
+        w = int(getattr(p, "frame_width", 0) or d.frame_width)
+        h = int(getattr(p, "frame_height", 0) or d.frame_height)
+        return n_cams, fps, w, h
+
+    def _check(self) -> HardwareReport:
+        p = self._profile
+        upload = None
+        if p is not None:
+            # Before the survey, whose GOP check builds its encoder on the
+            # upload path configured here.
+            n_cams, _fps, w, h = self._geometry()
+            upload = configure_nvenc_upload(p, n_cams, w, h)
+        report = (run_hardware_check(self._output_dir) if self._survey
+                  else run_encoder_check())
+        if upload is not None:
+            report.nvenc_upload = upload.upload
+            report.nvenc_context = (upload.context
+                                    if upload.upload == "pinned" else "")
+            report.nvenc_upload_reason = upload.reason
+            report.warnings.extend(upload.warnings)
+        if p is None:
+            return report
+        backend = str(getattr(p, "camera_backend", "") or "")
+        if backend:
+            from gui_app import backends
+            report.camera_sdk = backends.sdk_report(backend)
+        usbfs = usbfs_warning(p, self._geometry()[0])
+        if usbfs:
+            report.warnings.append(usbfs)
+        try:
+            self._preflight_encoders(report)
+        except Exception as e:
+            # A broken encoder preflight must not cost the operator the
+            # rest of the report, which is what warns about RAM and disk.
+            #
+            # RULE: the bench result is dropped with it. REASON: the bench
+            # runs before the selection, so a selection that raised would
+            # otherwise leave a cache that check_capacity reads as "the CPU
+            # path is live" while the GPU factory is still installed.
+            _x264_bench.clear()
+            report.x264_fps_per_core.clear()
+            report.x264_max_cams.clear()
+            print(f"[hw] encoder preflight failed: {e}", flush=True)
+        return report
 
     def _preflight_encoders(self, report: HardwareReport) -> None:
         p = self._profile
-        n_cams = self._n_cams or int(getattr(p, "n_cameras", 0) or 1)
-        fps = int(getattr(p, "frame_rate", 100) or 100)
-        w = int(getattr(p, "frame_width", 1920) or 1920)
-        h = int(getattr(p, "frame_height", 1200) or 1200)
-        run_x264_bench(w, h, fps)
+        n_cams, fps, w, h = self._geometry()
+        # The per-core rate depends on the frame size, so a bench measured
+        # for another profile's geometry is measured again; the same
+        # geometry keeps the launch measurement.
+        if not x264_bench_is_for(w, h, fps):
+            run_x264_bench(w, h, fps)
         for preset in BENCH_PRESETS:
             report.x264_fps_per_core[preset] = x264_bench_fps(preset)
             report.x264_max_cams[preset] = x264_camera_count(fps, preset)
