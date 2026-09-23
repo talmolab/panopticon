@@ -409,12 +409,36 @@ class MainWindow(QMainWindow):
         # What a camera needs besides the profile depends on the backend (a
         # Basler .pfs, a FLIR camera: block), so the profile says whether it
         # has it.
-        why = self._profile.settings_ready()
+        why = (self._profile.settings_ready()
+               or self._capture_processes_refusal())
         if why:
             return CameraOpenError(why)
         rig_setup.apply_profile_to_manager(self._camera_mgr, self._profile)
         return self._camera_mgr.open_all(
             **rig_setup.open_kwargs(self._camera_mgr, self._profile))
+
+    def _capture_processes_refusal(self) -> str | None:
+        """Why this window opens no camera for the profile's
+        capture_processes, or None.
+
+        RULE: a profile with capture_processes above 0 opens no camera here.
+        REASON: this window captures every camera in its own process
+        (CameraManager), and only probe_mp.py builds the multi-process manager
+        (gui_app.mp.manager.ProcessCameraManager). Opening anyway records in
+        one process a session whose profile asks for several, and a
+        comparison of the two capture paths then counts that session on the
+        wrong side.
+        session_metadata.json records both the request and what ran
+        (capture_processes, capture_processes_used).
+        """
+        n = int(getattr(self._profile, "capture_processes", 0) or 0)
+        if n <= 0:
+            return None
+        return (f"The profile sets capture_processes: {n}. This window "
+                f"captures every camera in its own process. Only probe_mp.py "
+                f"captures in several processes so far.\n\nSet "
+                f"capture_processes: 0 in the profile YAML to record from "
+                f"this window.")
 
     def _apply_camera_open_result(self, ok):
         if ok is True:
@@ -3753,7 +3777,9 @@ class MainWindow(QMainWindow):
         try:
             path = self._config.save_metadata(
                 self._acq_type, camera_info=info or None,
-                encoder=self._session_encoder or None)
+                encoder=self._session_encoder or None,
+                capture_processes_used=int(getattr(
+                    self._camera_mgr, "capture_processes", 0) or 0))
         except Exception as e:
             print(f"[acq] could not write session metadata: {e}", flush=True)
             return

@@ -193,6 +193,11 @@ class CameraManager(QObject):
     #: operator, not by a command from this host. The window sets it at every
     #: start.
     trigger_source = "board"
+    #: How many worker processes capture the cameras: 0, because this
+    #: manager captures them in the calling process. The multi-process
+    #: manager (gui_app.mp.manager) sets its own count. The main window
+    #: records it in session_metadata.json as capture_processes_used.
+    capture_processes = 0
 
     def __init__(self, backend: str = "basler"):
         # The only vendor-specific object in this class. Everything below is

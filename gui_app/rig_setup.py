@@ -147,11 +147,16 @@ def make_manager(profile: RigProfile, **kwargs):
     """The camera manager ``profile`` asks for.
 
     ``capture_processes`` 0 (the default in every shipped profile) returns a
-    CameraManager, as the GUI and the probes build it today. A
-    positive value returns a gui_app.mp.manager.ProcessCameraManager, which
-    has the same surface and captures the cameras in that many worker
-    processes, dealt to them in contiguous groups by camera index.
-    ``kwargs`` go to ProcessCameraManager (``log_dir``, ``backend``).
+    CameraManager. A positive value returns a
+    gui_app.mp.manager.ProcessCameraManager, which has the same surface and
+    captures the cameras in that many worker processes, dealt to them in
+    contiguous groups by camera index. ``kwargs`` go to
+    ProcessCameraManager (``log_dir``, ``backend``).
+
+    The main window does not call this. It builds a CameraManager and opens
+    no camera for a profile whose capture_processes is above 0
+    (MainWindow._capture_processes_refusal). probe_mp.py builds its
+    ProcessCameraManager directly.
 
     Both are configured the same way afterwards:
     ``apply_profile_to_manager(mgr, profile)`` and

@@ -1551,7 +1551,8 @@ class SessionConfig:
         return self.calibration_frame_rate if acq_type == "calibration" else self.frame_rate
 
     def metadata(self, acq_type: str | None = None, camera_info=None,
-                 encoder: str | None = None) -> dict:
+                 encoder: str | None = None,
+                 capture_processes_used: int | None = None) -> dict:
         """The session_metadata.json contents for ``acq_type``.
 
         ``camera_info`` is the opened cameras in cam1..camN order, one dict
@@ -1567,6 +1568,11 @@ class SessionConfig:
         (``nvenc``, ``x264`` or ``raw``), which can differ from the profile's
         ``encoder`` selection (``encoder_requested``): ``auto`` resolves at
         launch. None records that the caller did not say.
+
+        ``capture_processes_used`` is how many worker processes captured the
+        cameras (0: the calling process). The profile's ``capture_processes``
+        is only a request, and the entry point decides what runs. None
+        records that the caller did not say.
         """
         now = datetime.now()
         prof = self.profile
@@ -1606,6 +1612,7 @@ class SessionConfig:
             # file is the only place a session's setting can be read back.
             camera=(prof.camera.to_dict() if prof and prof.camera else None),
             capture_processes=prof.capture_processes if prof else None,
+            capture_processes_used=capture_processes_used,
             thermal_warn_margin_c=prof.thermal_warn_margin_c if prof else None,
             nvenc_upload=prof.nvenc_upload if prof else None,
             nvenc_context=prof.nvenc_context if prof else None,
@@ -1623,10 +1630,12 @@ class SessionConfig:
         return meta
 
     def save_metadata(self, acq_type: str | None = None, camera_info=None,
-                      encoder: str | None = None) -> Path:
+                      encoder: str | None = None,
+                      capture_processes_used: int | None = None) -> Path:
         """Write session_metadata.json and return its path.
 
-        ``camera_info`` and ``encoder`` go to ``metadata``.
+        ``camera_info``, ``encoder`` and ``capture_processes_used`` go to
+        ``metadata``.
 
         With ``acq_type`` the file goes into ``video_dir(acq_type)``, beside
         the videos it describes, so a calibration and a recording in the same
@@ -1638,7 +1647,8 @@ class SessionConfig:
         which is the older layout.
         """
         meta = self.metadata(acq_type, camera_info=camera_info,
-                             encoder=encoder)
+                             encoder=encoder,
+                             capture_processes_used=capture_processes_used)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         session_copy = self.session_dir / METADATA_FILENAME
         if acq_type is None:
