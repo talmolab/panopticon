@@ -332,8 +332,18 @@ class Coordinator:
     def progress_age_s(self, cam: int, t_ns: int | None = None) -> float:
         """Seconds since this camera's frontier last advanced in a poll (or
         since the ledger was created)."""
+        cam = self._cam(cam)
         return ((now_ns() if t_ns is None else int(t_ns))
                 - self._progress_ns[cam]) / 1e9
+
+    def _cam(self, cam) -> int:
+        """A camera index checked against the ledger. A negative one would
+        index from the end and act on another camera."""
+        c = int(cam)
+        if not 0 <= c < self.n:
+            raise ValueError(f"camera index {cam} is outside this ledger's "
+                             f"{self.n} cameras")
+        return c
 
     # -- decisions ------------------------------------------------------------
 
@@ -355,6 +365,7 @@ class Coordinator:
     def retire(self, cam: int, reason: str = "", announce: bool = True):
         """Drop a camera from the alignment set. Returns the log line, or None
         if it was already retired."""
+        cam = self._cam(cam)
         with self._lock:
             msg = self._retire_locked(cam, reason)
         if msg and announce:

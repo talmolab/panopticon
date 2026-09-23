@@ -238,6 +238,16 @@ class SegmentMismatch(ValueError):
     """A segment's header does not match what the caller expects to attach to."""
 
 
+def _check_cam(cam, n_cams: int) -> int:
+    """A camera index checked against a segment. A negative one would index
+    from the end and read or write another camera's fields."""
+    c = int(cam)
+    if not 0 <= c < n_cams:
+        raise ValueError(f"camera index {cam} is outside this segment's "
+                         f"{n_cams} cameras")
+    return c
+
+
 def _check_epoch(epoch) -> int:
     e = int(epoch)
     if e <= 0:
@@ -588,6 +598,7 @@ class StatusSegment:
         return cls(buf, n_cams, epoch, worker)
 
     def set(self, cam: int, field: str, value) -> None:
+        cam = _check_cam(cam, self.n_cams)
         kind, k = self._FIELD[field]
         if kind == "i":
             self._i[cam, k] = int(value)
@@ -595,14 +606,17 @@ class StatusSegment:
             self._f[cam, k] = float(value)
 
     def get(self, cam: int, field: str):
+        cam = _check_cam(cam, self.n_cams)
         kind, k = self._FIELD[field]
         return int(self._i[cam, k]) if kind == "i" else float(self._f[cam, k])
 
     def beat(self, cam: int, t_ns: int | None = None) -> None:
+        cam = _check_cam(cam, self.n_cams)
         self._i[cam, self._FIELD["heartbeat_ns"][1]] = now_ns() if t_ns is None else int(t_ns)
 
     def heartbeat_age_s(self, cam: int, t_ns: int | None = None) -> float | None:
         """Seconds since the camera's last heartbeat; None if it never beat."""
+        cam = _check_cam(cam, self.n_cams)
         hb = int(self._i[cam, self._FIELD["heartbeat_ns"][1]])
         if hb == 0:
             return None
@@ -653,10 +667,10 @@ class PreviewSegment:
         return cls(buf, n_cams, capacity, epoch)
 
     def write(self, cam: int, img, frame_n: int = 0, bid: int = 0) -> int:
-        return self._slots[cam].write(img, frame_n, bid)
+        return self._slots[_check_cam(cam, self.n_cams)].write(img, frame_n, bid)
 
     def read(self, cam: int) -> SlotRead | None:
-        return self._slots[cam].read()
+        return self._slots[_check_cam(cam, self.n_cams)].read()
 
     def close(self) -> None:
         self._hdr = None
@@ -712,13 +726,13 @@ class FrameSegment:
         return cls(buf, n_cams, capacity, epoch, names)
 
     def write(self, cam: int, name: str, img, frame_n: int = 0, bid: int = 0) -> int:
-        return self._slots[cam][name].write(img, frame_n, bid)
+        return self._slots[_check_cam(cam, self.n_cams)][name].write(img, frame_n, bid)
 
     def read(self, cam: int, name: str) -> SlotRead | None:
-        return self._slots[cam][name].read()
+        return self._slots[_check_cam(cam, self.n_cams)][name].read()
 
     def seq(self, cam: int, name: str) -> int:
-        return self._slots[cam][name].seq
+        return self._slots[_check_cam(cam, self.n_cams)][name].seq
 
     def close(self) -> None:
         self._hdr = None
