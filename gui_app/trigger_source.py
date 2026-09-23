@@ -50,8 +50,8 @@ FIRST_TRIGGER_TIMEOUT_S = PRE_TRIGGER_GRACE_S / 2
 #: what is the end of the recording.
 SOURCE_STOPPED_S = 2 * SOURCE_SILENT_S
 #: Seconds the stop waits for the operator to stop the source. After that the
-#: recording finishes anyway, the grab threads still receiving frames are
-#: stopped outright, and the warnings say so.
+#: recording finishes anyway: Panopticon stops the grab threads that are
+#: still receiving frames, and the warnings say so.
 STOP_WAIT_S = 30.0
 
 
