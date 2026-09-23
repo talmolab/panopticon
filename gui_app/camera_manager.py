@@ -498,8 +498,9 @@ class CameraManager(QObject):
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
             return self._open_failed("No cameras found")
-        sorted_devs, refusal = resolve_device_order(devices, only_serials,
-                                                    expect_cameras)
+        sorted_devs, refusal = resolve_device_order(
+            devices, only_serials, expect_cameras,
+            global_indices=self.global_indices)
         if refusal:
             return self._open_failed(refusal)
 
