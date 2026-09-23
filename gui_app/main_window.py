@@ -1526,6 +1526,8 @@ class MainWindow(QMainWindow):
         if self._quitting:
             return self._quit_during_start()
         teensy = self._teensy_connection(retries=self.START_SERIAL_RETRIES)
+        if teensy is None and self._quitting:
+            return self._quit_during_start()
         if teensy is None:
             # Nothing has been started, so there is nothing to stand down: no
             # camera is in trigger mode and the board never saw a start.
@@ -2170,7 +2172,12 @@ class MainWindow(QMainWindow):
         the connection open means that only happens at GUI launch (_warm_serial
         claims the port eagerly) and on upload, never at the start of a
         recording.
+
+        None once the window is quitting: the quit has stood the board down,
+        and an open now would reset it while the process exits.
         """
+        if self._quitting:
+            return None
         self._forget_board_on_other_port()
         if self._teensy is None:
             self._teensy = TeensyController(port=self._profile.serial_port)

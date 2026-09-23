@@ -111,6 +111,9 @@ class TeensyController:
         #: owed: a board that took a start and never confirmed a stop may
         #: still be triggering, and one that never took a start is not.
         self._start_unconfirmed = False
+        #: Set by stop_and_close(), the quit's last word to the board. open()
+        #: refuses from then on.
+        self._retired = False
 
     @property
     def speaks_rdy(self) -> bool:
@@ -130,11 +133,19 @@ class TeensyController:
         ("could not open port ... FileNotFoundError" for a wrong COM number or an
         unplugged board, "PermissionError" for a port held by another program)
         and the two need different actions from the operator.
+
+        Always False after stop_and_close(); see there.
         """
         with self._lock:
             return self._open_locked(retries)
 
     def _open_locked(self, retries: int) -> bool:
+        if self._retired:
+            self.last_error = ("the link to the trigger board was closed for "
+                               "good when Panopticon quit")
+            print(f"[teensy] not reopening {self._port}: {self.last_error}",
+                  flush=True)
+            return False
         self.last_error = None
         # Opening resets the board, so whatever it said before is history.
         self.board_id = None
@@ -446,7 +457,7 @@ class TeensyController:
             self._close_port()
 
     def stop_and_close(self, pins: list[int]) -> bool:
-        """Stand the board down and close the link, with no start between.
+        """Stand the board down, close the link and retire this controller.
 
         RULE: the quit path uses this, never stop_triggers() then close(),
         and whatever the link looks like from outside. REASON: between those
@@ -457,6 +468,13 @@ class TeensyController:
         reads as closed from outside while that retry is about to start the
         board.
 
+        RULE: open() refuses after this. REASON: a start worker that got past
+        the quit check before this ran can still reach the port afterwards,
+        and its open would pulse DTR, reset the board and float every pin
+        while the process exits. close() does not retire the controller,
+        because the upload's hand-back closes the link and the reclaim after
+        the flash must reopen it.
+
         Returns True when the board is known to be stood down: the stop was
         confirmed, or the link is closed and no start has gone out on it since
         the last confirmed stop. A closed link after an unconfirmed start
@@ -464,6 +482,7 @@ class TeensyController:
         """
         self._owner_interrupts += 1
         with self._lock:
+            self._retired = True
             try:
                 if self._ser is None and not self._start_unconfirmed:
                     print("[teensy] no serial link, and no start has gone out "
