@@ -739,9 +739,13 @@ class RigProfile:
     # How the NVENC encoder receives each frame; one of NVENC_UPLOAD_MODES.
     # "host" hands PyNvVideoCodec the ring slot, and PyNvVideoCodec copies it
     # to the GPU with the GIL held. "pinned" copies the frame into page-locked
-    # memory without the GIL first. No effect when the frames are encoded on
-    # the CPU.
-    nvenc_upload: str = "host"
+    # memory without the GIL first. The default is "pinned" because the
+    # GIL-held copy in "host" is what starves a capture thread until its
+    # camera falls behind the others; "pinned" costs about 1 ms of CPU per
+    # frame per camera, outside the GIL. An encoder that cannot get
+    # page-locked memory or its CUDA context falls back to "host" on its own,
+    # with a warning. No effect when the frames are encoded on the CPU.
+    nvenc_upload: str = "pinned"
     # CUDA context the pinned upload path runs its encoders in; one of
     # NVENC_CONTEXT_MODES. "own" costs GPU memory per encoder. It applies to
     # nvenc_upload: pinned only, so validate() refuses "own" with "host".
