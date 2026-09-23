@@ -38,8 +38,9 @@ kick-out and post-hoc alignment already drop. `auto` uses the frame ID when
 the self-test proves it and the trigger counter otherwise, because the chunk
 counter's timing relative to the edge it counts is not yet measured on a real
 camera.
-A GigE camera without extended IDs has a 16-bit frame ID; this backend
-unwraps it into a value that does not wrap.
+A GigE camera without extended IDs has a 16-bit frame ID that wraps after
+65535 or 65536 frames, depending on whether the counter uses 0. This backend
+unwraps it, deciding each wrap from the device clock (`_bid_frame_id16`).
 
 TIMESTAMPS
 The same self-test checks that the device clock is not zero, advances at the
@@ -58,8 +59,8 @@ UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
 ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
-names, the CounterValue chunk's timing, the 16-bit wrap cycle, and which
-temperature status and threshold nodes a model has.
+names, the CounterValue chunk's timing, and which temperature status and
+threshold nodes a model has.
 """
 from __future__ import annotations
 
@@ -124,6 +125,10 @@ CHUNK_SPELLINGS = {"Timestamp": ("Timestamp", "ChunkTimestamp"),
 #: a plain 16-bit counter runs 0..65535.
 _ID16_SKIP0 = 65535
 _ID16_FULL = 65536
+#: A 16-bit wrap is resolved only when the device clock puts the two frames
+#: across it within this share of a period of a whole number of periods, the
+#: bound `grab_thread._resync_offset` uses for the same kind of decision.
+ID16_RESID = 0.25
 
 #: Transport-layer stream counters `stream_stats` reports.
 STREAM_STAT_NODES = (
@@ -182,10 +187,12 @@ class FlirConfigError(RuntimeError):
 
 
 class FlirFrameError(RuntimeError):
-    """A delivered image whose layout the capture path cannot take (a wider
-    pixel, a stride that is not the width, another size). Raised from
-    `retrieve()` after the image is released, so the grab loop counts it as a
-    frame error and retires the camera if every frame has it."""
+    """A delivered image the capture path cannot take. Raised from
+    `retrieve()`, after the image is released, for a layout the (H, W) view
+    cannot describe (a wider pixel, a stride that is not the width, another
+    size), and from `BlockID` for a 16-bit frame ID whose wrap the device
+    clock cannot decide. The grab loop counts it as a frame error and retires
+    the camera if every frame has it."""
 
 
 def _fmt_rate(bytes_per_s: float) -> str:
@@ -394,7 +401,9 @@ class FlirResult:
 
     Each attribute is one Spinnaker call on the image, made when it is read.
     `BlockID` and `TimeStamp` go through the functions the camera chose at
-    open (frame ID or trigger counter; image or chunk timestamp, in ns)."""
+    open (frame ID or trigger counter; image or chunk timestamp, in ns). On
+    a camera with 16-bit frame IDs, `BlockID` also reads the timestamp, which
+    decides the wraps."""
 
     __slots__ = ("_api", "_cam", "_img", "_released", "_view_open", "_pad")
 
@@ -501,9 +510,14 @@ class FlirCamera:
         self._arm_pending = False
         self._grabbing = False
         self._verify = True
-        # Frame-ID unwrap state, reset by every StartGrabbing.
+        # Frame-ID unwrap state, reset by every StartGrabbing: the previous
+        # frame's raw ID and timestamp, the first frame of the arm as
+        # (block ID, timestamp), and why the ordinal was lost, if it was.
         self._prev_raw = None
+        self._prev_ts = None
         self._id_acc = 0
+        self._id_ref = None
+        self._id_lost = None
         # Trigger-counter state, reset with the counter.
         self._ctr_prev = None
         self._ctr_acc = 0
@@ -542,7 +556,10 @@ class FlirCamera:
             else:
                 self._note_restart_counters()
         self._prev_raw = None
+        self._prev_ts = None
         self._id_acc = 0
+        self._id_ref = None
+        self._id_lost = None
         self._verify = True
         self._api.begin(self.handle)
         self._grabbing = True
@@ -571,17 +588,73 @@ class FlirCamera:
     def _bid_frame_id16(self, img) -> int:
         """A 16-bit frame ID unwrapped into a value that does not wrap.
 
-        The cycle is read from the first ID after each wrap: 0 means the
-        counter includes 0 (65536 values), anything else means it skips 0 as
-        a GigE Vision block ID does (65535). A frame lost at the wrap itself
-        hides which, and the probe's --wrap-test measures the model's cycle.
+        The counter's cycle is 65535 (1..65535 as a GigE Vision block ID, or
+        0..65534) or 65536 (0..65535), and the first ID after a wrap does not
+        tell which when a frame is lost at the wrap. So each wrap is decided
+        by the device clock: `_id16_cycle` counts the trigger periods since
+        the previous frame and takes the cycle that gives that many IDs. The
+        timestamp read here is one more SDK call per frame, made only on a
+        GigE camera without extended IDs.
+
+        A wrap the clock cannot decide leaves the arm without an ordinal:
+        this image and every later one of the arm raise FlirFrameError, and
+        the grab loop retires the camera after its consecutive-error limit.
         """
+        lost = self._id_lost
+        if lost is not None:
+            raise FlirFrameError(lost)
         raw = self._api.image_frame_id(img)
+        ts = self._ts(img)
         prev = self._prev_raw
-        if prev is not None and raw < prev - _ID16_FULL // 2:
-            self._id_acc += _ID16_FULL if raw == 0 else _ID16_SKIP0
+        if prev is None:
+            self._id_ref = (raw + self.id_offset + self._id_acc, ts)
+        elif raw < prev - _ID16_FULL // 2:
+            self._id_acc += self._id16_cycle(prev, raw, ts)
         self._prev_raw = raw
+        self._prev_ts = ts
         return raw + self.id_offset + self._id_acc
+
+    def _id16_cycle(self, prev: int, raw: int, ts: int) -> int:
+        """The cycle of the wrap from raw ID `prev` to `raw` (at device time
+        `ts`, in ns), or FlirFrameError.
+
+        The frame rate is this arm's own: unwrapped IDs over device time,
+        from the arm's first frame to the frame before the wrap. It counts
+        the periods between the two frames, which must land within
+        ID16_RESID of a whole number, and exactly one cycle must give that
+        many IDs. A trigger the camera ignored at the wrap makes both
+        cycles miss, and then no ordinal is guessed."""
+        ref_bid, ref_ts = self._id_ref
+        prev_bid = prev + self.id_offset + self._id_acc
+        prev_ts = self._prev_ts
+        if prev_bid <= ref_bid or prev_ts <= ref_ts:
+            problem = ("this acquisition has no earlier frame to measure its "
+                       "frame rate from")
+        else:
+            periods = (ts - prev_ts) * (prev_bid - ref_bid) / (prev_ts - ref_ts)
+            k = round(periods)
+            if k < 1 or abs(periods - k) > ID16_RESID:
+                problem = (f"the device clock puts {periods:.2f} frame periods "
+                           f"between them, not a whole number")
+            else:
+                for cycle in (_ID16_SKIP0, _ID16_FULL):
+                    if raw - prev + cycle == k:
+                        print(f"[flir] {self.serial}: 16-bit frame ID wrapped "
+                              f"from {prev} to {raw}; the device clock counts "
+                              f"{k} frame period(s), so the cycle is {cycle}",
+                              flush=True)
+                        return cycle
+                problem = (f"the device clock counts {k} frame period(s) "
+                           f"between them, which neither a 65535 nor a 65536 "
+                           f"cycle gives (an ignored trigger at the wrap does "
+                           f"this)")
+        self._id_lost = (
+            f"{self.who}: the 16-bit frame ID wrapped from {prev} to {raw}, "
+            f"and {problem}, so this frame and every later one of this "
+            f"acquisition have no trigger ordinal. Set camera.flir."
+            f"extended_ids: true if the camera offers GevGVSPExtendedIDMode.")
+        print(f"[flir] {self._id_lost}", flush=True)
+        raise FlirFrameError(self._id_lost)
 
     def _bid_counter(self, img) -> int:
         """The trigger ordinal from the image's CounterValue chunk: rising
@@ -1811,7 +1884,8 @@ class FlirBackend:
         elif cam.extended_ids:
             status = "enabled (GevGVSPExtendedIDMode On)"
         else:
-            status = "UNAVAILABLE (16-bit IDs, unwrapped by the FLIR backend)"
+            status = ("UNAVAILABLE (16-bit IDs; the FLIR backend unwraps them "
+                      "from the device clock)")
         print(f"[cam{i + 1}] extended (64-bit) block IDs: {status}",
               flush=True)
         return not cam.id16
