@@ -43,12 +43,22 @@ except Exception:  # OpenCV missing → coverage HUD disabled, rest of GUI still
 
 CALIBRATION_SCRIPT = Path(__file__).parent.parent / "1_calibrate.py"
 
-#: What makes a directory "already holds an acquisition". blockids, frametimes
-#: and the alignment archive count as data too: a directory whose mp4s were
-#: moved away for labelling still holds the metadata that makes them
-#: interpretable, and without these patterns it reads as empty.
+#: What makes a directory "already holds an acquisition". blockids, frametimes,
+#: the alignment archive and the stimulation record count as data too: a
+#: directory whose mp4s were moved away for labelling still holds what makes
+#: them interpretable, and without these patterns it reads as empty. Without
+#: stim_paradigm.json here, a new take into such a directory got no overwrite
+#: prompt and inherited the old take's paradigm.
 DATA_PATTERNS = ("*.mp4", "raw.bin", "stream.h264", "blockids.npy",
-                 "frametimes.npy", "alignment.npz")
+                 "frametimes.npy", "alignment.npz", "stim_paradigm.json")
+
+#: The previous run's session-level files a committed start removes. The stim
+#: files are among them because stim_trace.write_trace builds the trace from
+#: whatever stim_paradigm.json it finds: one left from a stimulated take would
+#: label every frame of a new, unstimulated take as stimulated.
+STALE_SESSION_FILES = ("WARNINGS.txt", "codet_frames.json",
+                       "stim_paradigm.json", "stim_paradigm.ino",
+                       "stim_trace.csv")
 
 
 def _has_capture_data(video_dir: Path) -> bool:
@@ -1353,11 +1363,13 @@ class MainWindow(QMainWindow):
         They must go, though: WARNINGS.txt is the only durable trace of a
         block-ID reconciliation, and a stale one beside a clean recording is
         exactly what someone trusts months later; a leftover raw_tail.bin is
-        appended to THIS recording's stream at stop; and a codet_frames.json
-        from a previous calibration points at frame numbers in videos this run
-        replaces.
+        appended to THIS recording's stream at stop; a codet_frames.json from
+        a previous calibration points at frame numbers in videos this run
+        replaces; and a stim_paradigm.json from a stimulated take becomes the
+        paradigm stim_trace.csv describes for this one, which the recording
+        writes again only when it has a paradigm of its own.
         """
-        for stale in ("WARNINGS.txt", "codet_frames.json"):
+        for stale in STALE_SESSION_FILES:
             try:
                 (self._video_dir / stale).unlink(missing_ok=True)
             except OSError:
