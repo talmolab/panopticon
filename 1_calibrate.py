@@ -38,6 +38,11 @@ matches its video, every camera pairs by frame index instead, which is right
 only for videos already aligned across cameras, and the report records the
 rule used (``pairing``).
 
+The report also records which serial each camera name had during the
+calibration (``camera_serials``, from the calibration's
+``session_metadata.json``), and warns when another acquisition in the same
+session records a different serial under a name the calibration solved.
+
 Exit protocol: every failure prints ``ERROR_CODE=<code>`` to stderr before
 exiting 1, so the GUI classifies the failure from the code instead of guessing
 from traceback text. A solve that drops cameras (too few detections, failed
@@ -66,6 +71,7 @@ from gui_app.board_detector import (  # noqa: E402
     CODET_KEY_BLOCK_IDS, calibration_video, codet_hint_key, codet_indices)
 from gui_app.frame_sync import unwrap_blockids  # noqa: E402
 from gui_app.recording_meta import camera_sort_key  # noqa: E402
+from gui_app.session_config import METADATA_FILENAME  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +182,7 @@ def get_charuco_obj_points(board):
 
 
 # ---------------------------------------------------------------------------
-# Camera directories and trigger ordinals
+# Camera directories, trigger ordinals and the serial map
 # ---------------------------------------------------------------------------
 
 def camera_dirs(calib_dir):
@@ -207,6 +213,72 @@ def camera_ordinals(cam_dir):
         return unwrap_blockids(ids), None
     except ValueError as e:
         return None, "blockids.npy: {}".format(e)
+
+
+def camera_serial_map(acq_dir) -> dict:
+    """``{camera name: serial}`` from an acquisition's session_metadata.json.
+
+    Empty when the file is missing or unreadable, or records no serials
+    (sessions written before the metadata carried them), or when its name
+    and serial lists differ in length, since the names could then not be
+    matched to serials.
+    """
+    try:
+        meta = json.loads((Path(acq_dir) / METADATA_FILENAME).read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+    names, serials = meta.get("camera_names"), meta.get("camera_serials")
+    if (not isinstance(names, list) or not isinstance(serials, list)
+            or len(names) != len(serials)):
+        return {}
+    return {str(n): str(s) for n, s in zip(names, serials) if s is not None}
+
+
+def serial_map_differences(calibration, other, names=None) -> list[str]:
+    """``"cam3: 111 in the calibration, 222 here"`` for each name whose serial
+    differs between two serial maps, in camera order.
+
+    Only names both maps record are compared, and only those in ``names``
+    when it is given (the cameras the solve kept).
+    """
+    common = set(calibration) & set(other)
+    if names is not None:
+        common &= set(names)
+    return ["{}: {} in the calibration, {} here".format(
+                cam, calibration[cam], other[cam])
+            for cam in sorted(common, key=camera_sort_key)
+            if calibration[cam] != other[cam]]
+
+
+def check_serial_maps(session_dir, calib_dir, serials, active, warnings):
+    """Warn for each other acquisition of the session whose serial map
+    differs from the calibration's on a solved camera.
+
+    The extrinsics describe the physical cameras present during the
+    calibration. A camera replaced or re-ordered since then keeps its name,
+    so its extrinsics would attach to another camera with nothing else on
+    disk to show it.
+    """
+    if not serials:
+        return
+    calib_dir = Path(calib_dir).resolve()
+    for acq in sorted(Path(session_dir).iterdir()):
+        if not acq.is_dir() or acq.resolve() == calib_dir:
+            continue
+        if not (acq / METADATA_FILENAME).exists():
+            continue
+        diffs = serial_map_differences(serials, camera_serial_map(acq), active)
+        if diffs:
+            warn("{}/{} records other cameras under names this calibration "
+                 "solved ({}). calibration.toml describes the cameras present "
+                 "during the calibration, so the extrinsics of those names do "
+                 "not fit {}. Recalibrate, or list camera_serials in the "
+                 "profile so each name keeps its camera".format(
+                     acq.name, METADATA_FILENAME, "; ".join(diffs), acq.name),
+                 warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -976,7 +1048,7 @@ def save_reprojection_histogram(path, pair_rms):
 
 def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                  components, dropped, hints_used, skip, warnings,
-                 pairing=None, codetections=None):
+                 pairing=None, codetections=None, camera_serials=None):
     """Assemble every quality figure of a solve into one plain dict.
 
     Written verbatim as ``calibration_report.json`` and rendered into the
@@ -988,8 +1060,9 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
     Each pair carries its ``grade`` (``rms_grade``), and the report carries
     the bands (``rms_bands_px``) and the median over the solved cameras'
     pairs (``pair_rms_median``). ``pairing`` (``"block_id"`` or
-    ``"frame_index"``) and ``codetections`` (pair -> views shared before
-    the pose-diverse cap) are recorded when given.
+    ``"frame_index"``), ``codetections`` (pair -> views shared before the
+    pose-diverse cap) and ``camera_serials`` (name -> serial during the
+    calibration) are recorded when given.
     """
     tree_rows = []
     for a, b in tree:
@@ -1027,6 +1100,10 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
         report["pair_rms_median"] = median
     if pairing is not None:
         report["pairing"] = pairing
+    if camera_serials is not None:
+        report["camera_serials"] = {
+            cam: camera_serials[cam]
+            for cam in sorted(camera_serials, key=camera_sort_key)}
     return report
 
 
@@ -1313,6 +1390,16 @@ def main():
             warn("{}: only {} detection frames (30+ recommended)".format(
                 cam, len(keys)), warnings)
 
+    # --- Camera identity ---
+    serials = camera_serial_map(calib_dir)
+    if serials:
+        check_serial_maps(args.session_dir, calib_dir, serials, active,
+                          warnings)
+    else:
+        notice("calibration/{} records no camera serials, so the report "
+               "cannot say which physical camera each name was".format(
+                   METADATA_FILENAME))
+
     hist_path = calib_dir / "reprojection_error_histogram.png"
     save_reprojection_histogram(hist_path, pair_rms)
 
@@ -1320,7 +1407,7 @@ def main():
     report = build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                           components, dropped, hints_used=bool(hints),
                           skip=args.skip, warnings=warnings, pairing=pairing,
-                          codetections=codetections)
+                          codetections=codetections, camera_serials=serials)
     out = calib_dir / "calibration.toml"
     write_calibration_toml(out, active, intrinsics, extrinsics, all_sizes,
                            meta=report)
