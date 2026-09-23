@@ -497,7 +497,8 @@ class GrabThread(QThread):
         #: ladder purely per camera.
         self._source_down_check = None
         #: Stall windows this thread sat out because every active camera was
-        #: silent, and when the first one began (perf_counter).
+        #: silent, and when the silence before the first one began
+        #: (perf_counter).
         self.source_down_stalls = 0
         self.source_down_since = None
         self._abandoned = False
@@ -1290,7 +1291,10 @@ class GrabThread(QThread):
                             consec_timeouts = 0
                             self.source_down_stalls += 1
                             if self.source_down_since is None:
-                                self.source_down_since = t0
+                                # When the silence began: this camera's
+                                # last result, or the source start.
+                                self.source_down_since = (
+                                    t0 - self.seconds_since_frame(t0))
                                 print(f"[grab{self._cam_index}] every active "
                                       f"camera is silent: waiting for the "
                                       f"trigger source instead of re-arming",
