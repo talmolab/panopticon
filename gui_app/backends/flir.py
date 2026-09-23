@@ -530,6 +530,12 @@ class FlirCamera:
         self._last_counter = None
         #: The witness for the current triggered arm, filled at stops.
         self.witness = None
+        # With an edge counter and no exposure counter, a frame_id camera
+        # keeps its last block ID per arm: frames acquired through the last
+        # frame that reached the host (`_bid_tracked`).
+        self._track_ids = False
+        self._arm_last_bid = 0
+        self._bid_inner = None
         self._bid = self._bid_frame_id
         self._ts = self._ts_image
 
@@ -563,6 +569,7 @@ class FlirCamera:
         self._id_acc = 0
         self._id_ref = None
         self._id_lost = None
+        self._arm_last_bid = 0
         self._verify = True
         self._api.begin(self.handle)
         self._grabbing = True
@@ -668,6 +675,14 @@ class FlirCamera:
         print(f"[flir] {self._id_lost}", flush=True)
         raise FlirFrameError(self._id_lost)
 
+    def _bid_tracked(self, img) -> int:
+        """The block ID, kept as this arm's last. A frame ID restarts at
+        every arm, so the last one is the number of frames the camera
+        acquired through that frame, whatever was lost before it."""
+        v = self._bid_inner(img)
+        self._arm_last_bid = v
+        return v
+
     def _bid_counter(self, img) -> int:
         """The trigger ordinal from the image's CounterValue chunk: rising
         edges on the trigger line since the counter was reset at arm.
@@ -729,6 +744,10 @@ class FlirCamera:
             self._bid = self._bid_frame_id_plus1
         else:
             self._bid = self._bid_frame_id
+        self._track_ids = (self.block_id_source == "frame_id"
+                           and set(self.counters.values()) == {"edges"})
+        if self._track_ids:
+            self._bid_inner, self._bid = self._bid, self._bid_tracked
         if self.ts_source == "chunk":
             self._ts = self._ts_chunk
         elif self.ts_scale != 1:
@@ -779,7 +798,8 @@ class FlirCamera:
                   f"trigger witness", flush=True)
             return
         self.witness = {"edges": None, "exposures": None, "gap_edges": 0,
-                        "stopped_at": None, "error": None, "rearms": 0}
+                        "stopped_at": None, "error": None, "rearms": 0,
+                        "id_frames": 0}
 
     def _ctr_delta(self, later: int, earlier: int) -> int:
         """`later - earlier` for two reads of one counter, across a wrap of
@@ -825,9 +845,14 @@ class FlirCamera:
 
     def _read_counters_at_stop(self, now=None) -> None:
         """Record the counters at a stop. `now` is the read StopGrabbing made
-        before EndAcquisition, or None to read them now."""
+        before EndAcquisition, or None to read them now. The arm's last
+        block ID is banked here too."""
         w = self.witness
-        if w is None or w["error"]:
+        if w is None:
+            return
+        w["id_frames"] += self._arm_last_bid
+        self._arm_last_bid = 0
+        if w["error"]:
             return
         if now is None:
             try:
@@ -2153,9 +2178,9 @@ class FlirBackend:
         With both counters the count is exact: edges on the trigger line
         minus exposures started is the number of triggers the camera
         ignored, leaving out edges that arrived while a stall re-arm had the
-        stream down. With the edge counter alone, edges minus frames
-        delivered counts ignored triggers and frames lost in transport
-        together, and the sentence says so."""
+        stream down. With the edge counter alone the count mixes ignored
+        triggers with frames lost in transport, and the sentence says so
+        and makes no claim about alignment (`_edge_only_sentences`)."""
         try:
             return self._witness_sentences(cam, int(frames_acquired))
         except Exception as e:
@@ -2200,15 +2225,7 @@ class FlirBackend:
                     f"started only {exposures} exposures, so it ignored "
                     f"{ignored} trigger(s).")
         else:
-            ignored = edges - frames
-            if ignored <= 0:
-                return []
-            what = (f"its trigger input ({line}) counted {edges} edges but "
-                    f"only {frames} frames reached the host, so up to "
-                    f"{ignored} trigger(s) were ignored or lost in transport "
-                    f"(this camera has no exposure counter to tell the two "
-                    f"apart; frame-ID gaps in blockids.npy are the transport "
-                    f"losses).")
+            return self._edge_only_sentences(cam, w, edges, frames)
         if ignored <= 0:
             return []
         if cam.block_id_source == "trigger_counter":
@@ -2223,6 +2240,46 @@ class FlirBackend:
                 f"reconstruction. Lower camera.exposure_us, or set "
                 f"camera.flir.block_id_source: trigger_counter so an ignored "
                 f"trigger becomes a gap."]
+
+    @staticmethod
+    def _edge_only_sentences(cam, w, edges: int, frames: int) -> list:
+        """The witness of a camera with an edge counter and no exposure
+        counter. Neither branch can tell an ignored trigger from a frame
+        lost in transport, so neither says the recording is misaligned.
+
+        In frame_id mode the frames the camera acquired come from its own
+        IDs: the last block ID of each arm, summed. A frame lost before the
+        last one that reached the host is inside that count, so what is
+        left is triggers ignored, or frames lost after the last delivered
+        one of an arm (a stall's, or the recording's last)."""
+        line = cam.trigger_line
+        if cam.block_id_source == "trigger_counter":
+            unexplained = edges - frames
+            if unexplained <= 0:
+                return []
+            return [f"its trigger input ({line}) counted {edges} edges but "
+                    f"only {frames} frames reached the host, so "
+                    f"{unexplained} trigger(s) were ignored or their frames "
+                    f"were lost in transport; this camera has no exposure "
+                    f"counter to tell the two apart. Its block IDs count the "
+                    f"edges, so each is a gap, which alignment drops from "
+                    f"every camera."]
+        acquired = w["id_frames"]
+        unexplained = edges - acquired
+        if unexplained <= 0:
+            return []
+        advice = (" Set camera.flir.block_id_source: trigger_counter, which "
+                  "this camera offers, so an ignored trigger becomes a gap."
+                  if cam.counter_chunk_ok else "")
+        return [f"its trigger input ({line}) counted {edges} edges and its "
+                f"frame IDs account for {acquired} frames acquired, so "
+                f"{unexplained} trigger(s) were ignored, or their frames were "
+                f"lost after the last frame that reached the host in an "
+                f"acquisition" + (" (it was re-armed after a stall)"
+                                  if w["rearms"] else "")
+                + ". This camera has no exposure counter to tell the two "
+                f"apart. Each ignored trigger moves its later block IDs one "
+                f"trigger away from the other cameras'." + advice]
 
     @classmethod
     def sdk_report(cls) -> str:
