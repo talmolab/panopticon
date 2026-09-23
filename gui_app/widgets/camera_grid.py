@@ -137,6 +137,18 @@ class CameraGridWidget(QWidget):
             raise ValueError(f"column count must be positive, got {cols}")
         self._cols = int(cols)
 
+    @staticmethod
+    def columns_for(num_cameras: int) -> int:
+        """Columns for a grid of ``num_cameras`` panes, wider than tall.
+
+        floor(sqrt(n)) rows and as many columns as that takes: 1 to 3 cameras
+        sit in one row, 4 in a 2x2 grid, 5 and 6 in two rows of three, 7 and 8
+        in two rows of four, 9 in 3x3. Any camera count gets a grid; none is
+        assumed.
+        """
+        n = max(1, int(num_cameras))
+        return math.ceil(n / math.isqrt(n))
+
     def grid_aspect(self) -> float:
         if self._num_cameras == 0:
             return 2.4

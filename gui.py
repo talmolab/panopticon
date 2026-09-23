@@ -1,4 +1,6 @@
 """Panopticon Acquisition GUI — launch with: conda run -n 3dpose python gui.py"""
+import ntpath
+import os
 import sys
 import time
 import traceback
@@ -147,6 +149,161 @@ def _report_startup_failure(exc):
         pass
 
 
+#: Set to an absolute path to put the single-instance lock somewhere else.
+#: The offline tests set it so they never touch the operator's own lock.
+ENV_LOCK_FILE = "PANOPTICON_LOCK_FILE"
+
+#: Exit status of a launch refused because Panopticon is already running.
+EXIT_ALREADY_RUNNING = 3
+
+#: Held for the life of the process once taken; releasing it is what lets
+#: the next launch start.
+_INSTANCE_LOCK = None
+
+
+def _lock_path() -> Path:
+    """The per-user single-instance lock file.
+
+    Per user rather than per checkout, so a second copy launched from another
+    clone or worktree is refused as well: both would open the same cameras
+    and the same serial port.
+    """
+    override = os.environ.get(ENV_LOCK_FILE)
+    if override:
+        return Path(override)
+    from PyQt5.QtCore import QStandardPaths
+    from gui_app import settings
+    base = QStandardPaths.writableLocation(QStandardPaths.GenericDataLocation)
+    return Path(base) / settings.ORG / settings.APP / "gui.lock"
+
+
+def _entry_scripts() -> frozenset:
+    """File names, lower-cased, of the scripts that make a process a
+    Panopticon: every entry point the probe guard lists."""
+    from gui_app import probe_guard
+    return frozenset(m.lower() for m in probe_guard.PANOPTICON_MARKERS
+                     if m.lower().endswith(".py"))
+
+
+def _is_launcher(arg0: str) -> bool:
+    """True for a Python interpreter (python, python3.12, pythonw, the py
+    launcher) or uv, with or without a directory and ".exe"."""
+    name = ntpath.basename(arg0).lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name in ("py", "uv") or name.startswith("python")
+
+
+def _runs_entry_script(argv, scripts) -> bool:
+    """True when ``argv`` is an interpreter, or uv, running one of ``scripts``.
+
+    RULE: an argument counts only when its whole file name is an entry
+    script, and only in an interpreter's or uv's command line. REASON: the
+    command line as text matches far too much. The repository is usually
+    cloned into a folder named panopticon, so every program started from its
+    virtual environment has that word in its interpreter path: a notebook
+    kernel, an offline script, a language server. labelgui.py ends in gui.py,
+    and an editor with gui.py open names the file in its own command line.
+    Refusing a launch over any of these stops the operator for nothing.
+    """
+    if not argv or not _is_launcher(argv[0]):
+        return False
+    return any(ntpath.basename(a).lower() in scripts for a in argv[1:])
+
+
+def _other_panopticons():
+    """(pid, command line) of other Panopticon processes, or None if unknown.
+
+    A Panopticon process is a GUI started some other way or a probe that
+    holds the cameras: an interpreter or uv running an entry script the
+    probe guard lists (_runs_entry_script). This process and its ancestors
+    (uv, the virtual environment's launcher) are not counted.
+
+    RULE: unknown when this process's own command line cannot be read.
+    REASON: psutil reports a command line it is not allowed to read as empty
+    instead of raising, so on a restricted account every row is empty,
+    nothing matches, and the scan would read as clear.
+    """
+    try:
+        import psutil
+        from gui_app import probe_guard
+        scripts = _entry_scripts()
+        rows, own = [], False
+        for proc in psutil.process_iter(["pid", "ppid", "cmdline"]):
+            info = proc.info
+            argv = list(info.get("cmdline") or [])
+            pid = int(info["pid"])
+            if argv and pid == os.getpid():
+                own = True
+            rows.append((pid, int(info.get("ppid") or 0), argv))
+        if not own:
+            print("[startup] this process's own command line could not be "
+                  "read, so the process scan cannot see any", flush=True)
+            return None
+        mine = probe_guard._own_lineage(rows)
+        return [(pid, " ".join(" ".join(argv).split())[:120])
+                for pid, _ppid, argv in rows
+                if pid not in mine and _runs_entry_script(argv, scripts)]
+    except Exception as e:
+        print(f"[startup] the process scan failed: {e}", flush=True)
+        return None
+
+
+def _single_instance_refusal() -> str | None:
+    """Take the single-instance lock, or say why this launch must not start.
+
+    RULE: a second launch exits before any camera, serial, benchmark or
+    firmware work. REASON: a second instance runs the launch hardware check
+    (a disk speed test, two libx264 encodes and an NVENC probe that takes
+    every session the driver grants) alongside the first one's recording,
+    which is the contention that produces false lag, and 1.5 s later it can
+    start a firmware flash on the board the first one drives.
+
+    Two checks, because each misses a case: the lock sees another GUI however
+    it was launched, and the scan sees a probe, which takes no GUI lock. A
+    process table that cannot be read does not stop the launch: the lock
+    still covers GUI against GUI, and a GUI that will not open on a locked
+    down account is worse than a probe run beside it.
+    """
+    global _INSTANCE_LOCK
+    from PyQt5.QtCore import QLockFile
+    path = _lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"[startup] could not create {path.parent}: {e}", flush=True)
+    lock = QLockFile(str(path))
+    # Zero: a lock is stale only when the process holding it has gone, never
+    # because of its age; a GUI left running for days still holds it.
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(0):
+        if lock.error() == QLockFile.LockFailedError:
+            _ok, pid, _host, _app = lock.getLockInfo()
+            return (f"Panopticon is already running (pid {pid}).\n\nSwitch to "
+                    f"that window, or close it first. A second copy would "
+                    f"compete with it for the cameras, the trigger board and "
+                    f"the GPU encoder, and could flash the trigger board "
+                    f"while it records.")
+        print(f"[startup] the single-instance lock {path} could not be "
+              f"taken (error {lock.error()}); relying on the process scan",
+              flush=True)
+    else:
+        _INSTANCE_LOCK = lock
+    others = _other_panopticons()
+    if others is None:
+        print("[startup] the process table could not be read; the "
+              "single-instance lock is the only check", flush=True)
+        return None
+    if others:
+        listed = "\n".join(f"  pid {pid}  {cmd}" for pid, cmd in others[:5])
+        if len(others) > 5:
+            listed += f"\n  and {len(others) - 5} more"
+        return (f"Panopticon, or one of its probes, is already running:\n\n"
+                f"{listed}\n\nClose it first. Two copies compete for the "
+                f"cameras, the trigger board and the GPU encoder.")
+    return None
+
+
 def make_splash():
     px = QPixmap(360, 120)
     px.fill(QColor(25, 25, 42))
@@ -162,6 +319,10 @@ def make_splash():
 
 
 def main():
+    # --force starts a second copy anyway, for an operator who has checked
+    # the machine by hand. Qt never sees it.
+    force = "--force" in sys.argv[1:]
+    qt_argv = [a for a in sys.argv if a != "--force"]
     # One grab thread and one encoder thread per camera, plus the UI, all
     # sharing the GIL during a recording. The default 5 ms switch interval
     # lets a GIL-holding thread stall the others for whole milliseconds; 1 ms
@@ -179,12 +340,26 @@ def main():
     except Exception:
         pass
 
-    app = QApplication(sys.argv)
+    app = QApplication(qt_argv)
     app.setApplicationName("Panopticon Acquisition")
     icon_path = Path(__file__).parent / "panopticon.ico"
     if icon_path.exists():
         from PyQt5.QtGui import QIcon
         app.setWindowIcon(QIcon(str(icon_path)))
+
+    # Before the splash and before main_window is imported: nothing that
+    # opens a camera, the serial port or a benchmark may run in a refused
+    # launch.
+    refusal = None if force else _single_instance_refusal()
+    if refusal:
+        print(f"[startup] REFUSING TO START: {refusal}", flush=True)
+        QMessageBox.critical(
+            None, "Panopticon is already running",
+            refusal + "\n\nTo start a second copy anyway, run gui.py --force.")
+        sys.exit(EXIT_ALREADY_RUNNING)
+    if force:
+        print("[startup] --force: the single-instance check was skipped",
+              flush=True)
 
     _install_excepthook()
 
