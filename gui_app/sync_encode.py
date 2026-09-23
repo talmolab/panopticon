@@ -210,6 +210,11 @@ class SyncEncodeRouter:
         """Released frames of camera `cam` waiting for encoder queue room."""
         return len(self._backlog[cam])
 
+    @property
+    def retired_reasons(self) -> list:
+        """(camera index, reason) for every retirement, in order."""
+        return list(self._coord.retired_reasons)
+
     def retire(self, cam: int, reason: str = ""):
         """Drop a camera from the alignment set (stalled and unrecoverable)."""
         with self._lock:
