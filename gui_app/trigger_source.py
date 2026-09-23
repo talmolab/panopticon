@@ -42,13 +42,19 @@ ARM_SETTLE_PERIODS = 5
 #: other half covers the arming itself and the arm check, so the wait ends
 #: before a camera with no frame starts its stall ladder.
 FIRST_TRIGGER_TIMEOUT_S = PRE_TRIGGER_GRACE_S / 2
-#: Seconds every camera must be silent, after triggers have arrived, before
-#: the source counts as stopped and the recording finishes. Longer than the
-#: all-cameras-silent threshold, so a pause of a few hundred milliseconds in
-#: the network does not end a recording, and shorter than one stall window of
-#: the grab loop (five seconds of timeouts), so no camera sits one out for
-#: what is the end of the recording.
+#: Seconds every camera must at least be silent, after triggers have
+#: arrived, before the source counts as stopped and the recording finishes
+#: (ExternalTriggerSource.end_silence_s). Longer than the all-cameras-silent
+#: threshold, so a pause of a few hundred milliseconds in the network does
+#: not end a recording, and shorter than one stall window of the grab loop
+#: (five seconds of timeouts), so no camera sits one out for what is the end
+#: of the recording.
 SOURCE_STOPPED_S = 2 * SOURCE_SILENT_S
+#: Trigger periods of silence on every camera that a slow source must add
+#: up to before it counts as stopped. One period is the gap between two
+#: pulses, so two leave a whole period for a late one. At the usual rates
+#: the fixed thresholds are longer and this changes nothing.
+STOPPED_PERIODS = 2
 #: Seconds the stop waits for the operator to stop the source. After that the
 #: recording finishes anyway: Panopticon stops the grab threads that are
 #: still receiving frames, and the warnings say so.
@@ -198,6 +204,30 @@ class ExternalTriggerSource(TriggerSource):
         fn = getattr(camera_mgr, "results_received", None)
         counts = fn() if fn is not None else camera_mgr.frame_counts
         return any(int(n) > 0 for n in counts)
+
+    @staticmethod
+    def stop_silence_s(fps) -> float:
+        """Silence on every camera after which a source the operator was
+        asked to stop counts as stopped: SOURCE_SILENT_S, or STOPPED_PERIODS
+        trigger periods at a rate slow enough for those to be longer."""
+        fps = float(fps or 0)
+        periods = STOPPED_PERIODS / fps if fps > 0 else 0.0
+        return max(SOURCE_SILENT_S, periods)
+
+    @staticmethod
+    def end_silence_s(fps) -> float:
+        """Silence on every camera after which a running source counts as
+        stopped and the recording ends by itself: SOURCE_STOPPED_S, or twice
+        STOPPED_PERIODS trigger periods at a rate slow enough for those to
+        be longer.
+
+        Twice the stop's threshold, because nobody asked for this end. The
+        profile's rates are whole numbers of hertz, so the longest this gets
+        is 4 s at 1 Hz, still shorter than one stall window of the grab loop.
+        """
+        fps = float(fps or 0)
+        periods = 2 * STOPPED_PERIODS / fps if fps > 0 else 0.0
+        return max(SOURCE_STOPPED_S, periods)
 
     @staticmethod
     def source_stopped(camera_mgr, silent_s: float = SOURCE_STOPPED_S) -> bool:

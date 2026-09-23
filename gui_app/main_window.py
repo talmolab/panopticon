@@ -35,8 +35,8 @@ from gui_app import rig_setup
 from gui_app import settings
 from gui_app import stim_compiler
 from gui_app.session_config import SessionConfig, RigProfile
-from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S, SOURCE_STOPPED_S,
-                                    STOP_WAIT_S, ExternalTriggerSource,
+from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S, STOP_WAIT_S,
+                                    ExternalTriggerSource,
                                     make_trigger_source)
 from gui_app.widgets.camera_grid import CameraGridWidget
 from gui_app.widgets.sidebar import SidebarWidget
@@ -2759,9 +2759,10 @@ class MainWindow(QMainWindow):
 
         awaiting: the first result on any camera starts the recording
         proper; the deadline passing is "no trigger received". running:
-        every camera silent for SOURCE_STOPPED_S means the operator stopped
+        every camera silent for end_silence_s means the operator stopped
         the source, and the acquisition finishes through the normal stop.
-        stopping: every camera silent, or STOP_WAIT_S gone, finishes it.
+        stopping: every camera silent for stop_silence_s, or STOP_WAIT_S
+        gone, finishes it.
 
         RULE: each deadline is checked whatever the manager read returns.
         REASON: a read that raises on every tick would otherwise hold the
@@ -2788,18 +2789,18 @@ class MainWindow(QMainWindow):
                         ExternalTriggerSource.prompt_text(
                             fps, self._ext_deadline - now, self._acq_label()))
             elif phase == "running":
+                end_s = ExternalTriggerSource.end_silence_s(fps)
                 if self._watch_read(
-                        lambda: ExternalTriggerSource.source_stopped(
-                            mgr, SOURCE_STOPPED_S)):
-                    print(f"[acq] every camera silent for over "
-                          f"{SOURCE_STOPPED_S:g} s: the external trigger "
-                          f"source has stopped; finishing the "
-                          f"{self._acq_label()}", flush=True)
+                        lambda: ExternalTriggerSource.source_stopped(mgr,
+                                                                     end_s)):
+                    print(f"[acq] every camera silent for over {end_s:g} s: "
+                          f"the external trigger source has stopped; "
+                          f"finishing the {self._acq_label()}", flush=True)
                     self._end_external_acquisition()
             elif phase == "stopping":
+                stop_s = ExternalTriggerSource.stop_silence_s(fps)
                 stopped = self._watch_read(
-                    lambda: ExternalTriggerSource.source_stopped(
-                        mgr, SOURCE_SILENT_S))
+                    lambda: ExternalTriggerSource.source_stopped(mgr, stop_s))
                 if stopped or now >= self._ext_deadline:
                     if not stopped:
                         print(f"[acq] WARNING: frames still arriving "
@@ -2900,7 +2901,8 @@ class MainWindow(QMainWindow):
         if phase == "running":
             try:
                 stopped = ExternalTriggerSource.source_stopped(
-                    self._camera_mgr, SOURCE_SILENT_S)
+                    self._camera_mgr,
+                    ExternalTriggerSource.stop_silence_s(self._acq_fps))
             except Exception as e:
                 print(f"[acq] could not read the cameras' silence: {e}",
                       flush=True)
