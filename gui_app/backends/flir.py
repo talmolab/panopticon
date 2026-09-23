@@ -65,7 +65,9 @@ Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
 ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
 names, the CounterValue chunk's timing, whether a model's counters can be
-read while it streams, and which temperature status and threshold nodes a
+read while it streams, whether a trigger whose delayed exposure has not
+started when EndAcquisition runs is still exposed (if not, the witness
+counts it as ignored), and which temperature status and threshold nodes a
 model has.
 """
 from __future__ import annotations
@@ -595,21 +597,26 @@ class FlirCamera:
 
     def StopGrabbing(self) -> None:
         """End the stream (EndAcquisition). Every image must be released
-        first, which the grab loop guarantees. The trigger counters are read
-        here, just before EndAcquisition while the camera still acquires, so
-        a re-arm's down-time window starts no later than the stream stops. A
+        first, which the grab loop guarantees.
+
+        The trigger counters are read on both sides of EndAcquisition. The
+        exposures and then the edges are read while the camera still
+        acquires, so an edge that arrives while acquisition stops is not
+        taken for an ignored trigger. The exposures are read again once it
+        has stopped. No exposure starts after that, so every edge counted
+        before the stop has its exposure in that count, however late the
+        exposure started (a TriggerDelay, or readout holding it back). A
         camera whose counters cannot be read while it streams is read after
-        EndAcquisition instead."""
+        EndAcquisition only."""
         was = self._grabbing
         self._grabbing = False
         streaming = self._api.is_streaming(self.handle)
-        before_end = None
-        if was and self._triggered and streaming:
-            before_end = self._try_read_counters()
+        witness = was and self._triggered
+        before = self._read_before_end() if witness and streaming else None
         if streaming:
             self._api.end(self.handle)
-        if was and self._triggered:
-            self._read_counters_at_stop(before_end)
+        if witness:
+            self._read_counters_at_stop(before)
 
     def IsGrabbing(self) -> bool:
         return self._grabbing
@@ -802,16 +809,13 @@ class FlirCamera:
         n.sete("CounterSelector", selector)
         return n.geti("CounterValue")
 
-    def _read_counters(self, exposures_first: bool = False) -> dict:
-        """Every witness counter, read one after the other. A re-arm window
-        starts with a read of the edges first and ends with one of the
-        exposures first, so an edge that lands between the two reads of
-        either is counted as down time. That can hide an ignored trigger,
-        never invent one."""
-        items = list(self.counters.items())
-        if exposures_first:
-            items.reverse()
-        return {what: self._counter_value(sel) for sel, what in items}
+    def _read(self, order) -> dict:
+        """The witness counters named in `order` ("edges", "exposures"),
+        read one after the other in that order. A counter this camera does
+        not have is left out."""
+        sel = {what: s for s, what in self.counters.items()}
+        return {what: self._counter_value(sel[what]) for what in order
+                if what in sel}
 
     def _reset_counters(self) -> None:
         """Reset the witness counters for a new triggered arm.
@@ -839,9 +843,14 @@ class FlirCamera:
                   f"({type(e).__name__}: {e}); this acquisition has no "
                   f"trigger witness", flush=True)
             return
-        self.witness = {"edges": None, "exposures": None, "gap_edges": 0,
-                        "stopped_at": None, "error": None, "rearms": 0,
-                        "id_frames": 0}
+        self.witness = self._new_witness()
+
+    @staticmethod
+    def _new_witness() -> dict:
+        """The witness of a triggered arm whose counters were just reset."""
+        return {"edges": None, "exposures": None, "exposures_check": None,
+                "gap_edges": 0, "stopped_at": None, "error": None,
+                "rearms": 0, "id_frames": 0}
 
     def _ctr_delta(self, later: int, earlier: int) -> int:
         """`later - earlier` for two reads of one counter, across a wrap of
@@ -853,17 +862,22 @@ class FlirCamera:
         """Leave the edges of a re-arm's down time out of the witness.
 
         Called once BeginAcquisition has returned. The window runs from the
-        read at StopGrabbing to this read, so it covers all the time the
-        camera could not expose, BeginAcquisition included. An edge the
-        camera exposed inside the window is in both counters' increase, so
-        edges minus exposures over the window is the down-time edges. With
-        no exposure counter every edge in the window is left out, which can
-        only hide an ignored trigger, never report a false one."""
+        StopGrabbing reads to this one, so it covers all the time the camera
+        could not expose, BeginAcquisition included. At its start the edges
+        were read before EndAcquisition and the exposures after it, so the
+        exposure of every edge before the window is outside it. At its end
+        the exposures are read first and then the edges, so an exposure
+        inside the window has its edge inside it too. Edges minus exposures
+        over the window is then the down-time edges, plus any edge exposed
+        between two reads of one end. That can hide an ignored trigger. It
+        adds one only for an edge counted before the window whose delayed
+        exposure EndAcquisition cancels, which the module's UNKNOWNS name.
+        With no exposure counter every edge in the window is left out."""
         w = self.witness
         if w is None or w["error"] or w["stopped_at"] is None:
             return
         try:
-            now = self._read_counters(exposures_first=True)
+            now = self._read(("exposures", "edges"))
         except Exception as e:
             w["error"] = f"{type(e).__name__}: {e}"
             return
@@ -874,21 +888,27 @@ class FlirCamera:
         w["gap_edges"] += max(0, down)
         w["rearms"] += 1
 
-    def _try_read_counters(self):
-        """The witness counters now, or None when there is no witness or
-        the read fails."""
+    def _read_before_end(self):
+        """The witness counters just before EndAcquisition, the exposures
+        and then the edges, or None when there is no witness or the read
+        fails."""
         w = self.witness
         if w is None or w["error"]:
             return None
         try:
-            return self._read_counters()
+            return self._read(("exposures", "edges"))
         except Exception:
             return None
 
-    def _read_counters_at_stop(self, now=None) -> None:
-        """Record the counters at a stop. `now` is the read StopGrabbing made
-        before EndAcquisition, or None to read them now. The arm's last
-        block ID is banked here too."""
+    def _read_counters_at_stop(self, before) -> None:
+        """Record the counters at a stop, after EndAcquisition. `before` is
+        the read StopGrabbing made before EndAcquisition, or None. The arm's
+        last block ID is banked here too.
+
+        The edges are `before`'s and the exposures are read now; without
+        `before`, both are read now, the exposures first. `exposures_check`
+        keeps the exposures read before the edges, the bound a working
+        exposure counter meets (`_implausible_counts`)."""
         w = self.witness
         if w is None:
             return
@@ -896,15 +916,20 @@ class FlirCamera:
         self._arm_last_bid = 0
         if w["error"]:
             return
-        if now is None:
-            try:
-                now = self._read_counters()
-            except Exception as e:
-                w["error"] = f"{type(e).__name__}: {e}"
-                return
+        try:
+            if before is None:
+                now = self._read(("exposures", "edges"))
+                check = now.get("exposures")
+            else:
+                now = dict(before, **self._read(("exposures",)))
+                check = before.get("exposures")
+        except Exception as e:
+            w["error"] = f"{type(e).__name__}: {e}"
+            return
         w["stopped_at"] = now
         w["edges"] = now.get("edges")
         w["exposures"] = now.get("exposures")
+        w["exposures_check"] = check
 
 
 def _read_chunk(api, img, key: str) -> tuple:
@@ -2437,7 +2462,9 @@ class FlirBackend:
 
         Every frame that reached the host was exposed on a trigger edge, so
         a working edge counter and a working exposure counter each reach at
-        least the frames delivered, and exposures never pass edges. A
+        least the frames delivered. Exposures read before the edges never
+        pass them (`exposures_check`); the exposures read after
+        EndAcquisition may, by the edges that arrived between the reads. A
         counter narrower than 2**31 is checked only while the frames
         delivered are fewer than its period, so the counts cannot have
         wrapped."""
@@ -2445,6 +2472,7 @@ class FlirBackend:
         if period and frames >= period:
             return None
         edges, exposures = w["edges"], w["exposures"]
+        check = w["exposures_check"]
         line = cam.trigger_line
         if edges < frames:
             return (f"its trigger-line counter counted {edges} edges on "
@@ -2452,9 +2480,9 @@ class FlirBackend:
         if exposures is not None and exposures < frames:
             return (f"its exposure counter counted {exposures} exposures for "
                     f"{frames} frames that reached the host", False)
-        if exposures is not None and exposures > edges:
-            return (f"its exposure counter counted {exposures} exposures, "
-                    f"more than the {edges} edges on {line}", True)
+        if check is not None and check > edges:
+            return (f"its exposure counter counted {check} exposures, more "
+                    f"than the {edges} edges on {line}", True)
         return None
 
     @staticmethod
