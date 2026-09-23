@@ -2896,53 +2896,121 @@ class MainWindow(QMainWindow):
         return ", ".join(names[:-1]) + " and " + names[-1]
 
     def _warn_if_unequal_videos(self):
-        """Flag a kick-mode session whose per-camera videos are not equal
-        length, without re-encoding it. The operator chose to skip auto-align,
-        but an unequal set left unremarked is the silent trap this reports.
+        """Flag a kick-mode session whose per-camera videos are not all the
+        same triggers, without re-encoding it. The operator chose to skip
+        auto-align, but an unequal set left unremarked is the silent trap this
+        reports.
+
+        RULE: a retired camera is named as retired, and a camera that ended
+        early is named with the command that aligns the others. REASON:
+        trimming every camera to the frames all of them share cuts the
+        cameras that kept recording down to the one that stopped, which is
+        the data the retirement exists to keep; 2_align.py leaves a camera
+        with a RETIRED.json out by default, and --exclude leaves out any
+        other.
         """
+        fps = self._acq_fps or self._session_rig().frame_rate
+        retired = recording_meta.retired_cameras(self._video_dir)
         try:
-            _names, blocks, _videos = alignment.load_blockids(self._video_dir)
-            if not alignment.needs_alignment(blocks):
-                return
+            an = alignment.analyse(self._video_dir, fps, exclude=retired)
         except Exception as e:
             print(f"[align] equal-length check skipped ({e})", flush=True)
             return
-        note = ("The cameras did not all keep the same frames, so the videos "
-                "are not equal length. Auto-alignment is off, so they are left "
-                "as recorded. Run 2_align.py on this session to trim them to "
-                "the common frames before using them together.")
+        notes = []
+        if retired:
+            names = self._names_text(retired)
+            one = len(retired) == 1
+            rest = ("hold the same triggers" if not an.needed
+                    else "do not all hold the same triggers either (below)")
+            notes.append(
+                f"{names} {'was' if one else 'were'} retired during the "
+                f"recording, so {'its video ends' if one else 'their videos end'} "
+                f"early and the videos are not equal length. The other "
+                f"cameras' videos {rest}. 2_align.py leaves a retired camera "
+                f"out by default (its RETIRED.json), so it never cuts the "
+                f"others to {'its' if one else 'their'} length; pair "
+                f"{'its' if one else 'their'} frames with theirs by block ID "
+                f"(blockids.npy), not by frame number.")
+        if an.needed:
+            short = {nm: why for nm, why in an.short_cams.items()}
+            if short:
+                names = ",".join(short)
+                notes.append(
+                    "The cameras did not all keep the same frames: "
+                    + "; ".join(f"{nm} {why}" for nm, why in short.items())
+                    + f". Run 2_align.py --replace --exclude {names} on this "
+                      f"session to align the other cameras and leave "
+                      f"{self._names_text(short)} as recorded, or add "
+                      f"--truncate-to-shortest to cut every camera to the "
+                      f"{an.common.size} triggers they share.")
+            else:
+                notes.append(
+                    "The cameras did not all keep the same frames, so the "
+                    "videos are not equal length. Auto-alignment is off, so "
+                    "they are left as recorded. Run 2_align.py --replace on "
+                    "this session to trim them to the common frames before "
+                    "using them together.")
+        if not notes:
+            return
+        note = "\n\n".join(notes)
         print(f"[align] {note}", flush=True)
-        warnings_path = self._video_dir / "WARNINGS.txt"
-        try:
-            with warnings_path.open("a", encoding="utf-8") as f:
-                f.write("\n" + note + "\n")
-        except OSError as e:
-            print(f"[align] could not append to WARNINGS.txt: {e}", flush=True)
+        self._append_warnings(notes)
         QMessageBox.warning(self, "Videos are not equal length", note)
 
     def _start_alignment(self) -> bool:
-        """Start the align worker if cameras dropped different frames. Returns
-        True if alignment is now running (caller should defer the idle reset)."""
+        """Start the post-hoc alignment if cameras dropped different frames.
+        Returns True if alignment is now running (caller should defer the
+        idle reset).
+
+        RULE: a camera that was retired, or that recorded no frames, is left
+        out of the alignment, and every camera left out, every skip and every
+        failure is written to WARNINGS.txt and shown. REASON: aligning keeps
+        only the triggers every camera holds, so such a camera would cut the
+        others down to its frames or to none, and a problem reported only on
+        stdout reads afterwards as a recording that was aligned. The replace
+        itself refuses while another camera ended early or stopped
+        mid-recording (alignment.refusal_reason); the index is written and
+        _on_align_done says why.
+        """
+        rig = self._session_rig()
+        fps = self._acq_fps or rig.frame_rate
+        exclude = dict(recording_meta.retired_cameras(self._video_dir))
         try:
-            _names, blocks, _videos = alignment.load_blockids(self._video_dir)
+            an = alignment.analyse(self._video_dir, fps, exclude=exclude)
+            if an.empty_cams:
+                exclude.update(an.empty_cams)
+                an = alignment.analyse(self._video_dir, fps, exclude=exclude)
         except Exception as e:
-            print(f"[align] skipped ({e})", flush=True)
+            problem = (f"The post-hoc alignment did not run on this recording "
+                       f"({e}), so no video was aligned and the videos are "
+                       f"left as recorded: frame i is not the same trigger on "
+                       f"every camera. Fix the cause, then run 2_align.py "
+                       f"--replace on {self._video_dir}.")
+            print(f"[align] {problem}", flush=True)
+            self._append_warnings([problem])
+            QMessageBox.warning(self, "Videos were not aligned", problem)
             return False
-        try:
-            if not alignment.needs_alignment(blocks):
-                return False  # loss-free: videos already equal-length + aligned
-        except Exception as e:
-            print(f"[align] check failed ({e})", flush=True)
+        self._align_notes = [
+            f"{nm} was left out of the post-hoc alignment ({why}). Its video "
+            f"and block IDs are as recorded, so pair its frames with the "
+            f"others by block ID (blockids.npy), not by frame number."
+            for nm, why in exclude.items()]
+        if not an.needed:
+            # Loss-free among the cameras aligned: the videos already hold the
+            # same triggers.
+            if self._align_notes:
+                self._append_warnings(self._align_notes)
+                QMessageBox.warning(self, "Cameras left out of the alignment",
+                                    "\n\n".join(self._align_notes))
             return False
 
         self._state = State.ALIGNING
         self._sidebar.set_status("ALIGNING", "#ffaa00")
         self._sidebar.set_toggles_enabled(False)
         self.statusBar().showMessage("Aligning videos by trigger (re-encode)...")
-        rig = self._session_rig()
         self._align_worker = AlignWorker(
-            self._video_dir, self._acq_fps, rig.quality,
-            parallel=rig.encode_parallel)
+            self._video_dir, fps, rig.quality,
+            parallel=rig.encode_parallel, exclude=exclude)
         self._align_worker.progress.connect(self._on_align_progress)
         self._align_worker.finished_align.connect(self._on_align_done)
         self._align_worker.start()
@@ -2978,13 +3046,24 @@ class MainWindow(QMainWindow):
         self._cam_op.start()
 
     def _on_align_done(self, summary: dict):
+        if self._quitting:
+            # The window is closing: the quit dialog already said what is left
+            # to do, and nothing here may start a state or a worker.
+            return
         self._sidebar.hide_progress()
         failures = list(summary.get("failures") or [])
         replaced_cams = list(summary.get("replaced_cams") or [])
+        failed_cams = list(summary.get("failed_cams") or [])
+        refused = summary.get("refused")
+        index_error = summary.get("index_error")
         n_cams = len(summary.get("camera_names") or self._camera_names)
         if summary.get("error"):
             self.statusBar().showMessage(
                 f"Alignment failed: {summary['error']} — videos left as-is")
+        elif refused:
+            self.statusBar().showMessage(
+                "Alignment index written; no video was replaced (see the "
+                "dialog)")
         elif summary.get("replaced"):
             self.statusBar().showMessage(
                 f"Aligned: {summary.get('common_frames', 0)} synchronized "
@@ -2996,17 +3075,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Aligned {len(replaced_cams)} of {n_cams} cameras "
                 f"({', '.join(replaced_cams)}); "
-                f"{len(failures)} could not be replaced — see the log")
+                f"{len(failed_cams) or len(failures)} could not be replaced — "
+                f"see WARNINGS.txt")
         elif failures:
             self.statusBar().showMessage(
                 f"Alignment replaced no camera ({failures[0]}) — originals kept")
         else:
             self.statusBar().showMessage("Alignment: videos already aligned")
-        if summary.get("index_error"):
-            QMessageBox.warning(
-                self, "Alignment could not index the videos",
-                f"{summary['index_error']}\n\nThe videos have been left as "
-                f"they are.")
+        self._report_alignment(summary, failures, replaced_cams, failed_cams,
+                               refused, index_error)
         # stim_trace.csv is written during the finalize, i.e. BEFORE the align
         # pass rewrites each camera's blockids.npy / frametimes.npy and
         # replaces its mp4, so its frame column no longer matches any camera
@@ -3018,6 +3095,73 @@ class MainWindow(QMainWindow):
             self._regenerate_stim_trace(self._finish_to_idle)
             return
         self._finish_to_idle()
+
+    def _report_alignment(self, summary, failures, replaced_cams, failed_cams,
+                          refused, index_error) -> None:
+        """Write the alignment's problems to WARNINGS.txt and show them.
+
+        RULE: none of this decides whether a video was replaced, or whether
+        the stimulus trace is regenerated; `replaced` and `replaced_cams`
+        decide that. REASON: a block-rate warning or a refused replace says
+        nothing about the videos already on disk, and a trace left
+        unregenerated after a partial replace is offset in exactly the
+        session that had trouble.
+        """
+        rec = self._video_dir
+        problems = list(self._align_notes)
+        if summary.get("error"):
+            problems.append(
+                f"The post-hoc alignment failed ({summary['error']}). The "
+                f"videos are left as recorded and are not trigger-aligned: "
+                f"frame i is not the same trigger on every camera. Run "
+                f"2_align.py --replace on {rec} once the cause is fixed.")
+        if refused:
+            problems.append(
+                f"{refused} The alignment index (aligned/alignment.npz) was "
+                f"written and no video was changed, so the videos are not "
+                f"trigger-aligned with each other.")
+        other = [f for f in failures if f != refused and f != index_error
+                 and f != summary.get("error")]
+        if other:
+            problems.append("Cameras that could not be aligned, with their "
+                            "videos kept as recorded: " + "; ".join(other))
+        if replaced_cams and failed_cams:
+            problems.append(
+                f"Only {self._names_text(replaced_cams)} "
+                f"{'was' if len(replaced_cams) == 1 else 'were'} replaced by "
+                f"the aligned video; {self._names_text(failed_cams)} kept "
+                f"{'its' if len(failed_cams) == 1 else 'their'} original. The "
+                f"videos are NOT all the common set, so frame i differs "
+                f"between them: aligned/alignment.json says which video is "
+                f"which (video_is_common). Run 2_align.py --replace on {rec} "
+                f"to finish.")
+        new_rate = [w for w in (summary.get("rate_warnings") or [])
+                    if w not in self._reported_rate_warnings]
+        self._reported_rate_warnings = (set(self._reported_rate_warnings)
+                                        | set(new_rate))
+        problems += new_rate
+        if index_error:
+            if replaced_cams:
+                problems.append(
+                    f"{self._names_text(replaced_cams)} "
+                    f"{'was' if len(replaced_cams) == 1 else 'were'} aligned "
+                    f"and replaced, but the aligned/ index could not be "
+                    f"written: {index_error}. Run 2_align.py on {rec} (without "
+                    f"--replace) to write it.")
+            else:
+                problems.append(
+                    f"The aligned/ index could not be written: {index_error}. "
+                    f"No video was replaced. Run 2_align.py on {rec} to write "
+                    f"it.")
+        if not problems:
+            return
+        body = "\n\n".join(problems)
+        print(f"[align] {body}", flush=True)
+        written = self._append_warnings(problems)
+        QMessageBox.warning(
+            self, "Alignment reported problems",
+            body + (f"\n\nThis has also been written to:\n{written}"
+                    if written else ""))
 
     def _finish_to_idle(self):
         if self._acq_type == "calibration" and self._video_dir is not None:
