@@ -33,9 +33,13 @@
 #   powershell -ExecutionPolicy Bypass -File configure_nic.ps1
 #
 # PREFLIGHT (-Check) reads and reports and writes nothing, so it is safe at any
-# time, including during a recording:
-#   powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Check `
-#       -CaptureCores 10,11,12,13,22,23
+# time, including during a recording. Either form works; the core numbers are
+# an example, so pass the pool the GUI logs:
+#   powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Check -CaptureCores 10,11,12,13
+#   powershell -ExecutionPolicy Bypass -Command "& .\configure_nic.ps1 -Check -CaptureCores 10,11,12,13"
+# A list parameter (-Ports, -CaptureCores) takes comma-separated values in both
+# forms: through -File the list arrives as one string, which the script splits.
+# An adapter whose name contains a comma therefore cannot be named with -Ports.
 # It checks each camera port against four thresholds and prints PASS or WARN
 # per check. Each threshold is receive-path margin, not preference:
 #   * receive descriptors >= 2048 -- the ring is what absorbs a DPC that runs
@@ -84,13 +88,44 @@ param(
     [int]      $Queues        = 1,
     [int]      $BaseProcessor = 0,
     [int]      $MaxProcessor  = -1,
-    # The capture core pool the GUI logs. Used by -Check only.
-    [int[]]    $CaptureCores  = @(),
+    # The capture core pool the GUI logs. Used by -Check only. Strings, not
+    # [int[]]: see Split-List.
+    [string[]] $CaptureCores  = @(),
     [int]      $MinReceiveBuffers = 2048,
     [switch]   $Check
 )
 
 $ErrorActionPreference = "Stop"
+
+function Split-List($values) {
+    # RULE: every list parameter is split on commas after binding. REASON:
+    # "powershell -File" passes each argument as a string, so "-CaptureCores
+    # 10,11,12" arrives as the single string "10,11,12", which an [int[]]
+    # parameter refuses and a plain [string[]] one would treat as one adapter
+    # name. Under -Command PowerShell builds the list itself, and splitting
+    # its elements again changes nothing.
+    $out = @()
+    foreach ($v in $values) {
+        foreach ($part in ([string]$v -split ',')) {
+            $t = $part.Trim()
+            if ($t) { $out += $t }
+        }
+    }
+    # The unary comma keeps an empty result an empty array: PowerShell unrolls
+    # a returned collection, and a bare `return $out` of @() emits $null.
+    return ,$out
+}
+
+$Ports = Split-List $Ports
+$CaptureCoreList = @()
+foreach ($c in (Split-List $CaptureCores)) {
+    $n = 0
+    if (-not [int]::TryParse($c, [ref]$n) -or $n -lt 0) {
+        Write-Host ("-CaptureCores: '{0}' is not a processor number" -f $c) -ForegroundColor Red
+        exit 1
+    }
+    $CaptureCoreList += $n
+}
 
 function Get-CameraPort {
     # A camera port is an Up adapter holding a MANUALLY assigned IPv4 address:
@@ -225,16 +260,16 @@ function Invoke-Preflight {
         $dpc = Get-DpcProcessor $p
         if ($null -eq $dpc) {
             Write-Verdict "DPC affinity" $false "the affinity policy key is unreadable; re-run elevated"
-        } elseif ($CaptureCores.Count -eq 0) {
+        } elseif ($CaptureCoreList.Count -eq 0) {
             if ($dpc.Count) { $where = $dpc -join "," }
             else { $where = "unset, so DPCs land wherever Windows puts them" }
             Write-Host ("    INFO  {0,-22} {1}; pass -CaptureCores to judge it" -f "DPC affinity", $where) -ForegroundColor DarkGray
         } elseif ($dpc.Count -eq 0) {
             Write-Verdict "DPC affinity" $false "no policy set, so nothing keeps DPCs off the capture cores"
         } else {
-            $clash = @($dpc | Where-Object { $CaptureCores -contains $_ })
+            $clash = @($dpc | Where-Object { $CaptureCoreList -contains $_ })
             Write-Verdict "DPC affinity" ($clash.Count -eq 0) ("processors {0}; capture cores {1}" -f
-                ($dpc -join ","), ($CaptureCores -join ","))
+                ($dpc -join ","), ($CaptureCoreList -join ","))
         }
     }
     Write-Host ""
