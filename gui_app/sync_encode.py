@@ -310,40 +310,56 @@ class SyncEncodeRouter:
             if len(backlog) > self.backlog_peak:
                 self.backlog_peak = len(backlog)
 
-    def _pump(self, deadline=None) -> None:
-        """Move backlogged frames into their encoder queues, oldest first.
-
-        Without a deadline it takes only what fits now (the submit path,
-        under the lock, never blocks). With one it waits for room until the
-        deadline and drops what is left then: stop() uses that after the
-        last submit, when the encoders are draining toward their sentinels.
-        """
+    def _pump(self) -> int:
+        """Move backlogged frames into their encoder queues, oldest first,
+        as far as the queues have room now. Never blocks: it runs under the
+        submit lock. Returns how many frames moved."""
+        moved = 0
         for cam, backlog in enumerate(self._backlog):
             q = self._encoders[cam].queue
             while backlog:
                 bid, ts, buf = backlog[0]
                 try:
-                    if deadline is None:
-                        q.put_nowait(buf)
-                    else:
-                        q.put(buf, timeout=max(0.0, deadline - time.monotonic()))
+                    q.put_nowait(buf)
                 except queue.Full:
-                    if deadline is None:
-                        break
-                    # Out of time: the encoder is wedged, so the rest of this
-                    # camera's backlog is lost, and counted like any other
-                    # frame that never reached the encoder.
-                    self.dropped_full += len(backlog)
-                    self._dropped_full_by[cam] += len(backlog)
-                    self._n_backlog -= len(backlog)
-                    for _bid, _ts, dropped in backlog:
-                        self._give_back(cam, dropped)
-                    backlog.clear()
                     break
                 backlog.popleft()
                 self._n_backlog -= 1
+                moved += 1
                 self.block_ids[cam].append(bid)
                 self.timestamps[cam].append(ts)
+        return moved
+
+    def _drain_backlogs(self, deadline: float) -> None:
+        """Pump every camera's backlog until it is empty or `deadline`
+        (time.monotonic) passes, then drop what is left.
+
+        RULE: each pass takes what fits in every camera's queue, and the
+        passes repeat under the one deadline. REASON: a wedged encoder's
+        queue never makes room, so waiting on one camera at a time would
+        spend the whole deadline there and leave every camera after it only
+        the room its queue had at that moment.
+        """
+        while self._n_backlog:
+            if self._pump():
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.001)
+        if not self._n_backlog:
+            return
+        for cam, backlog in enumerate(self._backlog):
+            if not backlog:
+                continue
+            # Out of time: this camera's encoder is wedged, so the rest of
+            # its backlog is lost, and counted like any other frame that
+            # never reached the encoder.
+            self.dropped_full += len(backlog)
+            self._dropped_full_by[cam] += len(backlog)
+            for _bid, _ts, buf in backlog:
+                self._give_back(cam, buf)
+            backlog.clear()
+        self._n_backlog = 0
 
     def submit(self, cam: int, block_id: int, ts: float, buf: np.ndarray):
         """Hand the router one grabbed frame of camera `cam`.
@@ -463,7 +479,7 @@ class SyncEncodeRouter:
             # encoders are draining, so a healthy one makes room within
             # moments, and a wedged one loses the rest of its backlog.
             if self._n_backlog:
-                self._pump(deadline=time.monotonic() + DRAIN_SENTINEL_TIMEOUT_S)
+                self._drain_backlogs(time.monotonic() + DRAIN_SENTINEL_TIMEOUT_S)
         for i, et in enumerate(self._encoders):
             try:
                 et.queue.put(None, timeout=DRAIN_SENTINEL_TIMEOUT_S)
