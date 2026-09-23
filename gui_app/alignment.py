@@ -114,10 +114,13 @@ def video_for(cam_dir: Path, acq_type: str | None = None):
     """The one mp4 that is this camera's recording, or None.
 
     With ``acq_type`` (``"recording"`` or ``"calibration"``) the candidates
-    are the mp4s whose name carries it, which is how every writer names its
-    output (``<date>-<session>-<cam>-<acq_type>.mp4``). Without it a name
-    carrying ``recording`` is preferred, and any mp4 is accepted when none
-    does. The re-encode scratch file is never a candidate, and candidates are
+    are the mp4s whose name ends in ``-<acq_type>.mp4``, which is how every
+    writer names its output (``<date>-<session>-<cam>-<acq_type>.mp4``).
+    Without it a name ending in ``-recording.mp4`` is preferred, and any mp4
+    is accepted when none does. The suffix, not a substring, decides: a
+    session id may itself contain "recording" or "calibration", and a
+    substring match would then take the other acquisition's video. The
+    re-encode scratch file is never a candidate, and candidates are
     sorted, so the answer does not depend on directory enumeration order.
     More than one candidate is an error rather than a guess: under --replace
     the wrong pick would be re-encoded while the real recording stayed the
@@ -128,9 +131,9 @@ def video_for(cam_dir: Path, acq_type: str | None = None):
                   if f.suffix == ".mp4" and f.name != ALIGN_TMP_NAME
                   and f.is_file())
     if acq_type is not None:
-        cands = [f for f in mp4s if acq_type in f.name]
+        cands = [f for f in mp4s if f.name.endswith(f"-{acq_type}.mp4")]
     else:
-        cands = [f for f in mp4s if "recording" in f.name] or mp4s
+        cands = [f for f in mp4s if f.name.endswith("-recording.mp4")] or mp4s
     if len(cands) > 1:
         raise ValueError(f"{cam_dir}: {len(cands)} mp4 candidates, cannot tell "
                          f"which is the recording: "
