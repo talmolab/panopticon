@@ -53,14 +53,16 @@ When the camera has counters, Counter0 counts the edges on the trigger line
 and Counter1 the exposures it started, both reset when a triggered stream is
 first armed. After the acquisition, edges minus exposures is the number of
 triggers the camera ignored, a direct count that `acquisition_warnings`
-reports for WARNINGS.txt.
+reports for WARNINGS.txt. Edges that reach the camera while a stall re-arm
+has the stream down are left out of that count (`_note_restart_counters`).
 
 UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
 ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
-names, the CounterValue chunk's timing, and which temperature status and
-threshold nodes a model has.
+names, the CounterValue chunk's timing, whether a model's counters can be
+read while it streams, and which temperature status and threshold nodes a
+model has.
 """
 from __future__ import annotations
 
@@ -540,21 +542,22 @@ class FlirCamera:
 
         The frame ID restarts here, so its unwrap state does too. The first
         arm after `set_triggered` also resets the trigger counters while the
-        board is still stopped, so they count this recording's edges from 0;
-        a re-arm after a stall does not, and the edges that arrive while the
-        stream is down are recorded so the witness does not count them as
-        ignored triggers."""
+        board is still stopped, so they count this recording's edges from 0.
+        A re-arm after a stall does not reset them. It reads them again once
+        BeginAcquisition has returned, so the edges that arrived while the
+        stream was down are not counted as ignored triggers."""
         if strategy != GRAB_STRATEGY:
             raise ValueError(f"{self.who}: grab strategy {strategy!r}; the "
                              f"FLIR backend runs {GRAB_STRATEGY} only")
         if not self.is_open:
             raise RuntimeError(f"{self.who}: StartGrabbing on a closed camera")
+        rearm = False
         if self._triggered:
             if self._arm_pending:
                 self._reset_counters()
                 self._arm_pending = False
             else:
-                self._note_restart_counters()
+                rearm = True
         self._prev_raw = None
         self._prev_ts = None
         self._id_acc = 0
@@ -563,17 +566,26 @@ class FlirCamera:
         self._verify = True
         self._api.begin(self.handle)
         self._grabbing = True
+        if rearm:
+            self._note_restart_counters()
 
     def StopGrabbing(self) -> None:
         """End the stream (EndAcquisition). Every image must be released
         first, which the grab loop guarantees. The trigger counters are read
-        here, at the moment the camera stops acquiring."""
+        here, just before EndAcquisition while the camera still acquires, so
+        a re-arm's down-time window starts no later than the stream stops. A
+        camera whose counters cannot be read while it streams is read after
+        EndAcquisition instead."""
         was = self._grabbing
         self._grabbing = False
-        if self._api.is_streaming(self.handle):
+        streaming = self._api.is_streaming(self.handle)
+        before_end = None
+        if was and self._triggered and streaming:
+            before_end = self._try_read_counters()
+        if streaming:
             self._api.end(self.handle)
         if was and self._triggered:
-            self._read_counters_at_stop()
+            self._read_counters_at_stop(before_end)
 
     def IsGrabbing(self) -> bool:
         return self._grabbing
@@ -730,9 +742,16 @@ class FlirCamera:
         n.sete("CounterSelector", selector)
         return n.geti("CounterValue")
 
-    def _read_counters(self) -> dict:
-        return {what: self._counter_value(sel)
-                for sel, what in self.counters.items()}
+    def _read_counters(self, exposures_first: bool = False) -> dict:
+        """Every witness counter, read one after the other. A re-arm window
+        starts with a read of the edges first and ends with one of the
+        exposures first, so an edge that lands between the two reads of
+        either is counted as down time. That can hide an ignored trigger,
+        never invent one."""
+        items = list(self.counters.items())
+        if exposures_first:
+            items.reverse()
+        return {what: self._counter_value(sel) for sel, what in items}
 
     def _reset_counters(self) -> None:
         """Reset the witness counters for a new triggered arm.
@@ -760,29 +779,62 @@ class FlirCamera:
                   f"trigger witness", flush=True)
             return
         self.witness = {"edges": None, "exposures": None, "gap_edges": 0,
-                        "stopped_at": None, "error": None}
+                        "stopped_at": None, "error": None, "rearms": 0}
+
+    def _ctr_delta(self, later: int, earlier: int) -> int:
+        """`later - earlier` for two reads of one counter, across a wrap of
+        a counter narrower than 2**31."""
+        period = self._ctr_period
+        return (later - earlier) % period if period else later - earlier
 
     def _note_restart_counters(self) -> None:
+        """Leave the edges of a re-arm's down time out of the witness.
+
+        Called once BeginAcquisition has returned. The window runs from the
+        read at StopGrabbing to this read, so it covers all the time the
+        camera could not expose, BeginAcquisition included. An edge the
+        camera exposed inside the window is in both counters' increase, so
+        edges minus exposures over the window is the down-time edges. With
+        no exposure counter every edge in the window is left out, which can
+        only hide an ignored trigger, never report a false one."""
         w = self.witness
         if w is None or w["error"] or w["stopped_at"] is None:
             return
         try:
-            now = self._read_counters()
+            now = self._read_counters(exposures_first=True)
         except Exception as e:
             w["error"] = f"{type(e).__name__}: {e}"
             return
-        if "edges" in now:
-            w["gap_edges"] += max(0, now["edges"] - w["stopped_at"]["edges"])
+        before = w["stopped_at"]
+        down = self._ctr_delta(now["edges"], before["edges"])
+        if "exposures" in now and "exposures" in before:
+            down -= self._ctr_delta(now["exposures"], before["exposures"])
+        w["gap_edges"] += max(0, down)
+        w["rearms"] += 1
 
-    def _read_counters_at_stop(self) -> None:
+    def _try_read_counters(self):
+        """The witness counters now, or None when there is no witness or
+        the read fails."""
+        w = self.witness
+        if w is None or w["error"]:
+            return None
+        try:
+            return self._read_counters()
+        except Exception:
+            return None
+
+    def _read_counters_at_stop(self, now=None) -> None:
+        """Record the counters at a stop. `now` is the read StopGrabbing made
+        before EndAcquisition, or None to read them now."""
         w = self.witness
         if w is None or w["error"]:
             return
-        try:
-            now = self._read_counters()
-        except Exception as e:
-            w["error"] = f"{type(e).__name__}: {e}"
-            return
+        if now is None:
+            try:
+                now = self._read_counters()
+            except Exception as e:
+                w["error"] = f"{type(e).__name__}: {e}"
+                return
         w["stopped_at"] = now
         w["edges"] = now.get("edges")
         w["exposures"] = now.get("exposures")
@@ -2134,13 +2186,16 @@ class FlirBackend:
                  if cam.block_id_source == "trigger_counter" else ""),
               flush=True)
         if exposures is not None:
-            ignored = edges - exposures
-            if ignored < 0:
+            if not cam._ctr_period and exposures > w["edges"]:
                 print(f"[flir] {cam.serial}: the witness counted more "
                       f"exposures than trigger edges; the counters do not "
                       f"count what this backend expects on this model",
                       flush=True)
                 return []
+            # Below 0 only when an edge landed between the two reads that
+            # bound a re-arm window, which counts it as down time.
+            ignored = max(0, cam._ctr_delta(w["edges"], exposures)
+                          - w["gap_edges"])
             what = (f"its trigger input ({line}) counted {edges} edges but it "
                     f"started only {exposures} exposures, so it ignored "
                     f"{ignored} trigger(s).")
