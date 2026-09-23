@@ -108,6 +108,7 @@ class FrameSyncCoordinator:
         #: Per-camera unwrap history (see unwrap_one).
         self._unwrap_state = [UnwrapState() for _ in range(self.n)]
         self._decided_upto = 0                # highest block ID whose fate is set
+        self._first_decided = None            # lowest one, once any is decided
         self._retired = [False] * self.n      # cameras dropped from the align set
         #: (cam_index, reason) for every retirement, in order. A retirement is
         #: the difference between losing one camera and losing the session, so
@@ -142,6 +143,16 @@ class FrameSyncCoordinator:
     def decided_upto(self) -> int:
         """Highest trigger whose fate (released or dropped) is final."""
         return self._decided_upto
+
+    @property
+    def decided_triggers(self) -> int:
+        """Triggers from the first decided one to decided_upto, released or
+        not. Counted from the first decision rather than from 1, because a
+        stream's IDs start wherever its counter started (a 16-bit counter
+        near its wrap, a resumed stream)."""
+        if self._first_decided is None:
+            return 0
+        return self._decided_upto - self._first_decided + 1
 
     def retire(self, cam: int, reason: str = "", announce: bool = True):
         """Drop a camera from the alignment set.
@@ -264,6 +275,8 @@ class FrameSyncCoordinator:
                 if forced:
                     self.forced += len(havers)
                     self.forced_by[slowest] += 1
+            if self._first_decided is None:
+                self._first_decided = t
             self._decided_upto = t
         return ready
 
@@ -298,6 +311,8 @@ class FrameSyncCoordinator:
                 for c in havers:
                     self._pending[c].popleft()
                 self.dropped += len(havers)
+            if self._first_decided is None:
+                self._first_decided = t
             self._decided_upto = t
         return ready
 

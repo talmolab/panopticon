@@ -582,7 +582,7 @@ class SyncEncodeRouter:
         # Ordinary kick-outs: a trigger one camera missed is dropped from all
         # of them. A few are normal transport loss; above
         # KICKOUT_WARN_FRACTION the operator has to know how much is gone.
-        decided = coord.decided_upto
+        decided = coord.decided_triggers
         kicked = decided - coord.released_triggers - forced_triggers
         if decided > 0 and kicked > KICKOUT_WARN_FRACTION * decided:
             msg = (f"{kicked} of {decided} triggers "
