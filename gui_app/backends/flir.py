@@ -71,14 +71,14 @@ Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
 ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
 names, the CounterValue chunk's timing, whether a model's counters can be
-read while it streams, how long after its edge a camera counts the exposure
-(the witness assumes less than one register read), whether a trigger whose
-delayed exposure has not started when EndAcquisition runs is still exposed
-(if not, the witness counts it as ignored), whether a camera keeps exposing
-while its host has stopped taking frames (a stall), which temperature status
-and threshold nodes a model has, and which DeviceTemperatureSelector entry
-its DeviceTemperatureStatus and DeviceTemperatureStatusTransition thresholds
-refer to (`_temp_basis`).
+read while it streams, how long after its edge and its TriggerDelay a
+camera counts the exposure (the witness assumes less than one register
+read), whether a trigger whose delayed exposure has not started when
+EndAcquisition runs is still exposed (if not, the witness counts it as
+ignored), whether a camera keeps exposing while its host has stopped taking
+frames (a stall), which temperature status and threshold nodes a model has,
+and which DeviceTemperatureSelector entry its DeviceTemperatureStatus and
+DeviceTemperatureStatusTransition thresholds refer to (`_temp_basis`).
 """
 from __future__ import annotations
 
@@ -521,6 +521,11 @@ class FlirCamera:
     `ts_source` ("image" or "chunk"), `ts_scale` (ns per camera unit),
     `selftest` (what the self-test measured) and `applied` (the values open()
     set, read back)."""
+
+    #: The TriggerDelay `set_triggered` read back, in seconds. An exposure
+    #: starts this long after its edge, so a witness read waits it before it
+    #: counts exposures (`_read_settled`).
+    _trigger_delay_s = 0.0
 
     def __init__(self, backend, device: FlirDevice, spec, max_num_buffer: int):
         self._backend = backend
@@ -1003,21 +1008,25 @@ class FlirCamera:
         while the camera acquires, and how many edges that moment leaves on
         an unknown side.
 
-        The edges are read, then the exposures, then the edges again, until
-        two edge reads agree or COUNTER_READ_TRIES attempts have run. Two
-        edge reads that agree put no edge between them, so every exposure
-        read has its edge in the count, and every edge counted has its
-        exposure in the count unless the exposure started later than one
-        register read after the edge (the module's UNKNOWNS). When no attempt
-        settles, the last attempt's counts are kept, and the edges between
-        its two edge reads are unresolved: each may have been exposed after
-        the exposure read. A camera without an exposure counter reads its
-        edges once."""
+        The edges are read, then the exposures once the TriggerDelay has
+        passed, then the edges again, until two edge reads agree or
+        COUNTER_READ_TRIES attempts have run. The wait gives every edge the
+        first read counted the time to start its exposure, which begins the
+        TriggerDelay after the edge. Two edge reads that agree put no edge
+        between them, so every exposure read has its edge in the count, and
+        every edge counted has its exposure in the count unless the exposure
+        started more than one register read after the delay (the module's
+        UNKNOWNS). When no attempt settles, the last attempt's counts are
+        kept, and the edges between its two edge reads are unresolved: each
+        may have been exposed after the exposure read. A camera without an
+        exposure counter reads its edges once."""
         sel = {what: s for s, what in self.counters.items()}
         if "exposures" not in sel:
             return self._read(("edges",)), 0
         first = self._counter_value(sel["edges"])
         for _ in range(COUNTER_READ_TRIES):
+            if self._trigger_delay_s:
+                time.sleep(self._trigger_delay_s)
             exposures = self._counter_value(sel["exposures"])
             last = self._counter_value(sel["edges"])
             unresolved = self._ctr_delta(last, first)
@@ -2208,6 +2217,10 @@ class FlirBackend:
             n.sete("TriggerOverlap", t.overlap, field="camera.trigger.overlap")
         if t.delay_us is not None:
             n.setf("TriggerDelay", t.delay_us)
+        # The user set can hold a delay the profile does not name, so the
+        # witness waits the value the camera reports.
+        cam._trigger_delay_s = (max(0.0, n.getf("TriggerDelay")) * 1e-6
+                                if n.readable("TriggerDelay") else 0.0)
         n.sete("TriggerMode", "On")
         if n.writable("AcquisitionFrameRateEnable"):
             n.setb("AcquisitionFrameRateEnable", False)
