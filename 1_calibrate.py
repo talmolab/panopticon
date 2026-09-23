@@ -363,6 +363,13 @@ def _detect_into(task, out):
                                     "frames; scanned in full")
             else:
                 targets, out["absent"] = codet_indices(hints, ordinals)
+                if hints and not targets:
+                    # Decoding nothing would drop the camera for want of
+                    # detections that a scan may well find.
+                    out["hint_note"] = ("none of its {} hinted block IDs is "
+                                        "in its video; scanned in full".format(
+                                            len(set(hints))))
+                    targets = None
         elif kind == "frames" and hints is not None:
             # Frame hints (format 2 and the flat layout) are GRABBED-frame
             # counts read after the frame copy, so they sit one above the
