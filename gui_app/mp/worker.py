@@ -54,10 +54,12 @@ from gui_app.mp.ledger import LedgerState, attach_shared
 #: full-resolution copies, and the harvest of cameras that are not
 #: submitting.
 STATUS_PERIOD_S = 0.05
-#: A camera whose grab thread has not submitted for this long has its
-#: decided frames collected by the status thread instead. At the trigger
-#: rate a streaming camera submits far more often, so the two never contend.
-IDLE_HARVEST_S = 0.02
+#: A camera whose grab thread has not submitted for this many trigger
+#: periods (at the session's frame rate) has its decided frames collected
+#: by the status thread instead. A streaming camera submits once a period,
+#: so the status thread takes a camera's lock only after it has missed a
+#: trigger or more, and the submits of a streaming camera do not wait on it.
+IDLE_HARVEST_PERIODS = 2.0
 #: How long a stopping worker waits for the parent to flush the ledger once
 #: its cameras reached end of stream. The parent flushes as soon as every
 #: camera has, so this bounds a parent that died or wedged.
@@ -211,9 +213,9 @@ class WorkerRouter:
 
     Each camera has a lock. Its grab thread takes it per submit; the status
     thread takes it without waiting, only for a camera that has not
-    submitted for IDLE_HARVEST_S, to collect decisions while the camera is
-    silent (a stalled camera must still be harvested at least every
-    ring_bits triggers, see the ledger).
+    submitted for IDLE_HARVEST_PERIODS trigger periods, to collect decisions
+    while the camera is silent (a stalled camera must still be harvested at
+    least every ring_bits triggers, see the ledger).
     """
 
     #: Why a frame found no free ring slot, as the sinks' warnings say it.
@@ -230,6 +232,7 @@ class WorkerRouter:
         self.cams = [int(c) for c in cams]
         self.max_lag = max_lag
         self._fps = int(fps)
+        self._idle_s = IDLE_HARVEST_PERIODS / max(1, self._fps)
         self._ledger = dict(zip(self.cams, ledgers))
         self._locks = {c: threading.Lock() for c in self.cams}
         self._unwrap = {c: UnwrapState() for c in self.cams}
@@ -379,7 +382,7 @@ class WorkerRouter:
             return
         now = time.perf_counter()
         for cam in self.cams:
-            if now - self._last_submit[cam] < IDLE_HARVEST_S:
+            if now - self._last_submit[cam] < self._idle_s:
                 continue
             lock = self._locks[cam]
             if not lock.acquire(blocking=False):
