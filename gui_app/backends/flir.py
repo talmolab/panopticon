@@ -1112,8 +1112,8 @@ class FlirCamera:
             down -= self._ctr_delta(now["exposures"], before["exposures"])
             # The triggers ignored so far all came in an acquisition that
             # ended in a stall re-arm (`_ignored_sentences`).
-            upto = (self._ctr_signed(before["edges"], before["exposures"])
-                    - w["gap_edges"])
+            upto = self._ctr_signed(before["edges"] - w["gap_edges"],
+                                    before["exposures"])
             w["ignored_by_rearm"] = max(w["ignored_by_rearm"], upto)
             w["gaps_by_rearm"] = w["wrap_gaps"]
         elif w["begin_edges"] is not None:
@@ -2821,7 +2821,14 @@ class FlirBackend:
         is certain. In frame_id mode an unresolved edge may be one more
         trigger that shifts them, so the sentence says the frames are not
         proven aligned. In trigger_counter mode an ignored trigger is a gap,
-        so only a proven count is reported."""
+        so only a proven count is reported.
+
+        A counter narrower than 2**31 reads each count modulo its period.
+        The down-time edges are subtracted before the difference nearest 0
+        is taken, so the count is right while the camera ignored fewer
+        triggers than half the period, however many edges the re-arms left
+        out. The edges the sentence states are the exposures plus that
+        difference."""
         exposures = w["exposures"]
         line = cam.trigger_line
         if exposures is None:
@@ -2830,7 +2837,8 @@ class FlirBackend:
         unresolved = w["unresolved"] + w["stop_unresolved"]
         # Below 0 only when an unresolved edge added an exposure without
         # its edge.
-        raw = cam._ctr_signed(w["edges"], exposures) - w["gap_edges"]
+        raw = cam._ctr_signed(w["edges"] - w["gap_edges"], exposures)
+        edges = exposures + raw
         ignored = max(0, raw)
         top = max(ignored, raw + unresolved)
         outside = " outside stall re-arms" if w["rearms"] else ""
