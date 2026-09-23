@@ -5,6 +5,7 @@ class name is legacy from campy and is kept because tests, probe scripts and
 main_window all refer to it.
 """
 import re
+import threading
 import time
 import serial
 
@@ -37,6 +38,15 @@ class TeensyController:
     command arrives, every start is confirmed by an `RDY <n_cams> <fps>` ack from
     the sketch. Without that check a mis-parsed config is indistinguishable from
     a good one until the recording comes back empty.
+
+    THREADS. The start runs on the start worker and the stop, the quit and a
+    bench Test run on the UI thread, all on this one object. RULE: every
+    exchange with the board holds ``_lock``, and a start does not reset and
+    retry once the owner has stopped or closed the link during it. REASON:
+    without both, a quit that lands while a start waits for its ack stops the
+    board, closes the port, and then the start's retry reopens the port and
+    starts the board again, so the process exits with the board triggering and
+    any paradigm running.
     """
 
     # Both budgets are headroom over the sketch's fixed ack latency, which is
@@ -85,10 +95,31 @@ class TeensyController:
         #: the board ran BEFORE, typically the one a flash just replaced, and
         #: the host then decides on the wrong firmware.
         self.board_id: str | None = None
+        #: Held for every exchange with the board. Re-entrant, because
+        #: identify() stands the board down through stop_triggers().
+        self._lock = threading.RLock()
+        #: Counts the owner's stops and closes. start_triggers() compares it
+        #: before its reset-and-retry, and a change means the owner stood the
+        #: board down while the start was waiting for its ack.
+        self._owner_interrupts = 0
+        #: True when the most recent start_triggers() reset the board and sent
+        #: the start a second time. Kept for the caller: the cameras were
+        #: already armed during the first attempt.
+        self.last_start_retried = False
 
     @property
     def _acks(self) -> bool:
         """Back-compat alias for _speaks_rdy (probe scripts read it)."""
+        return self._speaks_rdy
+
+    @property
+    def speaks_rdy(self) -> bool:
+        """True once any RDY line has come from this board.
+
+        Firmware that has never printed one predates the handshake, and for it
+        the reset-and-retry inside start_triggers() is the normal way a start
+        takes effect.
+        """
         return self._speaks_rdy
 
     def open(self, retries: int = 10) -> bool:
@@ -100,6 +131,10 @@ class TeensyController:
         unplugged board, "PermissionError" for a port held by another program)
         and the two need different actions from the operator.
         """
+        with self._lock:
+            return self._open_locked(retries)
+
+    def _open_locked(self, retries: int) -> bool:
         self.last_error = None
         # Opening resets the board, so whatever it said before is history.
         self.board_id = None
@@ -152,29 +187,58 @@ class TeensyController:
         print("[teensy] simulated board opened", flush=True)
         return True
 
-    def start_triggers(self, pins: list[int], fps: int) -> bool:
+    def start_triggers(self, pins: list[int], fps: int, may_retry=None) -> bool:
         """Configure the board for acquisition and confirm it understood.
 
         Tries the existing connection first (no reset, no laser flash). If the
         board does not confirm, reopens the port to force a reset — the proven
         path — and retries. Returns False only when the board is genuinely
         unreachable, so the caller can abort instead of recording nothing.
+
+        The retry is skipped, and the start fails, in two cases:
+
+        - The owner stopped or closed the link while the first attempt waited
+          for its ack. The stop is the owner's last word, and a retry after it
+          would start a board the owner has just stood down.
+        - ``may_retry``, a zero-argument callable asked immediately before the
+          reset, returns False. The caller knows what the reset cannot undo:
+          cameras armed during the first attempt have already counted every
+          trigger it fired.
+
+        ``last_start_retried`` records whether this call reset and resent.
         """
-        if not self._ser:
-            print("[teensy] start_triggers called but port not open", flush=True)
-            return False
+        with self._lock:
+            interrupts = self._owner_interrupts
+            self.last_start_retried = False
+            if not self._ser:
+                print("[teensy] start_triggers called but port not open", flush=True)
+                return False
 
-        if self._send(pins, fps):
-            return True
+            if self._send(pins, fps):
+                return True
 
-        print("[teensy] no ack — reopening port to force a board reset", flush=True)
-        self.close()
-        # Few retries here: this runs on the UI thread at Record, and the port
-        # was open a moment ago, so a failure now is a vanished or seized
-        # device that ten more seconds of retrying cannot bring back.
-        if not self.open(retries=self.REOPEN_RETRIES):
-            print(f"[teensy] could not reopen port: {self.last_error}", flush=True)
-            return False
+            if self._owner_interrupts != interrupts:
+                print("[teensy] no ack, and the link was stopped or closed "
+                      "while the start waited: not retrying", flush=True)
+                return False
+            if may_retry is not None and not may_retry():
+                print("[teensy] no ack, and the caller refused the reset and "
+                      "retry", flush=True)
+                return False
+            print("[teensy] no ack — reopening port to force a board reset", flush=True)
+            self.last_start_retried = True
+            self._close_port()
+            # Few retries here: this runs on the start worker at Record and on
+            # the UI thread for a bench Test, and the port was open a moment
+            # ago, so a failure now is a vanished or seized device that ten
+            # more seconds of retrying cannot bring back.
+            if not self.open(retries=self.REOPEN_RETRIES):
+                print(f"[teensy] could not reopen port: {self.last_error}", flush=True)
+                return False
+            return self._finish_retry(pins, fps)
+
+    def _finish_retry(self, pins: list[int], fps: int) -> bool:
+        """The second attempt of start_triggers(), after the forced reset."""
         if self._send(pins, fps):
             return True
 
@@ -287,7 +351,15 @@ class TeensyController:
         The caller MUST NOT infer success from the port being open: pyserial's
         `is_open` stays True after the USB device disappears, so an unplugged
         cable looks healthy right up until the write fails.
+
+        A stop issued while a start waits for its ack on another thread runs
+        after that attempt, and the start then does not reset and retry.
         """
+        self._owner_interrupts += 1
+        with self._lock:
+            return self._stop_locked(pins)
+
+    def _stop_locked(self, pins: list[int]) -> bool:
         if not self._ser:
             print("[teensy] STOP NOT SENT: no serial link. The board may still be "
                   "triggering and any stim paradigm may still be running.",
@@ -339,22 +411,45 @@ class TeensyController:
         the sketch the flash replaced.
         """
         pins = list(pins)
-        self.board_id = None
-        self.stop_triggers(pins)
-        if self._ser and not self._speaks_rdy:
-            # readFPS() clamps the stop's -1 to 0, so the board acks it as
-            # `RDY <n> 0` and the identity rides on that line.
-            try:
-                self._await_ack(len(pins), 0, timeout=self.STOP_ACK_TIMEOUT)
-            except (serial.SerialException, OSError) as e:
-                print(f"[teensy] could not read the board's identity: {e}",
-                      flush=True)
-        return self.board_id
+        with self._lock:
+            self.board_id = None
+            self.stop_triggers(pins)
+            if self._ser and not self._speaks_rdy:
+                # readFPS() clamps the stop's -1 to 0, so the board acks it as
+                # `RDY <n> 0` and the identity rides on that line.
+                try:
+                    self._await_ack(len(pins), 0, timeout=self.STOP_ACK_TIMEOUT)
+                except (serial.SerialException, OSError) as e:
+                    print(f"[teensy] could not read the board's identity: {e}",
+                          flush=True)
+            return self.board_id
 
     def close(self):
-        if self._ser and self._ser.is_open:
-            self._ser.close()
-        self._ser = None
+        """Close the link. A start in flight on another thread does not reset
+        and retry after this, so it cannot reopen the port behind the owner."""
+        self._owner_interrupts += 1
+        with self._lock:
+            self._close_port()
+
+    def stop_and_close(self, pins: list[int]) -> bool:
+        """Stand the board down and close the link, with no start between.
+
+        RULE: the quit path uses this, never stop_triggers() then close().
+        REASON: between those two calls the lock is free, so a start waiting
+        on it writes its command after the stop, and the process exits with
+        the board triggering. Returns what the stop returned.
+        """
+        self._owner_interrupts += 1
+        with self._lock:
+            try:
+                return self._stop_locked(pins)
+            finally:
+                self._close_port()
+
+    def _close_port(self):
+        ser, self._ser = self._ser, None
+        if ser is not None and ser.is_open:
+            ser.close()
 
     @property
     def port(self) -> str:
