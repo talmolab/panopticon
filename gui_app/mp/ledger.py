@@ -322,9 +322,12 @@ class Coordinator:
         return self._core.lag_report()
 
     def eos_missing(self) -> list:
-        """Active cameras that have not reached end of stream."""
+        """Active cameras that have not reached end of stream. A camera whose
+        worker asked to retire is not missing: flush retires it first."""
+        v = self._v
         return [c for c in range(self.n)
-                if not self._retired[c] and not int(self._v.eos[c])]
+                if not self._retired[c] and not int(v.eos[c])
+                and not int(v.retire_req[c])]
 
     def all_eos(self) -> bool:
         return not self.eos_missing()
@@ -378,24 +381,33 @@ class Coordinator:
         Refuses (LedgerError) while an active camera has not reached end of
         stream, because announces it makes after the flush are never decided.
         Retire such a camera first, or pass require_eos=False knowingly.
+        Retirement requests are honoured before the check, so a camera whose
+        worker asked to retire needs no eos.
         """
+        refused = None
+        n_new = 0
         with self._lock:
+            msgs = [] if self._closed_state else self._honour_retire_requests_locked()
             missing = [c for c in range(self.n)
                        if not self._retired[c] and not int(self._v.eos[c])]
             if missing and require_eos:
                 names = ", ".join(f"cam{c + 1}" for c in missing)
-                raise LedgerError(f"flush refused: {names} has not reached end "
-                                  f"of stream; retire it or wait for eos")
-            n_new, msgs = self._poll_locked(now_ns())
-            released_now = {bid for (_c, bid, _f) in self._core.flush()}
-            n_new += self._publish_locked(released_now)
-            hdr = self._v.hdr
-            hdr[H_FLUSHED] = 1
-            if int(hdr[H_STATE]) != LedgerState.ABANDONED:
-                hdr[H_STATE] = LedgerState.FLUSHED
-            self._closed_state = True
+                refused = LedgerError(f"flush refused: {names} has not reached "
+                                      f"end of stream; retire it or wait for eos")
+            else:
+                n_new, more = self._poll_locked(now_ns())
+                msgs += more
+                released_now = {bid for (_c, bid, _f) in self._core.flush()}
+                n_new += self._publish_locked(released_now)
+                hdr = self._v.hdr
+                hdr[H_FLUSHED] = 1
+                if int(hdr[H_STATE]) != LedgerState.ABANDONED:
+                    hdr[H_STATE] = LedgerState.FLUSHED
+                self._closed_state = True
         for m in msgs:
             print(m, flush=True)
+        if refused is not None:
+            raise refused
         return n_new
 
     def abandon(self) -> None:
@@ -427,17 +439,21 @@ class Coordinator:
         self._retired[cam] = True
         return self._core.retire(cam, reason, announce=False)
 
-    def _poll_locked(self, t_ns: int):
-        v = self._v
-        v.hdr[H_COORD_HB] = t_ns
+    def _honour_retire_requests_locked(self) -> list:
         msgs = []
-        if self._closed_state:
-            return 0, msgs
         for cam in range(self.n):
-            if not self._retired[cam] and int(v.retire_req[cam]):
+            if not self._retired[cam] and int(self._v.retire_req[cam]):
                 msg = self._retire_locked(cam, self._reason(cam))
                 if msg:
                     msgs.append(msg)
+        return msgs
+
+    def _poll_locked(self, t_ns: int):
+        v = self._v
+        v.hdr[H_COORD_HB] = t_ns
+        if self._closed_state:
+            return 0, []
+        msgs = self._honour_retire_requests_locked()
         rb = self.layout.ring_bits
         items = []
         for cam in range(self.n):
