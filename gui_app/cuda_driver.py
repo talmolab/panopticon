@@ -65,6 +65,7 @@ _SIGNATURES = {
     "cuCtxGetCurrent": [POINTER(c_void_p)],
     "cuStreamCreate": [POINTER(c_void_p), c_uint],
     "cuStreamDestroy_v2": [c_void_p],
+    "cuStreamSynchronize": [c_void_p],
     "cuEventCreate": [POINTER(c_void_p), c_uint],
     "cuEventDestroy_v2": [c_void_p],
     "cuEventRecord": [c_void_p, c_void_p],
@@ -228,6 +229,11 @@ class Driver:
 
     def stream_destroy(self, stream: int) -> None:
         self._call("cuStreamDestroy_v2", c_void_p(stream))
+
+    def stream_sync(self, stream: int) -> None:
+        """Wait for all work on `stream`. Teardown only: see the pinned
+        encoder's rule against synchronizing its stream per frame."""
+        self._call("cuStreamSynchronize", c_void_p(stream))
 
     def event_create(self, flags: int = CU_EVENT_BLOCKING_SYNC
                      | CU_EVENT_DISABLE_TIMING) -> int:

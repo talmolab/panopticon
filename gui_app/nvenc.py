@@ -451,6 +451,10 @@ class PinnedUploadEncoder:
         #: Encodes that found their staging buffer's upload still running and
         #: waited for it (blocking, with the GIL released).
         self.event_waits = 0
+        #: Why this encoder takes no more frames ("" while it does).
+        self._broken = ""
+        #: An upload was queued that no event covers (its record failed).
+        self._unguarded = False
         self._closed = False
         self._close_lock = threading.Lock()
         #: No release line in the log (the one-time warm-up encoder).
@@ -496,9 +500,24 @@ class PinnedUploadEncoder:
         _stat("pinned_encoders", 1)
 
     def Encode(self, nv12):
+        """Stage and encode one frame; the bitstream PyNvVideoCodec returns.
+
+        RULE: once the library has accepted the frame, its bitstream is
+        returned even if recording the event or restoring the context then
+        fails; the encoder is marked broken instead, and its next Encode
+        raises before it feeds anything. REASON: the library has output
+        delay, so those bytes belong to frames already counted as encoded.
+        Dropping them loses coded frames from stream.h264 while the frame
+        count stays whole, which maps later frames to the wrong trigger
+        with no gap in blockids.npy. Raising on the next call starts the
+        encoder-failure path (flush, then spill raw) at a frame boundary.
+        """
         session = self._session
         if session is None:
             raise RuntimeError("PinnedUploadEncoder used after Close()")
+        if self._broken:
+            raise RuntimeError(f"PinnedUploadEncoder takes no more frames: "
+                               f"{self._broken}")
         if nv12.dtype != np.uint8 or nv12.size != self._fsize:
             raise ValueError(
                 f"expected a uint8 NV12 frame of {self._fsize} bytes "
@@ -508,9 +527,9 @@ class PinnedUploadEncoder:
         n = self._n
         j = n % self._nbuf
         drv = self._drv
+        ev = self._events[j]
         drv.ctx_push(self._ctx)
         try:
-            ev = self._events[j]
             if n >= self._nbuf and not drv.event_query(ev):
                 self.event_waits += 1
                 drv.event_sync(ev)
@@ -521,11 +540,35 @@ class PinnedUploadEncoder:
             else:
                 np.copyto(self._ydst[j], flat[:self._ysize])
             bs = session.Encode(self._frames[j])
-            drv.event_record(ev, self._stream)
-        finally:
-            drv.ctx_pop()
+        except BaseException:
+            self._pop()
+            raise
         self._n = n + 1
+        try:
+            drv.event_record(ev, self._stream)
+        except Exception as e:
+            # No event covers this upload now, so a rewrite of buffer j
+            # would not wait for it, and teardown waits on the stream.
+            self._unguarded = True
+            self._mark_broken(f"recording staging buffer {j}'s CUDA event "
+                              f"failed: {e}")
+        self._pop()
         return bs
+
+    def _pop(self) -> None:
+        """Pop this encoder's context after a call; a failure marks the
+        encoder broken rather than raise over a result already produced."""
+        try:
+            self._drv.ctx_pop()
+        except Exception as e:
+            self._mark_broken(f"popping its CUDA context failed: {e}")
+
+    def _mark_broken(self, why: str) -> None:
+        if not self._broken:
+            self._broken = why
+            print(f"[nvenc] WARNING: pinned {self.width}x{self.height} encoder "
+                  f"takes no more frames ({why}); its next Encode raises",
+                  flush=True)
 
     def _check_uv(self, flat) -> None:
         uv = flat[self._ysize:]
@@ -536,14 +579,20 @@ class PinnedUploadEncoder:
                   f"encoder copies whole frames", flush=True)
 
     def EndEncode(self):
+        """Flush the encoder. It works on a broken encoder too, and the
+        flushed bytes are returned even if restoring the context then fails
+        (see Encode)."""
         session = self._session
         if session is None:
             return b""
         self._drv.ctx_push(self._ctx)
         try:
-            return session.EndEncode()
-        finally:
-            self._drv.ctx_pop()
+            out = session.EndEncode()
+        except BaseException:
+            self._pop()
+            raise
+        self._pop()
+        return out
 
     def Close(self) -> None:
         """Free the NVENC session, then every CUDA resource. Idempotent."""
@@ -598,6 +647,14 @@ class PinnedUploadEncoder:
         try:
             # Every upload out of the staging buffers has finished before any
             # of them is freed. An event never recorded counts as complete.
+            # An upload whose event record failed is covered by no event, so
+            # the stream is waited on once instead.
+            if self._unguarded and self._stream:
+                try:
+                    drv.stream_sync(self._stream)
+                except Exception as e:
+                    print(f"[nvenc] WARNING: pinned upload teardown could not "
+                          f"wait for its stream: {e}", flush=True)
             for ev in self._events:
                 try:
                     drv.event_sync(ev)
