@@ -49,6 +49,17 @@ and appends the message to `FakeSpinC.violations`:
 - a view taken with the wrong shape, over a pixel format wider than 8 bits,
   over padded rows, or with a stride that is not the width;
 - holding every buffer of the pool at once.
+The fake also raises `FakeMisuse` for a board sequence it cannot replay.
+`SimBoard` keeps only the pulse train it runs now, so a streaming camera and
+a trigger-line counter must each look at the board between one train and
+the next (a `next_image` or `image_release` call, or a `CounterValue`
+read). Without that look, the pulses of the train in between are unknown.
+
+Host pool:
+`StreamBufferCountManual` buffers hold the frames waiting for `next_image`
+and the images the application holds. When none is free, OldestFirst loses
+the new frame (`StreamLostFrameCount`), and the other handling modes
+discard queued frames (`StreamDroppedFrameCount`), as SFNC defines them.
 """
 from __future__ import annotations
 
@@ -401,6 +412,20 @@ def _pulses(board, st, from_v: float, to_v: float) -> int:
     return hi - lo - missed
 
 
+def _board_snapshot(board) -> tuple:
+    """`(state, starts, stops)` of the board, read as one consistent view.
+
+    `SimBoard.state()` does not carry the start and stop counts. They are
+    read on both sides of it, and the read repeats if a start or stop lands
+    in between.
+    """
+    while True:
+        before = (board.starts, board.stops)
+        st = board.state()
+        if (board.starts, board.stops) == before:
+            return st, before[0], before[1]
+
+
 class _Def:
     """One node of a simulated nodemap.
 
@@ -435,10 +460,17 @@ class _Def:
 
 
 class _Counter:
-    """One `CounterSelector` entry's state."""
+    """One `CounterSelector` entry's state.
 
-    __slots__ = ("reset_v", "acc", "base", "epoch", "last_st",
-                 "acq_at_reset", "value_at_reset")
+    `acc` holds the edges of earlier pulse trains since the reset, and
+    `last_st` with `seen` (the board's start and stop counts) is the board
+    as the counter last saw it. `prev_st` and `prev_acc` keep the train
+    before the current one, so a frame of that train that is walked late
+    still reads the count its trigger saw.
+    """
+
+    __slots__ = ("reset_v", "acc", "base", "epoch", "last_st", "seen",
+                 "prev_st", "prev_acc", "acq_at_reset", "value_at_reset")
 
     def __init__(self):
         self.reset_v = -math.inf
@@ -446,6 +478,9 @@ class _Counter:
         self.base = 0
         self.epoch = None
         self.last_st = None
+        self.seen = None
+        self.prev_st = None
+        self.prev_acc = 0
         self.acq_at_reset = 0
         self.value_at_reset = 0
 
@@ -945,12 +980,15 @@ class _FakeCamera:
         with self.lock:
             c = self._counter(sel)
             prev = self.counter_value(sel)
-            st = self.board.state()
+            st, starts, stops = _board_snapshot(self.board)
             c.reset_v = self.board.virtual_now()
             c.acc = 0
             c.base = int(base)
             c.epoch = st.epoch_v
             c.last_st = st
+            c.seen = (starts, stops)
+            c.prev_st = None
+            c.prev_acc = 0
             c.acq_at_reset = self.acquired
             c.value_at_reset = prev
 
@@ -976,21 +1014,63 @@ class _FakeCamera:
 
     def _line_edges(self, c: _Counter, at_v) -> int:
         board = self.board
-        st = board.state()
         with self.lock:
+            st, starts, stops = _board_snapshot(board)
             if c.epoch is None:
                 c.epoch = st.epoch_v
             elif st.epoch_v != c.epoch:
                 # A new pulse train began: bank what the previous one fired
-                # after the reset. A train that stopped unseen ended no later
-                # than this one began.
-                prev = c.last_st
-                end = prev.stop_v if prev.stop_v is not None else st.epoch_v
-                c.acc += _pulses(board, prev, c.reset_v, end)
+                # after the reset.
+                end = self._train_end(c.last_st, c.seen, st, (starts, stops),
+                                      "the trigger-line counter",
+                                      "read CounterValue")
+                c.prev_acc = c.acc
+                c.prev_st = None
+                if end is not None:
+                    c.prev_st = c.last_st._replace(stop_v=end)
+                    c.acc += _pulses(board, c.prev_st, c.reset_v, end)
                 c.epoch = st.epoch_v
             c.last_st = st
+            c.seen = (starts, stops)
             v = board.virtual_now() if at_v is None else at_v
+            if c.prev_st is not None and v < st.epoch_v:
+                # A frame of the replaced train reads the count its trigger
+                # saw.
+                return c.prev_acc + _pulses(board, c.prev_st, c.reset_v, v)
             return c.acc + _pulses(board, st, c.reset_v, v)
+
+    def _train_end(self, prev, prev_seen, cur, cur_seen, what: str,
+                   how: str):
+        """Virtual time at which the pulse train `prev` ended, now that
+        `cur` has replaced it, or None when `prev` is no train.
+
+        `SimBoard` keeps only the train it runs now. The end of the one
+        before is known in two cases: it was seen stopped, or no stop came
+        between the last look at it and the start of `cur`, so that start cut
+        it off. In any other case pulses fired at times nobody saw, and
+        `FakeMisuse` names the limitation instead of guessing a count. `what`
+        names the observer and `how` the call that lets it look.
+        """
+        started = cur_seen[0] - prev_seen[0]
+        if started == 1:
+            if prev.fps <= 0:
+                return None
+            if prev.stop_v is not None:
+                return prev.stop_v
+            # A stop of `cur` shows in `cur`; any other stop ended `prev`.
+            if cur_seen[1] - prev_seen[1] - (cur.stop_v is not None) == 0:
+                return cur.epoch_v
+            detail = ("the train it last saw running stopped at a moment it "
+                      "did not see, and another train started")
+        elif started > 1:
+            detail = (f"{started} pulse trains started since it last looked, "
+                      f"so at least one ran unseen")
+        else:
+            detail = "the board's start count went back, so the board changed"
+        self.api._misuse(
+            f"{self}: {what} cannot follow the trigger board: {detail}. "
+            f"SimBoard keeps only the train it runs now, so {how} between "
+            f"one pulse train and the next.")
 
     def _line_is_input(self, line) -> bool:
         return self.val_or("LineMode", line, "Input") == "Input"
@@ -1146,11 +1226,12 @@ class _FakeCamera:
         if f.ts_reset_on_begin:
             self._ts_origin_s = -now_v * (1.0 + f.ppm)
         self._fr_v = now_v
-        st = self.board.state()
+        st, starts, stops = _board_snapshot(self.board)
         # Anchored to the pulse train running now: a camera cannot deliver a
         # trigger that has already passed.
         self._next = self.board.ordinal_now(st) + 1
-        self._train_epoch = st.epoch_v
+        self._train_st = st
+        self._seen = (starts, stops)
         self._due_key = None
         self._queue = deque()
         self.streaming = True
@@ -1242,14 +1323,6 @@ class _FakeCamera:
             self._acq["frames_left"] -= 1
         return self._hand_out(self._frame(v, v, incomplete=False), buf)
 
-    def _reanchor(self, st) -> None:
-        """Count in the pulse train the board runs now. Every camera is armed
-        before the board starts, and a new train restarts its ordinals at 1,
-        so an armed camera re-anchors to trigger 1 of it."""
-        if st.epoch_v != self._train_epoch:
-            self._train_epoch = st.epoch_v
-            self._next = 1
-
     def _stall_span(self, st) -> tuple:
         f = self.faults
         if not f.stall_at or f.stall_s <= 0 or st.fps <= 0:
@@ -1299,29 +1372,52 @@ class _FakeCamera:
         `image_release` both walk, because those are the moments the pool's
         free room changes. Returns the `perf_counter` time at which the next
         trigger arrives, or None when none is due.
+
+        A new pulse train restarts the board's ordinals at 1. The pulses the
+        replaced train fired before it ended reach the camera first, and
+        `_train_end` refuses when that end was not seen.
         """
         if not self.streaming:
             return None
         board = self.board
         with self.lock:
-            st = board.state()
-            self._reanchor(st)
-            if self._deaf_reason() is not None:
+            st, starts, stops = _board_snapshot(board)
+            prev, prev_seen = self._train_st, self._seen
+            new_train = st.epoch_v != prev.epoch_v
+            deaf = self._deaf_reason() is not None
+            if deaf:
                 # The pulses fired so far pass the camera without effect.
+                if new_train:
+                    self._next = 1
                 self._next = max(self._next, board.ordinal_now(st) + 1)
+            elif new_train:
+                end = self._train_end(prev, prev_seen, st, (starts, stops),
+                                      "the frame stream",
+                                      "call next_image or image_release")
+                if end is not None:
+                    self._walk_train(prev._replace(stop_v=end), math.inf)
+                self._next = 1
+            self._train_st, self._seen = st, (starts, stops)
+            if deaf:
                 return None
-            now = time.perf_counter()
-            while st.fps > 0 and not board.exhausted(self._next, st):
-                i = self._next
-                key = (i, st.epoch_v, st.stop_v)
-                if key != self._due_key:
-                    # Once per trigger, so a jittered arrival is drawn once.
-                    self._due_key, self._due = key, self._due_real(i, st)
-                if self._due > now:
-                    return self._due
-                self._next = i + 1
-                self._take_trigger(i, st)
-            return None
+            return self._walk_train(st, time.perf_counter())
+
+    def _walk_train(self, st, now: float):
+        """Take the triggers of train `st` that arrive by `now`, in order.
+        Returns the arrival time of the next one, or None when none is
+        due."""
+        board = self.board
+        while st.fps > 0 and not board.exhausted(self._next, st):
+            i = self._next
+            key = (i, st.epoch_v, st.stop_v)
+            if key != self._due_key:
+                # Once per trigger, so a jittered arrival is drawn once.
+                self._due_key, self._due = key, self._due_real(i, st)
+            if self._due > now:
+                return self._due
+            self._next = i + 1
+            self._take_trigger(i, st)
+        return None
 
     def _take_trigger(self, i: int, st) -> None:
         """Trigger `i` of the train `st` reaching the camera: acquired or
