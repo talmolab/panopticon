@@ -821,6 +821,19 @@ class ProcessCameraManager(QObject):
                 except Exception as e:
                     print(f"[mp] retiring cam{g + 1} failed: {e}", flush=True)
 
+    def spawn_args(self, wid: int, cams, serials, backend_state=None) -> dict:
+        """The arguments worker `wid` is started with (gui_app.mp.worker.
+        worker_main). Every value pickles: the profile goes as the RigProfile
+        object, the backend by name plus its spawn state, and the rig-wide
+        record by (name, epoch)."""
+        return {"worker": int(wid),
+                "cameras": [(int(g), str(s)) for g, s in zip(cams, serials)],
+                "profile": self._profile, "parent_pid": os.getpid(),
+                "backend": self._backend_name, "backend_state": backend_state,
+                "switch_interval": sys.getswitchinterval(),
+                "log_path": self._log_path(wid),
+                "rig": getattr(self, "_rig_spec", None)}
+
     def _spawn(self, groups: list, serials: list) -> str | None:
         """Start one worker per group; None, or why they could not start."""
         ctx = multiprocessing.get_context("spawn")
@@ -849,11 +862,7 @@ class ProcessCameraManager(QObject):
         workers = []
         for wid, idx in enumerate(groups, start=1):
             w = _Worker(wid, idx, [serials[i] for i in idx])
-            args = {"worker": wid, "cameras": list(zip(w.cams, w.serials)),
-                    "profile": self._profile, "parent_pid": os.getpid(),
-                    "backend": self._backend_name, "backend_state": state,
-                    "switch_interval": sys.getswitchinterval(),
-                    "log_path": self._log_path(wid), "rig": self._rig_spec}
+            args = self.spawn_args(wid, w.cams, w.serials, state)
             parent_conn, child_conn = ctx.Pipe(duplex=True)
             log_r, log_w = ctx.Pipe(duplex=False)
             p = ctx.Process(target=wk.worker_main,
