@@ -33,8 +33,12 @@
 #   powershell -ExecutionPolicy Bypass -File configure_nic.ps1
 #
 # PREFLIGHT (-Check) reads and reports and writes nothing, so it is safe at any
-# time, including during a recording. Either form works; the core numbers are
-# an example, so pass the pool the GUI logs:
+# time, including during a recording. Run it from an ELEVATED PowerShell:
+# without elevation Get-NetAdapterRss returns values that are not the
+# adapter's settings (a queue count and processor range nobody configured,
+# with MaxProcessors and RssProcessorArray blank), so an unelevated -Check
+# reports the RSS check as not judged and says to re-run elevated. Either form
+# works; the core numbers are an example, so pass the pool the GUI logs:
 #   powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Check -CaptureCores 10,11,12,13
 #   powershell -ExecutionPolicy Bypass -Command "& .\configure_nic.ps1 -Check -CaptureCores 10,11,12,13"
 # A list parameter (-Ports, -CaptureCores) takes comma-separated values in both
@@ -219,11 +223,25 @@ function Write-Verdict($label, $ok, $detail) {
     }
 }
 
+function Test-Elevated {
+    return ([Security.Principal.WindowsPrincipal] `
+            [Security.Principal.WindowsIdentity]::GetCurrent()
+           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+$isAdmin = Test-Elevated
+
 function Invoke-Preflight {
     Write-Host ""
     Write-Host "=== NIC preflight (read-only; writes nothing) ===" -ForegroundColor Cyan
     Write-Host ("Thresholds: receive descriptors >= {0}, interrupt moderation off or" -f $MinReceiveBuffers)
     Write-Host "lowest, RSS enabled, and the NIC's DPCs off the capture cores."
+    if (-not $isAdmin) {
+        Write-Host ""
+        Write-Host "Not elevated: the RSS values Windows reports without elevation are not" -ForegroundColor Yellow
+        Write-Host "the adapter's settings, so the RSS check is not judged. Re-run from an" -ForegroundColor Yellow
+        Write-Host "elevated PowerShell (right-click PowerShell -> Run as administrator)." -ForegroundColor Yellow
+    }
     foreach ($p in $Ports) {
         Write-Host ""
         Write-Host ("  {0}" -f $p) -ForegroundColor Cyan
@@ -249,12 +267,20 @@ function Invoke-Preflight {
             Write-Verdict "interrupt moderation" ($modOff -or $itrLow) ($shown -join " ")
         }
 
-        try {
-            $rss = Get-NetAdapterRss -Name $p -ErrorAction Stop
-            Write-Verdict "RSS" ($rss.Enabled) ("enabled={0} queues={1} processors {2}-{3}" -f
-                $rss.Enabled, $rss.NumberOfReceiveQueues, $rss.BaseProcessorNumber, $rss.MaxProcessorNumber)
-        } catch {
-            Write-Verdict "RSS" $false ("no RSS information -- {0}" -f $_.Exception.Message)
+        # RULE: no RSS verdict without elevation. REASON: unelevated,
+        # Get-NetAdapterRss returns a queue count and processor range that are
+        # not the adapter's settings, and printing them as PASS reports a
+        # configuration the adapter does not have.
+        if (-not $isAdmin) {
+            Write-Verdict "RSS" $false "not judged: unelevated values are not the adapter's settings; re-run elevated"
+        } else {
+            try {
+                $rss = Get-NetAdapterRss -Name $p -ErrorAction Stop
+                Write-Verdict "RSS" ($rss.Enabled) ("enabled={0} queues={1} processors {2}-{3}" -f
+                    $rss.Enabled, $rss.NumberOfReceiveQueues, $rss.BaseProcessorNumber, $rss.MaxProcessorNumber)
+            } catch {
+                Write-Verdict "RSS" $false ("no RSS information -- {0}" -f $_.Exception.Message)
+            }
         }
 
         $dpc = Get-DpcProcessor $p
@@ -281,9 +307,6 @@ if ($Check) {
     exit 0
 }
 
-$isAdmin = ([Security.Principal.WindowsPrincipal] `
-            [Security.Principal.WindowsIdentity]::GetCurrent()
-           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "This must run elevated (Set-NetAdapterRss needs admin)." -ForegroundColor Red
     Write-Host "Right-click PowerShell -> Run as administrator, then re-run." -ForegroundColor Red
