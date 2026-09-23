@@ -16,7 +16,7 @@ Layout (`Layout` computes the offsets; every region starts 8-byte aligned):
                 decided_upto, epoch, coord_heartbeat_ns, flushed, state,
                 reason_bytes, size, deciding_upto, spare x 3
     per camera  int64 arrays: frontier, announces, eos, retire_req,
-                retired, retired_at
+                retired, retired_at, entering
     presence    n_cams x ring_bytes  "camera c holds trigger T" (worker writes)
     decision    ring_bytes           "trigger T was released" (coordinator writes)
     reasons     n_cams x REASON_BYTES  UTF-8 retirement reason (worker writes)
@@ -27,8 +27,9 @@ per access, so no read can tear.
 Publication orders. Each is a store order the writer keeps and a load order the
 reader keeps; x86-64 preserves both, which is why `shm` refuses other CPUs.
 
-- Announce: presence bit, then `frontier`. The coordinator reads `frontier`
-  first and scans bits up to it, so it never reads past a bit not yet set.
+- Announce: `entering`, presence bit, then `frontier`. The coordinator reads
+  `frontier` first and scans bits up to it, so it never reads past a bit not
+  yet set. It reads `entering` after the scan (see the ring, below).
 - Decide: `deciding_upto`, decision bits, then `decided_upto`. A worker reads
   `decided_upto` first, then bits at or below it, then `deciding_upto` (see
   the ring, below).
@@ -56,6 +57,14 @@ T + ring_bits. These rules tie every bit a reader keeps to one trigger:
 - The coordinator scans only the last `ring_bits` triggers below a camera's
   frontier. The bit of any older trigger was cleared before that frontier was
   stored.
+- A worker can announce past that frontier while the coordinator scans. The
+  new bit then sits where the scan expects a trigger `ring_bits` older.
+  Announce stores `entering` before the bit, and the coordinator loads it
+  after the scan and discards every scanned trigger at or below
+  `entering - ring_bits`. A trigger the camera still holds is never that far
+  below, because announce refuses it. A trigger the camera grabbed and has
+  since harvested was decided before this poll, and the core would drop it as
+  late anyway.
 - A publish can rewrite a decision bit while a worker reads it. The publish
   stores `deciding_upto` before its first bit, and the harvest loads it after
   its last. A bit a later trigger already took therefore shows up as a
@@ -98,7 +107,7 @@ HEADER_BYTES = HEADER_SLOTS * 8
 REASON_BYTES = 256
 #: Per-camera int64 arrays, in layout order.
 CAMERA_ARRAYS = ("frontier", "announces", "eos", "retire_req", "retired",
-                 "retired_at")
+                 "retired_at", "entering")
 
 
 class LedgerState(enum.IntEnum):
@@ -431,9 +440,14 @@ class Coordinator:
                 continue
             row = v.presence[cam]
             # Only the last ring_bits triggers can have a bit set.
-            for t in range(max(start, front - rb + 1), front + 1):
-                if _bit(row, t % rb):
-                    items.append((t, cam))
+            held = [t for t in range(max(start, front - rb + 1), front + 1)
+                    if _bit(row, t % rb)]
+            # Loaded after the bits. A bit set by an announce past `front`
+            # sits where the scan expects a trigger ring_bits older, and that
+            # announce stored `entering` first. No trigger the camera still
+            # holds is ring_bits below `entering`: announce refuses that.
+            floor = int(v.entering[cam]) - rb
+            items.extend((t, cam) for t in held if t > floor)
             self._submitted[cam] = front
             self._progress_ns[cam] = t_ns
         items.sort()
@@ -559,6 +573,9 @@ class WorkerLedger:
             if self._pending and t - self._pending[0] >= rb:
                 self.refused_span += 1
                 return False
+        # Before the bit: a coordinator that reads this bit as an older
+        # trigger's then reads an `entering` that tells it otherwise.
+        self._v.entering[self.cam] = t
         _set_bit(self._row, t % rb, True)
         self._v.frontier[self.cam] = t
         self._announces += 1
