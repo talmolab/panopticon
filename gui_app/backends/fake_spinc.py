@@ -1046,11 +1046,11 @@ class _FakeCamera:
         `cur` has replaced it, or None when `prev` is no train.
 
         `SimBoard` keeps only the train it runs now. The end of the one
-        before is known in two cases: it was seen stopped, or no stop came
-        between the last look at it and the start of `cur`, so that start cut
-        it off. In any other case pulses fired at times nobody saw, and
-        `FakeMisuse` names the limitation instead of guessing a count. `what`
-        names the observer and `how` the call that lets it look.
+        before is known in two cases. Either it was seen stopped, or no stop
+        came between the last look at it and the start of `cur`, so that
+        start cut it off. In any other case pulses fired at times nobody saw,
+        and `FakeMisuse` names the limitation instead of guessing a count.
+        `what` names the observer and `how` the call that lets it look.
         """
         started = cur_seen[0] - prev_seen[0]
         if started == 1:

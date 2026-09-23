@@ -995,9 +995,9 @@ class SpinC:
         if timeout_ms < 0:
             raise ValueError(f"timeout_ms {timeout_ms} is negative")
         s = self._scratch()
-        # The scratch keeps the last call's handle, so it is cleared first:
-        # a call that succeeds without writing then reads as no image, not
-        # as the previous, already released one.
+        # Cleared first because the scratch keeps the last call's handle. A
+        # call that succeeds without writing would otherwise hand back the
+        # previous image, which is already released.
         s.img.value = None
         err = self._f_next(cam, timeout_ms, s.p_img)
         if not err:
