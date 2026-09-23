@@ -2033,7 +2033,7 @@ class MainWindow(QMainWindow):
                 # resets the board and floats every pin, so the laser flash
                 # the eager open exists to keep out of the experiment happens
                 # inside one.
-                self._teensy_connection()
+                reclaimed = self._teensy_connection() is not None
                 # Refusing is correct. The flash is what makes the board's
                 # contents known, so a failed flash means they are not.
                 print(f"[acq] firmware flash failed: {msg}", flush=True)
@@ -2047,13 +2047,25 @@ class MainWindow(QMainWindow):
                     f"The trigger board could not be flashed with the {label} "
                     f"firmware, so what it is running is unknown. The "
                     f"{acq_type} has not been started.\n\nKey off the laser and "
-                    f"check the board, then retry.\n\n{msg}")
+                    f"check the board, then retry."
+                    + ("" if reclaimed else
+                       " The serial port could not be reopened either, so "
+                       "the next start reopens it, which resets the board.")
+                    + f"\n\n{msg}")
                 self._reset_toggles()
                 return
             # Retake the port BEFORE recording what was flashed: a reclaim
             # that finds the controller on another port forgets the hint, and
             # a hint recorded first would be wiped, costing a second flash.
-            self._teensy_connection()
+            if self._teensy_connection() is None:
+                # The start goes ahead and opens the port on its worker, so the
+                # reset lands in the start, before any camera is armed. Said
+                # here because nothing else would say why the board resets.
+                note = (f"Flashed the {label} sketch, but the serial port could "
+                        f"not be reopened. The {acq_type} reopens it as it "
+                        f"starts, which resets the board: key off the laser.")
+                print(f"[acq] {note}", flush=True)
+                self.statusBar().showMessage(note)
             settings.set_board_sketch_hint(want_sha)
             # Whatever the board printed last is the OLD sketch's identity.
             self._board_id_stale = True
