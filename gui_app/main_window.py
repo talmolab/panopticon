@@ -271,7 +271,7 @@ class MainWindow(QMainWindow):
         self._display_timer.start(self._display_interval_ms())
 
         # Temperature gets its own slow timer and is deliberately kept off the
-        # preview timer: thermals() is a GVCP register read per camera, while
+        # preview timer: thermals() is a register read per camera, while
         # the preview repaints up to ten times a second. The interval is read
         # from the profile when acquisition starts, because _profile is not
         # assigned yet at this point in __init__.
@@ -283,13 +283,15 @@ class MainWindow(QMainWindow):
 
         # Prefer whatever profile this machine used last — the profile list is
         # shared with the 3dface rig, so alphabetical order picks the wrong one
-        # here. Fall back to the first profile whose .pfs actually exists.
+        # here. Fall back to the first profile that can open its cameras
+        # (RigProfile.settings_ready: a Basler profile's .pfs exists, a FLIR
+        # profile has its camera: block).
         self._profile = self._sidebar.current_profile
         if self._sidebar.select_profile(self._sidebar.remembered_profile()):
             self._profile = self._sidebar.current_profile
         else:
             for prof in self._sidebar.profiles:
-                if prof.pfs_path and Path(prof.pfs_path).exists():
+                if prof.settings_ready() is None:
                     self._sidebar.select_profile(prof.name)
                     self._profile = prof
                     break
@@ -349,12 +351,12 @@ class MainWindow(QMainWindow):
         Applying the profile anywhere but rig_setup is how the GUI came to run
         unpinned while every probe number looked right.
         """
-        pfs = self._profile.pfs_path
-        if not pfs or not Path(pfs).exists():
-            return CameraOpenError(
-                f"The profile's camera settings file is missing:\n"
-                f"{pfs or '(not set)'}\n\nSet pfs_path in the profile YAML to "
-                f"a file in configs/.")
+        # What a camera needs besides the profile depends on the backend (a
+        # Basler .pfs, a FLIR camera: block), so the profile says whether it
+        # has it.
+        why = self._profile.settings_ready()
+        if why:
+            return CameraOpenError(why)
         rig_setup.apply_profile_to_manager(self._camera_mgr, self._profile)
         return self._camera_mgr.open_all(
             **rig_setup.open_kwargs(self._camera_mgr, self._profile))
@@ -2747,10 +2749,11 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
 
     def _stop_acquisition(self):
-        # Stop the temperature poll FIRST. It is a GVCP register read on every
+        # Stop the temperature poll FIRST. It is a register read on every
         # camera, made from the UI thread, and the finalize worker is about to
-        # be inside pylon on the same devices; two threads making native calls
-        # on one device is an access violation, not an exception. _poll_thermals
+        # be inside the camera SDK on the same devices; two threads making
+        # native calls on one device is an access violation, not an
+        # exception. _poll_thermals
         # only stops itself on a state change, and the state does not change
         # until the finalize returns.
         self._thermal_timer.stop()
@@ -2767,8 +2770,8 @@ class MainWindow(QMainWindow):
         self._detector = None
         self._sidebar.hide_coverage()
 
-        # Draining the encoders + reconfiguring 6 cameras back to preview is ~1 s
-        # of blocking work; run it off the UI thread so the window stays live.
+        # Draining the encoders and reconfiguring the cameras back to preview
+        # is blocking work; run it off the UI thread so the window stays live.
         if self._worker_busy(self._cam_op):
             print("[acq] a camera operation is still running; the stop will "
                   "be completed by it", flush=True)
@@ -3864,12 +3867,13 @@ class MainWindow(QMainWindow):
 
         # Stop the temperature poll before any dialog on this path. RULE: the
         # thermal timer stops wherever the cameras are about to be abandoned.
-        # REASON: its slot is a GVCP register read per camera, it only
+        # REASON: its slot is a register read per camera, it only
         # self-stops on a state change, and the quit path never moves the
         # state to IDLE - so from RECORDING or CALIBRATING it keeps firing,
         # including inside the nested event loops of the two modal dialogs
         # below, against cameras _abandon_and_cleanup is closing. Two threads
-        # in pylon on one device is an access violation, not an exception.
+        # in the camera SDK on one device is an access violation, not an
+        # exception.
         self._thermal_timer.stop()
 
         # Quitting mid-session can't be finalized — confirm, then ABANDON the
@@ -4014,12 +4018,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         # Wait for the workers BEFORE tearing the cameras down. abandon() calls
-        # StopGrabbing()/Close() on every InstantCamera from the Qt main thread,
+        # StopGrabbing()/Close() on every camera from the Qt main thread,
         # while _cam_op is the thread running _finalize — possibly inside
-        # _router.stop() or resume_preview(). Two threads making native pylon
-        # calls on the same device is an access violation, not an exception, so
-        # no excepthook can intercept it. Killing the child processes above is what
-        # lets these waits actually return.
+        # _router.stop() or resume_preview(). Two threads making native camera
+        # SDK calls on the same device is an access violation, not an
+        # exception, so no excepthook can intercept it. Killing the child
+        # processes above is what lets these waits actually return.
         for w in (self._cam_op, self._cap_op, self._encode_worker,
                   self._align_worker, self._calib_worker,
                   self._coverage_worker, self._hw_check_thread,
@@ -4038,11 +4042,11 @@ class MainWindow(QMainWindow):
                   "rather than tearing it down", flush=True)
             self._fw_op.wait(5000)
         if self._cam_op is not None and self._cam_op.isRunning():
-            # Still inside pylon after 3 s. Leaking the camera handles costs
-            # nothing at process exit; closing them under a live native call
-            # crashes. Skip the teardown entirely.
+            # Still inside the camera SDK after 3 s. Leaking the camera
+            # handles costs nothing at process exit; closing them under a live
+            # native call crashes. Skip the teardown entirely.
             print("[quit] _cam_op still running — leaking camera handles rather "
-                  "than closing under a live pylon call", flush=True)
+                  "than closing under a live camera SDK call", flush=True)
         else:
             try:
                 self._camera_mgr.abandon()
