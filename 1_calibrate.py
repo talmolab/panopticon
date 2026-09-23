@@ -23,6 +23,12 @@ Outputs, all into the calibration directory:
   calibration_report.json   the same figures as JSON for the GUI
   reprojection_error_histogram.png   pairwise stereo RMS bar chart
 
+Cameras are taken in numeric order (cam2 before cam10). The toml numbers its
+camera sections in that order, zero-padded to one width (``[cam_00]`` from 11
+cameras up), so a string sort of the section keys, which is how aniposelib
+reads them, keeps the camera order. Match cameras by each section's ``name``,
+never by position.
+
 Detections are paired across cameras by trigger ordinal: frame i of a camera's
 video is trigger ``blockids.npy[i]`` (unwrapped), and two cameras pair on the
 triggers both detected the board in. Cameras drop frames independently, so
@@ -59,6 +65,7 @@ from gui_app import charuco  # noqa: E402
 from gui_app.board_detector import (  # noqa: E402
     CODET_KEY_BLOCK_IDS, calibration_video, codet_hint_key, codet_indices)
 from gui_app.frame_sync import unwrap_blockids  # noqa: E402
+from gui_app.recording_meta import camera_sort_key  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +180,10 @@ def get_charuco_obj_points(board):
 # ---------------------------------------------------------------------------
 
 def camera_dirs(calib_dir):
-    """The ``cam*`` directories under ``calib_dir``, sorted by name."""
-    return sorted(d for d in Path(calib_dir).iterdir()
-                  if d.is_dir() and d.name.startswith("cam"))
+    """The ``cam*`` directories under ``calib_dir``, in numeric order."""
+    return sorted((d for d in Path(calib_dir).iterdir()
+                   if d.is_dir() and d.name.startswith("cam")),
+                  key=lambda d: camera_sort_key(d.name))
 
 
 def camera_ordinals(cam_dir):
@@ -419,7 +427,7 @@ def load_codet_hints(codet_path, calib_dir, warnings):
                  "ignored, scanning the videos".format(
                      codet_path.name, ident, actual), warnings)
             return None
-    unstamped = sorted(set(cameras) - set(videos))
+    unstamped = sorted(set(cameras) - set(videos), key=camera_sort_key)
     if unstamped:
         notice("{}: {} not stamped with a video identity; scanned in "
                "full".format(codet_path.name, ", ".join(unstamped)))
@@ -514,7 +522,7 @@ def choose_pairing(results, warnings):
         return "block_id", {cam: (r["keys"], r["corners"], r["ids"])
                             for cam, r in results.items()}
     why = "; ".join("{}: {}".format(cam, missing[cam])
-                    for cam in sorted(missing))
+                    for cam in sorted(missing, key=camera_sort_key))
     text = ("pairing detections by frame index, which is right only for "
             "videos aligned across cameras, because {} of {} cameras have no "
             "usable trigger ordinals ({})".format(
@@ -746,12 +754,18 @@ def pair_entry(pairwise, a, b):
     return pairwise.get((b, a))
 
 
+def _pair_order(item):
+    """Sort key for ``pairwise`` items: both camera names in numeric order."""
+    (a, b), _ = item
+    return camera_sort_key(a), camera_sort_key(b)
+
+
 def connected_components(cam_names, pairwise):
     """Connected components of the solved-pair graph.
 
     Union-find over every solved pair. Sorted largest first; ties broken by the
     summed shared-frame count of the component's pairs, then by first camera
-    name, so the choice of "largest" is deterministic.
+    in numeric order, so the choice of "largest" is deterministic.
     """
     names = list(cam_names)
     index = {c: i for i, c in enumerate(names)}
@@ -776,8 +790,8 @@ def connected_components(cam_names, pairwise):
         return sum(int(v[3]) for (a, b), v in pairwise.items()
                    if a in gs and b in gs)
 
-    comps = [sorted(g) for g in groups.values()]
-    comps.sort(key=lambda g: (-len(g), -frames_in(g), g[0]))
+    comps = [sorted(g, key=camera_sort_key) for g in groups.values()]
+    comps.sort(key=lambda g: (-len(g), -frames_in(g), camera_sort_key(g[0])))
     return comps
 
 
@@ -793,7 +807,8 @@ def build_graph(cam_names, pairwise, min_tree_frames=MIN_TREE_FRAMES):
     if not components:
         return [], [], [], []
     kept = components[0]
-    dropped = sorted(c for g in components[1:] for c in g)
+    dropped = sorted((c for g in components[1:] for c in g),
+                     key=camera_sort_key)
 
     adj = defaultdict(list)
     for (a, b), (_, _, rms, n) in pairwise.items():
@@ -806,7 +821,7 @@ def build_graph(cam_names, pairwise, min_tree_frames=MIN_TREE_FRAMES):
     edges = []
     while len(in_tree) < len(kept):
         best = None
-        for node in sorted(in_tree):
+        for node in sorted(in_tree, key=camera_sort_key):
             for nb, w in adj[node]:
                 if nb not in in_tree and (best is None or w < best[2]):
                     best = (node, nb, w)
@@ -888,7 +903,7 @@ def pair_quality_warnings(pairwise) -> list[str]:
     tree edge.
     """
     out = []
-    for (ca, cb), (_, _, rms, n) in sorted(pairwise.items()):
+    for (ca, cb), (_, _, rms, n) in sorted(pairwise.items(), key=_pair_order):
         if rms_grade(rms) == "poor":
             out.append("{}-{}: stereo RMS {:.1f} px is poor ({} px or more); "
                        "check that the board config matches the printed "
@@ -924,7 +939,8 @@ def save_reprojection_histogram(path, pair_rms):
         print("  matplotlib not available, skipping histogram")
         return
 
-    labels = sorted(pair_rms.keys())
+    labels = sorted(pair_rms.keys(), key=lambda k: [
+        camera_sort_key(c) for c in k.split("-")])
     values = [pair_rms[k] for k in labels]
     if not values:
         return
@@ -981,12 +997,12 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
         tree_rows.append({"from": a, "to": b,
                           "rms": float(entry[2]), "frames": int(entry[3])})
     pairs = {}
-    for (a, b), (_, _, rms, n) in sorted(pairwise.items()):
+    for (a, b), (_, _, rms, n) in sorted(pairwise.items(), key=_pair_order):
         row = {"rms": float(rms), "frames": int(n), "grade": rms_grade(rms)}
         if codetections and (a, b) in codetections:
             row["codetections"] = int(codetections[(a, b)])
         pairs["{}-{}".format(a, b)] = row
-    dropped = {k: sorted(v) for k, v in dropped.items()}
+    dropped = {k: sorted(v, key=camera_sort_key) for k, v in dropped.items()}
     report = {
         "created": datetime.now().isoformat(timespec="seconds"),
         "opencv": cv2.__version__,
@@ -1078,18 +1094,35 @@ def metadata_toml_lines(meta):
 # Output (aniposelib-compatible calibration.toml)
 # ---------------------------------------------------------------------------
 
+def camera_section_names(n):
+    """The toml section key for each of ``n`` cameras, in camera order.
+
+    RULE: the index is zero-padded to the width of the largest one
+    (``cam_0``..``cam_9`` up to ten cameras, ``cam_00``..``cam_10`` from
+    eleven). REASON: aniposelib sorts the section keys as strings, so
+    ``cam_10`` would otherwise land between ``cam_1`` and ``cam_2``. Rigs of
+    ten or fewer cameras keep the unpadded keys.
+    """
+    width = len(str(max(int(n) - 1, 0)))
+    return ["cam_{:0{}d}".format(i, width) for i in range(int(n))]
+
+
 def write_calibration_toml(path, cam_names, intrinsics, extrinsics, sizes,
                            meta=None):
-    """Write calibration.toml, one section per camera in ``cam_names`` order."""
+    """Write calibration.toml, one section per camera in ``cam_names`` order.
+
+    Each section carries the camera's ``name``, which is what consumers
+    should match cameras by (``camera_section_names`` has the key rule).
+    """
     lines = []
-    for i, cam in enumerate(cam_names):
+    for key, cam in zip(camera_section_names(len(cam_names)), cam_names):
         K, dist = intrinsics[cam]
         rvec, tvec = extrinsics[cam]
         w, h = sizes[cam]
         d = dist.ravel()
         if len(d) < 5:
             d = np.concatenate([d, np.zeros(5 - len(d))])
-        lines.append("[cam_{}]".format(i))
+        lines.append("[{}]".format(key))
         lines.append('name = "{}"'.format(cam))
         lines.append("size = [ {}, {},]".format(w, h))
         lines.append("matrix = [ [ {}, 0.0, {},], [ 0.0, {}, {},], [ 0.0, 0.0, 1.0,],]".format(
@@ -1168,8 +1201,10 @@ def main():
         "trigger ordinal (blockids.npy)" if pairing == "block_id"
         else "frame index"))
 
-    active = sorted(c for c in all_dets if len(all_dets[c][0]) >= 5)
-    dropped["few_detections"] = sorted(set(all_dets) - set(active))
+    active = sorted((c for c in all_dets if len(all_dets[c][0]) >= 5),
+                    key=camera_sort_key)
+    dropped["few_detections"] = sorted(set(all_dets) - set(active),
+                                       key=camera_sort_key)
     if dropped["few_detections"]:
         warn("dropping {} (<5 detections)".format(
             ", ".join(dropped["few_detections"])), warnings)
@@ -1261,7 +1296,7 @@ def main():
     print("\nPairwise quality (good < {:g} px, poor from {:g} px):".format(
         RMS_GOOD_PX, RMS_POOR_PX))
     pair_rms = {}
-    for (ca, cb), (_, _, rms, n) in sorted(pairwise.items()):
+    for (ca, cb), (_, _, rms, n) in sorted(pairwise.items(), key=_pair_order):
         pair_rms["{}-{}".format(ca, cb)] = rms
         print("  {}-{}: RMS={:.2f}px  {}  ({} frames)".format(
             ca, cb, rms, rms_grade(rms), n))
