@@ -757,9 +757,23 @@ class SpinC:
             raise FlirError(err, "spinCameraDeInit")
 
     def release(self, cam) -> None:
-        """Give back a handle from `cameras()`. The handle is invalid after."""
-        self._cams.discard(cam)
-        self._release_handle(cam)
+        """Give back a handle from `cameras()`. The handle is invalid after.
+
+        A handle this object no longer holds (released already, here or by
+        `system_release()`) is refused, because releasing a handle twice is
+        undefined on the SDK. The lock keeps this and `system_release()`
+        (the exit hook) from releasing the same handle at once. A release
+        that fails leaves the handle held, so `system_release()` tries it
+        again.
+        """
+        with self._lock:
+            if cam not in self._cams:
+                raise FlirError(SPINNAKER_ERR_INVALID_HANDLE,
+                                f"spinCameraRelease: {cam!r} is not a camera "
+                                f"handle this SpinC holds (it was released "
+                                f"already, or did not come from cameras())")
+            self._release_handle(cam)
+            self._cams.discard(cam)
 
     def is_initialized(self, cam) -> bool:
         return self._flag(self._lib.spinCameraIsInitialized, cam,
