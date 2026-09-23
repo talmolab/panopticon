@@ -100,9 +100,18 @@ def unwrap_blockids(ids):
 
 
 class FrameSyncCoordinator:
-    def __init__(self, n_cams: int, max_lag: int = 240):
+    def __init__(self, n_cams: int, max_lag: int = 240, on_drop=None):
         self.n = int(n_cams)
         self.max_lag = int(max_lag)
+        #: Called as on_drop(cam, frame) for each frame the coordinator
+        #: discards instead of releasing, or None. RULE: every frame submit()
+        #: is given leaves exactly once, in a release or through on_drop,
+        #: including a late frame, a retired camera's frame and the frames a
+        #: retirement clears. REASON: the router's frames are NV12 ring
+        #: slots that the grab thread may reuse only once they are free, and
+        #: a discarded frame nobody hands back shrinks that ring for the rest
+        #: of the session.
+        self._on_drop = on_drop
         self._pending = [deque() for _ in range(self.n)]  # (block_id, frame)
         self._frontier = [0] * self.n        # highest unwrapped ID seen per cam
         #: Per-camera unwrap history (see unwrap_one).
@@ -170,7 +179,11 @@ class FrameSyncCoordinator:
             return None
         self._retired[cam] = True
         self.retired_reasons.append((cam, reason))
-        self._pending[cam].clear()
+        held = self._pending[cam]
+        if self._on_drop is not None:
+            for _bid, frame in held:
+                self._on_drop(cam, frame)
+        held.clear()
         if self.active():
             tail = "Remaining cameras stay aligned; this one's video ends here."
         else:
@@ -214,8 +227,11 @@ class FrameSyncCoordinator:
 
     def submit(self, cam: int, raw_block_id: int, frame):
         """Register a successfully-grabbed frame. Returns a list of
-        (cam, block_id, frame) ready to encode now, in per-camera order."""
+        (cam, block_id, frame) ready to encode now, in per-camera order.
+        A frame that is refused or dropped goes to on_drop (see __init__)."""
         if self._retired[cam]:
+            if self._on_drop is not None:
+                self._on_drop(cam, frame)
             return []
         if raw_block_id <= 0:
             # GVSP reserves block ID 0 and no camera reports a negative one, so
@@ -223,6 +239,8 @@ class FrameSyncCoordinator:
             # ordinal". Fed to the unwrap it reads as a 16-bit wrap and places
             # the camera far ahead, force-dropping every other camera. Refuse
             # it; the grab thread counts the exception as a frame error.
+            if self._on_drop is not None:
+                self._on_drop(cam, frame)
             raise ValueError(
                 f"cam{cam + 1}: block ID {raw_block_id} is not a trigger "
                 f"ordinal (0 is reserved, negative means unreported)")
@@ -231,6 +249,8 @@ class FrameSyncCoordinator:
             # Late arrival (e.g. recovered after we force-dropped its trigger);
             # its slot is already decided, so it can't be aligned — drop it.
             self.dropped += 1
+            if self._on_drop is not None:
+                self._on_drop(cam, frame)
             return []
         self._pending[cam].append((bid, frame))
         self._frontier[cam] = bid
@@ -269,9 +289,7 @@ class FrameSyncCoordinator:
             else:
                 slowest = min(act, key=lambda c: self._frontier[c])
                 forced = t > self._frontier[slowest]  # dropped only by max_lag
-                for c in havers:
-                    self._pending[c].popleft()
-                self.dropped += len(havers)
+                self._discard_heads(havers)
                 if forced:
                     self.forced += len(havers)
                     self.forced_by[slowest] += 1
@@ -308,13 +326,21 @@ class FrameSyncCoordinator:
                 self.released += len(act)
                 self.released_triggers += 1
             else:
-                for c in havers:
-                    self._pending[c].popleft()
-                self.dropped += len(havers)
+                self._discard_heads(havers)
             if self._first_decided is None:
                 self._first_decided = t
             self._decided_upto = t
         return ready
+
+    def _discard_heads(self, cams) -> None:
+        """Drop the head frame of each camera in `cams` (a trigger not every
+        camera has), counting it and handing it to on_drop."""
+        on_drop = self._on_drop
+        for c in cams:
+            _bid, frame = self._pending[c].popleft()
+            if on_drop is not None:
+                on_drop(c, frame)
+        self.dropped += len(cams)
 
 
 #: Fractional tolerance on the measured block-ID rate.

@@ -44,10 +44,13 @@ from gui_app.frame_sync import BLOCK_RATE_MIN_FRAMES, BLOCKID_WRAP
 # dry first, and the camera loses frames to buffer underrun instead of
 # catching up.
 ENCODE_QUEUE_DEPTH = 200
-#: Ring slots beyond the queue depth. In kick mode a frame is held by the
-#: coordinator (up to max_lag) and then queued (up to ENCODE_QUEUE_DEPTH), so the
-#: slack only has to cover the frame in Encode() plus the one being written;
-#: 64 leaves room for the router's own bookkeeping to lag a little.
+#: Ring slots beyond max_lag + ENCODE_QUEUE_DEPTH in kick mode. A frame is
+#: held by the coordinator (up to max_lag) and then queued (up to
+#: ENCODE_QUEUE_DEPTH); the slack covers the frame in Encode(), the one being
+#: written and a short backlog. A slot is reused only once it is free (see
+#: SyncEncodeRouter.attach_ring), so the depth decides how long an encoder
+#: may run behind the trigger before its camera drops frames, never whether a
+#: queued frame's pixels are overwritten.
 KICK_RING_SLACK = 64
 #: Decoupled mode holds at most ENCODE_QUEUE_DEPTH queued + 1 in Encode() + 1
 #: being written, so 4 spare slots suffice as long as a slot is only consumed
@@ -194,6 +197,12 @@ class _EncoderThread(threading.Thread):
         self._spill_path = spill_path
         self._height = height
         self.queue = queue.Queue(maxsize=ENCODE_QUEUE_DEPTH)
+        #: Called with each queued buffer once this thread has finished
+        #: reading it (encoded, spilled or discarded), or None. The router
+        #: sets it to the camera's free-slot list (SyncEncodeRouter.
+        #: attach_ring), so a ring slot is reused only after Encode() or the
+        #: spill write that reads it has returned.
+        self.recycle = None
         self.encoded = 0
         self.spilled = 0
         self.failed = False
@@ -280,6 +289,12 @@ class _EncoderThread(threading.Thread):
             self.join(timeout=timeout)
         return not self.is_alive()
 
+    def _done_with(self, nv12) -> None:
+        """Hand a buffer back once nothing in this thread reads it again."""
+        recycle = self.recycle
+        if recycle is not None:
+            recycle(nv12)
+
     def _open_spill(self, nv12) -> int:
         """Open raw_tail.bin and write the first spilled plane.
 
@@ -363,6 +378,7 @@ class _EncoderThread(threading.Thread):
                     # preflight budgets ~4.6 KB/frame for H.264, and this path
                     # writes the full 2.3 MB plane.
                     if spill_fd == -1:
+                        self._done_with(nv12)
                         continue                 # spill failed; nothing to do but drop
                     try:
                         plane = nv12[:self._height]
@@ -382,6 +398,7 @@ class _EncoderThread(threading.Thread):
                         except Exception:
                             pass
                         spill_fd = -1        # sentinel: spill is dead, drop frames
+                    self._done_with(nv12)
                     continue
                 try:
                     bs = self._enc.Encode(nv12)
@@ -402,6 +419,7 @@ class _EncoderThread(threading.Thread):
                     except Exception:
                         pass
                     spill_fd = self._open_spill(nv12)
+                self._done_with(nv12)
         except Exception as e:
             # Nothing above is supposed to raise, but the sentinel contract
             # must hold regardless: keep consuming (and discarding) until the
@@ -413,8 +431,10 @@ class _EncoderThread(threading.Thread):
                   f"sentinel", flush=True)
             self.failed = True
             while not self._abort:
-                if self.queue.get() is None:
+                item = self.queue.get()
+                if item is None:
                     break
+                self._done_with(item)
         finally:
             # -1 is the "spill died and was already closed" sentinel.
             if spill_fd is not None and spill_fd != -1:
@@ -511,10 +531,16 @@ class GrabThread(QThread):
         self.source_down_since = None
         self._abandoned = False
         self._kick = False
+        #: Kick mode: the ring slots free to be written, as the deque
+        #: SyncEncodeRouter.attach_ring returned; None in the other modes.
+        self._free_slots = None
         self.frame_count = 0
         self.timestamps = []
         self.block_ids = []
         self.drops = 0
+        #: Kick-mode frames that found no free NV12 ring slot this run (see
+        #: SyncEncodeRouter.attach_ring). Counted on that path only.
+        self.ring_full_drops = 0
         #: Results that arrived with GrabSucceeded() False this run, the
         #: time of the last one (perf_counter), and per-second counts as
         #: [int(perf_counter second), count] pairs for probes. Updated on the
@@ -812,6 +838,7 @@ class GrabThread(QThread):
         self.block_ids = []
         self.warnings = []
         self.drops = 0
+        self.ring_full_drops = 0
         self.failed_grabs = 0
         self._failed_by_second.clear()
         self._last_failed_t = None
@@ -830,8 +857,8 @@ class GrabThread(QThread):
 
         if kick:
             # Frames go to the shared router; this thread keeps no encoder. The
-            # ring must outlast a frame's whole journey (held by the coordinator
-            # up to max_lag, then queued at the encoder) before its slot reuses.
+            # ring is sized for a frame's usual journey (held by the coordinator
+            # up to max_lag, then queued at the encoder); see ring_slots.
             ring_n = ring_slots(self._router.max_lag, kick=True)
             try:
                 self._nv12_ring = [
@@ -853,7 +880,17 @@ class GrabThread(QThread):
                 self._give_up("could not allocate its NV12 ring")
                 self.ready.set()        # never hold the barrier open
                 return
-            self._ring_i = 0
+            # RULE: in kick mode a slot is written only when it is free, and
+            # the router owns every slot in between: it frees one when it
+            # drops the frame, and the encoder frees one after Encode()
+            # returns. REASON: the router may hold a frame far longer than
+            # ring_slots() submits (a backlog behind an encoder slower than
+            # the trigger), and a ring that simply cycled would then write a
+            # newer frame into a slot whose block ID is already recorded,
+            # which shifts this camera's video against blockids.npy with no
+            # gap and a clean rate check.
+            self._free_slots = self._router.attach_ring(self._cam_index,
+                                                        self._nv12_ring)
             print(f"[grab{self._cam_index}] real-time kick-out -> shared router "
                   f"(ring={ring_n})", flush=True)
         elif recording and self._realtime:
@@ -966,6 +1003,8 @@ class GrabThread(QThread):
                           "block IDs would count from a later trigger than "
                           "the other cameras'")
             self._running = False
+        # The free-slot list's pop, bound once: one call per kick-mode frame.
+        take_slot = self._free_slots.popleft if kick else None
         frame_n = 0
         timeout_n = 0
         consec_timeouts = 0    # reset by every successful grab; stall detector
@@ -1161,14 +1200,31 @@ class GrabThread(QThread):
                                     else:
                                         self.frames_before_barrier += 1
                                 if kick:
-                                    # Copy gray into the next ring slot and submit to the
+                                    # Copy gray into a free ring slot and submit to the
                                     # router; it records metadata for frames it RELEASES
                                     # (the common set), so this thread records none.
-                                    buf = self._nv12_ring[self._ring_i]
-                                    self._ring_i = (self._ring_i + 1) % len(self._nv12_ring)
-                                    tc0 = time.perf_counter()
-                                    buf[:self._height, :] = img
-                                    t_copy += time.perf_counter() - tc0
+                                    try:
+                                        buf = take_slot()
+                                    except IndexError:
+                                        # Every slot still holds a frame the router
+                                        # or its encoder has not finished with. The
+                                        # frame is submitted without pixels, so the
+                                        # alignment still sees the trigger; the
+                                        # router drops it from this camera's video
+                                        # alone and counts it (dropped_full).
+                                        buf = None
+                                        self.ring_full_drops += 1
+                                        if self.ring_full_drops in (1, 10, 100) or \
+                                                self.ring_full_drops % 1000 == 0:
+                                            stats_line = (
+                                                f"[grab{self._cam_index}] ENCODER "
+                                                f"BEHIND: no free NV12 ring slot, "
+                                                f"{self.ring_full_drops} frames "
+                                                f"dropped from this camera so far")
+                                    else:
+                                        tc0 = time.perf_counter()
+                                        buf[:self._height, :] = img
+                                        t_copy += time.perf_counter() - tc0
                                     ts0 = time.perf_counter()
                                     self._router.submit(self._cam_index, bid,
                                                         dev_ts, buf)
