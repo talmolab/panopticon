@@ -634,8 +634,11 @@ class SpinC:
 
         Leftover handles are released first because the SDK refuses to release
         a system whose cameras are still referenced. That cleanup is best
-        effort; a failure to release the system itself raises.
+        effort: every step runs, and the steps that fail are printed on one
+        line naming the handle and the error. A failure to release the system
+        itself raises.
         """
+        failures = []
         with self._lock:
             leftovers, self._cams = list(self._cams), set()
             for cam in leftovers:
@@ -643,17 +646,19 @@ class SpinC:
                              self._release_handle):
                     try:
                         step(cam)
-                    except FlirError:
-                        pass
+                    except FlirError as e:
+                        failures.append(f"camera {cam:#x}: {e}")
             if self._camlist is not None:
-                for fn in (self._lib.spinCameraListClear,
-                           self._lib.spinCameraListDestroy):
-                    try:
-                        fn(self._camlist)
-                    except Exception:
-                        pass
+                for name in ("spinCameraListClear", "spinCameraListDestroy"):
+                    err = getattr(self._lib, name)(self._camlist)
+                    if err:
+                        failures.append(f"camera list {self._camlist:#x}: "
+                                        f"{FlirError(err, name)}")
                 self._camlist = None
             system, self._system = self._system, None
+        if failures:
+            print("[spinc] system_release could not clean up: "
+                  + "; ".join(failures), flush=True)
         if system is not None:
             err = self._lib.spinSystemReleaseInstance(system)
             if err:
