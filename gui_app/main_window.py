@@ -882,6 +882,21 @@ class MainWindow(QMainWindow):
         tied to one model or one rig. How hot a camera runs depends on its
         installation as much as on the camera: airflow, mounting and whether
         the model has a fan.
+
+        RULE: a camera that reports its shutdown temperature alerts at
+        shutdown minus the profile's `thermal_warn_margin_c`, and always in
+        its own error (over-temperature) state; a 'Critical' status alone
+        does not alert. REASON: the camera's Critical level is a fixed
+        firmware value that an installation can sit above for hours without
+        losing a frame, so an alert on it fires on every session and is
+        ignored by the time it matters, while the shutdown point is where the
+        camera stops delivering. The margin is how much warning the
+        installation needs, so it lives in the profile. temp_max_c still
+        records how hot each camera got (session_metadata.json).
+
+        A camera that reports no shutdown temperature is judged by its own
+        status instead, Critical included, and one that reports neither
+        cannot be judged; the log says which, once per camera.
         """
         if self._state not in (State.RECORDING, State.CALIBRATING):
             self._thermal_timer.stop()
@@ -893,6 +908,8 @@ class MainWindow(QMainWindow):
                   flush=True)
             return
 
+        margin_c = float(getattr(self._profile, "thermal_warn_margin_c",
+                                 0.0) or 0.0)
         hot = []
         for idx, t in enumerate(readings, start=1):
             if not isinstance(t, dict) or t.get("error"):
@@ -900,64 +917,111 @@ class MainWindow(QMainWindow):
             temp = t.get("temp_c")
             status = str(t.get("temp_status", "") or "").strip()
             shutdown = t.get("temp_shutdown_c")
-            # The camera's own verdict is authoritative; the numeric comparison
-            # is a fallback for a model that does not expose the status node.
-            over = status.lower() not in ("", "ok")
-            if temp is not None and shutdown is not None and temp >= shutdown:
-                over = True
+            # Ok and Critical are the two states below the camera's own
+            # over-temperature state; anything else is that state.
+            error_state = status.lower() not in ("", "ok", "critical")
+            if shutdown is not None and temp is not None:
+                over = error_state or temp >= shutdown - margin_c
+                at_shutdown = error_state or temp >= shutdown
+            else:
+                self._log_thermal_fallback(idx, status)
+                over = status.lower() not in ("", "ok")
+                at_shutdown = error_state
             if not over:
                 continue
             margin = (shutdown - temp) if (temp is not None
                                            and shutdown is not None) else None
             # Sort key first: closest to shutdown is the one to name.
             hot.append((margin if margin is not None else 999.0,
-                        idx, temp, status, margin))
+                        idx, temp, status, margin, at_shutdown))
 
         if not hot:
             self._thermal_alert = None
             return
         hot.sort()
 
-        _key, idx, temp, status, margin = hot[0]
+        _key, idx, temp, status, margin, at_shutdown = hot[0]
         name = self._camera_label(idx)
-        if margin is None:
-            gap = ""
-        elif margin <= 0:
+        if margin is not None and margin <= 0:
             # Past the vendor's own shutdown point: a negative margin read as
             # though there were headroom left, which is the opposite of true.
             gap = ", AT OR PAST ITS SHUTDOWN POINT"
-        else:
+        elif at_shutdown:
+            gap = ", IN ITS OVER-TEMPERATURE STATE"
+        elif margin is not None:
             gap = f", {margin:.0f} C from shutdown"
+        else:
+            gap = ""
         extra = "" if len(hot) == 1 else f" (+{len(hot) - 1} more)"
         temp_s = "?" if temp is None else f"{temp:.0f}"
+        word = status if status.lower() not in ("", "ok") else "near shutdown"
         self._thermal_alert = (
-            f"CAMERA TEMPERATURE: {name} {temp_s} C "
-            f"{status or 'over limit'}{gap}{extra}")
+            f"CAMERA TEMPERATURE: {name} {temp_s} C {word}{gap}{extra}")
 
         # One durable warning per camera per session, so this reaches
         # WARNINGS.txt and the post-session dialog and not just a status bar
-        # message that scrolls past unread.
-        for _key, idx, temp, status, margin in hot:
-            if idx in self._thermal_reported:
-                continue
-            self._thermal_reported.add(idx)
+        # message that scrolls past unread. A camera that reaches shutdown
+        # gets a second one, which is reported whether or not frames were
+        # lost: from that point it stops delivering.
+        for _key, idx, temp, status, margin, at_shutdown in hot:
             name = self._camera_label(idx)
             temp_s = "?" if temp is None else f"{temp:.1f}"
-            tail = ""
-            if temp is not None and margin is not None:
-                if margin <= 0:
-                    tail = (f", which is AT OR PAST its "
-                            f"{temp + margin:.0f} C shutdown point")
-                else:
-                    tail = (f", {margin:.1f} C below its "
-                            f"{temp + margin:.0f} C shutdown point")
-            self._thermal_warnings.append(
-                f"{name} reached {temp_s} C during this acquisition, which its "
-                f"own firmware reports as '{status or 'over limit'}'{tail}. "
-                f"Check the airflow around the camera and its mounting. A "
-                f"camera that reaches its shutdown point stops delivering "
-                f"mid-session.")
-            print(f"[acq] THERMAL: {self._thermal_warnings[-1]}", flush=True)
+            shutdown = (temp + margin if temp is not None
+                        and margin is not None else None)
+            if idx not in self._thermal_reported:
+                self._thermal_reported.add(idx)
+                tail = ""
+                if shutdown is not None:
+                    if margin <= 0:
+                        tail = (f", which is AT OR PAST its {shutdown:.0f} C "
+                                f"shutdown point")
+                    else:
+                        tail = (f", {margin:.1f} C below its {shutdown:.0f} C "
+                                f"shutdown point")
+                self._thermal_warnings.append(
+                    f"{name} reached {temp_s} C during this acquisition, which "
+                    f"its own firmware reports as "
+                    f"'{status or 'no status'}'{tail}. Check the airflow "
+                    f"around the camera and its mounting. A camera that "
+                    f"reaches its shutdown point stops delivering "
+                    f"mid-session.")
+                print(f"[acq] THERMAL: {self._thermal_warnings[-1]}",
+                      flush=True)
+            if at_shutdown and idx not in self._thermal_shutdown_reported():
+                point = (f"its {shutdown:.0f} C shutdown point"
+                         if shutdown is not None
+                         else f"its over-temperature state ('{status}')")
+                self._thermal_shutdown_warnings = (
+                    list(self._thermal_shutdown_warnings)
+                    + [(idx, f"{name} reached {point} during this "
+                             f"acquisition ({temp_s} C). A camera at its "
+                             f"shutdown point stops delivering frames, so its "
+                             f"recording may end there. Let it cool before the "
+                             f"next recording.")])
+                print(f"[acq] THERMAL: {self._thermal_shutdown_warnings[-1][1]}",
+                      flush=True)
+
+    def _thermal_shutdown_reported(self) -> set:
+        """Cameras that already have a shutdown warning this acquisition."""
+        return {idx for idx, _text in self._thermal_shutdown_warnings}
+
+    def _log_thermal_fallback(self, idx: int, status: str) -> None:
+        """Say once per camera how the thermal watch judges a camera that
+        reports no shutdown temperature."""
+        if idx in self._thermal_logged:
+            return
+        self._thermal_logged = frozenset(set(self._thermal_logged) | {idx})
+        name = self._camera_label(idx)
+        if status:
+            print(f"[acq] thermal watch: {name} reports no shutdown "
+                  f"temperature, so it is judged by its own temperature "
+                  f"status ('{status}' now); any status but Ok raises the "
+                  f"alert", flush=True)
+        else:
+            print(f"[acq] thermal watch: {name} reports neither a shutdown "
+                  f"temperature nor a temperature status, so the live watch "
+                  f"cannot warn about it; its temperature is still recorded",
+                  flush=True)
 
     def _camera_label(self, idx: int) -> str:
         """Operator-facing name for a 1-based camera index."""
@@ -1405,6 +1469,8 @@ class MainWindow(QMainWindow):
         self._align_notes = []
         self._thermal_warnings = []
         self._thermal_reported = set()
+        self._thermal_shutdown_warnings = []
+        self._thermal_logged = frozenset()
         self._thermal_alert = None
         self._finalized = False
 
@@ -2973,18 +3039,20 @@ class MainWindow(QMainWindow):
                 f"encode_error.log, tail_error.log and WARNINGS.txt in those "
                 f"camera directories.")
         # Temperature is reported LIVE during the run (the status-bar alert),
-        # which is where it can still be acted on. After encoding it is added
-        # to the report only when the session actually lost frames, so a clean
-        # recording on chronically-warm cameras is not flagged for heat that
-        # cost nothing - the common case on a rig where several cameras sit
-        # above Critical by installation. When frames WERE lost, the thermal
-        # history is included so overheating is on the table as the cause.
-        # Either way the temperatures stay in session_metadata.json.
+        # which is where it can still be acted on. After encoding a camera
+        # that came near its shutdown point is added to the report only when
+        # the session actually lost frames, so a clean recording on warm
+        # cameras is not flagged for heat that cost nothing; when frames WERE
+        # lost, the thermal history is included so overheating is on the
+        # table as the cause. A camera that reached its shutdown point is
+        # always reported, because from there it stops delivering. Either way
+        # the temperatures stay in session_metadata.json.
         lost_frames = bool(self._capture_warnings) or bool(failed) \
             or bool(self._encode_worker.warnings) \
             or (len(frame_counts) > 1 and min_frames != max_frames)
         if self._thermal_warnings and lost_frames:
             problems += list(self._thermal_warnings)
+        problems += self._thermal_shutdown_texts()
         # Not a loss of frames, so not in lost_frames: these are files from
         # an earlier take that could not be removed at the start.
         problems += list(self._sweep_warnings)
