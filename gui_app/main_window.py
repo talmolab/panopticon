@@ -17,16 +17,18 @@ from PyQt5.QtGui import QPalette, QColor, QIcon, QCursor
 from gui_app.camera_manager import (AcquisitionStartRefused,
                                     AcquisitionStopIncomplete, CameraManager,
                                     CameraOpenError)
-from gui_app.grab_thread import ring_slots
+from gui_app.grab_thread import SOURCE_SILENT_S, ring_slots
 from gui_app.serial_controller import TeensyController
 from gui_app.encode_worker import EncodeWorker
 from gui_app.align_worker import AlignWorker
 from gui_app.ui_workers import CallableWorker
 from gui_app import alignment
+from gui_app import recording_meta
 from gui_app import stim_trace
 from gui_app.calibration_worker import CalibrationWorker
-from gui_app.hardware_check import (HardwareCheckThread, format_report,
-                                    check_capacity)
+from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
+                                    format_report, installed_encoder,
+                                    invalidate_nvenc_cache, select_encoder)
 from gui_app.coverage_worker import CoverageWorker
 from gui_app import rig_setup
 from gui_app import settings
@@ -108,6 +110,13 @@ class MainWindow(QMainWindow):
     #: firmware path. A failure is reported, and the next start retries on
     #: its worker with START_SERIAL_RETRIES.
     UI_SERIAL_RETRIES = 1
+    #: How a lag verdict that finds nothing wrong begins.
+    _HEALTHY = "Capture healthy"
+    #: Seconds the start waits for every grab thread to arm (fill its frame
+    #: ring and start its stream) before refusing. Arming normally takes a
+    #: few seconds; the bound only has to cover a host paging under memory
+    #: pressure without letting a wedged camera hold the start for minutes.
+    READY_TIMEOUT_S = 30.0
     #: Set by closeEvent once the operator has agreed to quit, and never
     #: cleared. The start path reads it so that nothing reaches the trigger
     #: board after the quit has stood it down.
@@ -118,6 +127,28 @@ class MainWindow(QMainWindow):
     #: Files from an earlier take that this acquisition's start could not
     #: remove, one warning each (_sweep_stale_diagnostics).
     _sweep_warnings: tuple | list = ()
+    #: True from the moment a hardware check starts until its report arrives.
+    #: Record and Calibrate stay disabled meanwhile (_toggles_permitted).
+    _hw_check_pending = False
+    #: What the finalize itself found (raw.bin against its block IDs, the
+    #: block-ID rate check outside kick mode), for this recording's report.
+    _finalize_warnings: tuple | list = ()
+    #: Rate-check texts this recording has already reported, so the
+    #: alignment summary's copy of the same finding is not shown twice.
+    _reported_rate_warnings: frozenset | set = frozenset()
+    #: Why the post-hoc alignment left each camera out, shown with its result.
+    _align_notes: tuple | list = ()
+    #: The encoder and NVENC upload this acquisition was started with, for its
+    #: session_metadata.json (_arm_encoder_record).
+    _session_encoder = ""
+    _session_upload: dict | None = None
+    #: The all-cameras-silent alarm has been raised for the current silence.
+    _source_alarm_raised = False
+    #: A camera that reached its shutdown temperature, one warning each. They
+    #: always reach WARNINGS.txt and the post-session dialog.
+    _thermal_shutdown_warnings: tuple | list = ()
+    #: Cameras whose thermal-watch fallback has been logged this acquisition.
+    _thermal_logged: frozenset | set = frozenset()
 
     def __init__(self):
         super().__init__()
@@ -240,7 +271,7 @@ class MainWindow(QMainWindow):
         self._display_timer.start(self._display_interval_ms())
 
         # Temperature gets its own slow timer and is deliberately kept off the
-        # preview timer: thermals() is a GVCP register read per camera, while
+        # preview timer: thermals() is a register read per camera, while
         # the preview repaints up to ten times a second. The interval is read
         # from the profile when acquisition starts, because _profile is not
         # assigned yet at this point in __init__.
@@ -252,13 +283,15 @@ class MainWindow(QMainWindow):
 
         # Prefer whatever profile this machine used last — the profile list is
         # shared with the 3dface rig, so alphabetical order picks the wrong one
-        # here. Fall back to the first profile whose .pfs actually exists.
+        # here. Fall back to the first profile that can open its cameras
+        # (RigProfile.settings_ready: a Basler profile's .pfs exists, a FLIR
+        # profile has its camera: block).
         self._profile = self._sidebar.current_profile
         if self._sidebar.select_profile(self._sidebar.remembered_profile()):
             self._profile = self._sidebar.current_profile
         else:
             for prof in self._sidebar.profiles:
-                if prof.pfs_path and Path(prof.pfs_path).exists():
+                if prof.settings_ready() is None:
                     self._sidebar.select_profile(prof.name)
                     self._profile = prof
                     break
@@ -318,12 +351,12 @@ class MainWindow(QMainWindow):
         Applying the profile anywhere but rig_setup is how the GUI came to run
         unpinned while every probe number looked right.
         """
-        pfs = self._profile.pfs_path
-        if not pfs or not Path(pfs).exists():
-            return CameraOpenError(
-                f"The profile's camera settings file is missing:\n"
-                f"{pfs or '(not set)'}\n\nSet pfs_path in the profile YAML to "
-                f"a file in configs/.")
+        # What a camera needs besides the profile depends on the backend (a
+        # Basler .pfs, a FLIR camera: block), so the profile says whether it
+        # has it.
+        why = self._profile.settings_ready()
+        if why:
+            return CameraOpenError(why)
         rig_setup.apply_profile_to_manager(self._camera_mgr, self._profile)
         return self._camera_mgr.open_all(
             **rig_setup.open_kwargs(self._camera_mgr, self._profile))
@@ -416,6 +449,7 @@ class MainWindow(QMainWindow):
         """
         return (self._state is State.IDLE
                 and not self._solve_running()
+                and not self._hw_check_pending
                 and bool(self._profile.name)
                 and not (self._stim_window is not None
                          and self._stim_window.is_uploading()))
@@ -491,22 +525,47 @@ class MainWindow(QMainWindow):
             (screen.height() - target_h) // 2 + screen.y(),
         )
 
-    def _run_hardware_check(self):
-        """Survey the host once, at launch, off the UI thread.
+    def _run_hardware_check(self, survey: bool = True):
+        """Check the host against the profile, off the UI thread.
 
-        The profile and the camera count are what make the libx264 bench, the
-        NVENC session probe and the encoder selection run HERE. Without them
-        the profile's `encoder` field selects nothing at all and the session
-        probe lands on the UI thread at the first Record, freezing the window
-        with no busy indicator.
+        At launch (`survey`) the whole host is surveyed; after a profile
+        switch only the encoder half runs again (HardwareCheckThread). The
+        profile and the camera count are what make the libx264 bench, the
+        NVENC session probe, the NVENC upload setting and the encoder
+        selection run HERE. Without them the profile's `encoder` field
+        selects nothing at all and the session probe lands on the UI thread
+        at the first Record, freezing the window with no busy indicator.
+
+        RULE: Record and Calibrate stay disabled until the report arrives.
+        REASON: the check installs the encoder factory and the NVENC upload,
+        and its session probe allocates every session the driver grants. A
+        start during it would record on whatever was installed before, and
+        the capacity preflight's own probe would run beside this one, each
+        child seeing only part of the session cap.
         """
         output_dir = self._profile.output_dir if self._profile else ""
         n_cams = self._camera_mgr.num_cameras or (
             self._profile.n_cameras if self._profile else 0)
-        self._hw_check_thread = HardwareCheckThread(
-            output_dir, profile=self._profile, n_cams=n_cams)
-        self._hw_check_thread.report_ready.connect(self._on_hardware_check_done)
-        self._hw_check_thread.start()
+        self._hw_check_pending = True
+        self._sidebar.set_toggles_enabled(False)
+        self.statusBar().showMessage(
+            "Checking hardware: Record and Calibrate are available once it "
+            "reports")
+        thread = HardwareCheckThread(output_dir, profile=self._profile,
+                                     n_cams=n_cams, survey=survey)
+        self._hw_check_thread = thread
+        thread.report_ready.connect(self._on_hardware_check_done)
+        # QThread's own finished, after report_ready: the backstop for a
+        # thread that ended without a report.
+        thread.finished.connect(self._on_hardware_check_thread_finished)
+        thread.start()
+
+    def _on_hardware_check_thread_finished(self):
+        if self._hw_check_pending:
+            print("[hw] the hardware check ended without a report; Record and "
+                  "Calibrate are enabled without its findings", flush=True)
+            self._hw_check_pending = False
+            self._sidebar.set_toggles_enabled(self._toggles_permitted())
 
     def _show_profile_warnings(self):
         """Report the profiles that would not load, once the window is up.
@@ -536,9 +595,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Rig profiles", "\n".join(warnings))
 
     def _on_hardware_check_done(self, report):
+        self._hw_check_pending = False
+        self._sidebar.set_toggles_enabled(self._toggles_permitted())
+        msg = format_report(report)
+        print(msg, flush=True)
+        self.statusBar().showMessage(
+            "Hardware check done" + (f": encoding with {report.encoder}"
+                                     if report.encoder else ""))
         if report.warnings:
-            msg = format_report(report)
-            print(msg, flush=True)
             QMessageBox.warning(self, "Hardware Check", msg)
 
     def _refuse_profile_switch(self):
@@ -599,8 +663,21 @@ class MainWindow(QMainWindow):
                   "profile", flush=True)
             self._refuse_profile_switch()
             return
-        # close_all + open 6 cameras (+ .pfs load) is ~1-2 s of GigE round-trips;
-        # run it off the UI thread so the window doesn't go "not responding".
+        if self._worker_busy(self._hw_check_thread):
+            # The switch runs the encoder check again for the new profile, and
+            # a second check cannot start over a running one: assigning over
+            # the running thread drops its last reference (a qFatal), and the
+            # two would install encoders for different profiles.
+            self._refuse_profile_switch()
+            QMessageBox.information(
+                self, "The hardware check is running",
+                "Panopticon is still checking the hardware for the current "
+                "profile. Switch profiles once it reports (the status bar "
+                "says when).")
+            return
+        # close_all + open the cameras (+ settings load) is seconds of camera
+        # round-trips; run it off the UI thread so the window doesn't go "not
+        # responding".
         self._begin_busy("Switching cameras…")
         self._switch_from_port = self._profile.serial_port
         self._profile = profile
@@ -622,6 +699,12 @@ class MainWindow(QMainWindow):
         self._size_to_screen()
         self._end_busy()
         self._sidebar.set_status("IDLE", "#888")
+        # RULE: the encoder check runs again for the new profile. REASON: the
+        # encoder factory, the NVENC upload and the libx264 bench are process
+        # state set by the last check, so without it the new profile records
+        # on the old profile's encoder and upload path, against a bench
+        # measured at the old frame size.
+        self._run_hardware_check(survey=False)
         self._prepare_board_after_switch(
             getattr(self, "_switch_from_port", self._profile.serial_port))
 
@@ -716,10 +799,24 @@ class MainWindow(QMainWindow):
 
         Also worth knowing while aiming the rig: a large lag means the preview
         is showing you the past, not the present.
+
+        RULE: silence is checked before lag. REASON: the lag figures and the
+        frame rates are computed as frames arrive, so with no frame arriving
+        they hold their last values and read as healthy; a camera that has
+        stopped delivering is the worse news.
         """
-        if self._state != State.RECORDING:
+        if self._state not in (State.RECORDING, State.CALIBRATING):
             return
-        msg = self._frontier_health_text() or self._delivery_health_text()
+        silence = self._silence_health_text()
+        if self._state != State.RECORDING and silence is None:
+            return
+        lag = (self._frontier_health_text() or self._delivery_health_text()
+               if self._state == State.RECORDING else None)
+        if silence and lag and lag.startswith(self._HEALTHY):
+            # A camera delivering nothing is not healthy, whatever the lag
+            # figures it left behind say.
+            lag = None
+        msg = "  |  ".join(m for m in (silence, lag) if m) or None
         if msg is None:
             return
         # An overheating camera outranks a lag report: lag costs alignment,
@@ -744,6 +841,12 @@ class MainWindow(QMainWindow):
             return None
         live = [(n, i) for i, n in enumerate(lags) if n >= 0]
         if not live:
+            # RULE: never fall back to the delivery text here. REASON: it is
+            # computed from the last frame each camera delivered, so with every
+            # camera retired it reads "healthy" for the rest of the session.
+            if lags:
+                return ("EVERY CAMERA IS RETIRED: nothing is being recorded. "
+                        "Stop the recording.")
             return None
         retired = [self._camera_label(i + 1) for i, n in enumerate(lags) if n < 0]
         tail = f"  |  RETIRED: {', '.join(retired)}" if retired else ""
@@ -751,8 +854,8 @@ class MainWindow(QMainWindow):
         cap = max(1, int(self._session_rig().kick_max_lag))
         name = self._camera_label(idx + 1)
         if worst < cap * 0.25:
-            return (f"Capture healthy — every camera within {worst} trigger(s) "
-                    f"of the leader{tail}")
+            return (f"{self._HEALTHY} — every camera within {worst} "
+                    f"trigger(s) of the leader{tail}")
         if worst < cap * 0.75:
             return (f"CAPTURE FALLING BEHIND: {name} is {worst} triggers "
                     f"behind the leader (cap {cap}). Close other "
@@ -772,13 +875,85 @@ class MainWindow(QMainWindow):
         worst = max(lags)
         name = self._camera_label(lags.index(worst) + 1)
         if worst < 0.25:
-            return (f"Capture healthy — keeping up with the trigger "
+            return (f"{self._HEALTHY} — keeping up with the trigger "
                     f"(max lag {worst * 1000:.0f} ms)")
         if worst < 1.0:
             return (f"CAPTURE FALLING BEHIND: {name} is {worst:.2f} s behind "
                     f"real time and growing. Close other applications.")
         return (f"CAPTURE {worst:.1f} s BEHIND REAL TIME ({name}). Frames will "
                 f"be lost when the buffer pool fills. Stop and investigate.")
+
+    def _silence_health_text(self):
+        """Which cameras have delivered nothing for a while, or None.
+
+        Every active camera silent at once is the trigger source, not the
+        cameras (CameraManager.source_silent), so it raises the alarm as
+        well. A camera the kick-out router retired is left out: it is silent
+        for good, and the lag text names it.
+        """
+        try:
+            secs = list(self._camera_mgr.seconds_since_frame())
+            all_silent = bool(self._camera_mgr.source_silent())
+            lags = list(self._camera_mgr.frontier_lags or [])
+        except Exception:
+            return None
+        if all_silent:
+            worst = max(secs) if secs else 0.0
+            self._raise_source_alarm(worst)
+            return (f"NO FRAMES FROM ANY CAMERA for {worst:.0f} s: the trigger "
+                    f"board may have stopped. Check the board, its USB cable"
+                    + (" and the laser" if self._profile.stim_safe_pins
+                       else "") + ".")
+        # The silence is over (or never started), so the next one alarms.
+        self._source_alarm_raised = False
+        silent = [(s, i) for i, s in enumerate(secs)
+                  if s > SOURCE_SILENT_S and not (i < len(lags) and lags[i] < 0)]
+        if not silent:
+            return None
+        silent.sort(reverse=True)
+        names = ", ".join(self._camera_label(i + 1) for _s, i in silent)
+        return f"NO FRAMES from {names} for {silent[0][0]:.0f} s"
+
+    def _raise_source_alarm(self, silent_s: float):
+        """One modal per silence: every camera stopped receiving frames.
+
+        RULE: the alarm names the trigger board and, on a profile with
+        stimulation pins, the laser. REASON: cameras stop together when what
+        they share stops, and on the board path that is the board (reset,
+        unplugged, or without power). The capture path neither re-arms nor
+        retires cameras while all of them are silent, so nothing else tells
+        the operator, and a board without power leaves its stimulation pins
+        undriven, which a laser driver can read as on.
+        """
+        if self._source_alarm_raised:
+            return
+        self._source_alarm_raised = True
+        teensy = self._teensy
+        try:
+            alive = teensy is not None and bool(teensy.port_alive())
+        except Exception:
+            alive = False
+        port = self._profile.serial_port or "(none)"
+        if alive:
+            link = (f"The trigger board's serial link on {port} still answers, "
+                    f"so the board may have reset or stopped triggering, or "
+                    f"the network to every camera is down.")
+        else:
+            link = (f"The trigger board's serial link on {port} is gone: the "
+                    f"board was unplugged, reset, or lost power.")
+        pins = list(self._profile.stim_safe_pins or [])
+        laser = (f"\n\nA board without power leaves its stimulation pins "
+                 f"{', '.join(str(p) for p in pins)} undriven, and a laser "
+                 f"driver can read an undriven input as on. Check the laser "
+                 f"now." if pins else "")
+        text = (f"No camera has received a frame for {silent_s:.0f} s.\n\n"
+                f"{link} No camera is re-armed or retired while all of them are "
+                f"silent, and every trigger in the silence is missing from "
+                f"every camera.{laser}\n\nStop the recording, then check the "
+                f"trigger board and its USB cable.")
+        print(f"[acq] ALARM: every camera silent for {silent_s:.1f} s; board "
+              f"link {'answers' if alive else 'is gone'}", flush=True)
+        QMessageBox.critical(self, "No frames from any camera", text)
 
     def _start_thermal_watch(self):
         """Begin polling temperatures for this acquisition, if enabled."""
@@ -801,6 +976,21 @@ class MainWindow(QMainWindow):
         tied to one model or one rig. How hot a camera runs depends on its
         installation as much as on the camera: airflow, mounting and whether
         the model has a fan.
+
+        RULE: a camera that reports its shutdown temperature alerts at
+        shutdown minus the profile's `thermal_warn_margin_c`, and always in
+        its own error (over-temperature) state; a 'Critical' status alone
+        does not alert. REASON: the camera's Critical level is a fixed
+        firmware value that an installation can sit above for hours without
+        losing a frame, so an alert on it fires on every session and is
+        ignored by the time it matters, while the shutdown point is where the
+        camera stops delivering. The margin is how much warning the
+        installation needs, so it lives in the profile. temp_max_c still
+        records how hot each camera got (session_metadata.json).
+
+        A camera that reports no shutdown temperature is judged by its own
+        status instead, Critical included, and one that reports neither
+        cannot be judged; the log says which, once per camera.
         """
         if self._state not in (State.RECORDING, State.CALIBRATING):
             self._thermal_timer.stop()
@@ -812,6 +1002,8 @@ class MainWindow(QMainWindow):
                   flush=True)
             return
 
+        margin_c = float(getattr(self._profile, "thermal_warn_margin_c",
+                                 0.0) or 0.0)
         hot = []
         for idx, t in enumerate(readings, start=1):
             if not isinstance(t, dict) or t.get("error"):
@@ -819,64 +1011,111 @@ class MainWindow(QMainWindow):
             temp = t.get("temp_c")
             status = str(t.get("temp_status", "") or "").strip()
             shutdown = t.get("temp_shutdown_c")
-            # The camera's own verdict is authoritative; the numeric comparison
-            # is a fallback for a model that does not expose the status node.
-            over = status.lower() not in ("", "ok")
-            if temp is not None and shutdown is not None and temp >= shutdown:
-                over = True
+            # Ok and Critical are the two states below the camera's own
+            # over-temperature state; anything else is that state.
+            error_state = status.lower() not in ("", "ok", "critical")
+            if shutdown is not None and temp is not None:
+                over = error_state or temp >= shutdown - margin_c
+                at_shutdown = error_state or temp >= shutdown
+            else:
+                self._log_thermal_fallback(idx, status)
+                over = status.lower() not in ("", "ok")
+                at_shutdown = error_state
             if not over:
                 continue
             margin = (shutdown - temp) if (temp is not None
                                            and shutdown is not None) else None
             # Sort key first: closest to shutdown is the one to name.
             hot.append((margin if margin is not None else 999.0,
-                        idx, temp, status, margin))
+                        idx, temp, status, margin, at_shutdown))
 
         if not hot:
             self._thermal_alert = None
             return
         hot.sort()
 
-        _key, idx, temp, status, margin = hot[0]
+        _key, idx, temp, status, margin, at_shutdown = hot[0]
         name = self._camera_label(idx)
-        if margin is None:
-            gap = ""
-        elif margin <= 0:
+        if margin is not None and margin <= 0:
             # Past the vendor's own shutdown point: a negative margin read as
             # though there were headroom left, which is the opposite of true.
             gap = ", AT OR PAST ITS SHUTDOWN POINT"
-        else:
+        elif at_shutdown:
+            gap = ", IN ITS OVER-TEMPERATURE STATE"
+        elif margin is not None:
             gap = f", {margin:.0f} C from shutdown"
+        else:
+            gap = ""
         extra = "" if len(hot) == 1 else f" (+{len(hot) - 1} more)"
         temp_s = "?" if temp is None else f"{temp:.0f}"
+        word = status if status.lower() not in ("", "ok") else "near shutdown"
         self._thermal_alert = (
-            f"CAMERA TEMPERATURE: {name} {temp_s} C "
-            f"{status or 'over limit'}{gap}{extra}")
+            f"CAMERA TEMPERATURE: {name} {temp_s} C {word}{gap}{extra}")
 
         # One durable warning per camera per session, so this reaches
         # WARNINGS.txt and the post-session dialog and not just a status bar
-        # message that scrolls past unread.
-        for _key, idx, temp, status, margin in hot:
-            if idx in self._thermal_reported:
-                continue
-            self._thermal_reported.add(idx)
+        # message that scrolls past unread. A camera that reaches shutdown
+        # gets a second one, which is reported whether or not frames were
+        # lost: from that point it stops delivering.
+        for _key, idx, temp, status, margin, at_shutdown in hot:
             name = self._camera_label(idx)
             temp_s = "?" if temp is None else f"{temp:.1f}"
-            tail = ""
-            if temp is not None and margin is not None:
-                if margin <= 0:
-                    tail = (f", which is AT OR PAST its "
-                            f"{temp + margin:.0f} C shutdown point")
-                else:
-                    tail = (f", {margin:.1f} C below its "
-                            f"{temp + margin:.0f} C shutdown point")
-            self._thermal_warnings.append(
-                f"{name} reached {temp_s} C during this acquisition, which its "
-                f"own firmware reports as '{status or 'over limit'}'{tail}. "
-                f"Check the airflow around the camera and its mounting. A "
-                f"camera that reaches its shutdown point stops delivering "
-                f"mid-session.")
-            print(f"[acq] THERMAL: {self._thermal_warnings[-1]}", flush=True)
+            shutdown = (temp + margin if temp is not None
+                        and margin is not None else None)
+            if idx not in self._thermal_reported:
+                self._thermal_reported.add(idx)
+                tail = ""
+                if shutdown is not None:
+                    if margin <= 0:
+                        tail = (f", which is AT OR PAST its {shutdown:.0f} C "
+                                f"shutdown point")
+                    else:
+                        tail = (f", {margin:.1f} C below its {shutdown:.0f} C "
+                                f"shutdown point")
+                self._thermal_warnings.append(
+                    f"{name} reached {temp_s} C during this acquisition, which "
+                    f"its own firmware reports as "
+                    f"'{status or 'no status'}'{tail}. Check the airflow "
+                    f"around the camera and its mounting. A camera that "
+                    f"reaches its shutdown point stops delivering "
+                    f"mid-session.")
+                print(f"[acq] THERMAL: {self._thermal_warnings[-1]}",
+                      flush=True)
+            if at_shutdown and idx not in self._thermal_shutdown_reported():
+                point = (f"its {shutdown:.0f} C shutdown point"
+                         if shutdown is not None
+                         else f"its over-temperature state ('{status}')")
+                self._thermal_shutdown_warnings = (
+                    list(self._thermal_shutdown_warnings)
+                    + [(idx, f"{name} reached {point} during this "
+                             f"acquisition ({temp_s} C). A camera at its "
+                             f"shutdown point stops delivering frames, so its "
+                             f"recording may end there. Let it cool before the "
+                             f"next recording.")])
+                print(f"[acq] THERMAL: {self._thermal_shutdown_warnings[-1][1]}",
+                      flush=True)
+
+    def _thermal_shutdown_reported(self) -> set:
+        """Cameras that already have a shutdown warning this acquisition."""
+        return {idx for idx, _text in self._thermal_shutdown_warnings}
+
+    def _log_thermal_fallback(self, idx: int, status: str) -> None:
+        """Say once per camera how the thermal watch judges a camera that
+        reports no shutdown temperature."""
+        if idx in self._thermal_logged:
+            return
+        self._thermal_logged = frozenset(set(self._thermal_logged) | {idx})
+        name = self._camera_label(idx)
+        if status:
+            print(f"[acq] thermal watch: {name} reports no shutdown "
+                  f"temperature, so it is judged by its own temperature "
+                  f"status ('{status}' now); any status but Ok raises the "
+                  f"alert", flush=True)
+        else:
+            print(f"[acq] thermal watch: {name} reports neither a shutdown "
+                  f"temperature nor a temperature status, so the live watch "
+                  f"cannot warn about it; its temperature is still recorded",
+                  flush=True)
 
     def _camera_label(self, idx: int) -> str:
         """Operator-facing name for a 1-based camera index."""
@@ -974,9 +1213,29 @@ class MainWindow(QMainWindow):
         # rate for it overstates the disk cost by the ratio between them.
         fps = (p.calibration_frame_rate if acq_type == "calibration"
                else p.frame_rate)
+        n_cams = self._camera_mgr.num_cameras
+        # RULE: the encoder is selected again for every start, against the
+        # live profile and the cameras that are open. REASON: the launch
+        # selection answers for the machine as it was then; an NVENC session
+        # shortfall at launch installs libx264, and a start that trusted it
+        # would record every camera on the CPU after the sessions came back,
+        # while the check below saw enough sessions and said nothing. The
+        # session count is cached, so this re-probes only when the cache is
+        # short of what this start needs.
+        choice_blocking = []
+        try:
+            if n_cams > 0:
+                choice = select_encoder(p, n_cams, fps, p.frame_width,
+                                        p.frame_height)
+                print(f"[acq] encoder: {choice.encoder} ({choice.reason})",
+                      flush=True)
+                if choice.blocking:
+                    choice_blocking.append(choice.blocking)
+        except Exception as e:
+            print(f"[acq] encoder selection failed to run: {e}", flush=True)
         try:
             blocking, warnings = check_capacity(
-                n_cams=self._camera_mgr.num_cameras,
+                n_cams=n_cams,
                 width=p.frame_width, height=p.frame_height,
                 ring_n=ring_n, max_num_buffer=p.max_num_buffer,
                 realtime=realtime, output_dir=self._sidebar.output_dir,
@@ -984,8 +1243,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             # A broken preflight must never be what stops a recording.
             print(f"[acq] capacity preflight failed to run: {e}", flush=True)
-            return [], []
-        return list(blocking or []), list(warnings or [])
+            return choice_blocking, []
+        blocking = list(blocking or [])
+        return (choice_blocking + [b for b in blocking
+                                   if b not in choice_blocking],
+                list(warnings or []))
 
     def _on_capacity_checked(self, result):
         """Answer the capacity preflight, then carry the start on. UI thread."""
@@ -1191,6 +1453,18 @@ class MainWindow(QMainWindow):
             self._sidebar.clear_toggle_silently(acq_type)
             return
 
+        # The toggles are disabled while the hardware check runs; this is the
+        # guard for a start that reaches here another way.
+        if self._hw_check_pending:
+            self._refuse_start(
+                "The hardware check is running",
+                "Panopticon is still checking the hardware for this profile: "
+                "it installs the encoder and probes the NVENC session cap, "
+                "and a start now would record on whatever was installed "
+                "before.\n\nStart again once the status bar says the check "
+                "is done.")
+            return
+
         # A solve runs for minutes and never leaves IDLE, so the guard above
         # does not see it. Starting on top of one puts an acquisition and a
         # running solve child on the same machine, the same calibration.toml
@@ -1284,9 +1558,15 @@ class MainWindow(QMainWindow):
         self._created_dirs = []
         self._capture_warnings = []
         self._sweep_warnings = []
+        self._finalize_warnings = []
+        self._reported_rate_warnings = set()
+        self._align_notes = []
         self._thermal_warnings = []
         self._thermal_reported = set()
+        self._thermal_shutdown_warnings = []
+        self._thermal_logged = frozenset()
         self._thermal_alert = None
+        self._source_alarm_raised = False
         self._finalized = False
 
         raw_paths = [self._video_dir / cam / "raw.bin"
@@ -1506,6 +1786,25 @@ class MainWindow(QMainWindow):
                 warnings.append(text)
         self._sweep_warnings = warnings
 
+    def _arm_encoder_record(self, rig) -> None:
+        """Note the encoder and NVENC upload this acquisition starts with.
+
+        Read off the installed seam just before the encoders are built, which
+        is what they are built from, and written into session_metadata.json
+        at stop: the profile says what was asked for (`encoder: auto`, the
+        requested upload), and only this says what recorded.
+        """
+        self._session_encoder = installed_encoder(bool(rig.realtime_encode))
+        self._session_upload = None
+        if self._session_encoder != "nvenc":
+            return
+        try:
+            from gui_app import nvenc
+            self._session_upload = dict(nvenc.upload_config(),
+                                        stats_at_start=nvenc.upload_stats())
+        except Exception as e:
+            print(f"[acq] NVENC upload setting unavailable: {e}", flush=True)
+
     def _start_body(self, acq_type, raw_paths, display_every, realtime, kick,
                     fps) -> dict:
         """Claim the board, start the cameras, start the triggers.
@@ -1573,6 +1872,7 @@ class MainWindow(QMainWindow):
                         f"recorded. Check the output directory, then start "
                         f"again.")}
 
+        self._arm_encoder_record(rig)
         try:
             self._camera_mgr.start_acquisition(
                 raw_paths, display_every=display_every,
@@ -1591,22 +1891,52 @@ class MainWindow(QMainWindow):
                          and rig.calibration_gain_db >= 0 else None))
         except AcquisitionStartRefused as e:
             # Raised only once the cameras are back in free-run preview with
-            # nothing recorded, so there is nothing to roll back.
+            # nothing recorded, so there is nothing to roll back. A refusal
+            # because the kick-out encoders could not be created makes the
+            # cached NVENC session count suspect (invalidate_nvenc_cache).
+            failures = list(getattr(self._camera_mgr, "last_encoder_failures",
+                                    []) or [])
+            if failures:
+                invalidate_nvenc_cache("; ".join(failures))
             return {"ok": False, "title": "Cannot start the acquisition",
                     "message": str(e)}
 
         # Barrier: never start the board while a grab thread is still
         # allocating. See CameraManager.wait_until_ready for the measurement.
+        # RULE: the start is refused unless every camera is armed. REASON: a
+        # camera that arms after the board starts counts its block IDs from
+        # a later trigger than the others, so every frame of it is paired
+        # with the wrong trigger, with no gap in blockids.npy and a clean
+        # rate check. The board has not been sent anything yet, so the
+        # rollback stops only the cameras.
         t_bar = time.perf_counter()
         try:
-            n_ready, n_tot = self._camera_mgr.wait_until_ready(30.0)
-            waited = time.perf_counter() - t_bar
-            flag = "" if n_ready == n_tot else "  *** NOT ALL READY ***"
-            print(f"[acq] grab threads ready {n_ready}/{n_tot} after "
-                  f"{waited:.2f}s{flag}", flush=True)
+            n_ready, n_tot = self._camera_mgr.wait_until_ready(
+                self.READY_TIMEOUT_S)
+            late = list(self._camera_mgr.not_ready())
         except Exception as e:
-            print(f"[acq] readiness barrier failed, starting anyway: {e}",
-                  flush=True)
+            print(f"[acq] readiness barrier failed: {e}", flush=True)
+            return self._rollback_acquisition(
+                f"The check that every camera is armed before the trigger "
+                f"board starts could not run:\n\n{type(e).__name__}: {e}\n\n"
+                f"The board was not started and nothing was recorded. Start "
+                f"again.", sent_start=False)
+        waited = time.perf_counter() - t_bar
+        flag = "" if not late else "  *** NOT ALL READY ***"
+        print(f"[acq] grab threads ready {n_ready}/{n_tot} after "
+              f"{waited:.2f}s{flag}", flush=True)
+        if late:
+            names = ", ".join(self._camera_label(i + 1) for i in late)
+            return self._rollback_acquisition(
+                f"{names} had not armed after {self.READY_TIMEOUT_S:.0f} s, "
+                f"so the trigger board was not started: a camera that arms "
+                f"after the board starts records every frame against the "
+                f"wrong trigger, with nothing in the files to show it.\n\n"
+                f"Nothing was recorded. Arming fills each camera's frame "
+                f"ring in memory first, so the usual cause is memory "
+                f"pressure: close other applications, or lower "
+                f"kick_max_lag or max_num_buffer in the rig profile, then "
+                f"start again.", sent_start=False)
         try:
             # Printed beside the readiness line so a session's log records
             # where the capture threads actually ran, which is what a probe's
@@ -1620,6 +1950,28 @@ class MainWindow(QMainWindow):
         # runs after this start and the start does not retry after it.
         if self._quitting:
             return self._quit_during_start()
+        # Immediately before the start: from here a camera whose stream arms
+        # late retires itself, and the frames each camera took before this
+        # point are fixed.
+        self._camera_mgr.mark_board_starting()
+        early = {name: n for name, n
+                 in self._camera_mgr.frames_before_barrier().items() if n}
+        if early:
+            # Every camera is armed and this start has not reached the board,
+            # so a frame here came from a trigger this start did not send.
+            # Such a camera's block IDs do not start at the board's first
+            # trigger. The rollback sends the board a stop, which is always
+            # safe, in case it is still triggering from an earlier start.
+            detail = ", ".join(f"{name} ({n})" for name, n in early.items())
+            return self._rollback_acquisition(
+                f"Frames arrived before the trigger board was started: "
+                f"{detail}. Something is triggering these cameras already: "
+                f"the board still running from an earlier start, another "
+                f"trigger source on their input line, or a camera not in "
+                f"trigger mode. Their block IDs would not count this "
+                f"recording's triggers.\n\nNothing was recorded. Check the "
+                f"trigger wiring and the cameras' trigger settings, then "
+                f"start again.", sent_start=True)
         print(f"[acq] sending start_triggers "
               f"pins={self._profile.trigger_pins} fps={fps}", flush=True)
         counted_before_retry = []
@@ -2397,10 +2749,11 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
 
     def _stop_acquisition(self):
-        # Stop the temperature poll FIRST. It is a GVCP register read on every
+        # Stop the temperature poll FIRST. It is a register read on every
         # camera, made from the UI thread, and the finalize worker is about to
-        # be inside pylon on the same devices; two threads making native calls
-        # on one device is an access violation, not an exception. _poll_thermals
+        # be inside the camera SDK on the same devices; two threads making
+        # native calls on one device is an access violation, not an
+        # exception. _poll_thermals
         # only stops itself on a state change, and the state does not change
         # until the finalize returns.
         self._thermal_timer.stop()
@@ -2417,8 +2770,8 @@ class MainWindow(QMainWindow):
         self._detector = None
         self._sidebar.hide_coverage()
 
-        # Draining the encoders + reconfiguring 6 cameras back to preview is ~1 s
-        # of blocking work; run it off the UI thread so the window stays live.
+        # Draining the encoders and reconfiguring the cameras back to preview
+        # is blocking work; run it off the UI thread so the window stays live.
         if self._worker_busy(self._cam_op):
             print("[acq] a camera operation is still running; the stop will "
                   "be completed by it", flush=True)
@@ -2439,12 +2792,12 @@ class MainWindow(QMainWindow):
                 # aligned. The cameras are left untouched for abandon().
                 print(f"[acq] stop incomplete, saving what was collected: {e}",
                       flush=True)
-                self._save_frametimes(e.results)
+                self._save_capture_record(e.results)
                 self._save_acquisition_metadata()
                 self._write_stim_trace()
                 self._finalized = True
                 raise
-            self._save_frametimes(cam_results)
+            self._save_capture_record(cam_results)
             # Read thermals BEFORE resume_preview: DeviceTemperature starts
             # decaying the moment the load comes off, and how hot a camera got
             # under load cannot be recovered after the fact.
@@ -2476,20 +2829,59 @@ class MainWindow(QMainWindow):
         once the rig has moved on.
         """
         try:
-            path = self._config.save_metadata(self._acq_type)
+            info = list(getattr(self._camera_mgr, "camera_info", []) or [])
+        except Exception as e:
+            print(f"[acq] camera identities unavailable: {e}", flush=True)
+            info = []
+        try:
+            path = self._config.save_metadata(
+                self._acq_type, camera_info=info or None,
+                encoder=self._session_encoder or None)
         except Exception as e:
             print(f"[acq] could not write session metadata: {e}", flush=True)
             return
+        extra = {}
         stats = list(getattr(self._camera_mgr, "last_stream_stats", []) or [])
-        if not stats:
+        if stats:
+            extra["camera_stream_stats"] = stats
+        upload = self._upload_record()
+        if upload is not None:
+            extra["nvenc_upload_used"] = upload
+        if not extra:
             return
         try:
             meta = json.loads(path.read_text(encoding="utf-8"))
-            meta["camera_stream_stats"] = stats
+            meta.update(extra)
             path.write_text(json.dumps(meta, indent=2, default=str),
                             encoding="utf-8")
         except Exception as e:
             print(f"[acq] could not record stream statistics: {e}", flush=True)
+
+    def _upload_record(self) -> dict | None:
+        """How NVENC received this acquisition's frames, or None when it did
+        not encode on NVENC.
+
+        The profile's nvenc_upload is what was asked for; the launch check
+        can have put the host upload back, and a pinned encoder that could
+        not be set up falls back to the host upload on its own. The count is
+        this acquisition's, not the process's.
+        """
+        rec = self._session_upload
+        if not rec:
+            return None
+        try:
+            from gui_app import nvenc
+            now = nvenc.upload_stats()
+        except Exception:
+            now = {}
+        start = rec.get("stats_at_start") or {}
+        return dict(
+            upload=rec.get("upload"),
+            context=rec.get("context") if rec.get("upload") == "pinned"
+            else None,
+            host_fallbacks=(int(now.get("host_fallbacks", 0))
+                            - int(start.get("host_fallbacks", 0))),
+            pinned_disabled=now.get("pinned_disabled") or None)
 
     def _on_acquisition_finalized(self, _result):
         self._end_busy()
@@ -2503,8 +2895,18 @@ class MainWindow(QMainWindow):
         # silently.
         # Capture-side problems (a retired camera, block-ID truncation) reach
         # the operator here or not at all: camera_manager drops the router right
-        # after reading them.
-        self._capture_warnings = list(getattr(self._camera_mgr, "last_warnings", []))
+        # after reading them. The finalize's own findings follow them.
+        self._capture_warnings = (
+            list(getattr(self._camera_mgr, "last_warnings", []) or [])
+            + list(self._finalize_warnings))
+        # RULE: an acquisition in which a real-time encoder could not be
+        # created or failed forgets the cached NVENC session count. REASON:
+        # the count the preflight passed on was wrong for this start, and a
+        # cache that is never re-probed passes the next start on it too.
+        failures = list(getattr(self._camera_mgr, "last_encoder_failures",
+                                []) or [])
+        if failures:
+            invalidate_nvenc_cache("; ".join(failures))
         if isinstance(_result, Exception):
             print(f"[acq] FINALIZE FAILED: {type(_result).__name__}: {_result}",
                   flush=True)
@@ -2527,17 +2929,33 @@ class MainWindow(QMainWindow):
             self._sidebar.set_fields_editable(True)
             self._camera_grid.setup_grid(0)
             self._camera_names = []
+            # RULE: the capture warnings are written and shown here too.
+            # REASON: this is the session most likely to be misread later,
+            # and the manager's warnings (a board that ignored the stop, a
+            # retired camera, exposure not applied) exist nowhere else.
+            problems = ([f"Saving the recording failed: "
+                         f"{type(_result).__name__}: {_result}"]
+                        + list(self._capture_warnings)
+                        + self._thermal_shutdown_texts())
+            written = self._write_warnings_file(problems)
+            where = (f"\n\nThis has also been written to:\n{written}"
+                     if written else "")
+            warn_text = ("\n\nCapture warnings:\n- "
+                         + "\n- ".join(self._capture_warnings)
+                         if self._capture_warnings else "")
             QMessageBox.critical(
                 self, "Recording did not finish cleanly",
                 f"Saving the recording failed:\n\n{type(_result).__name__}: "
                 f"{_result}\n\n"
                 + (f"Still running when the stop gave up: {stuck}.\n\n"
                    if stuck else "")
-                + f"The raw capture files are still in:\n"
+                + f"The capture files are still in:\n"
                 f"{self._video_dir}\n\nThey have NOT been encoded or deleted. Do "
-                f"not start another recording into that directory.\n\nThe "
+                f"not start another recording into that directory. Once the "
+                f"cause is fixed, 0_encode.py turns them into mp4s:\n"
+                f"uv run python 0_encode.py \"{self._video_dir}\"\n\nThe "
                 f"cameras have been closed: switch profile and back, or restart "
-                f"Panopticon, to reopen them.")
+                f"Panopticon, to reopen them." + warn_text + where)
             return
         self._state = State.ENCODING
         self._sidebar.set_status("ENCODING", "#ffaa00")
@@ -2582,44 +3000,153 @@ class MainWindow(QMainWindow):
         print(f"[hud] saved {n} co-detection frame indices to {path.name}",
               flush=True)
 
-    def _save_frametimes(self, cam_results: list[tuple[int, list[float], list[int]]]):
-        counts = [len(ts) for _, ts, _ in cam_results if ts]
-        if not counts:
-            return
-        min_frames = min(counts)
-        rig = self._session_rig()
-        realtime = rig.realtime_encode
+    def _save_capture_record(self, cam_results: list) -> None:
+        """Everything the finalize writes from the capture itself. Worker thread.
 
-        for i, (count, timestamps, block_ids) in enumerate(cam_results):
+        The frame times and block IDs, the RETIRED.json of each retired
+        camera, and the block-ID rate check outside kick mode. What they find
+        is kept in _finalize_warnings for this recording's report.
+        """
+        warnings = list(self._save_frametimes(cam_results) or [])
+        self._write_retired()
+        rate = self._finalize_rate_check()
+        self._reported_rate_warnings = set(self._reported_rate_warnings) | set(rate)
+        self._finalize_warnings = warnings + rate
+
+    def _save_frametimes(self, cam_results: list[tuple[int, list[float], list[int]]]
+                         ) -> list:
+        """Write each camera's frametimes.npy and blockids.npy. Worker thread.
+
+        Returns the warnings, one per camera whose raw.bin disagreed with its
+        own block IDs.
+
+        RULE: every camera keeps every frame it persisted, in every mode; no
+        camera is cut to another camera's length. REASON: cameras drop frames
+        independently, so frame i is not the same trigger on two cameras, and
+        the block IDs are what align them afterwards (the post-hoc alignment,
+        2_align.py). Cutting each raw.bin to the shortest camera's count
+        destroys the survivors' frames when one camera stops early, and in
+        raw mode gives equal-length videos whose frame i is a different
+        trigger on any camera that dropped one.
+
+        RULE: when a raw.bin and its camera's block IDs disagree, the block
+        IDs are cut to the whole frames raw.bin holds, never the reverse, and
+        the camera is named in a warning. REASON: blockids.npy records only
+        frames that were persisted; a frame on disk without a block ID cannot
+        be placed on the trigger timeline, so it is the one cut, and a
+        partial frame at the end of the file is cut with it.
+        """
+        rig = self._session_rig()
+        frame_size = int(rig.frame_width) * int(rig.frame_height)
+        warnings = []
+        for i, (_count, timestamps, block_ids) in enumerate(cam_results):
             if not timestamps:
                 continue
             cam = self._camera_names[i]
             cam_dir = self._video_dir / cam
+            n = len(timestamps)
+            if block_ids:
+                n = min(n, len(block_ids))
 
-            # Realtime: the mp4 carries every encoded frame, so save FULL
-            # per-camera frametimes + blockids — auto-alignment then trims them
-            # to the frames every camera captured. Raw mode truncates raw.bin
-            # (below) to the min count for positional cross-cam consistency, so
-            # its frametimes/blockids are truncated to match.
-            n = len(timestamps) if realtime else min_frames
+            raw_path = cam_dir / "raw.bin"
+            if raw_path.exists() and frame_size > 0:
+                size = raw_path.stat().st_size
+                on_disk = size // frame_size
+                keep = min(on_disk, n)
+                if keep * frame_size != size:
+                    with open(raw_path, "r+b") as f:
+                        f.truncate(keep * frame_size)
+                note = None
+                if on_disk < n:
+                    note = (f"{cam}: raw.bin holds {on_disk} whole frames but "
+                            f"{n} were recorded, so its block IDs and frame "
+                            f"times are cut to the {on_disk} frames on disk. "
+                            f"The frames it lost at the end are missing from "
+                            f"its video.")
+                    n = on_disk
+                elif on_disk > n:
+                    note = (f"{cam}: raw.bin holds {on_disk} frames but only "
+                            f"{n} have a block ID; the {on_disk - n} without "
+                            f"one cannot be placed on the trigger timeline and "
+                            f"were cut from raw.bin.")
+                elif size != keep * frame_size:
+                    print(f"[acq] {cam}: raw.bin ended in a partial frame; it "
+                          f"was cut to its {keep} whole frames", flush=True)
+                if note:
+                    warnings.append(note)
+                    print(f"[acq] WARNING: {note}", flush=True)
+            if n <= 0:
+                continue
+
             frame_nums = np.arange(1, n + 1, dtype=np.float64)
-            ts_arr = np.array(timestamps[:n])
+            ts_arr = np.array(timestamps[:n], dtype=np.float64)
             ts_arr -= ts_arr[0]
             np.save(cam_dir / "frametimes.npy", np.stack([frame_nums, ts_arr]))
             # Block ID = trigger ordinal; dropped frames show as gaps, so
             # cross-camera alignment survives a drop (see gui_app/alignment.py).
             if block_ids:
-                bids = np.asarray(block_ids, dtype=np.int64)
-                np.save(cam_dir / "blockids.npy", bids if realtime else bids[:n])
+                bids = np.asarray(block_ids[:n], dtype=np.int64)
+                np.save(cam_dir / "blockids.npy", bids)
+        return warnings
 
-            raw_path = cam_dir / "raw.bin"
-            if raw_path.exists():
-                frame_size = rig.frame_width * rig.frame_height
-                expected_size = min_frames * frame_size
-                actual_size = raw_path.stat().st_size
-                if actual_size > expected_size:
-                    with open(raw_path, "r+b") as f:
-                        f.truncate(expected_size)
+    def _write_retired(self) -> None:
+        """RETIRED.json beside each camera the capture retired. Worker thread.
+
+        2_align.py and this window's own alignment leave such a camera out of
+        the alignment, so a camera that stopped early cannot cut the cameras
+        that kept recording down to its length.
+        """
+        retired = dict(getattr(self._camera_mgr, "last_retired", {}) or {})
+        for name, reason in retired.items():
+            cam_dir = self._video_dir / name
+            if not cam_dir.is_dir():
+                continue
+            extra = {}
+            try:
+                bids = np.load(cam_dir / "blockids.npy")
+                extra = dict(frames=int(bids.size),
+                             last_block_id=int(bids[-1]) if bids.size else None)
+            except (OSError, ValueError):
+                extra = dict(frames=0, last_block_id=None)
+            try:
+                recording_meta.write_retired(cam_dir, reason, **extra)
+                print(f"[acq] {name}: RETIRED.json written ({reason})",
+                      flush=True)
+            except OSError as e:
+                print(f"[acq] could not write {name}/RETIRED.json: {e}",
+                      flush=True)
+
+    def _finalize_rate_check(self) -> list:
+        """The block-ID rate check of a recording made without kick-out.
+        Worker thread; returns its warnings.
+
+        RULE: it runs at every stop outside kick mode, from the block IDs and
+        frame times just saved. REASON: a camera that ignores triggers
+        (exposure over the ceiling) keeps gapless block IDs and the same frame
+        count as the others, so nothing else in these modes looks: the
+        post-hoc alignment finds nothing to trim and stops there. Kick mode
+        runs the same check in the router's stop and reports it through the
+        manager's warnings.
+        """
+        rig = self._session_rig()
+        if rig.realtime_encode and rig.realtime_kick:
+            return []
+        fps = self._acq_fps or rig.frame_rate
+        try:
+            an = alignment.analyse(self._video_dir, fps)
+        except Exception as e:
+            msg = (f"The block-ID rate check could not run on this recording "
+                   f"({e}), so a camera that ignored triggers would not be "
+                   f"detected. Run 2_align.py on {self._video_dir} to check "
+                   f"it.")
+            print(f"[acq] WARNING: {msg}", flush=True)
+            return [msg]
+        for name, why in an.rate_skipped.items():
+            print(f"[acq] block-ID rate check skipped {name}: {why}",
+                  flush=True)
+        for msg in an.rate_warnings:
+            print(f"[acq] WARNING: {msg}", flush=True)
+        return list(an.rate_warnings)
 
     def _on_encoding_done(self, results):
         self._sidebar.hide_progress()
@@ -2667,18 +3194,20 @@ class MainWindow(QMainWindow):
                 f"encode_error.log, tail_error.log and WARNINGS.txt in those "
                 f"camera directories.")
         # Temperature is reported LIVE during the run (the status-bar alert),
-        # which is where it can still be acted on. After encoding it is added
-        # to the report only when the session actually lost frames, so a clean
-        # recording on chronically-warm cameras is not flagged for heat that
-        # cost nothing - the common case on a rig where several cameras sit
-        # above Critical by installation. When frames WERE lost, the thermal
-        # history is included so overheating is on the table as the cause.
-        # Either way the temperatures stay in session_metadata.json.
+        # which is where it can still be acted on. After encoding a camera
+        # that came near its shutdown point is added to the report only when
+        # the session actually lost frames, so a clean recording on warm
+        # cameras is not flagged for heat that cost nothing; when frames WERE
+        # lost, the thermal history is included so overheating is on the
+        # table as the cause. A camera that reached its shutdown point is
+        # always reported, because from there it stops delivering. Either way
+        # the temperatures stay in session_metadata.json.
         lost_frames = bool(self._capture_warnings) or bool(failed) \
             or bool(self._encode_worker.warnings) \
             or (len(frame_counts) > 1 and min_frames != max_frames)
         if self._thermal_warnings and lost_frames:
             problems += list(self._thermal_warnings)
+        problems += self._thermal_shutdown_texts()
         # Not a loss of frames, so not in lost_frames: these are files from
         # an earlier take that could not be removed at the start.
         problems += list(self._sweep_warnings)
@@ -2686,80 +3215,179 @@ class MainWindow(QMainWindow):
             # Write it down as well as showing it: a dialog is dismissed and
             # forgotten, and this is exactly what someone needs months later
             # when the data looks odd.
-            warnings_path = self._video_dir / "WARNINGS.txt"
             body = "\n\n".join(problems)
-            try:
-                warnings_path.write_text(body + "\n", encoding="utf-8")
-            except Exception as e:
-                print(f"[acq] could not write WARNINGS.txt: {e}", flush=True)
+            written = self._write_warnings_file(problems)
             QMessageBox.warning(
                 self, "Recording completed with problems",
-                f"{body}\n\nThis has also been written to:\n{warnings_path}")
+                f"{body}\n\nThis has also been written to:\n"
+                f"{written or self._video_dir / recording_meta.WARNINGS_NAME}")
 
         # Kick-out keeps every camera on the same triggers, so a kick-mode
-        # session is NOT auto-aligned, even after it dropped frames: the
-        # operator asked for the forced-drop and block-rate warnings to be
-        # reported (WARNINGS.txt, above) rather than followed by an
-        # unrequested re-encode. Only the explicit post-hoc mode (realtime_kick
-        # False) trims at stop. A kick session whose videos are genuinely
+        # session is NOT auto-aligned, even after it dropped frames: its
+        # forced-drop, kick-out and block-rate warnings are reported
+        # (WARNINGS.txt, above, from the router's stop) rather than followed
+        # by an unrequested re-encode. Every other mode (post-hoc alignment,
+        # and raw capture, whose cameras keep whatever frames they caught)
+        # runs the post-hoc alignment. A kick session whose videos are
         # unequal length - a retirement, a truncated tail - is flagged so the
         # operator can run 2_align.py by hand instead of it happening silently.
         rig = self._session_rig()
-        if rig.realtime_encode and not rig.realtime_kick:
-            if self._start_alignment():
-                return
-        elif rig.realtime_encode:
+        if rig.realtime_encode and rig.realtime_kick:
             self._warn_if_unequal_videos()
+        elif self._start_alignment():
+            return
         self._finish_to_idle()
 
-    def _warn_if_unequal_videos(self):
-        """Flag a kick-mode session whose per-camera videos are not equal
-        length, without re-encoding it. The operator chose to skip auto-align,
-        but an unequal set left unremarked is the silent trap this reports.
+    def _thermal_shutdown_texts(self) -> list:
+        return [text for _idx, text in self._thermal_shutdown_warnings]
+
+    def _write_warnings_file(self, problems: list):
+        """Write this acquisition's WARNINGS.txt afresh; its path, or None.
+
+        The start removed the previous take's copy, and this is the first
+        writer, so it replaces rather than appends; the alignment appends
+        after it.
         """
+        path = self._video_dir / recording_meta.WARNINGS_NAME
         try:
-            _names, blocks, _videos = alignment.load_blockids(self._video_dir)
-            if not alignment.needs_alignment(blocks):
-                return
+            path.write_text("\n\n".join(problems) + "\n", encoding="utf-8")
+        except Exception as e:
+            print(f"[acq] could not write WARNINGS.txt: {e}", flush=True)
+            return None
+        return path
+
+    def _append_warnings(self, problems: list):
+        """Append paragraphs to this acquisition's WARNINGS.txt; its path, or
+        None when it could not be written (the caller shows them anyway)."""
+        path = recording_meta.append_warning(self._video_dir,
+                                             "\n\n".join(problems))
+        if path is None:
+            print("[align] could not append to WARNINGS.txt", flush=True)
+        return path
+
+    @staticmethod
+    def _names_text(names) -> str:
+        names = list(names)
+        if len(names) <= 1:
+            return "".join(names)
+        return ", ".join(names[:-1]) + " and " + names[-1]
+
+    def _warn_if_unequal_videos(self):
+        """Flag a kick-mode session whose per-camera videos are not all the
+        same triggers, without re-encoding it. The operator chose to skip
+        auto-align, but an unequal set left unremarked is the silent trap this
+        reports.
+
+        RULE: a retired camera is named as retired, and a camera that ended
+        early is named with the command that aligns the others. REASON:
+        trimming every camera to the frames all of them share cuts the
+        cameras that kept recording down to the one that stopped, which is
+        the data the retirement exists to keep; 2_align.py leaves a camera
+        with a RETIRED.json out by default, and --exclude leaves out any
+        other.
+        """
+        fps = self._acq_fps or self._session_rig().frame_rate
+        retired = recording_meta.retired_cameras(self._video_dir)
+        try:
+            an = alignment.analyse(self._video_dir, fps, exclude=retired)
         except Exception as e:
             print(f"[align] equal-length check skipped ({e})", flush=True)
             return
-        note = ("The cameras did not all keep the same frames, so the videos "
-                "are not equal length. Auto-alignment is off, so they are left "
-                "as recorded. Run 2_align.py on this session to trim them to "
-                "the common frames before using them together.")
+        notes = []
+        if retired:
+            names = self._names_text(retired)
+            one = len(retired) == 1
+            rest = ("hold the same triggers" if not an.needed
+                    else "do not all hold the same triggers either (below)")
+            notes.append(
+                f"{names} {'was' if one else 'were'} retired during the "
+                f"recording, so {'its video ends' if one else 'their videos end'} "
+                f"early and the videos are not equal length. The other "
+                f"cameras' videos {rest}. 2_align.py leaves a retired camera "
+                f"out by default (its RETIRED.json), so it never cuts the "
+                f"others to {'its' if one else 'their'} length; pair "
+                f"{'its' if one else 'their'} frames with theirs by block ID "
+                f"(blockids.npy), not by frame number.")
+        if an.needed:
+            short = {nm: why for nm, why in an.short_cams.items()}
+            if short:
+                names = ",".join(short)
+                notes.append(
+                    "The cameras did not all keep the same frames: "
+                    + "; ".join(f"{nm} {why}" for nm, why in short.items())
+                    + f". Run 2_align.py --replace --exclude {names} on this "
+                      f"session to align the other cameras and leave "
+                      f"{self._names_text(short)} as recorded, or add "
+                      f"--truncate-to-shortest to cut every camera to the "
+                      f"{an.common.size} triggers they share.")
+            else:
+                notes.append(
+                    "The cameras did not all keep the same frames, so the "
+                    "videos are not equal length. Auto-alignment is off, so "
+                    "they are left as recorded. Run 2_align.py --replace on "
+                    "this session to trim them to the common frames before "
+                    "using them together.")
+        if not notes:
+            return
+        note = "\n\n".join(notes)
         print(f"[align] {note}", flush=True)
-        warnings_path = self._video_dir / "WARNINGS.txt"
-        try:
-            with warnings_path.open("a", encoding="utf-8") as f:
-                f.write("\n" + note + "\n")
-        except OSError as e:
-            print(f"[align] could not append to WARNINGS.txt: {e}", flush=True)
+        self._append_warnings(notes)
         QMessageBox.warning(self, "Videos are not equal length", note)
 
     def _start_alignment(self) -> bool:
-        """Start the align worker if cameras dropped different frames. Returns
-        True if alignment is now running (caller should defer the idle reset)."""
+        """Start the post-hoc alignment if cameras dropped different frames.
+        Returns True if alignment is now running (caller should defer the
+        idle reset).
+
+        RULE: a camera that was retired, or that recorded no frames, is left
+        out of the alignment, and every camera left out, every skip and every
+        failure is written to WARNINGS.txt and shown. REASON: aligning keeps
+        only the triggers every camera holds, so such a camera would cut the
+        others down to its frames or to none, and a problem reported only on
+        stdout reads afterwards as a recording that was aligned. The replace
+        itself refuses while another camera ended early or stopped
+        mid-recording (alignment.refusal_reason); the index is written and
+        _on_align_done says why.
+        """
+        rig = self._session_rig()
+        fps = self._acq_fps or rig.frame_rate
+        exclude = dict(recording_meta.retired_cameras(self._video_dir))
         try:
-            _names, blocks, _videos = alignment.load_blockids(self._video_dir)
+            an = alignment.analyse(self._video_dir, fps, exclude=exclude)
+            if an.empty_cams:
+                exclude.update(an.empty_cams)
+                an = alignment.analyse(self._video_dir, fps, exclude=exclude)
         except Exception as e:
-            print(f"[align] skipped ({e})", flush=True)
+            problem = (f"The post-hoc alignment did not run on this recording "
+                       f"({e}), so no video was aligned and the videos are "
+                       f"left as recorded: frame i is not the same trigger on "
+                       f"every camera. Fix the cause, then run 2_align.py "
+                       f"--replace on {self._video_dir}.")
+            print(f"[align] {problem}", flush=True)
+            self._append_warnings([problem])
+            QMessageBox.warning(self, "Videos were not aligned", problem)
             return False
-        try:
-            if not alignment.needs_alignment(blocks):
-                return False  # loss-free: videos already equal-length + aligned
-        except Exception as e:
-            print(f"[align] check failed ({e})", flush=True)
+        self._align_notes = [
+            f"{nm} was left out of the post-hoc alignment ({why}). Its video "
+            f"and block IDs are as recorded, so pair its frames with the "
+            f"others by block ID (blockids.npy), not by frame number."
+            for nm, why in exclude.items()]
+        if not an.needed:
+            # Loss-free among the cameras aligned: the videos already hold the
+            # same triggers.
+            if self._align_notes:
+                self._append_warnings(self._align_notes)
+                QMessageBox.warning(self, "Cameras left out of the alignment",
+                                    "\n\n".join(self._align_notes))
             return False
 
         self._state = State.ALIGNING
         self._sidebar.set_status("ALIGNING", "#ffaa00")
         self._sidebar.set_toggles_enabled(False)
         self.statusBar().showMessage("Aligning videos by trigger (re-encode)...")
-        rig = self._session_rig()
         self._align_worker = AlignWorker(
-            self._video_dir, self._acq_fps, rig.quality,
-            parallel=rig.encode_parallel)
+            self._video_dir, fps, rig.quality,
+            parallel=rig.encode_parallel, exclude=exclude)
         self._align_worker.progress.connect(self._on_align_progress)
         self._align_worker.finished_align.connect(self._on_align_done)
         self._align_worker.start()
@@ -2795,13 +3423,24 @@ class MainWindow(QMainWindow):
         self._cam_op.start()
 
     def _on_align_done(self, summary: dict):
+        if self._quitting:
+            # The window is closing: the quit dialog already said what is left
+            # to do, and nothing here may start a state or a worker.
+            return
         self._sidebar.hide_progress()
         failures = list(summary.get("failures") or [])
         replaced_cams = list(summary.get("replaced_cams") or [])
+        failed_cams = list(summary.get("failed_cams") or [])
+        refused = summary.get("refused")
+        index_error = summary.get("index_error")
         n_cams = len(summary.get("camera_names") or self._camera_names)
         if summary.get("error"):
             self.statusBar().showMessage(
                 f"Alignment failed: {summary['error']} — videos left as-is")
+        elif refused:
+            self.statusBar().showMessage(
+                "Alignment index written; no video was replaced (see the "
+                "dialog)")
         elif summary.get("replaced"):
             self.statusBar().showMessage(
                 f"Aligned: {summary.get('common_frames', 0)} synchronized "
@@ -2813,17 +3452,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Aligned {len(replaced_cams)} of {n_cams} cameras "
                 f"({', '.join(replaced_cams)}); "
-                f"{len(failures)} could not be replaced — see the log")
+                f"{len(failed_cams) or len(failures)} could not be replaced — "
+                f"see WARNINGS.txt")
         elif failures:
             self.statusBar().showMessage(
                 f"Alignment replaced no camera ({failures[0]}) — originals kept")
         else:
             self.statusBar().showMessage("Alignment: videos already aligned")
-        if summary.get("index_error"):
-            QMessageBox.warning(
-                self, "Alignment could not index the videos",
-                f"{summary['index_error']}\n\nThe videos have been left as "
-                f"they are.")
+        self._report_alignment(summary, failures, replaced_cams, failed_cams,
+                               refused, index_error)
         # stim_trace.csv is written during the finalize, i.e. BEFORE the align
         # pass rewrites each camera's blockids.npy / frametimes.npy and
         # replaces its mp4, so its frame column no longer matches any camera
@@ -2835,6 +3472,73 @@ class MainWindow(QMainWindow):
             self._regenerate_stim_trace(self._finish_to_idle)
             return
         self._finish_to_idle()
+
+    def _report_alignment(self, summary, failures, replaced_cams, failed_cams,
+                          refused, index_error) -> None:
+        """Write the alignment's problems to WARNINGS.txt and show them.
+
+        RULE: none of this decides whether a video was replaced, or whether
+        the stimulus trace is regenerated; `replaced` and `replaced_cams`
+        decide that. REASON: a block-rate warning or a refused replace says
+        nothing about the videos already on disk, and a trace left
+        unregenerated after a partial replace is offset in exactly the
+        session that had trouble.
+        """
+        rec = self._video_dir
+        problems = list(self._align_notes)
+        if summary.get("error"):
+            problems.append(
+                f"The post-hoc alignment failed ({summary['error']}). The "
+                f"videos are left as recorded and are not trigger-aligned: "
+                f"frame i is not the same trigger on every camera. Run "
+                f"2_align.py --replace on {rec} once the cause is fixed.")
+        if refused:
+            problems.append(
+                f"{refused} The alignment index (aligned/alignment.npz) was "
+                f"written and no video was changed, so the videos are not "
+                f"trigger-aligned with each other.")
+        other = [f for f in failures if f != refused and f != index_error
+                 and f != summary.get("error")]
+        if other:
+            problems.append("Cameras that could not be aligned, with their "
+                            "videos kept as recorded: " + "; ".join(other))
+        if replaced_cams and failed_cams:
+            problems.append(
+                f"Only {self._names_text(replaced_cams)} "
+                f"{'was' if len(replaced_cams) == 1 else 'were'} replaced by "
+                f"the aligned video; {self._names_text(failed_cams)} kept "
+                f"{'its' if len(failed_cams) == 1 else 'their'} original. The "
+                f"videos are NOT all the common set, so frame i differs "
+                f"between them: aligned/alignment.json says which video is "
+                f"which (video_is_common). Run 2_align.py --replace on {rec} "
+                f"to finish.")
+        new_rate = [w for w in (summary.get("rate_warnings") or [])
+                    if w not in self._reported_rate_warnings]
+        self._reported_rate_warnings = (set(self._reported_rate_warnings)
+                                        | set(new_rate))
+        problems += new_rate
+        if index_error:
+            if replaced_cams:
+                problems.append(
+                    f"{self._names_text(replaced_cams)} "
+                    f"{'was' if len(replaced_cams) == 1 else 'were'} aligned "
+                    f"and replaced, but the aligned/ index could not be "
+                    f"written: {index_error}. Run 2_align.py on {rec} (without "
+                    f"--replace) to write it.")
+            else:
+                problems.append(
+                    f"The aligned/ index could not be written: {index_error}. "
+                    f"No video was replaced. Run 2_align.py on {rec} to write "
+                    f"it.")
+        if not problems:
+            return
+        body = "\n\n".join(problems)
+        print(f"[align] {body}", flush=True)
+        written = self._append_warnings(problems)
+        QMessageBox.warning(
+            self, "Alignment reported problems",
+            body + (f"\n\nThis has also been written to:\n{written}"
+                    if written else ""))
 
     def _finish_to_idle(self):
         if self._acq_type == "calibration" and self._video_dir is not None:
@@ -3163,12 +3867,13 @@ class MainWindow(QMainWindow):
 
         # Stop the temperature poll before any dialog on this path. RULE: the
         # thermal timer stops wherever the cameras are about to be abandoned.
-        # REASON: its slot is a GVCP register read per camera, it only
+        # REASON: its slot is a register read per camera, it only
         # self-stops on a state change, and the quit path never moves the
         # state to IDLE - so from RECORDING or CALIBRATING it keeps firing,
         # including inside the nested event loops of the two modal dialogs
         # below, against cameras _abandon_and_cleanup is closing. Two threads
-        # in pylon on one device is an access violation, not an exception.
+        # in the camera SDK on one device is an access violation, not an
+        # exception.
         self._thermal_timer.stop()
 
         # Quitting mid-session can't be finalized — confirm, then ABANDON the
@@ -3180,11 +3885,24 @@ class MainWindow(QMainWindow):
                 text = (f"State is {self._state.value}. Quit anyway?\n\n"
                         "This capture is still running, so it cannot be "
                         "finished — its incomplete data will be DELETED.")
-            elif self._state in (State.ENCODING, State.ALIGNING):
+            elif self._state is State.ENCODING:
                 text = (f"State is {self._state.value}. Quit anyway?\n\n"
                         "The capture is COMPLETE and will be KEPT. Only the "
-                        "mp4 wrapping is unfinished, and it can be re-run "
-                        "later from the same directory.")
+                        "mp4 wrapping is unfinished. To finish it, run\n"
+                        f"uv run python 0_encode.py \"{self._video_dir}\"\n"
+                        "and then 2_align.py on the same directory (with "
+                        "--replace for a recording made without real-time "
+                        "kick-out), which also checks the block-ID rate.")
+            elif self._state is State.ALIGNING:
+                text = (f"State is {self._state.value}. Quit anyway?\n\n"
+                        "The capture and its videos are KEPT, but the "
+                        "alignment is unfinished: some cameras may already "
+                        "hold their aligned video and others not, and "
+                        "stim_trace.csv still describes the unaligned frames. "
+                        "To finish, run\n"
+                        f"uv run python 2_align.py \"{self._video_dir}\" "
+                        f"--replace\nand then 3_stim_trace.py on the same "
+                        f"directory.")
             else:
                 text = ("Work is still in progress — a solve, a profile switch "
                         "or a camera operation.\n\nQuit anyway? It will be "
@@ -3300,12 +4018,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         # Wait for the workers BEFORE tearing the cameras down. abandon() calls
-        # StopGrabbing()/Close() on every InstantCamera from the Qt main thread,
+        # StopGrabbing()/Close() on every camera from the Qt main thread,
         # while _cam_op is the thread running _finalize — possibly inside
-        # _router.stop() or resume_preview(). Two threads making native pylon
-        # calls on the same device is an access violation, not an exception, so
-        # no excepthook can intercept it. Killing the child processes above is what
-        # lets these waits actually return.
+        # _router.stop() or resume_preview(). Two threads making native camera
+        # SDK calls on the same device is an access violation, not an
+        # exception, so no excepthook can intercept it. Killing the child
+        # processes above is what lets these waits actually return.
         for w in (self._cam_op, self._cap_op, self._encode_worker,
                   self._align_worker, self._calib_worker,
                   self._coverage_worker, self._hw_check_thread,
@@ -3324,11 +4042,11 @@ class MainWindow(QMainWindow):
                   "rather than tearing it down", flush=True)
             self._fw_op.wait(5000)
         if self._cam_op is not None and self._cam_op.isRunning():
-            # Still inside pylon after 3 s. Leaking the camera handles costs
-            # nothing at process exit; closing them under a live native call
-            # crashes. Skip the teardown entirely.
+            # Still inside the camera SDK after 3 s. Leaking the camera
+            # handles costs nothing at process exit; closing them under a live
+            # native call crashes. Skip the teardown entirely.
             print("[quit] _cam_op still running — leaking camera handles rather "
-                  "than closing under a live pylon call", flush=True)
+                  "than closing under a live camera SDK call", flush=True)
         else:
             try:
                 self._camera_mgr.abandon()
