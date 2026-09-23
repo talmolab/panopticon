@@ -879,8 +879,10 @@ class ProcessCameraManager(QObject):
                 state = spawn_state()
             except Exception as e:
                 return f"{e}"
-        if self._gate is None:
-            self._gate = ctx.Semaphore(1)
+        # A new gate for every set of workers: one that exited or wedged
+        # inside its NVENC warm-up keeps the gate it held, and the workers
+        # started next must not inherit it.
+        self._gate = ctx.Semaphore(1)
         if self._rig is None:
             epoch = shm.new_epoch()
             self._rig_seg = shm.SharedSegment.create(

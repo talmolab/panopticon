@@ -64,6 +64,12 @@ IDLE_HARVEST_PERIODS = 2.0
 #: its cameras reached end of stream. The parent flushes as soon as every
 #: camera has, so this bounds a parent that died or wedged.
 FLUSH_WAIT_S = 60.0
+#: How long an arming worker waits for the NVENC warm-up gate the workers
+#: share. Shorter than the parent's bound on the whole arm
+#: (manager.ARM_TIMEOUT_S), so a gate that is never released (a worker
+#: exited or wedged inside its warm-up) comes back as this worker's refusal,
+#: which says so, rather than as a timeout.
+GATE_TIMEOUT_S = 30.0
 #: The file beside each camera's stream that keeps its encoder-order block
 #: IDs during a recording (WorkerRouter.write_partial).
 PARTIAL_NAME = "blockids.partial"
@@ -895,8 +901,22 @@ class Worker:
             # One throwaway encoder warms the path in use, under a gate
             # shared by every worker, so the extra session is one at a time
             # across the rig.
-            with self.gate:
+            if not self.gate.acquire(timeout=GATE_TIMEOUT_S):
+                names = ", ".join(self._name(g) for g in self.cams)
+                raise WorkerError(
+                    f"The capture process for {names} could not start the "
+                    f"acquisition: the NVENC warm-up gate the capture "
+                    f"processes share was not free within {GATE_TIMEOUT_S:g} "
+                    f"s, so another capture process is stuck in its warm-up "
+                    f"or exited while holding it. Close and reopen the "
+                    f"cameras, which starts the capture processes with a new "
+                    f"gate.\n\nNothing was recorded and the cameras are "
+                    f"still in preview.", kind="AcquisitionStartRefused",
+                    data={"encoder_failures": []})
+            try:
                 self._warm_nvenc(upload)
+            finally:
+                self.gate.release()
         self.mgr.encoder_factory = factory
         self._ledger_seg, self._ledgers = attach_shared(
             msg["ledger"][0], self.cams, epoch=int(msg["ledger"][1]))
