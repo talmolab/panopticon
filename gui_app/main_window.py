@@ -1,6 +1,8 @@
 """Main application window — wires cameras, sidebar, state machine, and encoding."""
 import json
+import os
 import shutil
+import tempfile
 import time
 import traceback
 from datetime import datetime
@@ -56,6 +58,11 @@ DATA_PATTERNS = ("*.mp4", "raw.bin", "stream.h264", "blockids.npy",
 #: files are among them because stim_trace.write_trace builds the trace from
 #: whatever stim_paradigm.json it finds: one left from a stimulated take would
 #: label every frame of a new, unstimulated take as stimulated.
+#: Files an agreed overwrite keeps. calibration.toml is the calibration Solve
+#: copied beside the recording; it belongs to the session, not to the take
+#: being replaced, and the overwrite prompt never offered to delete it.
+KEPT_ON_OVERWRITE = ("calibration.toml",)
+
 STALE_SESSION_FILES = ("WARNINGS.txt", "codet_frames.json",
                        "stim_paradigm.json", "stim_paradigm.ino",
                        "stim_trace.csv")
@@ -1329,17 +1336,22 @@ class MainWindow(QMainWindow):
         session and one is the last, with plausible block IDs, and alignment
         then intersects two different sessions. Deleting the directory whole
         removes that trap; the new run recreates it under the same name, which
-        is what 1_calibrate and alignment.video_for resolve a session by.
+        is what 1_calibrate and alignment.video_for resolve a session by. The
+        files in KEPT_ON_OVERWRITE are the exception, and the prompt names
+        them.
         """
         if self._overwrite_dir == video_dir:
             return True                       # already agreed this start
         if not _has_capture_data(video_dir):
             return True                       # nothing to overwrite, no prompt
+        kept = [name for name in KEPT_ON_OVERWRITE
+                if (video_dir / name).is_file()]
+        keep_note = (f" {', '.join(kept)} is kept." if kept else "")
         reply = QMessageBox.question(
             self, "Overwrite the existing data?",
             f"{video_dir}\n\nalready holds data from an earlier acquisition."
             f"\n\nStarting will PERMANENTLY DELETE it and record over it. This "
-            f"cannot be undone.\n\nOverwrite?",
+            f"cannot be undone.{keep_note}\n\nOverwrite?",
             QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
         if reply != QMessageBox.Yes:
             print("[acq] start cancelled; existing data left in place",
@@ -1370,8 +1382,35 @@ class MainWindow(QMainWindow):
         if not inside:
             raise OSError(f"refusing to overwrite {target}: outside the "
                           f"output directory {self._sidebar.output_dir}")
-        shutil.rmtree(target)
-        print(f"[acq] overwrote existing data in {target}", flush=True)
+        kept = [name for name in KEPT_ON_OVERWRITE
+                if (target / name).is_file()]
+        aside = None
+        if kept:
+            # A sibling on the same volume, so each move is a rename and the
+            # file keeps its timestamps.
+            aside = Path(tempfile.mkdtemp(prefix=f".{target.name}-kept-",
+                                          dir=target.parent))
+            for name in kept:
+                os.replace(target / name, aside / name)
+        try:
+            shutil.rmtree(target)
+        finally:
+            if aside is not None:
+                self._restore_kept_files(target, aside, kept)
+        print(f"[acq] overwrote existing data in {target}"
+              + (f", keeping {', '.join(kept)}" if kept else ""), flush=True)
+
+    @staticmethod
+    def _restore_kept_files(target: Path, aside: Path, kept: list):
+        """Put the files an overwrite kept back into the recreated directory."""
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for name in kept:
+                os.replace(aside / name, target / name)
+            aside.rmdir()
+        except OSError as e:
+            print(f"[acq] could not put {', '.join(kept)} back into {target}: "
+                  f"{e}; it is in {aside}", flush=True)
 
     def _remove_created_dirs(self):
         """Take back the empty directories a refused start created.
