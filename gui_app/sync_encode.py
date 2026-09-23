@@ -12,11 +12,25 @@ lock is held for microseconds and never blocks on a full queue. Releases are
 routed under the lock so each encoder receives its frames in trigger order.
 Nothing prints under the lock: a console write can take milliseconds, and
 every other grab thread would spend them blocked while holding a driver buffer.
+
+A release that finds its encoder queue full waits in a per-camera backlog
+instead of being dropped, and later submits move it on as the encoder drains.
+That covers the one burst the coordinator produces: retiring a camera
+releases every trigger the survivors held for it, up to max_lag at once,
+into queues ENCODE_QUEUE_DEPTH deep.
+
+A grab thread's frames are slots of its NV12 ring, and the router owns each
+slot from submit() until the frame is dropped or encoded (attach_ring). The
+backlog therefore needs no bound of its own: it can hold at most the slots
+the ring has, and a camera whose encoder falls further behind finds no free
+slot and loses frames of its own video, never the pixels of a queued one.
 """
 import gc
 import os
+import queue
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +48,9 @@ from gui_app.grab_thread import (_EncoderThread, _end_encode, write_split_point,
 #: Bound on abandon() as a whole. An encoder thread that has not left
 #: Encode() in this long is wedged in the driver and is leaked, not waited on.
 ABANDON_TIMEOUT_S = 5.0
+#: Ordinary kick-outs (triggers some camera missed, dropped from all of them)
+#: above this fraction of the decided triggers add a session warning at stop.
+KICKOUT_WARN_FRACTION = 0.005
 
 
 def _release_loose_encoder(enc, timeout_s=None) -> None:
@@ -65,12 +82,17 @@ def _release_loose_encoder(enc, timeout_s=None) -> None:
 class SyncEncodeRouter:
     def __init__(self, raw_paths, width: int, height: int, quality: int,
                  fps: int = 100, max_lag: int = 240, pin_encoders: bool = False,
-                 enc_pcores: bool = False, encoder_factory=None):
+                 enc_pcores: bool = False, encoder_factory=None,
+                 rate_hints=None):
         self._n = len(raw_paths)
         self._w, self._h, self._q = width, height, quality
         self._fps = int(fps)   # stop() checks block-ID rate against it
         self.max_lag = max_lag  # grab threads read this to size their NV12 ring
-        self._coord = FrameSyncCoordinator(self._n, max_lag=max_lag)
+        #: Backend wording for the block-rate warning's advice (see
+        #: frame_sync.check_block_id_rate), or None for the default.
+        self._rate_hints = dict(rate_hints) if rate_hints else None
+        self._coord = FrameSyncCoordinator(self._n, max_lag=max_lag,
+                                           on_drop=self._coord_dropped)
         self._lock = threading.Lock()
         self._encoders = []
         self._fds = []
@@ -80,8 +102,30 @@ class SyncEncodeRouter:
         self.available = False
         #: Reason `available` is False, for a caller that refuses to start.
         self.unavailable_reason = ""
-        self.dropped_full = 0  # frames lost to a wedged encoder queue (should be 0)
+        #: Released frames that never reached their encoder (should be 0),
+        #: in total and per camera. Their block IDs are not recorded.
+        self.dropped_full = 0
         self._dropped_full_by = [0] * self._n
+        #: Of those, per camera, the frames whose grab thread found no free
+        #: ring slot (submitted without pixels); the rest were still waiting
+        #: when the drain at stop ran out of time.
+        self._no_slot_by = [0] * self._n
+        #: Per camera, the deque of free NV12 ring slots its grab thread
+        #: takes from (attach_ring), or None for a submitter that owns its
+        #: buffers.
+        self._free_slots = [None] * self._n
+        #: Released frames waiting for room in their encoder queue, per
+        #: camera, as (block_id, ts, buf) in trigger order; and their total,
+        #: so a submit with nothing waiting pays one integer test. Each one
+        #: owns a ring slot, so the ring bounds the backlog.
+        self._backlog = [deque() for _ in range(self._n)]
+        self._n_backlog = 0
+        #: Largest backlog any camera reached, for the log.
+        self.backlog_peak = 0
+        #: "camN: reason" for each encoder that failed during the recording,
+        #: filled by stop(); the manager reports them so the NVENC session
+        #: count the preflight cached is probed again.
+        self.encoder_failures: list[str] = []
         self._log_every = max(int(fps), 1) * 5 * self._n   # ~5 s of submissions
         self._since_log = 0
 
@@ -171,6 +215,51 @@ class SyncEncodeRouter:
     def pending(self) -> int:
         return self._coord.pending_depth()
 
+    def backlog_len(self, cam: int) -> int:
+        """Released frames of camera `cam` waiting for encoder queue room."""
+        return len(self._backlog[cam])
+
+    def attach_ring(self, cam: int, slots) -> deque:
+        """Take ownership of camera `cam`'s NV12 ring; return its free list.
+
+        The grab thread takes a slot with `free.popleft()` for each frame
+        and submits it. From then on the slot belongs to the router: it goes
+        back on the list when the coordinator or the router drops the frame,
+        or once the camera's encoder has finished reading it. A grab thread
+        that finds the list empty submits the frame with buf=None instead
+        (the router counts it in dropped_full and records no block ID).
+
+        RULE: a slot is written only while it is on this list. REASON: a
+        released frame can wait behind a slow encoder for longer than the
+        ring takes to cycle, and a ring written in turn would put a later
+        trigger's pixels under the block ID already recorded for that frame,
+        which no count, gap or rate check can detect afterward.
+
+        Called by the grab thread before it starts grabbing. Deque appends
+        and pops are atomic, so the grab thread, the encoder thread and the
+        router share the list without the submit lock.
+        """
+        free = deque(slots)
+        self._free_slots[cam] = free
+        if cam < len(self._encoders):
+            self._encoders[cam].recycle = free.append
+        return free
+
+    def _give_back(self, cam: int, buf) -> None:
+        """Return a dropped frame's ring slot to its camera's free list."""
+        free = self._free_slots[cam]
+        if free is not None and buf is not None:
+            free.append(buf)
+
+    def _coord_dropped(self, cam: int, payload) -> None:
+        """The coordinator's on_drop: a frame it will never release."""
+        self._give_back(cam, payload[1])
+
+    @property
+    def retired_reasons(self) -> list:
+        """(camera index, reason) for every retirement, in order."""
+        return list(self._coord.retired_reasons)
+
     def retire(self, cam: int, reason: str = ""):
         """Drop a camera from the alignment set (stalled and unrecoverable)."""
         with self._lock:
@@ -196,22 +285,94 @@ class SyncEncodeRouter:
     def _route(self, releases):
         for cam, bid, payload in releases:
             ts, buf = payload
-            try:
-                self._encoders[cam].queue.put_nowait(buf)
-                self.block_ids[cam].append(bid)
-                self.timestamps[cam].append(ts)
-            except Exception:
-                # Encoder queue full => encoder wedged (GPU stall). Dropping
-                # here desyncs this camera's video length from the others; it
-                # should never happen because the encoder drains faster than
-                # inflow. The block ID is NOT recorded (the frame was not
-                # persisted), and stop() turns the count into a warning.
+            if buf is None:
+                # Its grab thread had no free ring slot: the frame took part
+                # in the alignment but has no pixels, so it is dropped from
+                # this camera's video alone. The block ID is NOT recorded,
+                # and stop() turns the count into a warning.
                 self.dropped_full += 1
                 self._dropped_full_by[cam] += 1
+                self._no_slot_by[cam] += 1
+                continue
+            backlog = self._backlog[cam]
+            if not backlog:
+                try:
+                    self._encoders[cam].queue.put_nowait(buf)
+                    self.block_ids[cam].append(bid)
+                    self.timestamps[cam].append(ts)
+                    continue
+                except queue.Full:
+                    pass
+            # Queue full, or earlier frames of this camera already waiting
+            # (which keeps the encoder's input in trigger order).
+            backlog.append((bid, ts, buf))
+            self._n_backlog += 1
+            if len(backlog) > self.backlog_peak:
+                self.backlog_peak = len(backlog)
+
+    def _pump(self) -> int:
+        """Move backlogged frames into their encoder queues, oldest first,
+        as far as the queues have room now. Never blocks: it runs under the
+        submit lock. Returns how many frames moved."""
+        moved = 0
+        for cam, backlog in enumerate(self._backlog):
+            q = self._encoders[cam].queue
+            while backlog:
+                bid, ts, buf = backlog[0]
+                try:
+                    q.put_nowait(buf)
+                except queue.Full:
+                    break
+                backlog.popleft()
+                self._n_backlog -= 1
+                moved += 1
+                self.block_ids[cam].append(bid)
+                self.timestamps[cam].append(ts)
+        return moved
+
+    def _drain_backlogs(self, deadline: float) -> None:
+        """Pump every camera's backlog until it is empty or `deadline`
+        (time.monotonic) passes, then drop what is left.
+
+        RULE: each pass takes what fits in every camera's queue, and the
+        passes repeat under the one deadline. REASON: a wedged encoder's
+        queue never makes room, so waiting on one camera at a time would
+        spend the whole deadline there and leave every camera after it only
+        the room its queue had at that moment.
+        """
+        while self._n_backlog:
+            if self._pump():
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.001)
+        if not self._n_backlog:
+            return
+        for cam, backlog in enumerate(self._backlog):
+            if not backlog:
+                continue
+            # Out of time: this camera's encoder is wedged, so the rest of
+            # its backlog is lost, and counted like any other frame that
+            # never reached the encoder.
+            self.dropped_full += len(backlog)
+            self._dropped_full_by[cam] += len(backlog)
+            for _bid, _ts, buf in backlog:
+                self._give_back(cam, buf)
+            backlog.clear()
+        self._n_backlog = 0
 
     def submit(self, cam: int, block_id: int, ts: float, buf: np.ndarray):
+        """Hand the router one grabbed frame of camera `cam`.
+
+        `buf` is the frame's ring slot, which the router owns from here
+        (attach_ring), or None when the grab thread had no free slot: the
+        trigger still counts for alignment, and the frame is dropped from
+        this camera's video.
+        """
         report = None
         with self._lock:
+            if self._n_backlog:
+                self._pump()
             releases = self._coord.submit(cam, block_id, (ts, buf))
             if releases:
                 self._route(releases)
@@ -262,6 +423,12 @@ class SyncEncodeRouter:
         empty file instead of raw.bin.
         """
         deadline = time.monotonic() + max(0.0, timeout_s)
+        # Frames waiting for queue room are part of a session being thrown
+        # away: nothing will encode them.
+        with self._lock:
+            for backlog in self._backlog:
+                backlog.clear()
+            self._n_backlog = 0
         for i, et in enumerate(self._encoders):
             exited = True
             try:
@@ -307,6 +474,12 @@ class SyncEncodeRouter:
         (count, timestamps, block_ids)."""
         with self._lock:
             self._route(self._coord.flush())
+            # Everything still waiting for queue room goes in before the
+            # sentinels, under one shared deadline for all cameras: the
+            # encoders are draining, so a healthy one makes room within
+            # moments, and a wedged one loses the rest of its backlog.
+            if self._n_backlog:
+                self._drain_backlogs(time.monotonic() + DRAIN_SENTINEL_TIMEOUT_S)
         for i, et in enumerate(self._encoders):
             try:
                 et.queue.put(None, timeout=DRAIN_SENTINEL_TIMEOUT_S)
@@ -359,6 +532,17 @@ class SyncEncodeRouter:
         print(f"[sync] released={self._coord.released} dropped={self._coord.dropped} "
               f"forced={self._coord.forced} queue_full_drops={self.dropped_full}",
               flush=True)
+        if self.backlog_peak:
+            print(f"[sync] released frames waited for encoder queue room: "
+                  f"largest backlog {self.backlog_peak} frames", flush=True)
+        # An encoder that failed mid-recording (it spilled, or died with its
+        # spill) is reported to the manager: the NVENC session count the
+        # preflight cached may no longer be true.
+        for i, et in enumerate(self._encoders):
+            if et.failed:
+                self.encoder_failures.append(
+                    f"cam{i+1}: the real-time encoder failed during the "
+                    f"recording")
 
         # Reconcile bookkeeping against what was actually PERSISTED.
         #
@@ -430,18 +614,44 @@ class SyncEncodeRouter:
                               f"frames; {et.spilled} frames were spilled raw to "
                               f"raw_tail.bin and are merged at encode time")
 
-        # A frame dropped because an encoder queue was full is a frame every
+        # A released frame that never reached its encoder is a frame every
         # camera captured and every OTHER camera encoded, so this camera's
         # video is shorter than the rest and frame i no longer means the same
         # trigger across cameras — the property kick mode promises. blockids.npy
         # is still right for this camera; the operator must still be told.
         for i, n in enumerate(self._dropped_full_by):
             if n:
-                self._warn(i, f"cam{i+1}: {n} released frames were dropped because "
-                              f"its encoder queue was full (encoder wedged). Its "
-                              f"video is {n} frames shorter than the others; frame "
-                              f"indices are NOT aligned across cameras for this "
-                              f"recording, use blockids.npy to align.")
+                self._warn(i, self._dropped_text(i, n))
+
+        # Forced drops remove the same triggers from every camera, so the
+        # videos stay equal length and aligned, and nothing else in the
+        # session would say that part of it is missing from all of them.
+        coord = self._coord
+        forced_triggers = coord.forced_triggers
+        if forced_triggers:
+            who = ", ".join(f"cam{c+1} ({n} triggers)"
+                            for c, n in enumerate(coord.forced_by) if n)
+            msg = (f"{forced_triggers} triggers ({self._seconds(forced_triggers)}"
+                   f" of recording) are missing from every camera's video: "
+                   f"they were force-dropped because a camera fell more than "
+                   f"kick_max_lag ({self.max_lag}) triggers behind the leader. "
+                   f"Laggard: {who}. The videos stay aligned with each other.")
+            print(f"[sync] WARNING: {msg}", flush=True)
+            self.warnings.append(msg)
+        # Ordinary kick-outs: a trigger one camera missed is dropped from all
+        # of them. A few are normal transport loss; above
+        # KICKOUT_WARN_FRACTION the operator has to know how much is gone.
+        decided = coord.decided_triggers
+        kicked = decided - coord.released_triggers - forced_triggers
+        if decided > 0 and kicked > KICKOUT_WARN_FRACTION * decided:
+            msg = (f"{kicked} of {decided} triggers "
+                   f"({100.0 * kicked / decided:.2f}%, "
+                   f"{self._seconds(kicked)}) are missing from every camera's "
+                   f"video because at least one camera did not deliver them. "
+                   f"Each camera's own losses are in its log (failed grabs, "
+                   f"stream stats); the videos stay aligned with each other.")
+            print(f"[sync] WARNING: {msg}", flush=True)
+            self.warnings.append(msg)
 
         # Does each camera's block-ID counter actually keep step with the
         # trigger board? Every other loss mode leaves a gap in blockids.npy;
@@ -451,7 +661,8 @@ class SyncEncodeRouter:
         # the invariant the whole path rests on. Cheap to check: the device
         # clock is independent of the block-ID counter.
         for msg in self._coord.block_rate_warnings(self.timestamps,
-                                                   self.block_ids, self._fps):
+                                                   self.block_ids, self._fps,
+                                                   hints=self._rate_hints):
             print(f"[sync] WARNING: {msg}", flush=True)
             self.warnings.append(msg)
 
@@ -459,11 +670,18 @@ class SyncEncodeRouter:
         # retired camera's video simply ends early, so the recording is no
         # longer equal-length by construction and downstream alignment has to
         # know. Fold them in beside the reconciliation warnings.
+        survivors = bool(self._coord.active())
         for cam, reason in self._coord.retired_reasons:
+            if survivors:
+                tail = ("the other cameras continued and stay aligned with "
+                        "each other.")
+            else:
+                tail = ("no camera was still recording when the session "
+                        "ended, so every video ends at its camera's "
+                        "retirement.")
             self.warnings.append(
                 f"cam{cam+1} was RETIRED mid-recording ({reason}). Its video "
-                f"ends at that point; the other cameras continued and stay "
-                f"aligned with each other.")
+                f"ends at that point; {tail}")
 
         # One WARNINGS.txt per affected camera, holding every warning about it
         # (a second write_text would overwrite the first).
@@ -478,6 +696,30 @@ class SyncEncodeRouter:
 
         return [(len(self.block_ids[i]), self.timestamps[i], self.block_ids[i])
                 for i in range(self._n)]
+
+    def _dropped_text(self, i: int, n: int) -> str:
+        """The warning for camera i's `n` released frames that never
+        reached its encoder, naming each cause."""
+        no_slot = self._no_slot_by[i]
+        causes = []
+        if no_slot:
+            causes.append(f"{no_slot} found no free NV12 ring slot because "
+                          f"its encoder ran behind the trigger rate")
+        if n - no_slot:
+            causes.append(f"{n - no_slot} were still waiting for the encoder "
+                          f"when the drain at stop ran out of time (encoder "
+                          f"wedged)")
+        return (f"cam{i+1}: {n} released frames were dropped from this "
+                f"camera's video ({'; '.join(causes)}). Its video is {n} "
+                f"frames shorter than the others; frame indices are NOT "
+                f"aligned across cameras for this recording, use blockids.npy "
+                f"to align.")
+
+    def _seconds(self, triggers: int) -> str:
+        """`triggers` as recording time at this session's frame rate."""
+        if self._fps <= 0:
+            return f"{triggers} trigger periods"
+        return f"{triggers / self._fps:.1f} s"
 
     def _warn(self, cam: int, msg: str) -> None:
         print(f"[sync] WARNING: {msg}", flush=True)
