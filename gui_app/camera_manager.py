@@ -85,6 +85,71 @@ class AcquisitionStartRefused(RuntimeError):
 MAX_NUM_BUFFER = 1000
 
 
+def resolve_device_order(devices, only_serials=None, expect_cameras: int = 0,
+                         global_indices=None):
+    """The enumerated devices in cam1..camN order, and why they cannot be
+    opened: (devices, None), or (None, refusal message).
+
+    Camera names are positional (`cam{i+1}`) and every extrinsic in
+    calibration.toml attaches to a name, so a device that shifts a
+    position attaches one camera's calibration to a different physical
+    camera: triangulation still runs and the 3D output is simply wrong.
+    There are two orderings, and both are explicit:
+      - with `only_serials` (the profile's camera_serials), cam{i+1} is
+        entry i of THAT LIST. An extra device on the host - a USB camera,
+        another rig on a shared segment - cannot shift a name, and a listed
+        camera that did not enumerate is named rather than guessed at;
+      - without one, the backend's serial-sorted enumeration order, which is
+        why expect_cameras exists: a camera that never ENUMERATES (dead
+        switch port, unpowered, still booting) is invisible to the open
+        check, and a missing camera 3 silently renames physical 4..N to
+        cam3..cam(N-1).
+
+    `expect_cameras`, when nonzero, is counted AFTER the serial filter,
+    because the count that matters is the cameras the caller opens: with a
+    serial list an extra device is not one of them. A capture worker is
+    handed its own share as `only_serials` and checks its own count;
+    `global_indices` (one per entry of `only_serials`) then names a missing
+    camera by its index in the whole rig.
+    """
+    if only_serials:
+        want = [str(x) for x in only_serials]
+        by_serial = {d.GetSerialNumber(): d for d in devices}
+        missing = [x for x in want if x not in by_serial]
+        if missing:
+            gidx = (list(global_indices) if global_indices is not None
+                    else list(range(len(want))))
+            names = ", ".join(f"cam{gidx[want.index(x)] + 1} ({x})"
+                              for x in missing)
+            return None, (
+                f"Requested cameras did not enumerate: {names}\n\n"
+                f"They are named by their position in the profile's "
+                f"camera_serials, so opening without them would leave "
+                f"those names unrecorded. Power-cycle them and reselect "
+                f"the profile.")
+        extra = [x for x in sorted(by_serial) if x not in set(want)]
+        if extra:
+            # Ignored rather than refused: an unlisted device cannot take
+            # a name when the names come from the list, so it is a fact
+            # about the host and not a fault in the rig.
+            print(f"[cam] ignoring {len(extra)} enumerated device(s) not "
+                  f"in the profile's camera_serials: {', '.join(extra)}",
+                  flush=True)
+        sorted_devs = [by_serial[x] for x in want]
+    else:
+        sorted_devs = devices      # backend guarantees a stable order
+    if expect_cameras and len(sorted_devs) != expect_cameras:
+        found = ", ".join(sorted(d.GetSerialNumber() for d in devices))
+        return None, (
+            f"Expected {expect_cameras} cameras but {len(sorted_devs)} "
+            f"are available to open.\n\nEnumerated: {found}\n\n"
+            f"Camera names are positional, so starting with a missing "
+            f"camera would rename every camera after it and attach the "
+            f"calibration extrinsics to the wrong physical cameras. "
+            f"Power-cycle the missing camera and reselect the profile.")
+    return sorted_devs, None
+
+
 def _device_model(dev):
     """The model name an enumerated device reports, or None.
 
@@ -433,59 +498,10 @@ class CameraManager(QObject):
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
             return self._open_failed("No cameras found")
-
-        # Camera names are positional (`cam{i+1}`) and every extrinsic in
-        # calibration.toml attaches to a name, so a device that shifts a
-        # position attaches one camera's calibration to a different physical
-        # camera: triangulation still runs and the 3D output is simply wrong.
-        # There are two orderings, and both are explicit:
-        #   - with `only_serials` (the profile's camera_serials), cam{i+1} is
-        #     entry i of THAT LIST. An extra pylon device on the host - a USB
-        #     camera, another rig on a shared segment - cannot shift a name,
-        #     and a listed camera that did not enumerate is named rather than
-        #     guessed at;
-        #   - without one, the backend's serial-sorted enumeration order,
-        #     which is why expect_cameras exists: a camera that never
-        #     ENUMERATES (dead switch port, unpowered, still booting) is
-        #     invisible to the open check further down, and a missing camera 3
-        #     silently renames physical 4..9 to cam3..cam8.
-        if only_serials:
-            want = [str(x) for x in only_serials]
-            by_serial = {d.GetSerialNumber(): d for d in devices}
-            missing = [x for x in want if x not in by_serial]
-            if missing:
-                names = ", ".join(f"cam{want.index(x) + 1} ({x})"
-                                  for x in missing)
-                return self._open_failed(
-                    f"Requested cameras did not enumerate: {names}\n\n"
-                    f"They are named by their position in the profile's "
-                    f"camera_serials, so opening without them would leave "
-                    f"those names unrecorded. Power-cycle them and reselect "
-                    f"the profile.")
-            extra = [x for x in sorted(by_serial) if x not in set(want)]
-            if extra:
-                # Ignored rather than refused: an unlisted device cannot take
-                # a name when the names come from the list, so it is a fact
-                # about the host and not a fault in the rig.
-                print(f"[cam] ignoring {len(extra)} enumerated device(s) not "
-                      f"in the profile's camera_serials: {', '.join(extra)}",
-                      flush=True)
-            sorted_devs = [by_serial[x] for x in want]
-        else:
-            sorted_devs = devices      # backend guarantees a stable order
-
-        # Counted AFTER the serial filter, because the count that matters is
-        # the cameras THIS process opens: with a serial list an extra device
-        # is not one of them, and a multi-process split opens its own share.
-        if expect_cameras and len(sorted_devs) != expect_cameras:
-            found = ", ".join(sorted(d.GetSerialNumber() for d in devices))
-            return self._open_failed(
-                f"Expected {expect_cameras} cameras but {len(sorted_devs)} "
-                f"are available to open.\n\nEnumerated: {found}\n\n"
-                f"Camera names are positional, so starting with a missing "
-                f"camera would rename every camera after it and attach the "
-                f"calibration extrinsics to the wrong physical cameras. "
-                f"Power-cycle the missing camera and reselect the profile.")
+        sorted_devs, refusal = resolve_device_order(devices, only_serials,
+                                                    expect_cameras)
+        if refusal:
+            return self._open_failed(refusal)
 
         # The keyword is passed only for a profile that has a camera: block,
         # so a backend written before the block existed is called as before.
@@ -533,7 +549,7 @@ class CameraManager(QObject):
                         f"({self._geometry[0]}x{self._geometry[1]}); all "
                         f"cameras must match.")
                 self._geometry = (w, h)
-                print(f"[cam{i+1}] {info['serial']} {w}x{h} {pf}", flush=True)
+                print(f"[{self._cn(i)}] {info['serial']} {w}x{h} {pf}", flush=True)
                 # Which physical camera became camN, for the session
                 # metadata: the log line above is otherwise the only record.
                 infos.append({"serial": str(info["serial"]),
@@ -545,8 +561,8 @@ class CameraManager(QObject):
                 # recording would silently halve the frame rate.
                 self._baseline_exp_gain.append(
                     self._backend.get_exposure_gain(cam))
-                self._backend.enable_extended_block_ids(i, cam)
-                self._backend.select_gige_driver(i, cam, gige_driver)
+                self._backend.enable_extended_block_ids(self._gi(i), cam)
+                self._backend.select_gige_driver(self._gi(i), cam, gige_driver)
                 if (gev_bandwidth_reserve_pct is not None
                         or gev_bandwidth_reserve_accum is not None):
                     # Applied at open, before any grabbing: the reserve lowers
@@ -567,7 +583,7 @@ class CameraManager(QObject):
                             f"gev_bandwidth_reserve_accum from the profile")
                     applied = reserve(cam, gev_bandwidth_reserve_pct,
                                       gev_bandwidth_reserve_accum)
-                    print(f"[cam{i+1}] bandwidth reserve {applied}", flush=True)
+                    print(f"[{self._cn(i)}] bandwidth reserve {applied}", flush=True)
             except Exception as e:
                 # Never continue with a partial set: names are positional,
                 # so a camera missing from the middle shifts every later
@@ -589,7 +605,7 @@ class CameraManager(QObject):
             except Exception as e:
                 # A camera that dropped off the bus must not abort teardown for
                 # the rest — log and continue so the survivors still recover.
-                print(f"[cam{i+1}] free-run config failed (camera offline?): {e}",
+                print(f"[{self._cn(i)}] free-run config failed (camera offline?): {e}",
                       flush=True)
 
     def _set_trigger_mode(self) -> list:
@@ -605,9 +621,10 @@ class CameraManager(QObject):
         failed = []
         for i, cam in enumerate(self._cameras):
             try:
-                self._backend.set_triggered(cam, limit, announce=(i == 0))
+                self._backend.set_triggered(cam, limit,
+                                            announce=(self._gi(i) == 0))
             except Exception as e:
-                print(f"[cam{i+1}] trigger config failed: {type(e).__name__}: {e}",
+                print(f"[{self._cn(i)}] trigger config failed: {type(e).__name__}: {e}",
                       flush=True)
                 failed.append((i, f"{type(e).__name__}: {e}"))
         return failed
@@ -618,7 +635,7 @@ class CameraManager(QObject):
         self._stop_grab_threads()
         for i, cam in enumerate(self._cameras):
             rp = raw_paths[i] if raw_paths else None
-            gt = GrabThread(i, cam, self._backend, raw_path=rp,
+            gt = GrabThread(self._gi(i), cam, self._backend, raw_path=rp,
                             display_every=display_every,
                             realtime=realtime, width=width, height=height,
                             quality=quality, fps=fps, router=self._router,
@@ -626,7 +643,7 @@ class CameraManager(QObject):
             gt._pin_cpu = self.pin_capture_threads
             gt._pin_ecore = self.pin_encoder_threads
             gt._enc_pcores = self.encoder_pcores
-            gt.set_source_down_check(self._source_down)
+            gt.set_source_down_check(self.source_down_check or self._source_down)
             gt.start()
             self._grab_threads.append(gt)
 
@@ -643,6 +660,34 @@ class CameraManager(QObject):
     #: Encoder factory handed to the router and the grab threads; None means
     #: the process default in gui_app.encoders (NVENC).
     encoder_factory = None
+    #: Each open camera's index in the whole rig, in open order, or None
+    #: when this manager holds the whole rig (the index is the position).
+    #: A capture worker process opens a share of the cameras and sets it, so
+    #: its grab threads, their capture-core slots and every camN in its log
+    #: and warnings carry the rig-wide index.
+    global_indices = None
+    #: Builds the kick-out router, called with SyncEncodeRouter's arguments;
+    #: None means SyncEncodeRouter. A capture worker installs the router
+    #: that talks to the cross-process ledger.
+    router_factory = None
+    #: The stall ladder's check for a silent trigger source (GrabThread.
+    #: set_source_down_check), or None for this manager's own view across
+    #: its cameras (_source_down). A capture worker holds a share of the
+    #: cameras, so it installs a check that reads the whole rig's silence.
+    source_down_check = None
+    #: Whether stop_acquisition adds the warning about every camera falling
+    #: silent at once. A capture worker sees only its share of the cameras,
+    #: so its parent reports it for the whole rig instead.
+    report_source_silence = True
+
+    def _gi(self, i: int) -> int:
+        """Rig-wide index of open camera `i` (see global_indices)."""
+        g = self.global_indices
+        return i if g is None else int(g[i])
+
+    def _cn(self, i: int) -> str:
+        """The camN name of open camera `i`."""
+        return f"cam{self._gi(i) + 1}"
 
     def pinning_report(self) -> str:
         """One line saying how many grab threads actually pinned.
@@ -807,7 +852,7 @@ class CameraManager(QObject):
                     # The backend's method does not take these arguments, so
                     # the call failed before its body ran: nothing at all
                     # was written.
-                    msg = (f"cam{i+1}: the exposure/gain write was refused "
+                    msg = (f"{self._cn(i)}: the exposure/gain write was refused "
                            f"before anything was applied ({type(e).__name__}: "
                            f"{e}): the {self._backend_name} backend's "
                            f"set_exposure_gain does not take the arguments "
@@ -822,12 +867,12 @@ class CameraManager(QObject):
                     # GainRaw camera - leaves the exposure APPLIED; telling
                     # the operator it was not sends them looking for a fault
                     # in the wrong place.
-                    msg = (f"cam{i+1}: the exposure/gain write failed part-way "
+                    msg = (f"{self._cn(i)}: the exposure/gain write failed part-way "
                            f"({type(e).__name__}: {e}); the exposure may have "
                            f"been applied and the gain not, so this camera may "
                            f"be recording at whatever the previous acquisition "
                            f"left")
-                print(f"[cam{i+1}] exposure/gain set failed: {e}", flush=True)
+                print(f"[{self._cn(i)}] exposure/gain set failed: {e}", flush=True)
                 found.append(msg)
                 continue
             # Every camera, every time (mandate M7): a value that lands on
@@ -841,11 +886,12 @@ class CameraManager(QObject):
             # the log is what a session's settings are read back from.
             gain_txt = ("None" if gain is None
                         else f"{gain:.1f} {self._gain_unit(cam)}".rstrip())
-            print(f"[cam{i+1}] exposure={exp_txt} us gain={gain_txt} "
+            print(f"[{self._cn(i)}] exposure={exp_txt} us gain={gain_txt} "
                   f"(ceiling {ceiling_txt} at {fps:g} fps, {limiter}){note}",
                   flush=True)
             found.extend(
-                self._exposure_gain_warnings(i, want_exp, want_gain, exp, gain))
+                self._exposure_gain_warnings(self._gi(i), want_exp, want_gain,
+                                             exp, gain))
         if collect:
             self.last_warnings.extend(found)
 
@@ -880,7 +926,7 @@ class CameraManager(QObject):
         try:
             return float(fn(cam, fps, limit))
         except Exception as e:
-            msg = (f"cam{i+1}: the backend could not report its exposure "
+            msg = (f"{self._cn(i)}: the backend could not report its exposure "
                    f"ceiling ({type(e).__name__}: {e}), so exposure is "
                    f"bounded by the trigger period alone")
             print(f"[acq] WARNING: {msg}", flush=True)
@@ -1013,12 +1059,15 @@ class CameraManager(QObject):
             # grab thread against the same exhausted session cap and end in
             # raw.bin at ~129 GiB per 10 minutes, unaligned, with the capacity
             # preflight having budgeted for H.264.
-            from gui_app.sync_encode import SyncEncodeRouter
-            router = SyncEncodeRouter(raw_paths, width, height, quality,
-                                      fps=fps, max_lag=kick_max_lag,
-                                      pin_encoders=self.pin_encoder_threads,
-                                      enc_pcores=self.encoder_pcores,
-                                      encoder_factory=self.encoder_factory)
+            make_router = self.router_factory
+            if make_router is None:
+                from gui_app.sync_encode import SyncEncodeRouter
+                make_router = SyncEncodeRouter
+            router = make_router(raw_paths, width, height, quality,
+                                 fps=fps, max_lag=kick_max_lag,
+                                 pin_encoders=self.pin_encoder_threads,
+                                 enc_pcores=self.encoder_pcores,
+                                 encoder_factory=self.encoder_factory)
             if not router.available:
                 self._start_grab_threads()      # back to preview
                 # Reported like a mid-session encoder failure: the cached
@@ -1038,7 +1087,7 @@ class CameraManager(QObject):
             # Refuse rather than record a partial set: names are positional
             # and a free-running camera poisons the coordinator (see the
             # exception's docstring). Undo everything done so far.
-            names = ", ".join(f"cam{i+1} ({err})" for i, err in failed)
+            names = ", ".join(f"{self._cn(i)} ({err})" for i, err in failed)
             print(f"[acq] REFUSING to start: trigger mode failed on {names}",
                   flush=True)
             if self._router is not None:
@@ -1131,7 +1180,7 @@ class CameraManager(QObject):
         way the cameras' block-ID origins differ, and the caller refuses the
         recording.
         """
-        return {f"cam{i+1}": int(getattr(gt, "frames_before_barrier", 0))
+        return {self._cn(i): int(getattr(gt, "frames_before_barrier", 0))
                 for i, gt in enumerate(self._grab_threads)}
 
     @staticmethod
@@ -1242,7 +1291,7 @@ class CameraManager(QObject):
         for i, gt in enumerate(threads):
             if not gt.isRunning() or gt.retrieve_loop_exited:
                 continue
-            msg = (f"cam{i+1}: its grab thread was still receiving frames "
+            msg = (f"{self._cn(i)}: its grab thread was still receiving frames "
                    f"{STOP_NORMAL_EXIT_S:.0f} s after the trigger board was told "
                    f"to stop; the board may still be triggering, or the camera "
                    f"was not in trigger mode. The thread was stopped outright.")
@@ -1257,7 +1306,7 @@ class CameraManager(QObject):
         draining = [gt for gt in threads if gt.isRunning()]
         for i, gt in enumerate(threads):
             if gt.isRunning():
-                print(f"[cam{i+1}] grab thread still draining at stop, waiting...", flush=True)
+                print(f"[{self._cn(i)}] grab thread still draining at stop, waiting...", flush=True)
         self._wait_all(draining, STOP_DRAIN_S)
 
         retired = {}
@@ -1289,11 +1338,12 @@ class CameraManager(QObject):
         for i, gt in enumerate(threads):
             reason = getattr(gt, "retired_reason", None)
             if reason:
-                retired.setdefault(f"cam{i + 1}", reason)
+                retired.setdefault(self._cn(i), reason)
             failure = getattr(gt, "encoder_failure", None)
             if failure:
-                encoder_failures.append(f"cam{i + 1}: {failure}")
-        warnings.extend(self._source_silence_warnings(threads))
+                encoder_failures.append(f"{self._cn(i)}: {failure}")
+        if self.report_source_silence:
+            warnings.extend(self._source_silence_warnings(threads))
         running = {id(gt._camera) for gt in threads if gt.isRunning()}
         warnings.extend(self._camera_acquisition_warnings(threads, running))
         self.last_warnings = warnings
@@ -1312,7 +1362,7 @@ class CameraManager(QObject):
             # results travel on the exception: the streams are on disk, but
             # blockids.npy / frametimes.npy are the caller's to write, and
             # without them the healthy cameras' streams cannot be aligned.
-            names = ", ".join(f"cam{i+1}" for i in stuck)
+            names = ", ".join(self._cn(i) for i in stuck)
             raise AcquisitionStopIncomplete(
                 f"grab thread(s) for {names} did not exit after the stop "
                 f"timeouts (GPU or driver wedged?). The cameras were NOT "
@@ -1406,13 +1456,13 @@ class CameraManager(QObject):
             try:
                 found = list(fn(cam, frames[id(cam)]) or [])
             except Exception as e:
-                print(f"[cam{i+1}] acquisition_warnings failed: "
+                print(f"[{self._cn(i)}] acquisition_warnings failed: "
                       f"{type(e).__name__}: {e}", flush=True)
                 continue
             serial = (self._camera_info[i]["serial"]
                       if i < len(self._camera_info) else "?")
             for sentence in found:
-                msg = f"cam{i+1} ({serial}): {sentence}"
+                msg = f"{self._cn(i)} ({serial}): {sentence}"
                 print(f"[acq] WARNING: {msg}", flush=True)
                 out.append(msg)
         return out
@@ -1424,7 +1474,7 @@ class CameraManager(QObject):
                    if getattr(gt, "source_down_stalls", 0)]
         if not stalled:
             return []
-        names = ", ".join(f"cam{i + 1}" for i, _gt in stalled)
+        names = ", ".join(self._cn(i) for i, _gt in stalled)
         if not any(getattr(gt, "frames_retrieved", 0)
                    or getattr(gt, "frame_count", 0)
                    or getattr(gt, "failed_grabs", 0) for gt in threads):
@@ -1478,7 +1528,7 @@ class CameraManager(QObject):
         if live:
             raise RuntimeError(
                 "resume_preview() called while grab thread(s) "
-                + ", ".join(f"cam{i+1}" for i in live)
+                + ", ".join(self._cn(i) for i in live)
                 + " are still running; the cameras were not reconfigured")
         self._set_freerun_mode()
         # RULE: the preview restore collects no warnings. REASON: it runs
@@ -1489,6 +1539,35 @@ class CameraManager(QObject):
         # recording's WARNINGS.txt as a capture problem.
         self.apply_exposure_gain(preview_fps, None, None, collect=False)
         self._start_grab_threads()
+
+    def cancel_acquisition(self, preview_fps: float = 30.0) -> None:
+        """Undo a start_acquisition that returned but must not record, and
+        put the cameras back in free-run preview.
+
+        For a start that succeeded here while another part of the rig
+        refused (a capture worker whose peer could not arm): the recording
+        grab threads are abandoned, so they skip their drain and record no
+        retirement, the kick-out router drops its encoders and removes its
+        empty streams, and the cameras return to preview with their open
+        exposure and gain. Nothing was triggered, so nothing is lost.
+
+        Raises RuntimeError, as resume_preview does, when a grab thread is
+        still running after the wait: reconfiguring a camera under it would
+        be concurrent native access.
+        """
+        threads = self._grab_threads
+        for gt in threads:
+            gt.abandon()
+        self._wait_all(threads, ABANDON_THREAD_S)
+        live = self._retain_live(threads)
+        self._grab_threads = [threads[i] for i in live]
+        if self._router is not None:
+            try:
+                self._router.abandon()
+            except Exception as e:
+                print(f"[acq] abandoning the router failed: {e}", flush=True)
+            self._router = None
+        self.resume_preview(preview_fps)
 
     def close_all(self):
         """Stop the grab threads and close every camera.
@@ -1540,7 +1619,7 @@ class CameraManager(QObject):
         live = self._retain_live(threads)
         live_cams = {id(threads[i]._camera) for i in live}
         for i in live:
-            print(f"[cam{i+1}] grab thread still running at abandon; leaking "
+            print(f"[{self._cn(i)}] grab thread still running at abandon; leaking "
                   f"its camera handle rather than closing under a live native "
                   f"call", flush=True)
         self._grab_threads = []
