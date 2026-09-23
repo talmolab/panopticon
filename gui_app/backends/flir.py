@@ -703,8 +703,8 @@ class FlirCamera:
             if k is None or k < step[_ID16_FULL]:
                 self._id16_lose(prev, raw, problem or (
                     f"the device clock counts {k} frame period(s) between "
-                    f"them, fewer than the {step[_ID16_SKIP0]} IDs either "
-                    f"cycle gives"))
+                    f"them, fewer than the {step[_ID16_SKIP0]} or "
+                    f"{step[_ID16_FULL]} IDs the two cycles give"))
             gaps = k - step[_ID16_FULL]
             fits = (f"which a 65536 cycle gives, and a 65535 cycle with 1 "
                     f"trigger ignored at the wrap" if not gaps else
