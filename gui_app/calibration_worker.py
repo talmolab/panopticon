@@ -18,10 +18,12 @@ traceback, and they are deliberately narrow (``LinAlgError``, not any path
 containing ``linalg``; no tuple-unpack matching) so an unrelated exception is
 never reported as "no board detections".
 
-Signals. ``finished(bool, str)`` is kept for the existing main_window
-connection; ``finished_solve(bool, str)`` carries the same payload under a
-name that does not shadow ``QThread.finished`` and is what new code should
-connect to. ``report_ready(dict)`` fires before either with the parsed
+Signals. ``finished_solve(bool, str)`` carries the result under a name that
+does not shadow ``QThread.finished``, and it is the one the application
+connects to; connect new code there. ``finished(bool, str)`` carries the same
+payload and shadows ``QThread.finished``, so anything that relies on the
+built-in signal's no-argument form gets this one instead; the application
+does not connect to it. ``report_ready(dict)`` fires before either with the parsed
 ``calibration_report.json`` (empty dict when the script produced none); the
 same dict is left in ``self.report``. On success the message is a summary
 built from the report (cameras dropped and why, warnings), so the dialog names

@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
         if self._sidebar.select_profile(self._sidebar.remembered_profile()):
             self._profile = self._sidebar.current_profile
         else:
-            for prof in self._sidebar_profiles():
+            for prof in self._sidebar.profiles:
                 if prof.pfs_path and Path(prof.pfs_path).exists():
                     self._sidebar.select_profile(prof.name)
                     self._profile = prof
@@ -285,17 +285,6 @@ class MainWindow(QMainWindow):
         # After the window is up, so the warning is a dialog over a live
         # window rather than a message behind the splash screen.
         QTimer.singleShot(0, self._show_profile_warnings)
-
-    def _sidebar_profiles(self) -> list:
-        """Every profile the sidebar loaded, newest accessor first.
-
-        The public property is the one to use; the private list is the
-        fallback until the sidebar exposes one.
-        """
-        profiles = getattr(self._sidebar, "profiles", None)
-        if profiles is None:
-            profiles = self._sidebar._profiles
-        return list(profiles)
 
     def _open_cameras(self):
         """Open cameras for the current profile (synchronous — startup only).
@@ -346,6 +335,10 @@ class MainWindow(QMainWindow):
             # a 1920x1200 rig is drawn at the widget's default aspect.
             self._camera_grid.set_camera_aspect(self._profile.frame_width,
                                                 self._profile.frame_height)
+            # The layout follows the camera count, so a four-camera rig gets
+            # a 2x2 grid rather than three columns with one pane on a second
+            # row.
+            self._camera_grid.set_columns(CameraGridWidget.columns_for(n))
             self._camera_grid.setup_grid(n)
             self._camera_names = [f"cam{i+1}" for i in range(n)]
             # The camera count is only known now, and the repaint period scales
@@ -1914,7 +1907,11 @@ class MainWindow(QMainWindow):
         if teensy is None or not teensy.is_open:
             return
         try:
-            heard = self._read_board_identity(teensy)
+            # The controller's identify() awaits the stop's ack even before
+            # the first RDY line, which is the state at launch: stop_triggers
+            # alone skips the ack then, so RDY firmware would read as pre-RDY
+            # and the decision would fall back to the per-machine hint.
+            heard = teensy.identify(self._profile.trigger_pins)
         except Exception as e:
             print(f"[acq] could not stand the board down at launch: {e}",
                   flush=True)
@@ -1952,47 +1949,6 @@ class MainWindow(QMainWindow):
         # _warm_serial from starting a third flash.
         self.release_serial_port()
         self._ensure_clean_firmware()
-
-    def _read_board_identity(self, teensy) -> str | None:
-        """The sketch identity the board prints in answer to a stand-down.
-
-        RULE: the identity comes from a read that does not depend on the
-        controller having already heard an RDY line. REASON: stop_triggers
-        skips the ack entirely while the controller has never seen one, and
-        that is precisely the state at launch - a freshly constructed
-        controller, before any start - so firmware that DOES speak RDY is
-        mislabelled pre-RDY, no identity is ever read, and the launch-time
-        decision falls back to the per-machine hint. A board flashed from the
-        Arduino IDE, swapped, or shared with a second rig is exactly what the
-        hint cannot see, and exactly what this check exists for.
-
-        A stop is the one config that is always safe to send: it drives the
-        camera pins and every stim pin LOW, which is also the right state for
-        a board found carrying a previous session's paradigm.
-
-        The waiting read belongs to the serial controller, which owns the
-        port and the ack grammar, and `identify()` is it. The fallback below
-        stays only for a stand-in controller that predates it; pre-RDY
-        firmware answers nothing either way and costs one stop-ack timeout,
-        once per launch.
-        """
-        pins = self._profile.trigger_pins
-        identify = getattr(teensy, "identify", None)
-        if callable(identify):
-            return identify(pins)
-        teensy.stop_triggers(pins)
-        if not getattr(teensy, "_speaks_rdy", False):
-            await_ack = getattr(teensy, "_await_ack", None)
-            if callable(await_ack):
-                try:
-                    # readFPS() clamps the stop's -1 to 0, so the board acks
-                    # it as `RDY <n> 0` and the identity rides on that line.
-                    await_ack(len(pins), 0,
-                              timeout=getattr(teensy, "STOP_ACK_TIMEOUT", 3.0))
-                except Exception as e:
-                    print(f"[acq] could not read the board's identity: {e}",
-                          flush=True)
-        return getattr(teensy, "board_id", None)
 
     def _ensure_sketch_for(self, acq_type: str) -> bool:
         """Make the board carry the firmware this acquisition needs.

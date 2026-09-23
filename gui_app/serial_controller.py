@@ -108,11 +108,6 @@ class TeensyController:
         self.last_start_retried = False
 
     @property
-    def _acks(self) -> bool:
-        """Back-compat alias for _speaks_rdy (probe scripts read it)."""
-        return self._speaks_rdy
-
-    @property
     def speaks_rdy(self) -> bool:
         """True once any RDY line has come from this board.
 

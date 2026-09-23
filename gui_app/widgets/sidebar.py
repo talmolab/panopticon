@@ -156,10 +156,6 @@ class SidebarWidget(QWidget):
         self._busy = False
         self._toggles_gate = True
         self._solve_running = False
-        # Which toggle most recently went on. A refused start is delivered
-        # synchronously inside that toggle's own emission, so this names the
-        # refused toggle for callers that do not pass the kind themselves.
-        self._last_armed: str | None = None
 
         self._calibrate_toggle = ToggleSwitch("Calibrate", QColor(66, 133, 244))
         self._record_toggle = ToggleSwitch("Record", QColor(234, 67, 53))
@@ -311,14 +307,12 @@ class SidebarWidget(QWidget):
 
     def _on_calibrate(self, checked):
         if checked:
-            self._last_armed = "calibrate"
             self.refresh_date()
         self._apply_enablement()
         self.calibrate_toggled.emit(checked)
 
     def _on_record(self, checked):
         if checked:
-            self._last_armed = "record"
             self.refresh_date()
         self._apply_enablement()
         self.record_toggled.emit(checked)
@@ -461,6 +455,11 @@ class SidebarWidget(QWidget):
         return False
 
     @property
+    def profiles(self) -> list[RigProfile]:
+        """Every profile that loaded, in dropdown order."""
+        return list(self._profiles)
+
+    @property
     def profile_warnings(self) -> list[str]:
         """Messages about profiles that failed to load at construction, one
         per skipped file, plus one naming the profiles directory when none
@@ -582,20 +581,6 @@ class SidebarWidget(QWidget):
         t.setChecked(False)
         t.blockSignals(False)
         self._apply_enablement()
-
-    def clear_toggles_silently(self, kind: str | None = None):
-        """Deprecated alias of clear_toggle_silently, kept for one release.
-
-        Without ``kind`` the most recently armed toggle is cleared, which is
-        the refused one when called from inside its own emission; if nothing
-        has been armed, both toggles are cleared.
-        """
-        kind = kind or self._last_armed
-        if kind is None:
-            for k in ("calibrate", "record"):
-                self.clear_toggle_silently(k)
-            return
-        self.clear_toggle_silently(kind)
 
     def stop_record(self):
         """Flip Record off programmatically, emitting record_toggled like a
