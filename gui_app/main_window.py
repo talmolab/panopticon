@@ -201,6 +201,9 @@ class MainWindow(QMainWindow):
     #: The last error the trigger-source watch printed, so a manager read
     #: that fails on every tick is logged once, not ten times a second.
     _ext_watch_error = ""
+    #: The trigger pins of the profile a switch left, for the stop a switch
+    #: to an external trigger source sends that profile's board.
+    _switch_from_pins: list | None = None
 
     def __init__(self):
         super().__init__()
@@ -732,6 +735,9 @@ class MainWindow(QMainWindow):
         # responding".
         self._begin_busy("Switching cameras…")
         self._switch_from_port = self._profile.serial_port
+        # The old board's own pins, for the stop a switch to an external
+        # trigger source sends it (_prepare_board_after_switch).
+        self._switch_from_pins = list(self._profile.trigger_pins)
         self._profile = profile
 
         def _switch():
@@ -773,17 +779,34 @@ class MainWindow(QMainWindow):
         activate stim". The old port's hint and board identity describe the
         other board and are forgotten first, so the flash runs.
 
-        A profile on an external trigger source uses no board. The link to
-        the previous profile's board is closed and its hint forgotten, so a
-        later switch back runs the launch check on it, and the Stimulation
-        editor is closed, because nothing can run a paradigm now.
+        A profile on an external trigger source uses no board. The previous
+        profile's board is sent a stop on its own trigger pins and its link
+        is closed (stop_and_close), and its hint is forgotten, so a later
+        switch back runs the launch check on it. The Stimulation editor is
+        closed, because nothing can run a paradigm now.
+
+        RULE: the stop goes out before the link closes, and a stop the board
+        does not confirm is shown. REASON: in this mode nothing talks to that
+        board again, not even the quit's stand-down, so this is the last
+        chance to drive its camera and stimulation pins low.
         """
         if self._external_trigger():
             if self._teensy is not None:
+                teensy, self._teensy = self._teensy, None
+                pins = list(self._switch_from_pins
+                            or self._profile.trigger_pins)
                 print(f"[acq] the profile takes its triggers from an external "
-                      f"source; closing the link to the trigger board on "
-                      f"{self._teensy.port}", flush=True)
-                self._forget_board_on_other_port()
+                      f"source; stopping the trigger board on {teensy.port} "
+                      f"and closing its link", flush=True)
+                try:
+                    stood_down = teensy.stop_and_close(pins)
+                except Exception as e:
+                    print(f"[acq] standing the board down failed: {e}",
+                          flush=True)
+                    stood_down = False
+                settings.set_board_sketch_hint("")
+                self._board_id_stale = True
+                self._warn_if_not_stood_down(stood_down)
             close = getattr(self._stim_window, "close", None)
             if close is not None:
                 close()
