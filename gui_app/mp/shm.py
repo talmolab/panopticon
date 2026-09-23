@@ -338,6 +338,13 @@ class SeqlockSlot:
     def seq(self) -> int:
         return int(self._hdr[_S_SEQ])
 
+    def clear(self) -> None:
+        """Mark the slot never written (seq 0). A segment's creator calls this
+        before any reader attaches, because a reused buffer can hold an old
+        even seq that would read back as a valid old frame."""
+        self._hdr[:] = 0
+        self._last = None
+
     def write(self, img, frame_n: int = 0, bid: int = 0) -> int:
         """Publish `img`. Returns the new (even) sequence number."""
         a = np.asarray(img)
@@ -420,6 +427,8 @@ class PingPongSlot:
         return cls._HEADER + 2 * SeqlockSlot.size_for(capacity)
 
     def init(self) -> None:
+        for s in self._slots:
+            s.clear()
         self._hdr[0] = -1
 
     def write(self, img, frame_n: int = 0, bid: int = 0) -> int:
@@ -710,6 +719,9 @@ class FrameSegment:
         epoch = _check_epoch(epoch)
         seg = cls(buf, n_cams, capacity, epoch, names)
         seg._hdr[:] = 0
+        for per_cam in seg._slots:
+            for s in per_cam.values():
+                s.clear()
         _stamp(seg._hdr, FRAMES_MAGIC, n_cams, capacity, epoch, len(seg.names))
         return seg
 
