@@ -86,11 +86,12 @@ class RigProfile:
     encode_parallel: int = 3
     realtime_encode: bool = True
     # Real-time frame kick-out: gate frames through the cross-camera coordinator
-    # during capture so only frames every camera caught get encoded — videos come
-    # out already trigger-aligned, no post-hoc re-encode. BOTH shipped profiles
-    # set this true; the field default stays False so a profile written before
-    # the field existed keeps the post-hoc alignment path (gui_app/alignment.py).
-    realtime_kick: bool = False
+    # during capture so only frames every camera caught get encoded. Videos come
+    # out trigger-aligned with no post-hoc re-encode, and the block-ID rate
+    # check runs when the recording stops. The default is true so a profile that
+    # omits the key gets that path; false selects post-hoc alignment
+    # (gui_app/alignment.py).
+    realtime_kick: bool = True
     # Kick-out coordinator buffer depth (frames). A camera may lag the others by
     # this many frames before its missing triggers are force-dropped to keep the
     # pipeline flowing. Higher = fewer late frames sacrificed, but more RAM held
