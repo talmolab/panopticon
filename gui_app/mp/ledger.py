@@ -41,9 +41,12 @@ reader keeps; x86-64 preserves both, which is why `shm` refuses other CPUs.
   `decided_upto` it read predates the retirement.
 - Retire request: reason text, then `retire_req`.
 - End of stream: a worker's final announce, then `eos`. `flush` checks `eos`
-  before its last poll, so that poll sees every announce.
-- Flush: bits, `decided_upto`, then `flushed`. A worker that sees `flushed`
-  knows no later trigger will be decided, and drops what it still holds.
+  before its last poll, so that poll sees every announce. It honours retire
+  requests before the check, so a camera whose worker asked to retire needs
+  no `eos`.
+- Flush: a publish in the Decide order, then `flushed`. A worker that sees
+  `flushed` knows no later trigger will be decided, and drops what it still
+  holds.
 
 A worker's harvest therefore loads `flushed`, `decided_upto`, `retired`,
 `retired_at`, the decision bits, and `deciding_upto`, in that order.
@@ -67,7 +70,7 @@ T + ring_bits. These rules tie every bit a reader keeps to one trigger:
   late anyway.
 - A publish can rewrite a decision bit while a worker reads it. The publish
   stores `deciding_upto` before its first bit, and the harvest loads it after
-  its last. A bit a later trigger already took therefore shows up as a
+  its last bit read. A bit a later trigger already took therefore shows up as a
   `deciding_upto` at least `ring_bits` past the trigger read. Harvest then
   stops, returns nothing and sets `lag_error`, and the caller retires the
   camera.
