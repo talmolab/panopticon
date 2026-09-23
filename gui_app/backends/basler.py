@@ -60,6 +60,9 @@ class BaslerBackend:
         and a value that could live in two places drifts between them. The
         profile loader refuses the block first; this is the backend's own
         check for a caller that bypassed it.
+
+        The camera's timestamp tick rate is logged, because the capture path
+        reads `TimeStamp` as nanoseconds (see `acquisition_warnings`).
         """
         if camera_spec is not None:
             raise ValueError(
@@ -75,6 +78,7 @@ class BaslerBackend:
         # checks the result.
         pylon.FeaturePersistence.Load(pfs_path, cam.GetNodeMap(), False)
         cam.MaxNumBuffer.SetValue(max_num_buffer)
+        self._log_timestamp_clock(cam, device.GetSerialNumber())
         return cam
 
     def describe(self, cam) -> dict:
@@ -92,6 +96,69 @@ class BaslerBackend:
             "pixel_format": cam.PixelFormat.GetValue(),
             "serial": cam.GetDeviceInfo().GetSerialNumber(),
         }
+
+    # ---------------------------------------------------------- timestamp clock
+    #: The tick rate the capture path assumes: `GrabResultProtocol.TimeStamp`
+    #: is nanoseconds.
+    TIMESTAMP_HZ = 1_000_000_000
+    #: Node that reports a GigE camera's timestamp tick rate. USB3 Vision
+    #: cameras do not have it, and their timestamps are nanoseconds by the
+    #: USB3 Vision standard.
+    TICK_FREQUENCY_NODE = "GevTimestampTickFrequency"
+
+    @classmethod
+    def timestamp_tick_hz(cls, cam):
+        """The camera's timestamp ticks per second, or None when it does not
+        report a rate (USB3 cameras) or the node cannot be read."""
+        try:
+            node = cls._optional_node(cam, cls.TICK_FREQUENCY_NODE)
+            if node is None:
+                return None
+            return int(node.GetValue())
+        except Exception:
+            return None
+
+    @classmethod
+    def _timestamp_unit_problem(cls, hz):
+        """A sentence saying why a clock of `hz` ticks per second is not the
+        nanosecond clock the capture path assumes, or None when it is (or
+        when the camera does not report a rate)."""
+        if hz is None or hz <= 0 or hz == cls.TIMESTAMP_HZ:
+            return None
+        return (f"the camera's device clock ticks at {hz} Hz "
+                f"({cls.TICK_FREQUENCY_NODE}), but the capture path reads "
+                f"TimeStamp as nanoseconds ({cls.TIMESTAMP_HZ} Hz). The "
+                f"delivery lag, the stall resync and the block-ID rate check "
+                f"are wrong for this camera by a factor of "
+                f"{cls.TIMESTAMP_HZ / hz:g}")
+
+    @classmethod
+    def _log_timestamp_clock(cls, cam, serial) -> None:
+        """Print this camera's timestamp tick rate, with a WARNING when it is
+        not the nanosecond clock the capture path assumes."""
+        hz = cls.timestamp_tick_hz(cam)
+        problem = cls._timestamp_unit_problem(hz)
+        if problem is not None:
+            print(f"[basler] WARNING {serial}: {problem}", flush=True)
+            return
+        rate = ("not reported" if hz is None
+                else f"{hz} Hz ({cls.TICK_FREQUENCY_NODE})")
+        print(f"[basler] {serial}: timestamp clock {rate}", flush=True)
+
+    def acquisition_warnings(self, cam, frames_acquired: int) -> list:
+        """Camera-side problems with the acquisition that just ended.
+
+        A Basler camera has no trigger counter in use here, so the only
+        problem reported is a timestamp clock that is not nanoseconds. It is
+        reported for every recording, so it reaches that recording's
+        WARNINGS.txt. `frames_acquired` is part of the contract and unused
+        here. Never raises.
+        """
+        try:
+            problem = self._timestamp_unit_problem(self.timestamp_tick_hz(cam))
+        except Exception:
+            return []
+        return [] if problem is None else [problem]
 
     # -------------------------------------------------------- exposure ceiling
     @staticmethod
@@ -212,9 +279,13 @@ class BaslerBackend:
     def set_transmission_delay(cls, cam, ticks: int) -> int:
         """Write GevSCFTD (frame transmission delay) and return the value set.
 
-        The camera holds each frame back by `ticks` timestamp ticks
-        (GevTimestampTickFrequency, 125 MHz on ace GigE, so 1 tick = 8 ns)
-        before putting it on the wire. Basler documents this as the knob for
+        The camera holds each frame back by `ticks` ticks of its timestamp
+        clock before putting it on the wire. The tick rate is the camera's
+        GevTimestampTickFrequency (see `timestamp_tick_hz`); it differs
+        between camera models, so convert a delay in time with the rate the
+        camera reports rather than an assumed one.
+
+        Basler documents this as the knob for
         cameras "triggered simultaneously": staggering the start of each
         camera's burst spreads the switch load without touching the exposure
         or readout timer, which is what the trigger_rate_limit pacing costs.
