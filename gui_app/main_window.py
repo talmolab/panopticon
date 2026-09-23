@@ -110,6 +110,13 @@ class MainWindow(QMainWindow):
     #: firmware path. A failure is reported, and the next start retries on
     #: its worker with START_SERIAL_RETRIES.
     UI_SERIAL_RETRIES = 1
+    #: How a lag verdict that finds nothing wrong begins.
+    _HEALTHY = "Capture healthy"
+    #: Seconds the start waits for every grab thread to arm (fill its frame
+    #: ring and start its stream) before refusing. Arming normally takes a
+    #: few seconds; the bound only has to cover a host paging under memory
+    #: pressure without letting a wedged camera hold the start for minutes.
+    READY_TIMEOUT_S = 30.0
     #: Set by closeEvent once the operator has agreed to quit, and never
     #: cleared. The start path reads it so that nothing reaches the trigger
     #: board after the quit has stood it down.
@@ -1630,16 +1637,40 @@ class MainWindow(QMainWindow):
 
         # Barrier: never start the board while a grab thread is still
         # allocating. See CameraManager.wait_until_ready for the measurement.
+        # RULE: the start is refused unless every camera is armed. REASON: a
+        # camera that arms after the board starts counts its block IDs from
+        # a later trigger than the others, so every frame of it is paired
+        # with the wrong trigger, with no gap in blockids.npy and a clean
+        # rate check. The board has not been sent anything yet, so the
+        # rollback stops only the cameras.
         t_bar = time.perf_counter()
         try:
-            n_ready, n_tot = self._camera_mgr.wait_until_ready(30.0)
-            waited = time.perf_counter() - t_bar
-            flag = "" if n_ready == n_tot else "  *** NOT ALL READY ***"
-            print(f"[acq] grab threads ready {n_ready}/{n_tot} after "
-                  f"{waited:.2f}s{flag}", flush=True)
+            n_ready, n_tot = self._camera_mgr.wait_until_ready(
+                self.READY_TIMEOUT_S)
+            late = list(self._camera_mgr.not_ready())
         except Exception as e:
-            print(f"[acq] readiness barrier failed, starting anyway: {e}",
-                  flush=True)
+            print(f"[acq] readiness barrier failed: {e}", flush=True)
+            return self._rollback_acquisition(
+                f"The check that every camera is armed before the trigger "
+                f"board starts could not run:\n\n{type(e).__name__}: {e}\n\n"
+                f"The board was not started and nothing was recorded. Start "
+                f"again.", sent_start=False)
+        waited = time.perf_counter() - t_bar
+        flag = "" if not late else "  *** NOT ALL READY ***"
+        print(f"[acq] grab threads ready {n_ready}/{n_tot} after "
+              f"{waited:.2f}s{flag}", flush=True)
+        if late:
+            names = ", ".join(self._camera_label(i + 1) for i in late)
+            return self._rollback_acquisition(
+                f"{names} had not armed after {self.READY_TIMEOUT_S:.0f} s, "
+                f"so the trigger board was not started: a camera that arms "
+                f"after the board starts records every frame against the "
+                f"wrong trigger, with nothing in the files to show it.\n\n"
+                f"Nothing was recorded. Arming fills each camera's frame "
+                f"ring in memory first, so the usual cause is memory "
+                f"pressure: close other applications, or lower "
+                f"kick_max_lag or max_num_buffer in the rig profile, then "
+                f"start again.", sent_start=False)
         try:
             # Printed beside the readiness line so a session's log records
             # where the capture threads actually ran, which is what a probe's
@@ -1653,6 +1684,28 @@ class MainWindow(QMainWindow):
         # runs after this start and the start does not retry after it.
         if self._quitting:
             return self._quit_during_start()
+        # Immediately before the start: from here a camera whose stream arms
+        # late retires itself, and the frames each camera took before this
+        # point are fixed.
+        self._camera_mgr.mark_board_starting()
+        early = {name: n for name, n
+                 in self._camera_mgr.frames_before_barrier().items() if n}
+        if early:
+            # Every camera is armed and this start has not reached the board,
+            # so a frame here came from a trigger this start did not send.
+            # Such a camera's block IDs do not start at the board's first
+            # trigger. The rollback sends the board a stop, which is always
+            # safe, in case it is still triggering from an earlier start.
+            detail = ", ".join(f"{name} ({n})" for name, n in early.items())
+            return self._rollback_acquisition(
+                f"Frames arrived before the trigger board was started: "
+                f"{detail}. Something is triggering these cameras already: "
+                f"the board still running from an earlier start, another "
+                f"trigger source on their input line, or a camera not in "
+                f"trigger mode. Their block IDs would not count this "
+                f"recording's triggers.\n\nNothing was recorded. Check the "
+                f"trigger wiring and the cameras' trigger settings, then "
+                f"start again.", sent_start=True)
         print(f"[acq] sending start_triggers "
               f"pins={self._profile.trigger_pins} fps={fps}", flush=True)
         counted_before_retry = []
