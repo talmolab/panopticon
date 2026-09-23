@@ -35,6 +35,9 @@ from pathlib import Path
 import numpy as np
 
 from gui_app.backends import sim_board
+# The block-ID cycle is defined once, in frame_sync, because the coordinator's
+# unwrap and this simulated counter must agree on it.
+from gui_app.frame_sync import BLOCKID_WRAP
 from gui_app.session_config import RigProfile
 
 #: The profile that selects this backend, and the ONE place the simulated
@@ -70,10 +73,10 @@ BASELINE_GAIN_DB = 6.0
 #: an immediate, named failure instead of unbounded memory growth.
 BUFFER_POOL = 4
 
-#: 16-bit GVSP block IDs run 1..65535: 0 is reserved, so the counter wraps
-#: onto 1. `frame_sync.BLOCKID_WRAP` and `alignment._unwrap_blockids` assume
-#: exactly this, and a wrap that produced a 0 would be read as "no ordinal".
-BLOCKID_WRAP = 65535
+# 16-bit GVSP block IDs run 1..65535: 0 is reserved, so the counter wraps
+# onto 1. `BLOCKID_WRAP` (imported above from frame_sync) is that period, and
+# `alignment._unwrap_blockids` assumes the same cycle; a wrap that produced a
+# 0 would be read as "no ordinal".
 
 
 class SimTimeout(Exception):
