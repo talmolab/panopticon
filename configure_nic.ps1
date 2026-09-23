@@ -84,7 +84,8 @@ param(
     # the core layout describe one machine, so none of them is a default here;
     # pass -Ports to override the derivation.
     [string[]] $Ports  = @(),
-    # Defaults RESTORE the vendor RSS placement (1 queue, processors 0-23); pass
+    # Defaults RESTORE the vendor RSS placement (1 queue, processors 0 to the
+    # last logical processor; -MaxProcessor -1 means the last one); pass
     # other values only for a deliberate, one-variable experiment.
     [int]      $Queues        = 1,
     [int]      $BaseProcessor = 0,
