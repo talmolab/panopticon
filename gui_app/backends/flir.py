@@ -70,8 +70,10 @@ names, the CounterValue chunk's timing, whether a model's counters can be
 read while it streams, whether a trigger whose delayed exposure has not
 started when EndAcquisition runs is still exposed (if not, the witness
 counts it as ignored), whether a camera keeps exposing while its host has
-stopped taking frames (a stall), and which temperature status and threshold
-nodes a model has.
+stopped taking frames (a stall), which temperature status and threshold
+nodes a model has, and which DeviceTemperatureSelector entry its
+DeviceTemperatureStatus and DeviceTemperatureStatusTransition thresholds
+refer to (`_temp_basis`).
 """
 from __future__ import annotations
 
@@ -174,6 +176,14 @@ _TEMP_STATUS_WORDS = {"normal": "Ok", "ok": "Ok", "high": "Critical",
 #: DeviceTemperatureStatusTransition entries -> the thermals() key they fill.
 _TEMP_TRANSITIONS = (("NormalToHigh", "temp_critical_c"),
                      ("HighToExceeded", "temp_shutdown_c"))
+
+
+def _temp_status_rank(word: str) -> int:
+    """How serious a DeviceTemperatureStatus word is: Ok 0, Critical 1, and
+    2 for Error or a word `_TEMP_STATUS_WORDS` does not list, which the
+    watch treats as over temperature."""
+    return {"Ok": 0, "Critical": 1}.get(
+        _TEMP_STATUS_WORDS.get(word.lower()), 2)
 
 
 # ------------------------------------------------------------ the shared SDK
@@ -523,6 +533,10 @@ class FlirCamera:
         self.counters: dict = {}
         self.counter_chunk_ok = False
         self.temp_max_c = None
+        # DeviceTemperatureSelector entry -> the status transition
+        # thresholds read under it, learned at the first thermals() poll
+        # that finds the threshold nodes (`FlirBackend._thermals`).
+        self._temp_limits = None
         self._ceilings: dict = {}
         self._link_fps = None
         self._triggered = False
@@ -2388,17 +2402,20 @@ class FlirBackend:
         """The camera's temperature readings, in the keys the thermal watch
         reads. Never raises.
 
-        `temp_c` is the `Sensor` reading, or the first `DeviceTemperature
-        Selector` entry's, and every entry is also reported as
-        `temp_<entry>_c`. `temp_max_c` is the highest `temp_c` this backend
-        has polled since the camera was opened, not a device high-water mark.
-        `temp_status`, `temp_critical_c` and `temp_shutdown_c` are reported
-        only when the camera has the nodes (SFNC `DeviceTemperatureStatus`,
-        and `DeviceTemperatureStatusTransition` for NormalToHigh and
-        HighToExceeded); the status word is translated to Ok, Critical or
-        Error, and the camera's own word is kept under
-        `temp_status_camera`. A camera that reports no shutdown temperature
-        has no `temp_shutdown_c`, and the watch falls back to its status."""
+        Every `DeviceTemperatureSelector` entry is reported as
+        `temp_<entry>_c`, and `temp_c` is the one the camera's thresholds are
+        compared with (`_temp_basis`), named in `temp_entry`.
+        `temp_critical_c` and `temp_shutdown_c` come from SFNC
+        `DeviceTemperatureStatusTransition` (NormalToHigh and
+        HighToExceeded) when the camera has it, and `temp_limits_entry`
+        names the entry they belong to, or reads "unknown". `temp_max_c` is
+        the highest `temp_c` this backend has polled since the camera was
+        opened, not a device high-water mark. `temp_status` is SFNC
+        `DeviceTemperatureStatus`, read under every entry the selector can
+        take, the worst word kept: it is translated to Ok, Critical or Error,
+        and the camera's own word is kept under `temp_status_camera`. A camera that reports no
+        shutdown temperature has no `temp_shutdown_c`, and the watch falls
+        back to its status."""
         try:
             return self._thermals(cam)
         except Exception as e:
@@ -2411,43 +2428,108 @@ class FlirBackend:
         temp = n.node("DeviceTemperature")
         if temp is None or not api.node_readable(temp):
             return out
-        readings = {}
+        status = (n.node("DeviceTemperatureStatus")
+                  if n.readable("DeviceTemperatureStatus") else None)
+        # The thresholds are firmware values, read under each entry once.
+        learn = cam._temp_limits is None and self._has_temp_limits(cam)
+        readings, words, limits = {}, {}, {}
+
+        def read(entry):
+            readings[entry] = float(api.float_get(temp))
+            if status is not None:
+                words[entry] = str(api.enum_get_symbolic(status))
+            if learn:
+                limits[entry] = self._temp_transitions(cam)
+
         sel = n.node("DeviceTemperatureSelector")
         if sel is not None and n.writable("DeviceTemperatureSelector"):
             current = api.enum_get_symbolic(sel)
+            entries = list(api.enum_entries(sel))
             try:
-                for entry in api.enum_entries(sel):
+                for entry in entries:
                     api.enum_set_symbolic(sel, entry)
-                    readings[entry] = float(api.float_get(temp))
+                    read(entry)
             finally:
                 api.enum_set_symbolic(sel, current)
         else:
-            label = api.enum_get_symbolic(sel) if sel is not None else ""
-            readings[label] = float(api.float_get(temp))
-        primary = "Sensor" if "Sensor" in readings else next(iter(readings))
-        out["temp_c"] = readings[primary]
-        for entry, value in readings.items():
-            if entry:
-                out[f"temp_{entry.lower()}_c"] = value
+            entries = None
+            read(api.enum_get_symbolic(sel) if sel is not None else "")
+        if learn:
+            cam._temp_limits = limits
+        entry, lim, owner = self._temp_basis(
+            readings, cam._temp_limits or {},
+            single=sel is None or entries is not None and len(entries) == 1)
+        out["temp_c"] = readings[entry]
+        if entry:
+            out["temp_entry"] = entry
+        for name, value in readings.items():
+            if name:
+                out[f"temp_{name.lower()}_c"] = value
         if cam.temp_max_c is None or out["temp_c"] > cam.temp_max_c:
             cam.temp_max_c = out["temp_c"]
         out["temp_max_c"] = cam.temp_max_c
-        if n.readable("DeviceTemperatureStatus"):
-            word = n.gete("DeviceTemperatureStatus")
+        if words:
+            word = max(words.values(), key=_temp_status_rank)
             out["temp_status_camera"] = word
             out["temp_status"] = _TEMP_STATUS_WORDS.get(word.lower(), word)
-        tsel = n.node("DeviceTemperatureStatusTransitionSelector")
-        if tsel is not None and n.readable("DeviceTemperatureStatusTransition"):
-            offered = api.enum_entries(tsel)
-            current = api.enum_get_symbolic(tsel)
-            try:
-                for entry, key in _TEMP_TRANSITIONS:
-                    if entry in offered:
-                        api.enum_set_symbolic(tsel, entry)
-                        out[key] = n.getf("DeviceTemperatureStatusTransition")
-            finally:
-                api.enum_set_symbolic(tsel, current)
+        if lim:
+            out.update(lim)
+            out["temp_limits_entry"] = owner
         return out
+
+    @staticmethod
+    def _has_temp_limits(cam) -> bool:
+        n = cam.nodes
+        return (n.node("DeviceTemperatureStatusTransitionSelector") is not None
+                and n.readable("DeviceTemperatureStatusTransition"))
+
+    def _temp_transitions(self, cam) -> dict:
+        """The thresholds `_TEMP_TRANSITIONS` names, read under the
+        DeviceTemperatureSelector entry now selected, with the transition
+        selector put back."""
+        n = cam.nodes
+        api = self._api
+        tsel = n.node("DeviceTemperatureStatusTransitionSelector")
+        offered = api.enum_entries(tsel)
+        current = api.enum_get_symbolic(tsel)
+        out = {}
+        try:
+            for entry, key in _TEMP_TRANSITIONS:
+                if entry in offered:
+                    api.enum_set_symbolic(tsel, entry)
+                    out[key] = n.getf("DeviceTemperatureStatusTransition")
+        finally:
+            api.enum_set_symbolic(tsel, current)
+        return out
+
+    @staticmethod
+    def _temp_basis(readings: dict, limits: dict, single: bool) -> tuple:
+        """`(entry, thresholds, owner)`: the DeviceTemperatureSelector entry
+        whose reading is `temp_c`, the thresholds it is compared with, and
+        the entry those thresholds belong to ("unknown" when the camera does
+        not show it). `single` is True for a camera with one entry or none.
+
+        Thresholds that change with the selector belong to their entry, so
+        each reading is compared with its own, and the entry with the least
+        room below its shutdown point (or its NormalToHigh point) is
+        reported. Thresholds that are the same under every entry belong to
+        an entry the camera does not name, so they are compared with the
+        hottest reading: a cooler location never stands in for the one they
+        belong to. A camera without thresholds reports its Sensor reading,
+        or its first entry's."""
+        if not any(limits.values()):
+            entry = "Sensor" if "Sensor" in readings else next(iter(readings))
+            return entry, {}, None
+        if len({tuple(sorted(v.items())) for v in limits.values()}) > 1:
+            def room(e):
+                lim = limits.get(e) or {}
+                top = lim.get("temp_shutdown_c", lim.get("temp_critical_c"))
+                return math.inf if top is None else top - readings[e]
+            entry = min(readings, key=room)
+            return entry, dict(limits.get(entry) or {}), entry
+        entry = max(readings, key=readings.get)
+        lim = next(v for v in limits.values() if v)
+        return entry, dict(lim), entry if single else "unknown"
 
     def acquisition_warnings(self, cam, frames_acquired: int) -> list:
         """What the trigger witness found about the acquisition that just
