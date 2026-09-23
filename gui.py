@@ -1,4 +1,5 @@
 """Panopticon Acquisition GUI — launch with: conda run -n 3dpose python gui.py"""
+import ntpath
 import os
 import sys
 import time
@@ -176,16 +177,73 @@ def _lock_path() -> Path:
     return Path(base) / settings.ORG / settings.APP / "gui.lock"
 
 
+def _entry_scripts() -> frozenset:
+    """File names, lower-cased, of the scripts that make a process a
+    Panopticon: every entry point the probe guard lists."""
+    from gui_app import probe_guard
+    return frozenset(m.lower() for m in probe_guard.PANOPTICON_MARKERS
+                     if m.lower().endswith(".py"))
+
+
+def _is_launcher(arg0: str) -> bool:
+    """True for a Python interpreter (python, python3.12, pythonw, the py
+    launcher) or uv, with or without a directory and ".exe"."""
+    name = ntpath.basename(arg0).lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name in ("py", "uv") or name.startswith("python")
+
+
+def _runs_entry_script(argv, scripts) -> bool:
+    """True when ``argv`` is an interpreter, or uv, running one of ``scripts``.
+
+    RULE: an argument counts only when its whole file name is an entry
+    script, and only in an interpreter's or uv's command line. REASON: the
+    command line as text matches far too much. The repository is usually
+    cloned into a folder named panopticon, so every program started from its
+    virtual environment has that word in its interpreter path: a notebook
+    kernel, an offline script, a language server. labelgui.py ends in gui.py,
+    and an editor with gui.py open names the file in its own command line.
+    Refusing a launch over any of these stops the operator for nothing.
+    """
+    if not argv or not _is_launcher(argv[0]):
+        return False
+    return any(ntpath.basename(a).lower() in scripts for a in argv[1:])
+
+
 def _other_panopticons():
     """(pid, command line) of other Panopticon processes, or None if unknown.
 
-    The process scan is the probe guard's, so the GUI sees exactly what a
-    probe sees: a probe holding the cameras, or a GUI started some other way.
+    A Panopticon process is a GUI started some other way or a probe that
+    holds the cameras: an interpreter or uv running an entry script the
+    probe guard lists (_runs_entry_script). This process and its ancestors
+    (uv, the virtual environment's launcher) are not counted.
+
+    RULE: unknown when this process's own command line cannot be read.
+    REASON: psutil reports a command line it is not allowed to read as empty
+    instead of raising, so on a restricted account every row is empty,
+    nothing matches, and the scan would read as clear.
     """
     try:
+        import psutil
         from gui_app import probe_guard
-        rows = probe_guard._process_table()
-        return None if rows is None else probe_guard.find_others(rows)
+        scripts = _entry_scripts()
+        rows, own = [], False
+        for proc in psutil.process_iter(["pid", "ppid", "cmdline"]):
+            info = proc.info
+            argv = list(info.get("cmdline") or [])
+            pid = int(info["pid"])
+            if argv and pid == os.getpid():
+                own = True
+            rows.append((pid, int(info.get("ppid") or 0), argv))
+        if not own:
+            print("[startup] this process's own command line could not be "
+                  "read, so the process scan cannot see any", flush=True)
+            return None
+        mine = probe_guard._own_lineage(rows)
+        return [(pid, " ".join(" ".join(argv).split())[:120])
+                for pid, _ppid, argv in rows
+                if pid not in mine and _runs_entry_script(argv, scripts)]
     except Exception as e:
         print(f"[startup] the process scan failed: {e}", flush=True)
         return None
@@ -238,6 +296,8 @@ def _single_instance_refusal() -> str | None:
         return None
     if others:
         listed = "\n".join(f"  pid {pid}  {cmd}" for pid, cmd in others[:5])
+        if len(others) > 5:
+            listed += f"\n  and {len(others) - 5} more"
         return (f"Panopticon, or one of its probes, is already running:\n\n"
                 f"{listed}\n\nClose it first. Two copies compete for the "
                 f"cameras, the trigger board and the GPU encoder.")
