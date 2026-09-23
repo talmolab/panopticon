@@ -963,6 +963,10 @@ class SpinC:
         if timeout_ms < 0:
             raise ValueError(f"timeout_ms {timeout_ms} is negative")
         s = self._scratch()
+        # The scratch keeps the last call's handle, so it is cleared first:
+        # a call that succeeds without writing then reads as no image, not
+        # as the previous, already released one.
+        s.img.value = None
         err = self._f_next(cam, timeout_ms, s.p_img)
         if not err:
             h = s.img.value
@@ -1058,6 +1062,7 @@ class SpinC:
         """Address of the image's pixels in the driver buffer. Valid until
         `image_release()`."""
         s = self._scratch()
+        s.data.value = None           # as in next_image: no stale pointer
         err = self._f_data(image, s.p_data)
         if err:
             raise FlirError(err, "spinImageGetData")
