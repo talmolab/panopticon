@@ -181,6 +181,28 @@ class _CameraSink:
         if free is not None and buf is not None:
             free.append(buf)
 
+    def release_ring(self) -> None:
+        """Drop every reference this sink holds to the camera's NV12 ring.
+
+        RULE: release once the encoder thread has exited, and not before.
+        REASON: the ring is the largest allocation in the program, and the
+        router, its sinks, the encoder threads and the grab threads refer to
+        one another, so a group that outlives the stop keeps every ring
+        until a full garbage collection, which a quiet GUI may not run for
+        the rest of the session; the next acquisition then finds no RAM.
+        A live encoder may still recycle a slot, so its ring stays. The free
+        list itself is left as it is (only this sink's and the encoder's
+        references to it go): the grab thread drops its own at exit, so the
+        list and every slot on it are freed at once, while anything that
+        still holds the list, such as a slot-accounting check, sees it whole.
+        """
+        if self.et is not None and self.et.is_alive():
+            return
+        self.free_slots = None
+        self.backlog.clear()
+        if self.et is not None:
+            self.et.recycle = None
+
     # -- routing ---------------------------------------------------------------
 
     def route(self, bid, ts, buf) -> bool:
@@ -969,6 +991,7 @@ class SyncEncodeRouter:
             self.max_lag, self._rate_hints))
         for sink in self._sinks:
             sink.write_warnings_file()
+            sink.release_ring()
         return [(len(self.block_ids[i]), self.timestamps[i], self.block_ids[i])
                 for i in range(self._n)]
 

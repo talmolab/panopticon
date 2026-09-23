@@ -525,6 +525,7 @@ class WorkerRouter:
                     f"this camera's blockids.npy.")
         for sink in sinks:
             sink.write_warnings_file()
+            sink.release_ring()
         return [(len(s.block_ids), s.timestamps, s.block_ids) for s in sinks]
 
     def abandon(self, timeout_s: float = sync_encode.ABANDON_TIMEOUT_S) -> None:
