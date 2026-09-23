@@ -303,7 +303,8 @@ def configure_upload(upload: str = "host", context: str = "shared") -> dict:
     context applies to 'pinned' only: 'shared' runs every encoder in the
     device's primary context (no extra GPU memory), 'own' gives each encoder
     a CUDA context of its own. An own context costs GPU memory (a few hundred
-    MiB each), and encoders in separate contexts share no driver locks.
+    MiB each). Measured, encoders in separate contexts wait less on each
+    other's driver locks than encoders that share one.
 
     Encoders that already exist keep the path they were built with. A pinned
     path whose first encode failed stays off for the process, whatever this
