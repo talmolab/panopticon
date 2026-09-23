@@ -44,6 +44,16 @@ GIGE_DRIVERS = ("socket", "filter", "auto")
 #: Consumed by the encoder selection code, declared and validated here.
 ENCODERS = ("auto", "nvenc", "x264", "raw")
 
+#: How the NVENC encoder receives each frame (RigProfile.nvenc_upload).
+#: "host" hands PyNvVideoCodec the ring slot as it is; "pinned" copies it into
+#: page-locked memory outside the GIL first. gui_app/nvenc.py implements both.
+NVENC_UPLOAD_MODES = ("host", "pinned")
+
+#: CUDA context of the pinned upload path (RigProfile.nvenc_context): "shared"
+#: runs every encoder in the device's primary context, "own" gives each
+#: encoder a context of its own.
+NVENC_CONTEXT_MODES = ("shared", "own")
+
 #: H.264 quantiser range. The encoders pass RigProfile.quality straight
 #: through as the QP, and libx264 clamps a value above the top of the range
 #: to it, so an out-of-range value would record at another quality.
@@ -649,6 +659,13 @@ class RigProfile:
     # register read per camera is a cold path, hence the slow default rather
     # than the preview timer.
     thermal_poll_s: float = 20.0
+    # Degrees C below the shutdown temperature a camera reports
+    # (thermals()["temp_shutdown_c"]) at which the live thermal warning starts.
+    # The margin is a profile field because how fast a camera heats is a
+    # property of the installation; the shutdown point itself always comes
+    # from the camera. A camera that reports no shutdown point is judged by its
+    # own temperature status instead.
+    thermal_warn_margin_c: float = 3.0
     # Logical CPUs that capture threads are kept off, when pinning is enabled.
     # CPU 0 is the Windows boot processor and the default target for timer and
     # DPC work, so a grab thread pinned there is descheduled by exactly the
@@ -705,6 +722,22 @@ class RigProfile:
     # Parsed by parse_camera_spec; required for flir and flir_sim, accepted
     # by sim, refused for basler, whose settings are the .pfs.
     camera: CameraSpec | None = None
+    # Worker processes the cameras are captured in; 0 captures in this
+    # process. Cameras are dealt to workers contiguously by camera index.
+    # Multi-process capture runs only on the real-time kick-out path, so
+    # validate() refuses a nonzero value unless realtime_encode and
+    # realtime_kick are both true.
+    capture_processes: int = 0
+    # How the NVENC encoder receives each frame; one of NVENC_UPLOAD_MODES.
+    # "host" hands PyNvVideoCodec the ring slot, and PyNvVideoCodec copies it
+    # to the GPU with the GIL held. "pinned" copies the frame into page-locked
+    # memory without the GIL first. No effect when the frames are encoded on
+    # the CPU.
+    nvenc_upload: str = "host"
+    # CUDA context the pinned upload path runs its encoders in; one of
+    # NVENC_CONTEXT_MODES. "own" costs GPU memory per encoder. It applies to
+    # nvenc_upload: pinned only, so validate() refuses "own" with "host".
+    nvenc_context: str = "shared"
 
     #: The keys the profile file sets, recorded by ``load``. A dataclass
     #: default cannot tell a key the file left out from one it set to the
@@ -888,6 +921,26 @@ class RigProfile:
             raise ValueError(
                 f"calibration_exposure_us {cal:g} must be 0 (keep the "
                 f"recording exposure) or a positive number of microseconds")
+        margin = self.thermal_warn_margin_c
+        if not (math.isfinite(margin) and margin > 0):
+            raise ValueError(
+                f"thermal_warn_margin_c {margin:g} must be a positive number "
+                f"of degrees C: the thermal warning starts this far below the "
+                f"shutdown temperature each camera reports")
+        if self.nvenc_upload not in NVENC_UPLOAD_MODES:
+            raise ValueError(
+                f"nvenc_upload {self.nvenc_upload!r} is not one of "
+                f"{list(NVENC_UPLOAD_MODES)}")
+        if self.nvenc_context not in NVENC_CONTEXT_MODES:
+            raise ValueError(
+                f"nvenc_context {self.nvenc_context!r} is not one of "
+                f"{list(NVENC_CONTEXT_MODES)}")
+        if self.nvenc_context != "shared" and self.nvenc_upload != "pinned":
+            raise ValueError(
+                f"nvenc_context {self.nvenc_context!r} chooses the CUDA "
+                f"context of the pinned upload path, so it has no effect with "
+                f"nvenc_upload {self.nvenc_upload!r}. Set nvenc_upload: "
+                f"pinned, or remove nvenc_context.")
         if self.n_cameras < 0:
             raise ValueError("n_cameras must be 0 (unchecked) or positive")
         if self.camera_serials is not None:
@@ -917,6 +970,7 @@ class RigProfile:
                 raise ValueError(
                     f"n_cameras {self.n_cameras} disagrees with the "
                     f"{len(self.camera_serials)} entries in camera_serials")
+        self._validate_capture_processes()
         pct = self.gev_bandwidth_reserve_pct
         if pct is not None and not 0 <= pct <= 100:
             raise ValueError(
@@ -982,6 +1036,26 @@ class RigProfile:
                 raise ValueError(
                     f"{name} is a Basler GigE node ({node}); FLIR cameras "
                     f"have no equivalent. Remove it.")
+
+    def _validate_capture_processes(self) -> None:
+        n = self.capture_processes
+        if n < 0:
+            raise ValueError(
+                f"capture_processes {n} must be 0 (capture in this process) "
+                f"or a positive number of worker processes")
+        if not n:
+            return
+        count = self.n_cameras or len(self.camera_serials or ())
+        if count and n > count:
+            raise ValueError(
+                f"capture_processes {n} is more than the {count} cameras the "
+                f"profile expects (n_cameras); each worker needs a camera")
+        if not (self.realtime_encode and self.realtime_kick):
+            raise ValueError(
+                f"capture_processes {n} needs realtime_encode: true and "
+                f"realtime_kick: true, because multi-process capture runs only "
+                f"on the real-time kick-out path. Turn both on, or set "
+                f"capture_processes: 0.")
 
     def _validate_camera(self) -> None:
         """The camera: block against the backend and the other fields."""
