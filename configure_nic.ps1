@@ -1,36 +1,11 @@
-# Spread GigE receive processing across cores on the camera NIC ports.
+# Check, and optionally set, receive-side scaling (RSS) on the camera NIC ports.
 #
-# WHY (the measurements and the RSS A/B are in docs/HISTORY.md, phases 5-6):
-#   Both camera ports report NumberOfReceiveQueues = 1, so RSS is enabled but
-#   inert: each port's ~78,000 packets/s funnel through a single core's DPC, so
-#   the two DPC-bound cores sit near ~46% at six cameras (>55% at nine) while the
-#   24-core average is ~4%. One port discards packets at the NIC while the other
-#   discards none; UDPv4 receive errors and packet errors are both 0, so it is
-#   not socket-buffer overflow or corruption on the wire -- the receive ring is
-#   being serviced too slowly.
-#
-#   Frame loss today is already near zero because pylon's resends recover those
-#   discards. The point of this change is MARGIN FOR 9 CAMERAS: a third port
-#   adds a third DPC-bound core, and 46% is not where you want to begin a 50%
-#   increase in packet rate.
-#
-# WHY IT SHOULD WORK: Windows hashes non-TCP IPv4 on the source/destination
-#   2-tuple, and the three cameras on each port have distinct IPs, so they
-#   should land on different queues. Some Intel drivers ignore the setting for
-#   non-TCP traffic, which is why this script VERIFIES rather than assumes.
-#
-# REVERTING: re-run with -Queues 1, the default.
-#
-# VERIFICATION RULE: the settle poll and the final check compare against the
-# value this run APPLIES. A check against a different number reports every run
-# as failed (or every run as succeeded) whatever the driver did, which defeats
-# the one thing this script promises.
-#
-# Applying this RESETS both adapters, so the cameras briefly disappear and
-# re-enumerate. Never run it during a recording.
-#
-# Run ELEVATED:
-#   powershell -ExecutionPolicy Bypass -File configure_nic.ps1
+# WHY: a port that reports NumberOfReceiveQueues = 1 has RSS enabled but inert,
+# so all of that port's packets are handled by one core's DPC. -Check judges
+# each camera port's receive path; the apply path sets the RSS queue count and
+# processor range and verifies what the driver kept. docs/HISTORY.md has the
+# measurements: on the reference rig four queues changed nothing measurable, so
+# the apply path is for a deliberate experiment, not a required setting.
 #
 # PREFLIGHT (-Check) reads and reports and writes nothing, so it is safe at any
 # time, including during a recording. Run it from an ELEVATED PowerShell:
@@ -49,14 +24,36 @@
 #   * receive descriptors >= 2048 -- the ring is what absorbs a DPC that runs
 #     late, so a short ring turns a scheduling hiccup into discarded packets.
 #   * interrupt moderation off or at its lowest setting -- moderation trades
-#     latency for interrupt rate, and a synchronised burst from three cameras
+#     latency for interrupt rate, and a synchronised burst from several cameras
 #     needs the ring drained promptly rather than efficiently.
 #   * RSS enabled -- receive processing otherwise cannot leave one core.
 #   * the NIC's DPCs off the capture cores -- a grab thread sharing a core with
 #     its own NIC's DPC is the laggard, and the penalty follows the core. Pass
 #     -CaptureCores with the pool the GUI logs ("[rig] capture core pool ..."),
 #     which is the complement of the profile's capture_core_exclude; without it
-#     the check reports where the DPCs are and judges nothing.
+#     the check reports where the DPCs are and judges nothing. A processor mask
+#     counts only under DevicePolicy 4 (IrqPolicySpecifiedProcessors); under
+#     any other policy Windows ignores it, and the check reports it as inactive.
+#
+# APPLYING (no -Check) RESETS every port it touches, so the cameras drop off the
+# network and re-enumerate. Never run it during a recording. It needs
+# elevation, and it refuses:
+#   * while a Panopticon process (gui.py or a probe) is running, or when the
+#     process table cannot be read; -Force overrides after checking by hand.
+#   * ports it derived itself (Up adapters with a manual IPv4 address, a rule an
+#     office adapter with a static address also matches), unless you name the
+#     ports with -Ports or pass -Confirm to be asked before each one.
+#   powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Ports "Ethernet 3,Ethernet 4"
+# -WhatIf prints what would be applied and changes nothing.
+#
+# The defaults RESTORE the vendor RSS placement (1 queue, processors 0 to the
+# last logical processor). Pass other values only for a deliberate,
+# one-variable experiment, and re-run with the defaults to revert.
+#
+# VERIFICATION RULE: the settle poll and the final check compare against the
+# value this run APPLIES. A check against a different number reports every run
+# as failed (or every run as succeeded) whatever the driver did, which defeats
+# the one thing this script promises.
 #
 # MOVING THE DPCs IS REVERSIBLE, AND THIS SCRIPT DOES NOT DO IT. The knob is
 # IrqPolicySpecifiedProcessors plus AssignmentSetOverride under the device's
@@ -69,19 +66,19 @@
 # Measure it with the per-core % DPC Time method before adopting it: a setting
 # that does not move those counters has changed nothing.
 # ---------------------------------------------------------------------------
-# DO NOT confine RSS to the E-cores (-BaseProcessorNumber 2 -MaxProcessorNumber 9
-# to keep DPC off the P-cores). It was tried and it is a regression:
-#   1. It does not move the DPC at all. RSS queue->processor mapping is NOT the
-#      same knob as MSI-X interrupt affinity, which is what actually places a
-#      DPC; that lives in the device's registry Interrupt Management\Affinity
-#      Policy key (below) and needs a reboot.
-#   2. It makes packet handling worse, because the NIC wants fast cores: the DPC
-#      on the two P-cores is the receive path needing them, not waste to reclaim.
-# If anyone revisits this, change queue count and base processor ONE at a time;
-# the recorded regression changed both at once. The numbers are in
-# docs/HISTORY.md, phase 6.
+# Do not confine RSS to a core subset (for example the E-cores with
+# -BaseProcessor/-MaxProcessor) to keep DPC off the capture cores:
+#   1. It does not move the DPC. RSS queue->processor mapping is not the same
+#      knob as MSI-X interrupt affinity, which is what places a DPC; that
+#      lives in the device's registry Interrupt Management\Affinity Policy key
+#      (above) and needs a reboot.
+#   2. It makes packet handling worse, because the NIC wants fast cores.
+# It measured as a regression (docs/HISTORY.md, phase 6). In any experiment,
+# change the queue count and the base processor one at a time.
 # ---------------------------------------------------------------------------
-[CmdletBinding()]
+# SupportsShouldProcess gives -WhatIf and -Confirm their standard meaning; the
+# default impact never prompts on its own.
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     # Empty means "derive it". Adapter names, the logical-processor count and
     # the core layout describe one machine, so none of them is a default here;
@@ -96,7 +93,10 @@ param(
     # [int[]]: see Split-List.
     [string[]] $CaptureCores  = @(),
     [int]      $MinReceiveBuffers = 2048,
-    [switch]   $Check
+    [switch]   $Check,
+    # Apply even while a Panopticon process runs or the process table cannot
+    # be read. For an operator who has checked the machine by hand.
+    [switch]   $Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -145,7 +145,9 @@ function Get-CameraPort {
         Select-Object -ExpandProperty Name
 }
 
+$portsDerived = $false
 if (-not $Ports -or $Ports.Count -eq 0) {
+    $portsDerived = $true
     $Ports = @(Get-CameraPort)
     if ($Ports.Count -eq 0) {
         Write-Host "No camera port found: no Up adapter carries a manually" -ForegroundColor Red
@@ -176,40 +178,45 @@ function Get-AdvancedValue($port, $keywords) {
     return $null
 }
 
-function Get-DpcProcessor($port) {
+function Get-DpcPolicy($port) {
     # The MSI-X affinity policy lives in the device's own registry key and in
     # no Get-NetAdapter* cmdlet, which is why an RSS setting cannot move a DPC.
-    # Returns the processors the policy names, @() when no policy is set, or
-    # $null when the key cannot be read, which needs elevation.
-    #
-    # RULE: every empty-array return is written `return ,@()` (unary comma).
-    # REASON: PowerShell unrolls a collection on return, so a plain `return @()`
-    # emits nothing and the caller receives $null -- which is this function's
-    # OTHER answer. Without the comma "no affinity policy is set", the normal
-    # shipped state, is reported as "the key is unreadable; re-run elevated",
-    # and the branch that names the real finding is dead code.
+    # Returns $null when the key cannot be read (it can need elevation), and
+    # otherwise an object:
+    #   Processors  the processors AssignmentSetOverride names (empty if unset)
+    #   Policy      DevicePolicy, or $null when absent (the machine default, 0)
+    #   Active      whether the mask places DPCs: only DevicePolicy 4
+    #               (IrqPolicySpecifiedProcessors) with a non-empty mask does.
+    # Returning an object, never a bare array, keeps "no policy set" and
+    # "unreadable" apart: PowerShell unrolls an empty array on return, which
+    # would otherwise arrive as $null, the unreadable answer.
     try {
         $id  = (Get-NetAdapter -Name $port -ErrorAction Stop).PnPDeviceID
         $key = "HKLM:\SYSTEM\CurrentControlSet\Enum\$id\Device Parameters\Interrupt Management\Affinity Policy"
-        if (-not (Test-Path $key)) { return ,@() }
-        $mask = (Get-ItemProperty -Path $key -ErrorAction Stop).AssignmentSetOverride
-        if ($null -eq $mask) { return ,@() }
         $procs = @()
-        if ($mask -is [byte[]]) {
-            for ($b = 0; $b -lt $mask.Length; $b++) {
-                for ($bit = 0; $bit -lt 8; $bit++) {
-                    if ($mask[$b] -band (1 -shl $bit)) { $procs += ($b * 8 + $bit) }
+        $policy = $null
+        if (Test-Path $key) {
+            $props = Get-ItemProperty -Path $key -ErrorAction Stop
+            $mask = $props.AssignmentSetOverride
+            $policy = $props.DevicePolicy
+            if ($mask -is [byte[]]) {
+                for ($b = 0; $b -lt $mask.Length; $b++) {
+                    for ($bit = 0; $bit -lt 8; $bit++) {
+                        if ($mask[$b] -band (1 -shl $bit)) { $procs += ($b * 8 + $bit) }
+                    }
+                }
+            } elseif ($null -ne $mask) {
+                $m = [uint64]$mask
+                for ($i = 0; $i -lt 64; $i++) {
+                    if ($m -band ([uint64]1 -shl $i)) { $procs += $i }
                 }
             }
-        } else {
-            $m = [uint64]$mask
-            for ($i = 0; $i -lt 64; $i++) {
-                if ($m -band ([uint64]1 -shl $i)) { $procs += $i }
-            }
         }
-        # The same unrolling trap: a mask with no bits set leaves $procs
-        # empty, and an empty $procs must not read as "unreadable".
-        return ,$procs
+        return [pscustomobject]@{
+            Processors = @($procs)
+            Policy     = $policy
+            Active     = (($null -ne $policy) -and ([int]$policy -eq 4) -and ($procs.Count -gt 0))
+        }
     } catch {
         return $null
     }
@@ -283,19 +290,33 @@ function Invoke-Preflight {
             }
         }
 
-        $dpc = Get-DpcProcessor $p
+        $dpc = Get-DpcPolicy $p
         if ($null -eq $dpc) {
             Write-Verdict "DPC affinity" $false "the affinity policy key is unreadable; re-run elevated"
-        } elseif ($CaptureCoreList.Count -eq 0) {
-            if ($dpc.Count) { $where = $dpc -join "," }
-            else { $where = "unset, so DPCs land wherever Windows puts them" }
-            Write-Host ("    INFO  {0,-22} {1}; pass -CaptureCores to judge it" -f "DPC affinity", $where) -ForegroundColor DarkGray
-        } elseif ($dpc.Count -eq 0) {
-            Write-Verdict "DPC affinity" $false "no policy set, so nothing keeps DPCs off the capture cores"
         } else {
-            $clash = @($dpc | Where-Object { $CaptureCoreList -contains $_ })
-            Write-Verdict "DPC affinity" ($clash.Count -eq 0) ("processors {0}; capture cores {1}" -f
-                ($dpc -join ","), ($CaptureCoreList -join ","))
+            $procs = @($dpc.Processors)
+            if ($null -eq $dpc.Policy) { $policyText = "DevicePolicy unset" }
+            else { $policyText = "DevicePolicy={0}" -f $dpc.Policy }
+            if ($dpc.Active) {
+                $where = "processors {0}" -f ($procs -join ",")
+            } elseif ($procs.Count) {
+                $where = ("a mask naming processors {0} is present but inactive ({1}; " +
+                          "it applies only at 4), so DPCs land wherever Windows puts them") -f
+                         ($procs -join ","), $policyText
+            } else {
+                $where = "unset, so DPCs land wherever Windows puts them"
+            }
+            if ($CaptureCoreList.Count -eq 0) {
+                Write-Host ("    INFO  {0,-22} {1}; pass -CaptureCores to judge it" -f "DPC affinity", $where) -ForegroundColor DarkGray
+            } elseif (-not $dpc.Active) {
+                if ($procs.Count) { $detail = $where }
+                else { $detail = "no policy set" }
+                Write-Verdict "DPC affinity" $false ("{0}, so nothing keeps DPCs off the capture cores" -f $detail)
+            } else {
+                $clash = @($procs | Where-Object { $CaptureCoreList -contains $_ })
+                Write-Verdict "DPC affinity" ($clash.Count -eq 0) ("processors {0}; capture cores {1}" -f
+                    ($procs -join ","), ($CaptureCoreList -join ","))
+            }
         }
     }
     Write-Host ""
@@ -311,6 +332,66 @@ if (-not $isAdmin) {
     Write-Host "This must run elevated (Set-NetAdapterRss needs admin)." -ForegroundColor Red
     Write-Host "Right-click PowerShell -> Run as administrator, then re-run." -ForegroundColor Red
     exit 1
+}
+
+function Get-PanopticonProcess {
+    # Python processes running a Panopticon entry point: gui.py, or a probe_*.py
+    # (the probes gui_app/probe_guard.py guards open cameras too). Returns
+    # $null when the process table cannot be read.
+    #
+    # RULE: this process's own command line is the canary; a table in which it
+    # is blank is unreadable, not empty. REASON: a guard that treats an
+    # instrument failure as "nothing running" passes exactly when it cannot
+    # see, which is the state it exists to catch.
+    try {
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+    $self = $all | Where-Object { $_.ProcessId -eq $PID }
+    if (-not $self -or -not $self.CommandLine) { return $null }
+    $hits = @($all | Where-Object {
+        $_.Name -like "python*.exe" -and $_.CommandLine -and
+        $_.CommandLine -match '(?i)(^|[\\/\s"''])(gui|probe_\w+)\.py\b' })
+    return ,$hits
+}
+
+function Get-ApplyRefusal($ports, $portsDerived, $confirmAsked, $force) {
+    # Why the apply path must not run, as the lines to print, or $null when it
+    # may. A function, so the rules can be exercised without applying.
+    if (-not $force) {
+        $running = Get-PanopticonProcess
+        if ($null -eq $running) {
+            return @("Cannot read the process table, so cannot tell whether Panopticon is",
+                     "recording. Applying resets the camera adapters. Check by hand, then",
+                     "re-run with -Force.")
+        }
+        if ($running.Count -gt 0) {
+            $lines = @("Panopticon is running; applying would reset the camera adapters under it:")
+            foreach ($r in $running) { $lines += ("  PID {0}: {1}" -f $r.ProcessId, $r.CommandLine) }
+            $lines += "Close it first, or re-run with -Force if it is not recording."
+            return $lines
+        }
+    }
+    if ($portsDerived -and -not $confirmAsked) {
+        return @(("Derived camera ports: {0}" -f ($ports -join ", ")),
+                 "Applying resets every one of them. The derivation takes any Up adapter",
+                 "with a manual IPv4 address, which an office adapter with a static address",
+                 "matches too. Name the camera ports with -Ports, or pass -Confirm to be",
+                 "asked before each one.")
+    }
+    return $null
+}
+
+# Nothing below changes an adapter under -WhatIf, so the guards that protect a
+# running session and an unnamed adapter apply only to a real run.
+if (-not $WhatIfPreference) {
+    $confirmAsked = $PSBoundParameters.ContainsKey("Confirm") -and [bool]$PSBoundParameters["Confirm"]
+    $refusal = Get-ApplyRefusal $Ports $portsDerived $confirmAsked $Force.IsPresent
+    if ($null -ne $refusal) {
+        foreach ($line in $refusal) { Write-Host $line -ForegroundColor Red }
+        exit 1
+    }
 }
 
 function Show-State($label) {
@@ -335,16 +416,34 @@ function Show-State($label) {
 
 Show-State "BEFORE"
 
+# Only the ports this run asked the driver to change are polled and verified:
+# a port declined at a -Confirm prompt keeps its setting and is not a failure.
+$applied = @()
 foreach ($p in $Ports) {
+    $what = "Set {0} receive queues on processors {1}-{2} (resets the adapter)" -f `
+        $Queues, $BaseProcessor, $MaxProcessor
+    if (-not $PSCmdlet.ShouldProcess($p, $what)) { continue }
+    $applied += $p
     try {
+        # -Confirm:$false: the prompt, when asked for, was the one above.
         Set-NetAdapterRss -Name $p -NumberOfReceiveQueues $Queues `
             -BaseProcessorNumber $BaseProcessor -MaxProcessorNumber $MaxProcessor `
-            -ErrorAction Stop
+            -Confirm:$false -ErrorAction Stop
         Write-Host ("  {0}: {1} queues on processors {2}-{3}" -f `
             $p, $Queues, $BaseProcessor, $MaxProcessor) -ForegroundColor Green
     } catch {
         Write-Host ("  {0}: FAILED -- {1}" -f $p, $_.Exception.Message) -ForegroundColor Red
     }
+}
+if ($WhatIfPreference) {
+    Write-Host ""
+    Write-Host "WhatIf: no adapter was changed."
+    exit 0
+}
+if ($applied.Count -eq 0) {
+    Write-Host ""
+    Write-Host "No port was changed."
+    exit 0
 }
 
 # The adapter reset is not instant, and a fixed wait is not good enough: a 5 s
@@ -359,8 +458,8 @@ while ((Get-Date) -lt $deadline) {
     # script itself causes -- otherwise reads as "every port already agrees"
     # and the poll prints "settled after 0s" without having seen one queue
     # count.
-    $now = @(Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue)
-    if ($now.Count -eq $Ports.Count -and
+    $now = @(Get-NetAdapterRss -Name $applied -ErrorAction SilentlyContinue)
+    if ($now.Count -eq $applied.Count -and
         -not ($now | Where-Object { $_.NumberOfReceiveQueues -ne $Queues })) {
         Write-Host ("  settled after {0:N0}s" -f `
             (60 - ($deadline - (Get-Date)).TotalSeconds)) -ForegroundColor DarkGray
@@ -379,8 +478,8 @@ Show-State "AFTER"
 # line for ports that were never read -- a verification that passes hardest
 # exactly when the instrument failed. That is the VERIFICATION RULE above,
 # inverted.
-$after  = @(Get-NetAdapterRss -Name $Ports -ErrorAction SilentlyContinue)
-$silent = @($Ports | Where-Object { $port = $_
+$after  = @(Get-NetAdapterRss -Name $applied -ErrorAction SilentlyContinue)
+$silent = @($applied | Where-Object { $port = $_
                                     -not ($after | Where-Object { $_.Name -eq $port }) })
 $bad = @()
 foreach ($r in $after) {
@@ -396,7 +495,7 @@ if ($silent.Count -gt 0) {
     Write-Host "so this run proves nothing about those ports. A port still resetting"
     Write-Host "reappears within a minute; check the link state below and re-run elevated."
 } elseif ($bad.Count -eq 0) {
-    Write-Host "OK: every port reports $Queues receive queues." -ForegroundColor Green
+    Write-Host ("OK: {0} report {1} receive queues." -f ($applied -join ", "), $Queues) -ForegroundColor Green
     Write-Host "Next: run a recording and compare each port's ReceivedDiscardedPackets"
     Write-Host "and per-core % DPC Time against the same numbers taken before this run."
     Write-Host "A setting that does not move those counters has changed nothing."
