@@ -64,7 +64,10 @@ has the stream down are left out of that count (`_note_restart_counters`).
 Two counters cannot be read at one instant, so an edge that lands between
 the reads at a stop or a re-arm may be on either side of the boundary. Each
 boundary reads until it settles or records how many edges it left
-unresolved, and a count with unresolved edges is reported as a range.
+unresolved, and a count with unresolved edges is reported as a range. A
+trigger ignored at a re-arm after BeginAcquisition arms the camera and before
+the first read after it returns is counted as down time
+(`_note_restart_counters`).
 
 UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
@@ -1005,8 +1008,8 @@ class FlirCamera:
 
     def _read_settled(self) -> tuple:
         """`(counts, unresolved)`: the edges and the exposures at one moment
-        while the camera acquires, and how many edges that moment leaves on
-        an unknown side.
+        while the camera acquires, and how many of the edges counted since
+        the first read may hide an ignored trigger.
 
         The edges are read, then the exposures once the TriggerDelay has
         passed, then the edges again, until two edge reads agree or
@@ -1017,23 +1020,35 @@ class FlirCamera:
         every edge counted has its exposure in the count unless the exposure
         started more than one register read after the delay (the module's
         UNKNOWNS). When no attempt settles, the last attempt's counts are
-        kept, and the edges between its two edge reads are unresolved: each
-        may have been exposed after the exposure read. A camera without an
-        exposure counter reads its edges once."""
+        kept.
+
+        Every edge after the first read arrived while the camera was armed.
+        One that the exposures read since the first exposure read do not
+        account for was ignored, or was exposed after the last exposure
+        read. The caller counts it as down time, which takes one ignored
+        trigger out of the count in either case. So `unresolved` is the
+        edges since the first read less the exposures since the first
+        exposure read: 0 when the first attempt settles, and too high only
+        by an edge exposed before the first exposure read. A camera without
+        an exposure counter reads its edges once."""
         sel = {what: s for s, what in self.counters.items()}
         if "exposures" not in sel:
             return self._read(("edges",)), 0
-        first = self._counter_value(sel["edges"])
+        start = first = self._counter_value(sel["edges"])
+        start_exposures = None
         for _ in range(COUNTER_READ_TRIES):
             if self._trigger_delay_s:
                 time.sleep(self._trigger_delay_s)
             exposures = self._counter_value(sel["exposures"])
+            if start_exposures is None:
+                start_exposures = exposures
             last = self._counter_value(sel["edges"])
-            unresolved = self._ctr_delta(last, first)
-            if not unresolved:
+            if not self._ctr_delta(last, first):
                 break
             first = last
-        return {"edges": last, "exposures": exposures}, unresolved
+        unresolved = (self._ctr_delta(last, start)
+                      - self._ctr_delta(exposures, start_exposures))
+        return {"edges": last, "exposures": exposures}, max(0, unresolved)
 
     def _note_begin_counters(self) -> None:
         """Read the edges just before a re-arm's BeginAcquisition, on a
@@ -1056,13 +1071,24 @@ class FlirCamera:
         all the time the camera could not expose, BeginAcquisition included.
         At its start the edges were read before EndAcquisition and the
         exposures after it, so the exposure of every edge before the window
-        is outside it. Edges minus exposures over the window is the
-        down-time edges. The edges either end leaves on an unknown side are
-        added to `unresolved`: the stop's (`_stop_unresolved`) and those of
-        a read that did not settle. With no exposure counter every edge in
-        the window is left out, and the edges from the read before
-        BeginAcquisition to this one are unresolved, because the camera may
-        have exposed any of them once BeginAcquisition armed it."""
+        is outside it. Edges minus exposures over the window is taken for
+        the down-time edges.
+
+        The window also holds time the camera is armed: the end of
+        BeginAcquisition after it arms the camera, and the reads after it
+        returns. A trigger ignored there is counted as down time. The edges
+        from the first read after BeginAcquisition on that the exposures do
+        not account for are added to `unresolved`, with the edges the stop
+        left on an unknown side (`_stop_unresolved`). A trigger ignored
+        between the arming and that first read stays hidden. It shifts block
+        IDs only when the camera delivered a frame after the arming and
+        before it, because grab_thread realigns a re-armed camera at its
+        first delivered frame.
+
+        With no exposure counter every edge in the window is left out, and
+        the edges from the read before BeginAcquisition to this one are
+        unresolved, because the camera may have exposed any of them once
+        BeginAcquisition armed it."""
         w = self.witness
         if w is None or w["error"] or w["stopped_at"] is None:
             return
