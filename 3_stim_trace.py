@@ -21,29 +21,33 @@ skipped or when any recording in a ``--all`` batch failed (the batch itself
 continues past the failure and prints a SKIP line for it).
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from gui_app.stim_trace import PARADIGM_NAME, write_trace
+from gui_app import recording_meta  # noqa: E402
+from gui_app.stim_trace import PARADIGM_NAME, write_trace  # noqa: E402
+
+DEFAULT_FPS = 100.0
 
 
 def _fps_for(recording_dir: Path, override: float | None) -> float:
-    """Trigger rate: --fps, else the session metadata, else 100."""
+    """Trigger rate: --fps, else the acquisition's metadata, else 100.
+
+    Every fallback is printed, because the rate scales every time in the
+    trace: a wrong one labels frames with the stimulus of another instant.
+    """
     if override:
         return override
-    meta = recording_dir.parent / "session_metadata.json"
-    if meta.exists():
-        try:
-            data = json.loads(meta.read_text())
-            key = ("calibration_frame_rate"
-                   if recording_dir.name == "calibration" else "frame_rate")
-            if data.get(key):
-                return float(data[key])
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
-    return 100.0
+    params = recording_meta.acquisition_params(recording_dir)
+    for w in params["warnings"]:
+        print(f"WARN {recording_dir}: {w}", file=sys.stderr)
+    if params["acq_fps"]:
+        return params["acq_fps"]
+    print(f"WARN {recording_dir}: no session_metadata.json records the frame "
+          f"rate; assuming {DEFAULT_FPS:g} fps. Pass --fps if the recording "
+          f"ran at another rate.", file=sys.stderr)
+    return DEFAULT_FPS
 
 
 def main():
@@ -54,7 +58,8 @@ def main():
     ap.add_argument("--all", action="store_true",
                     help="recurse and process every recording with a paradigm")
     ap.add_argument("--fps", type=float, default=None,
-                    help="trigger rate (default: from session_metadata.json, else 100)")
+                    help="trigger rate (default: the acquisition's "
+                         "session_metadata.json, else 100 with a warning)")
     args = ap.parse_args()
 
     if args.all:

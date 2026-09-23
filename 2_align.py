@@ -24,11 +24,12 @@ the k-th synchronized sample). With --replace, each camera's mp4 is re-encoded
 to only the common frames and atomically replaces the original, and that
 camera's blockids.npy + frametimes.npy are rewritten to match.
 
-The frame rate defaults to the one recorded in ``session_metadata.json`` beside
-the recording directory (``frame_rate`` for recording/, ``calibration_frame_rate``
-for calibration/), because it stamps the re-encoded videos AND is the reference
-for the block-rate check; a wrong rate mis-stamps every video and flags every
-camera at once.
+The frame rate and the re-encode quality default to the values the acquisition
+recorded in its own ``session_metadata.json`` (inside ``<recording_dir>``). A
+recording without one falls back to the session-level copy one directory up,
+with a warning, because that copy describes the session's first acquisition.
+The rate stamps the re-encoded videos and is the reference for the block-rate
+check, so a wrong rate mis-stamps every video and flags every camera at once.
 
 Exit status: 0 on success; 1 on an error or when --replace left any camera
 unreplaced; 2 when the only problem is a block-rate warning (a camera whose
@@ -43,33 +44,33 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from gui_app import alignment, ffmpeg_cmd
+from gui_app import alignment, ffmpeg_cmd, recording_meta
 
 DEFAULT_FPS = 100
 DEFAULT_QUALITY = 21
 
 
 def session_defaults(rec_dir: Path) -> tuple:
-    """(fps, quality, source) from session_metadata.json, or the fallbacks.
+    """(fps, quality, fps_source, quality_source, warnings) for a recording.
 
-    ``source`` names where the numbers came from so the run can print it.
+    Values come from ``recording_meta.acquisition_params``; a value no file
+    records is the fallback here, with source None so the run can say so.
     """
-    meta = Path(rec_dir).parent / "session_metadata.json"
-    if meta.exists():
-        try:
-            data = json.loads(meta.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = None
-        if isinstance(data, dict):
-            key = ("calibration_frame_rate" if Path(rec_dir).name == "calibration"
-                   else "frame_rate")
-            fps = data.get(key)
-            quality = data.get("quality")
-            if fps:
-                return (int(round(float(fps))),
-                        int(quality) if quality else DEFAULT_QUALITY,
-                        f"{meta.name}:{key}")
-    return DEFAULT_FPS, DEFAULT_QUALITY, None
+    params = recording_meta.acquisition_params(rec_dir)
+    fps = params["acq_fps"]
+    quality = params["quality"]
+    try:
+        quality = int(quality) if quality is not None else None
+    except (TypeError, ValueError):
+        params["warnings"].append(
+            f"quality {quality!r} in session_metadata.json is not a number; "
+            f"using {DEFAULT_QUALITY}")
+        quality = None
+    return (int(round(fps)) if fps else DEFAULT_FPS,
+            quality if quality is not None else DEFAULT_QUALITY,
+            params["sources"].get("acq_fps") if fps else None,
+            params["sources"].get("quality") if quality is not None else None,
+            params["warnings"])
 
 
 def print_table(an: alignment.Analysis) -> None:
@@ -96,12 +97,12 @@ def main() -> int:
     ap.add_argument("--replace", action="store_true",
                     help="trim+replace the per-camera mp4s (re-encodes)")
     ap.add_argument("--quality", type=int, default=None,
-                    help="QP for the --replace re-encode "
-                         "(default: session_metadata.json, else 21)")
+                    help="QP for the --replace re-encode (default: the "
+                         "acquisition's session_metadata.json, else 21)")
     ap.add_argument("--fps", type=int, default=None,
                     help="trigger rate: stamps re-encoded videos and is the "
-                         "block-rate reference (default: session_metadata.json, "
-                         "else 100 with a warning)")
+                         "block-rate reference (default: the acquisition's "
+                         "session_metadata.json, else 100 with a warning)")
     ap.add_argument("--encoder", choices=ffmpeg_cmd.BACKENDS, default=None,
                     help="H.264 encoder for --replace (default nvenc; x264 "
                          "for a machine without an NVIDIA GPU)")
@@ -111,16 +112,23 @@ def main() -> int:
                     help="report only (including the block-rate check); write nothing")
     args = ap.parse_args()
 
-    meta_fps, meta_quality, source = session_defaults(args.recording_dir)
-    fps = args.fps or meta_fps
-    quality = args.quality or meta_quality
+    (meta_fps, meta_quality, fps_source, quality_source,
+     meta_warnings) = session_defaults(args.recording_dir)
+    fps = args.fps if args.fps is not None else meta_fps
+    quality = args.quality if args.quality is not None else meta_quality
+    for w in meta_warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
     if args.fps is None:
-        if source:
-            print(f"fps {fps} from {source}")
+        if fps_source:
+            print(f"fps {fps} from {fps_source}")
         else:
-            print(f"WARNING: no session_metadata.json beside "
-                  f"{args.recording_dir}; assuming {fps} fps. Pass --fps if the "
-                  f"recording ran at another rate.", file=sys.stderr)
+            print(f"WARNING: no session_metadata.json records the frame rate "
+                  f"of {args.recording_dir}; assuming {fps} fps. Pass --fps if "
+                  f"the recording ran at another rate.", file=sys.stderr)
+    if args.replace and args.quality is None:
+        print(f"quality {quality} from {quality_source}" if quality_source else
+              f"quality {quality} (the default: no session_metadata.json "
+              f"records one; pass --quality to change it)")
 
     try:
         an = alignment.analyse(args.recording_dir, fps)
