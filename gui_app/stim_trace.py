@@ -205,8 +205,9 @@ class TraceResult:
 
     ``path`` is the written stim_trace.csv, or None when none was written and
     ``message`` says why. ``disagreement`` is set when the cameras that take
-    part in the alignment do not hold the same block IDs: the videos are not
-    trigger-aligned, which a caller must report where the operator sees it.
+    part in the alignment do not hold the same block IDs (the videos are not
+    trigger-aligned), or when none of them has frames (no camera numbers the
+    rows). A caller must report it where the operator sees it.
     """
     path: Path | None
     message: str
@@ -222,17 +223,27 @@ def _frames_of(ids: np.ndarray, rows: np.ndarray) -> np.ndarray:
 
 
 def _camera_blockids(recording_dir: Path):
-    """(camera -> unwrapped block IDs, cameras without a blockids.npy)."""
-    arrays, missing = {}, []
+    """(camera -> unwrapped block IDs, camera -> why it has none).
+
+    A camera whose blockids.npy is missing or unreadable (truncated, not 1-D,
+    a non-positive or non-monotonic ID) is reported with the reason rather
+    than raised. The caller treats it like a camera with no frames, which the
+    disagreement names, and builds the trace from the others: one corrupt
+    camera must not cost every other camera its trace.
+    """
+    arrays, missing = {}, {}
     for d in camera_dirs(recording_dir):
         f = d / "blockids.npy"
         if not f.exists():
-            missing.append(d.name)
+            missing[d.name] = "no blockids.npy"
             continue
         try:
-            arrays[d.name] = _unwrap_blockids(np.load(f))
-        except ValueError as e:
-            raise ValueError(f"{f}: {e}") from e
+            b = np.load(f)
+            if b.ndim != 1:
+                raise ValueError(f"expected 1-D block IDs, got shape {b.shape}")
+            arrays[d.name] = _unwrap_blockids(b)
+        except (OSError, EOFError, ValueError) as e:
+            missing[d.name] = f"unreadable blockids.npy ({e})"
     return arrays, missing
 
 
@@ -243,7 +254,9 @@ def write_trace_result(recording_dir: Path, fps: float,
     Cameras in ``exclude`` and cameras with a RETIRED.json still get their
     ``frame_<cam>`` column, but they are not held to the others' block IDs,
     never serve as the reference and add no rows: a camera left out of the
-    alignment is expected to differ.
+    alignment is expected to differ. A camera whose blockids.npy is missing
+    or unreadable gets no column, and unless it is left out it is a
+    disagreement that names the reason.
     """
     recording_dir = Path(recording_dir)
     paradigm_path = recording_dir / PARADIGM_NAME
@@ -253,17 +266,29 @@ def write_trace_result(recording_dir: Path, fps: float,
 
     arrays, missing = _camera_blockids(recording_dir)
     if not arrays:
+        unreadable = {nm: why for nm, why in missing.items()
+                      if why != "no blockids.npy"}
+        if unreadable:
+            return TraceResult(None, "no camera has a readable blockids.npy: "
+                               + "; ".join(f"{nm} {why}"
+                                           for nm, why in unreadable.items()))
         return TraceResult(None, "no blockids.npy (recording never stopped cleanly?)")
     left_out = dict(recording_meta.retired_cameras(recording_dir))
     left_out.update({nm: "excluded" for nm in exclude})
     held = [nm for nm in arrays if nm not in left_out]
+    held_missing = {nm: why for nm, why in missing.items() if nm not in left_out}
+    with_frames = [nm for nm in held if arrays[nm].size]
     # The reference is the lowest-numbered camera that takes part and has
     # frames; a camera with none cannot number the rows.
-    ref = next((nm for nm in held if arrays[nm].size),
-               held[0] if held else next(iter(arrays)))
+    ref = next(iter(with_frames), held[0] if held else next(iter(arrays)))
     ref_ids = arrays[ref]
-    agree = (all(np.array_equal(arrays[nm], ref_ids) for nm in held)
-             and not [nm for nm in missing if nm not in left_out])
+    # RULE: agreement needs at least one participating camera with frames.
+    # REASON: with every camera left out, or every held camera empty, the
+    # comparison below is vacuously true, and a trace no camera's frames
+    # number would be reported as consistent.
+    agree = (bool(with_frames)
+             and all(np.array_equal(arrays[nm], ref_ids) for nm in held)
+             and not held_missing)
     # Rows are the triggers of the cameras that take part, so 'frame' is
     # never blank while they agree; a left-out camera only gets a column.
     held_arrays = [arrays[nm] for nm in held] or list(arrays.values())
@@ -276,15 +301,28 @@ def write_trace_result(recording_dir: Path, fps: float,
 
     notes = []
     disagreement = None
-    if not agree:
+    no_ids = "; ".join(f"{nm} has {why}" for nm, why in held_missing.items())
+    if not held:
+        disagreement = (
+            f"no camera takes part in the alignment (left out: "
+            f"{', '.join(left_out)}{'; ' + no_ids if no_ids else ''}), so no "
+            f"camera is held to the others. stim_trace.csv has one row per "
+            f"trigger any camera recorded, and 'frame' is {ref}'s frame number")
+    elif not with_frames:
+        disagreement = (
+            f"no camera that takes part in the alignment has frames "
+            f"({', '.join(held)} recorded none"
+            f"{'; ' + no_ids if no_ids else ''}), so stim_trace.csv has no rows")
+    elif not agree:
         lengths = {nm: int(arrays[nm].size) if nm in arrays else 0
-                   for nm in [*held, *[m for m in missing if m not in left_out]]}
+                   for nm in [*held, *held_missing]}
         disagreement = (
             f"cameras disagree on block IDs {lengths}: the videos are not "
             f"trigger-aligned. stim_trace.csv has one row per trigger any of "
             f"them recorded; frame_<cam> gives each camera's frame for it, "
             f"blank where that camera has none, and 'frame' is {ref}'s frame "
-            f"number")
+            f"number{' (' + no_ids + ')' if no_ids else ''}")
+    if disagreement:
         notes.append(disagreement)
     if rows_ids.size and int(rows_ids[0]) != 1:
         lead = int(rows_ids[0]) - 1
