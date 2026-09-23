@@ -1784,6 +1784,25 @@ class MainWindow(QMainWindow):
                 warnings.append(text)
         self._sweep_warnings = warnings
 
+    def _arm_encoder_record(self, rig) -> None:
+        """Note the encoder and NVENC upload this acquisition starts with.
+
+        Read off the installed seam just before the encoders are built, which
+        is what they are built from, and written into session_metadata.json
+        at stop: the profile says what was asked for (`encoder: auto`, the
+        requested upload), and only this says what recorded.
+        """
+        self._session_encoder = installed_encoder(bool(rig.realtime_encode))
+        self._session_upload = None
+        if self._session_encoder != "nvenc":
+            return
+        try:
+            from gui_app import nvenc
+            self._session_upload = dict(nvenc.upload_config(),
+                                        stats_at_start=nvenc.upload_stats())
+        except Exception as e:
+            print(f"[acq] NVENC upload setting unavailable: {e}", flush=True)
+
     def _start_body(self, acq_type, raw_paths, display_every, realtime, kick,
                     fps) -> dict:
         """Claim the board, start the cameras, start the triggers.
@@ -1851,6 +1870,7 @@ class MainWindow(QMainWindow):
                         f"recorded. Check the output directory, then start "
                         f"again.")}
 
+        self._arm_encoder_record(rig)
         try:
             self._camera_mgr.start_acquisition(
                 raw_paths, display_every=display_every,
@@ -2806,20 +2826,59 @@ class MainWindow(QMainWindow):
         once the rig has moved on.
         """
         try:
-            path = self._config.save_metadata(self._acq_type)
+            info = list(getattr(self._camera_mgr, "camera_info", []) or [])
+        except Exception as e:
+            print(f"[acq] camera identities unavailable: {e}", flush=True)
+            info = []
+        try:
+            path = self._config.save_metadata(
+                self._acq_type, camera_info=info or None,
+                encoder=self._session_encoder or None)
         except Exception as e:
             print(f"[acq] could not write session metadata: {e}", flush=True)
             return
+        extra = {}
         stats = list(getattr(self._camera_mgr, "last_stream_stats", []) or [])
-        if not stats:
+        if stats:
+            extra["camera_stream_stats"] = stats
+        upload = self._upload_record()
+        if upload is not None:
+            extra["nvenc_upload_used"] = upload
+        if not extra:
             return
         try:
             meta = json.loads(path.read_text(encoding="utf-8"))
-            meta["camera_stream_stats"] = stats
+            meta.update(extra)
             path.write_text(json.dumps(meta, indent=2, default=str),
                             encoding="utf-8")
         except Exception as e:
             print(f"[acq] could not record stream statistics: {e}", flush=True)
+
+    def _upload_record(self) -> dict | None:
+        """How NVENC received this acquisition's frames, or None when it did
+        not encode on NVENC.
+
+        The profile's nvenc_upload is what was asked for; the launch check
+        can have put the host upload back, and a pinned encoder that could
+        not be set up falls back to the host upload on its own. The count is
+        this acquisition's, not the process's.
+        """
+        rec = self._session_upload
+        if not rec:
+            return None
+        try:
+            from gui_app import nvenc
+            now = nvenc.upload_stats()
+        except Exception:
+            now = {}
+        start = rec.get("stats_at_start") or {}
+        return dict(
+            upload=rec.get("upload"),
+            context=rec.get("context") if rec.get("upload") == "pinned"
+            else None,
+            host_fallbacks=(int(now.get("host_fallbacks", 0))
+                            - int(start.get("host_fallbacks", 0))),
+            pinned_disabled=now.get("pinned_disabled") or None)
 
     def _on_acquisition_finalized(self, _result):
         self._end_busy()
