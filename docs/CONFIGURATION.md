@@ -233,8 +233,9 @@ Text. Default: the file name without `.yaml`. Reference rig: `3dpose`.
 - Goes wrong: Two files with the same name both appear in the dropdown under one
   label, and the remembered choice opens the first of them in file-name order.
   After a rename, the next launch does not find the
-  [remembered](#where-settings-live) name and asks you to choose a profile. An empty name loads, but Panopticon uses an empty name to
-  mean that no profile is chosen.
+  [remembered](#where-settings-live) name and asks you to choose a profile. An
+  empty name loads, but Panopticon uses an empty name to mean that no profile is
+  chosen.
 
 #### `metadata_defaults`
 
