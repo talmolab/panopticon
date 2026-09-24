@@ -75,6 +75,16 @@ silent when its counts cannot be proven to fit: counters that do not count,
 reads that disagree and edges it could not place each give a sentence that
 says the recording has no witness or is not proven aligned.
 
+Silence is not proof in these cases, each outside what two counters can
+see: a trigger ignored between the arming inside BeginAcquisition and the
+first read after it (counted as down time); an exposure that starts later
+than the TriggerDelay plus one register read at a re-arm; a counter
+narrower than 2**31 that ignored a whole multiple of its period, which
+`frame_sync.check_block_id_rate` reports because the camera then ignored
+more than twice the frames it delivered; and two counters that count the
+wrong events but agree. A frame_id camera without an edge counter has no
+witness: it gets no sentence, and only the log says the witness is off.
+
 UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
@@ -2902,13 +2912,18 @@ class FlirBackend:
         says so and makes no claim about alignment
         (`_edge_only_sentences`).
 
-        A camera gets no sentence only when its counts prove it ignored no
-        trigger. Every state they cannot prove gets a sentence: counters
-        whose reads cannot come from counters that count
-        (`_implausible_counts`), counters narrower than 2**31 in a recording
-        past what their reads can prove (`_wrap_reach`), edges the reads
-        could not place (a range), and a witness whose counters failed, were
-        never read at a stop, or whose sentences could not be built."""
+        A camera gets no sentence when its counts show no ignored trigger,
+        which proves none was ignored except in the cases the module
+        docstring lists (the arm window, a late exposure, a narrow counter
+        that ignored a whole multiple of its period, counters that count
+        the wrong events but agree). A camera without an edge counter has
+        no witness and gets no sentence either. Every state the counts
+        cannot prove gets a sentence: counters whose reads cannot come from
+        counters that count (`_implausible_counts`), counters narrower than
+        2**31 in a recording past what their reads can prove
+        (`_wrap_reach`), edges the reads could not place (a range), and a
+        witness whose counters failed, were never read at a stop, or whose
+        sentences could not be built."""
         if logging_setup.verbose():
             print(f"[flir] {cam.serial}: trigger witness at stop "
                   f"(frames acquired {frames_acquired}): "
