@@ -3925,7 +3925,7 @@ class MainWindow(QMainWindow):
                 "level": logging_setup.level(),
                 "file": str(logging_setup.log_path()),
                 "session_log": logging_setup.SESSION_LOG_NAME,
-                "lines_dropped": logging_setup.dropped_lines()}
+                **logging_setup.log_status()}
         upload = self._upload_record()
         if upload is not None:
             extra["nvenc_upload_used"] = upload

@@ -5,7 +5,9 @@ Every line printed in the process goes through `StampedStream`, which
 replaces sys.stdout and sys.stderr. A line gets its wall-clock time and the
 name of the thread that printed it, and goes onto a bounded queue. One
 background thread (`AsyncLogSink`) takes the lines off the queue, formats
-them and writes them to the log file and the console.
+them and writes them to the log file; the console gets its copy through a
+second bounded queue and thread, so a console that is not being read never
+holds up the file.
 
 RULE: printing never waits for the disk or the console, at any log level.
 REASON: every grab thread and encoder thread prints, and a thread that waits
@@ -58,6 +60,9 @@ PARTIAL_LIMIT = 65536
 #: Seconds a flush waits for the writer: at the excepthook, at shutdown and
 #: before session.log is copied.
 FLUSH_TIMEOUT_S = 2.0
+#: Longest the shutdown waits for the console to show its last lines. A
+#: console that is not being read is not waited for; the file has them.
+CONSOLE_CLOSE_S = 0.5
 #: The per-acquisition slice of the log, beside session_metadata.json.
 SESSION_LOG_NAME = "session.log"
 #: Separates the fields of a line a capture worker sends up its log pipe.
@@ -219,6 +224,103 @@ class _Stop:
         self.event = threading.Event()
 
 
+class _ConsoleWriter:
+    """The console echo: a bounded queue and a thread of its own.
+
+    RULE: the log file never waits for the console. REASON: a console window
+    that is not being read (a selection held in it) blocks every write to
+    it, and a writer that did both would stop the log file and session.log
+    with it. When more than `capacity` lines wait here, the text is dropped
+    and its lines counted, and the count goes to the console once it moves
+    again; the file has every line either way.
+
+    Only the sink's writer thread calls `put`, and only this thread writes
+    the console, so each counter has one writer and needs no lock.
+    """
+
+    def __init__(self, consoles, capacity: int, name: str):
+        self._q = queue.SimpleQueue()
+        self._consoles = list(consoles)
+        self._capacity = int(capacity)
+        self._queued = 0      # lines put; the sink's writer thread only
+        self._written = 0     # lines taken; this thread only
+        self._dropped = 0     # the sink's writer thread only
+        self._reported = 0    # this thread only
+        self.name = name
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name=name)
+        self._thread.start()
+
+    @property
+    def dropped(self) -> int:
+        """Lines not shown on the console because it was not being read."""
+        return self._dropped
+
+    def put(self, stream: int, lines: list) -> None:
+        """Queue formatted lines for the console. What does not fit is
+        dropped from the end and counted."""
+        room = self._capacity - (self._queued - self._written)
+        if room < len(lines):
+            self._dropped += len(lines) - max(room, 0)
+            lines = lines[:max(room, 0)]
+        if lines:
+            self._queued += len(lines)
+            self._q.put((stream, "".join(lines), len(lines)))
+
+    def close(self, timeout: float) -> bool:
+        """Let the console show what is queued, waiting at most `timeout`:
+        a console that is not being read is not waited for."""
+        self._q.put(None)
+        self._thread.join(max(0.0, timeout))
+        return not self._thread.is_alive()
+
+    def _run(self) -> None:
+        q = self._q
+        while True:
+            item = q.get()
+            batch = [item]
+            while item is not None and len(batch) < 1024:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    break
+                batch.append(item)
+            texts = ([], [])
+            for it in batch:
+                if it is not None:
+                    texts[it[0]].append(it[1])
+                    self._written += it[2]
+            self._write(texts)
+            # Lines dropped while that write was held up are reported as
+            # soon as it returns, not with the next line, which may be a
+            # long way off.
+            self._write(([], []))
+            if batch[-1] is None:
+                return
+
+    def _write(self, texts) -> None:
+        """Write each stream's text, after the count of any lines dropped
+        since the last one was shown."""
+        lost = self._dropped - self._reported
+        if lost > 0:
+            self._reported += lost
+            k = 1 if self._consoles[1] is not None else 0
+            texts[k].append(format_line(
+                time.time(), self.name,
+                f"[log] {lost} log lines were not shown on this console, "
+                f"which was not being read; the log file has every one")
+                + "\n")
+        for k in (0, 1):
+            con = self._consoles[k]
+            if con is None or not texts[k]:
+                continue
+            try:
+                con.write("".join(texts[k]))
+                con.flush()
+            except Exception:
+                self._consoles[k] = None
+
+
 class AsyncLogSink:
     """The bounded queue and the one thread that writes it out.
 
@@ -226,27 +328,44 @@ class AsyncLogSink:
     streams stdout and stderr lines are echoed to (entries may be None);
     `forward`, when given, is called on the writer thread with each line's
     (t, thread, stream, text), which is how a capture worker sends its lines
-    to the parent. A failing output is dropped and the rest go on.
+    to the parent. The consoles are written by a thread of their own
+    (`_ConsoleWriter`), so a console that stops being read never holds up
+    the file.
 
     `put` never blocks and never raises: it appends to a SimpleQueue, whose
     put takes no lock a reader can hold. A full queue drops the line and adds
     one to the calling thread's own drop counter, which no other thread
     writes, so the total needs no lock either.
+
+    A file write that fails (a full disk, a network drive gone) loses that
+    batch, not the file: the console gets one line saying so, every later
+    batch is written again, and once one lands the file says how many lines
+    it is missing (`lines_not_written`, `file_error`). A closed file cannot
+    be written again and stays lost.
     """
 
     def __init__(self, file=None, consoles=(None, None), forward=None,
                  capacity: int = QUEUE_LINES, name: str = "log-writer",
-                 path: Path | None = None):
+                 path: Path | None = None,
+                 console_capacity: int = QUEUE_LINES):
         self._q = queue.SimpleQueue()
         self._capacity = int(capacity)
         self._drops: dict = {}
         self._reported = 0
         self._file = file
-        self._consoles = list(consoles) + [None] * (2 - len(consoles))
+        consoles = list(consoles) + [None] * (2 - len(consoles))
+        self._console = (_ConsoleWriter(consoles, console_capacity,
+                                        f"{name}-console")
+                         if any(c is not None for c in consoles) else None)
         self._forward = forward
         self._pos = 0
         self._last_t = 0.0
         self._closed = False
+        #: Lines lost to failed file writes: since the start, and since the
+        #: file last took a write.
+        self._not_written = 0
+        self._not_written_since = 0
+        self._file_error = None
         self.path = Path(path) if path is not None else None
         self.name = name
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -271,6 +390,21 @@ class AsyncLogSink:
     def position(self) -> int:
         """Bytes the writer has written to the file so far."""
         return self._pos
+
+    @property
+    def lines_not_written(self) -> int:
+        """Lines a failed file write lost, since the start."""
+        return self._not_written
+
+    @property
+    def file_error(self):
+        """The last file write error as text, or None."""
+        return self._file_error
+
+    @property
+    def console_dropped(self) -> int:
+        """Lines not shown on the console because it was not being read."""
+        return self._console.dropped if self._console is not None else 0
 
     def put(self, t: float, thread: str, text: str, stream: int = 0) -> bool:
         """Queue one line; False when it was dropped. Never blocks."""
@@ -300,13 +434,19 @@ class AsyncLogSink:
 
     def close(self, timeout: float = FLUSH_TIMEOUT_S) -> bool:
         """Write what is queued, then stop the writer. True when it stopped
-        within `timeout`."""
+        within `timeout`. The console gets what is left of `timeout`, at
+        most CONSOLE_CLOSE_S."""
         if self._closed:
             return True
+        deadline = time.monotonic() + max(0.0, timeout)
         stop = _Stop()
         self._q.put(stop)
         self._closed = True
-        return stop.event.wait(max(0.0, timeout))
+        done = stop.event.wait(max(0.0, timeout))
+        if done and self._console is not None:
+            self._console.close(min(CONSOLE_CLOSE_S,
+                                    deadline - time.monotonic()))
+        return done
 
     # -- the writer thread
     def _run(self) -> None:
@@ -379,6 +519,7 @@ class AsyncLogSink:
         ordered = []
         by_stream = ([], [])
         now = time.time()
+        first_t = None
         for t, thread, stream, text in items:
             # A time that is not a number, or is ahead of the clock (a
             # corrupt forwarded line), is replaced by the writer's own, so
@@ -388,6 +529,8 @@ class AsyncLogSink:
             if t < self._last_t:
                 t = self._last_t
             self._last_t = t
+            if first_t is None:
+                first_t = t
             line = format_line(t, thread, text) + "\n"
             ordered.append(line)
             by_stream[1 if stream else 0].append(line)
@@ -397,26 +540,50 @@ class AsyncLogSink:
                 except Exception:
                     self._forward = None
         if self._file is not None:
-            raw = memoryview("".join(ordered).encode("utf-8", "replace"))
-            try:
-                # An unbuffered write may take part of the bytes.
-                while raw:
-                    n = self._file.write(raw)
-                    if not n:
-                        break
-                    self._pos += n
-                    raw = raw[n:]
-            except (OSError, ValueError):
+            self._write_file(ordered, first_t)
+        if self._console is not None:
+            for k in (0, 1):
+                if by_stream[k]:
+                    self._console.put(k, by_stream[k])
+
+    def _write_file(self, ordered: list, first_t: float) -> None:
+        """Write one batch's lines. After a failed write, the first batch
+        that lands starts with a line saying how many lines the file is
+        missing."""
+        text = "".join(ordered)
+        if self._not_written_since:
+            where = ("the console showed them" if self._console is not None
+                     else "no other copy was kept")
+            text = format_line(
+                first_t, self.name,
+                f"[log] {self._not_written_since} log lines before this one "
+                f"could not be written to this file ({self._file_error}); "
+                f"{where}") + "\n" + text
+        raw = memoryview(text.encode("utf-8", "replace"))
+        try:
+            # An unbuffered write may take part of the bytes.
+            while raw:
+                n = self._file.write(raw)
+                if not n:
+                    break
+                self._pos += n
+                raw = raw[n:]
+        except (OSError, ValueError) as e:
+            first = not self._not_written_since
+            self._not_written += len(ordered)
+            self._not_written_since += len(ordered)
+            self._file_error = f"{type(e).__name__}: {e}"
+            if isinstance(e, ValueError):
+                # A closed file takes no later write.
                 self._file = None
-        for k in (0, 1):
-            con = self._consoles[k]
-            if con is None or not by_stream[k]:
-                continue
-            try:
-                con.write("".join(by_stream[k]))
-                con.flush()
-            except Exception:
-                self._consoles[k] = None
+            if first and self._console is not None:
+                self._console.put(1, [format_line(
+                    time.time(), self.name,
+                    f"[log] the log file could not be written "
+                    f"({self._file_error}); each later batch is tried "
+                    f"again, and the lines lost are counted") + "\n"])
+            return
+        self._not_written_since = 0
 
 
 # -- the stream ------------------------------------------------------------------
@@ -565,6 +732,20 @@ def log_path() -> Path | None:
 def dropped_lines() -> int:
     """Lines dropped because the writer fell behind; 0 when not installed."""
     return _sink.dropped if _sink is not None else 0
+
+
+def log_status() -> dict:
+    """The log's losses for session_metadata.json: lines dropped from the
+    queue, lines a failed file write lost and the last such error, and lines
+    the console did not show. Zeros and None when not installed."""
+    sink = _sink
+    if sink is None:
+        return {"lines_dropped": 0, "lines_not_written": 0,
+                "file_error": None, "console_lines_dropped": 0}
+    return {"lines_dropped": sink.dropped,
+            "lines_not_written": sink.lines_not_written,
+            "file_error": sink.file_error,
+            "console_lines_dropped": sink.console_dropped}
 
 
 def flush(timeout: float = FLUSH_TIMEOUT_S) -> bool:
@@ -720,8 +901,13 @@ def header_lines(title: str, facts, profile=None, cameras=None) -> list:
     state, every field of the resolved profile and the open cameras."""
     lines = [f"===== Panopticon session header: {title} ====="]
     lines += [f"{label}: {value}" for label, value in facts]
+    status = log_status()
+    lost = ""
+    if status["lines_not_written"]:
+        lost = (f", {status['lines_not_written']} lines not written to the "
+                f"file ({status['file_error']})")
     lines.append(f"log: level {level()}, file {_log_path or 'not set up'}, "
-                 f"{dropped_lines()} lines dropped so far")
+                 f"{status['lines_dropped']} lines dropped so far{lost}")
     if profile is None:
         lines.append("profile: none")
     else:
