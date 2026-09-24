@@ -4130,6 +4130,10 @@ def _sweep_step(p: Probe, cams, src, fps: float, e: float, tol: float):
             r["ignored_share"] <= tol
         all_ok = all_ok and r["ok"]
     if silent:
+        # The train stopped reaching the cameras, so no camera's figures
+        # measure this exposure.
+        for r in row["per_camera"].values():
+            r["ok"] = None
         p.check("exposure_sweep", f"the triggers reach every camera for the "
                 f"whole step at {e:.0f} us", "FAIL", " ".join(silent))
         return row, None
@@ -4169,10 +4173,13 @@ def stage_exposure_sweep(p: Probe):
         if p.open_source("exposure_sweep") is None:
             return
         lo = hi = None
+        #: The exposure of the step that ended the sweep, when one failed.
+        ended_at = None
         for e in grid:
             row, ok = _sweep_step(p, cams, src, fps, e, BLOCK_RATE_TOL)
             rep["steps"].append(row)
             if ok is None:
+                ended_at = e
                 break
             if ok:
                 lo = e
@@ -4186,6 +4193,7 @@ def stage_exposure_sweep(p: Probe):
             row, ok = _sweep_step(p, cams, src, fps, mid, BLOCK_RATE_TOL)
             rep["steps"].append(row)
             if ok is None:
+                ended_at = mid
                 break
             if ok:
                 lo = mid
@@ -4212,7 +4220,15 @@ def stage_exposure_sweep(p: Probe):
             rep["per_camera"][cam.serial] = {
                 "longest_ok_us": longest, "first_failing_us": first_bad,
                 "backend_ceiling_us": ceiling, "clamped_steps": clamped}
-            if longest is None:
+            # A sweep that ended on a failed step before any step lost
+            # triggers never reached the ceiling, so it measured none.
+            unreached = (None if first_bad is not None or ended_at is None
+                         else f"the sweep ended at {ended_at:.0f} us, on a "
+                              f"step that failed, before any step lost "
+                              f"triggers")
+            if unreached is not None:
+                rep["per_camera"][cam.serial]["why_not"] = unreached
+            if longest is None or unreached is not None:
                 ans = None
             else:
                 ans = f"every trigger acquired up to {longest:.0f} us"
@@ -4231,7 +4247,10 @@ def stage_exposure_sweep(p: Probe):
                 first_bad is None or 0.9 * ceiling < first_bad)
             p.check("exposure_sweep", f"{cam.serial} the backend's ceiling "
                     f"keeps 10% below the first exposure that loses triggers",
-                    "PASS" if safe else "FAIL", ans or "no step completed")
+                    "WARN" if unreached is not None
+                    else "PASS" if safe else "FAIL",
+                    f"not measured: {unreached}" if unreached is not None
+                    else ans or "no step completed")
     finally:
         for cam in cams:
             with contextlib.suppress(Exception):
