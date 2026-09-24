@@ -397,10 +397,15 @@ class AsyncLogSink:
                 except Exception:
                     self._forward = None
         if self._file is not None:
-            raw = "".join(ordered).encode("utf-8", "replace")
+            raw = memoryview("".join(ordered).encode("utf-8", "replace"))
             try:
-                self._file.write(raw)
-                self._pos += len(raw)
+                # An unbuffered write may take part of the bytes.
+                while raw:
+                    n = self._file.write(raw)
+                    if not n:
+                        break
+                    self._pos += n
+                    raw = raw[n:]
             except (OSError, ValueError):
                 self._file = None
         for k in (0, 1):
