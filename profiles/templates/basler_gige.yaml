@@ -43,7 +43,7 @@ nvenc_context: shared             # shared | own
 # --- Alignment and memory ---------------------------------------------------
 realtime_kick: true               # align during the recording
 kick_max_lag: 240                 # raise only after a test on your rig
-max_num_buffer: 600               # at least kick_max_lag; 4 x 600 x 2.3 MB = 5.2 GiB
+max_num_buffer: 600               # at least kick_max_lag; 4 x 600 x 2.3 MB = 5.1 GiB
 capture_processes: 0              # experimental; the window records only at 0
 
 # --- GigE network -----------------------------------------------------------
