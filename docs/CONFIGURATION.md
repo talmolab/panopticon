@@ -42,16 +42,16 @@ opens names the file and the field.
 
 This computer also remembers the last profile you opened, outside the repository,
 and opens it at the next launch. `uv run gui.py --profile NAME` opens the profile
-whose `name` is `NAME` instead, and remembers it. When no profile has been opened
-on this computer yet, or the one remembered or named with `--profile` does not
-load, the window waits for you to choose one in the profile dropdown. Until then
-it opens no camera and no serial port, programs no board and runs no hardware
-check. The choice is remembered.
+whose `name` is `NAME` instead, and remembers it. When this computer has never
+opened a profile, or the one remembered or named with `--profile` does not load,
+the window waits for you to choose one in the profile dropdown. Until then it
+opens no camera and no serial port, programs no board and runs no hardware check.
+The choice is remembered.
 
 ## A complete annotated profile
 
 This is [`profiles/templates/basler_gige.yaml`](../profiles/templates/basler_gige.yaml),
-which sets every field. It loads as written. Fields that do not apply to a Basler
+which names every field. It loads as written. Fields that do not apply to a Basler
 GigE rig are commented out.
 
 ```yaml
@@ -144,7 +144,7 @@ so a template never appears in the profile dropdown. To use one, copy it into
 
 | Template | Start from it for |
 |---|---|
-| [`basler_gige.yaml`](../profiles/templates/basler_gige.yaml) | Basler GigE cameras. Sets every field. |
+| [`basler_gige.yaml`](../profiles/templates/basler_gige.yaml) | Basler GigE cameras. Names every field. |
 | [`basler_usb3.yaml`](../profiles/templates/basler_usb3.yaml) | Basler USB3 cameras. No GigE fields. |
 | [`minimal.yaml`](../profiles/templates/minimal.yaml) | A profile written from scratch: only the fields with no safe default. |
 | [`flir_usb3.yaml`](../profiles/templates/flir_usb3.yaml) | FLIR USB3 cameras on Panopticon's trigger board. |
@@ -152,10 +152,10 @@ so a template never appears in the profile dropdown. To use one, copy it into
 | [`external_ttl.yaml`](../profiles/templates/external_ttl.yaml) | Cameras on your own TTL source instead of the trigger board. |
 | [`flir_sim.yaml`](../profiles/templates/flir_sim.yaml) | A simulated FLIR rig: no camera, SDK or board. |
 
-The FLIR and external-source templates have not recorded on real hardware yet.
-They load and pass every check Panopticon can make without cameras, and each says
-so at the top. [FLIR.md](FLIR.md) takes a FLIR rig from install to a first test
-recording.
+`flir_usb3.yaml`, `flir_gige.yaml` and `external_ttl.yaml` are untested on real
+hardware. They load and pass every check Panopticon can make without cameras, and
+each says so at the top. [FLIR.md](FLIR.md) takes a FLIR rig from install to a
+first test recording.
 
 `profiles/sim.yaml` is the simulated Basler-style rig. It ships in `profiles/`
 itself, because the simulated backend reads its camera count and frame size from
@@ -564,8 +564,8 @@ Integer. Default `0`. Reference rig: not set.
   captured in, each taking a contiguous group of cameras. `0` captures every
   camera in Panopticon's own process. `session_metadata.json` records the value
   asked for (`capture_processes`) and what ran (`capture_processes_used`).
-- Change when: Keep `0`. The Panopticon window cannot capture in several
-  processes yet.
+- Change when: Keep `0`. The Panopticon window records only with
+  `capture_processes: 0`.
 - Goes wrong: For a profile above `0`, the window opens no camera and a dialog
   says why. The loader refuses a negative value, and a nonzero value without
   `realtime_encode: true` and `realtime_kick: true`. It also refuses more
@@ -1162,7 +1162,7 @@ True or false. Default `true`.
   witness is limited and the camera offers the `CounterValue` chunk.
 - Goes wrong: `trigger_counter` on a camera without the chunk refuses the open,
   and so does `frame_id` on a camera whose frame ID fails the self-test. A camera
-  whose frame ID fails and that has no `CounterValue` chunk cannot record yet.
+  whose frame ID fails and that has no `CounterValue` chunk cannot record.
 
 #### `camera.flir.timestamp_source`
 
