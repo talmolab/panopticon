@@ -1280,8 +1280,7 @@ failed buffers means the link recovers every packet, each one late
 thousand times the other cameras' as a fault even when every frame arrives.
 
 Measure on an otherwise idle machine. Other programs' CPU load once moved the
-cycle from 10.00 to 10.32 ms, which builds up 5.6 seconds of backlog in 150
-seconds.
+cycle from 10.00 to 10.32 ms, and the delivery lag reached 5.6 s after 150 s.
 
 Then make a short real recording and check its files.
 [WORKFLOW.md](WORKFLOW.md) covers a session from start to finish.
