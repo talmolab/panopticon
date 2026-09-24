@@ -56,10 +56,11 @@ camera, and double-click it again to go back.
 #### 3. Frame rate
 
 The camera's delivered frame rate over its last ten frames, refreshed every
-tenth repaint (1). That is about three times a second up to six cameras, and
-twice a second on the nine-camera reference rig. It should match the camera
-rate that the table under (1) gives for the current state. One pane reading low while the others are right is usually the
-first sign of trouble with that camera's link or trigger.
+tenth repaint (1): about three times a second up to six cameras, and twice a
+second on the nine-camera reference rig. It should match the camera rate that
+the table under (1) gives for the current state. One pane reading low while
+the others are right is usually the first sign of trouble with that camera's
+link or trigger.
 
 ### Metadata
 
@@ -235,8 +236,8 @@ arena. The log line
 READY appears once all of these hold at the same time:
 
 1. Every camera has at least `calibration_min_per_cam_shared`
-   [co-detection](GLOSSARY.md#co-detection) ticks, in which it and at least
-   one other camera saw the board. That is 120 on the reference rig.
+   [co-detection](GLOSSARY.md#co-detection) ticks (120 on the reference rig),
+   in which it and at least one other camera saw the board.
 2. Every camera has seen the board in at least `calibration_min_grid_cells` of
    its four quadrants, 3 on the reference rig.
 3. The pairs with at least `calibration_min_edge` shared ticks

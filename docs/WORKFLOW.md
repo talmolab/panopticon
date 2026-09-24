@@ -296,14 +296,14 @@ paradigm is on the board, Panopticon first flashes the recording-only sketch
 never runs stimulation while you stand in the arena.
 
 Flip Calibrate on. The cameras switch to triggered mode at
-`calibration_frame_rate` (30 fps on the reference rig). The profile's `calibration_exposure_us` and `calibration_gain_db`
-replace the recording exposure and gain for this acquisition only. An exposure
-of 0 or a gain of -1 keeps the recording value, and the reference rig keeps its
-recording gain this way. Panopticon caps the exposure at 90% of the exposure
-ceiling at the calibration rate. When it does, the camera's exposure line in
-the log says `CLAMPED`
-([CONFIGURATION.md](CONFIGURATION.md#calibration_exposure_us)). The next
-recording uses the exposure from the camera settings again.
+`calibration_frame_rate` (30 fps on the reference rig). The profile's
+`calibration_exposure_us` and `calibration_gain_db` replace the recording
+exposure and gain for this acquisition only. An exposure of 0 or a gain of -1
+keeps the recording value, and the reference rig keeps its recording gain this
+way. Panopticon caps the exposure at 90% of the exposure ceiling at the
+calibration rate. When it does, the camera's exposure line in the log says
+`CLAMPED` ([CONFIGURATION.md](CONFIGURATION.md#calibration_exposure_us)). The
+next recording uses the exposure from the camera settings again.
 
 Move the board slowly and pause at each pose. A long exposure blurs a moving
 board, and a blurred board yields no corners.
@@ -413,9 +413,8 @@ Calibration complete (PARTIAL).
   Cameras: cam1 cam2 cam3 cam5 cam6
 ```
 
-A dropped camera adds nothing to 3D, however good its video. Record the
-calibration again, holding the board where that camera and a neighbour both
-see it.
+A dropped camera adds nothing to 3D. Record the calibration again, holding
+the board where that camera and a neighbour both see it.
 
 The solve fails, with a `Calibration Failed` dialog, when too few cameras are
 left to place: fewer than two with detections or lens models, no pair that saw
@@ -489,8 +488,8 @@ aniposelib both read the `calibration.toml` this writes.
 A calibration describes the cameras as they were while the board was recorded.
 From the calibration to the last recording of the session, do not move,
 re-aim, refocus or re-mount any camera. If one is bumped, calibrate again
-before you record. A moved camera changes no frame count, plot or warning.
-Only the 3D output is wrong.
+before you record. A moved camera leaves the frame counts, the plot and the
+warnings unchanged, and the 3D output is wrong.
 
 ---
 
@@ -1139,9 +1138,9 @@ data/20260904/m1_m2/recording/
     └── frametimes.npy
 ```
 
-That is a clean take: no `WARNINGS.txt`, and no `stream.h264` or `raw.bin`
-left behind. A take whose cameras kept different frames without kick-out
-also has `aligned/`, and so does one checked later with `2_align.py`.
+A clean take has no `WARNINGS.txt`, and no `stream.h264` or `raw.bin` left
+behind. A take whose cameras kept different frames without kick-out also has
+`aligned/`, and so does one checked later with `2_align.py`.
 
 ### The command-line tools
 
