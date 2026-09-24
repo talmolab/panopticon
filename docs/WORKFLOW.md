@@ -796,13 +796,16 @@ fires whenever a camera reports its own over-temperature state. On a camera
 that reports its shutdown temperature, the `Critical` status alone does not
 raise it. A camera that reports no shutdown temperature is judged by its own
 status instead: any status but `Ok` raises the alert, `Critical` included. A
-camera that reports neither cannot be watched. The log says once per camera
-which rule applies
-(`[acq] thermal watch: camN reports no shutdown temperature`). The warning
-reaches `WARNINGS.txt` when the recording lost frames, and always when a
-camera reached its shutdown point. `camera_thermals` in `session_metadata.json` records each camera's
-temperatures. Read `temp_max_c` there, because the current temperature falls
-as soon as the load comes off.
+camera that reports neither cannot be watched. For a camera that reports no
+shutdown temperature, the log says once how it is judged
+(`[acq] thermal watch: camN reports no shutdown temperature`), or that it
+cannot be watched
+(`[acq] thermal watch: camN reports neither a shutdown temperature nor a temperature status`).
+
+The warning reaches `WARNINGS.txt` when the recording lost frames, and always
+when a camera reached its shutdown point. `camera_thermals` in
+`session_metadata.json` records each camera's temperatures. Read `temp_max_c`
+there, because the current temperature falls as soon as the load comes off.
 
 ### Stopping
 
