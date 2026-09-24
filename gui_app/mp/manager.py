@@ -1385,13 +1385,19 @@ class ProcessCameraManager(QObject):
         self._board_started_t = time.perf_counter()
         calls = {w: w.call("mark") for w in self._workers if w.armed}
         counts = {}
+        answered = 0
         for w, (ok, res) in _await(calls, SIGNAL_TIMEOUT_S).items():
             if ok:
+                answered += 1
                 counts.update(res.get("frames_before_barrier", {}))
             else:
                 print(f"[acq] WARNING: {res}", flush=True)
         self._barrier = counts
         self._marked = True
+        logging_setup.transition(
+            f"barrier closed: {answered} of {len(calls)} capture process(es) "
+            f"marked it; the trigger source may start, and a camera that "
+            f"arms from here retires itself")
 
     def frames_before_barrier(self) -> dict:
         """{"camN": frames retrieved in trigger mode before the barrier}, in
@@ -1410,7 +1416,9 @@ class ProcessCameraManager(QObject):
 
     def signal_triggers_started(self) -> None:
         calls = {w: w.call("go") for w in self._workers if w.armed}
+        confirmed = 0
         for w, (ok, res) in _await(calls, SIGNAL_TIMEOUT_S).items():
+            confirmed += bool(ok)
             if not ok and self._coordinator is not None:
                 reason = (f"capture process for {w.names} did not confirm "
                           f"the trigger start ({res})")
@@ -1418,6 +1426,9 @@ class ProcessCameraManager(QObject):
                 for g in w.cams:
                     self._coordinator.retire(g, reason)
         self._triggers_running = True
+        logging_setup.transition(
+            f"triggers started: {confirmed} of {len(calls)} capture "
+            f"process(es) armed their stall detectors")
 
     def stop_acquisition(self) -> list:
         """CameraManager.stop_acquisition over the workers.
