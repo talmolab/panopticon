@@ -1387,7 +1387,11 @@ class FlirBackend:
         parts = []
         for name, want, got in rows:
             want_txt = f"{want:g}" if isinstance(want, float) else str(want)
-            mark = "" if _same_value(want, got) else " (differs)"
+            if got == "not readable" or got.startswith("unreadable"):
+                # A write-only node, or a read that failed: not a mismatch.
+                mark = " (not read back)"
+            else:
+                mark = "" if _same_value(want, got) else " (differs)"
             parts.append(f"{name} {want_txt} -> {got}{mark}")
         chunks = [parts[k:k + per] for k in range(0, len(parts), per)]
         for k, chunk in enumerate(chunks):

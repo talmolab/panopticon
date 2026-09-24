@@ -228,7 +228,11 @@ class BaslerBackend:
         marked."""
         parts = []
         for name, want, got in rows:
-            mark = "" if cls._same(want, got) else " (differs)"
+            if cls._unread(got):
+                # An absent node, or a read that failed: not a mismatch.
+                mark = " (not read back)"
+            else:
+                mark = "" if cls._same(want, got) else " (differs)"
             parts.append(f"{name} {want} -> {got}{mark}")
         if parts:
             print(f"[basler] {serial} {phase} read-back: " + ", ".join(parts),
