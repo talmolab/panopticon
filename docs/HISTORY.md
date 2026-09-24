@@ -416,6 +416,13 @@ Dead ends, do not retry:
   start that hit one switch's cameras together, alongside incomplete buffers or
   NIC DPC saturation on CPUs 0-2. Cost: about 0.8 more cores and 2.6 GiB more
   private memory. Measured on the rig; no code change.
+- 2026-09-22: Page-locking the whole NV12 ring, instead of copying each frame
+  into staging buffers, was the prototype's runner-up. It was the only variant
+  that also lowered CPU, to 0.36-0.46 ms per frame against 0.88-1.03 ms for the
+  production path. It pins 21.5 GiB at nine cameras, CUDA warns against
+  page-locking that much, and it is safe only in kick mode. It was not run on
+  the rig and stays open: a rig A/B is worth it if the staged upload's extra
+  0.8 cores matters. No code change.
 - 2026-09-22: Thermal policy. A fan is not an option on this rig, and the
   cameras' thresholds cannot be raised, so Panopticon's reaction changed. It
   warns at the camera's reported shutdown point minus `thermal_warn_margin_c`,
@@ -570,9 +577,6 @@ Dead ends, do not retry:
   them all; drive the real GUI through repeated acquisitions).
 - Patching the FLIR witness one edge case at a time (each round found another;
   the conservative rule replaced it).
-- Page-locking the whole NV12 ring, tried in the prototype and not adopted: it
-  pins 21.5 GiB at nine cameras, CUDA warns against pinning that much, and it is
-  unsafe in the decoupled mode.
 
 ---
 
@@ -608,4 +612,3 @@ Everything already tried and reverted, so nobody spends a rig day on it again:
 - Reading RSS unelevated (wrong values).
 - Validating a fix without driving the real GUI through repeated acquisitions.
 - Patching the FLIR witness edge case by edge case.
-- Page-locking the whole NV12 ring (not adopted).
