@@ -74,8 +74,9 @@ checked by hand that no other one holds the hardware.
   or loads Spinnaker, so a rig without an SDK fails in one place with a clear
   message. A new vendor is one new module, a name in `KNOWN_BACKENDS` and a
   branch in `load_backend()`.
-- `gui_app/backends/_spinc.py` is the only code that loads the Spinnaker DLL.
-  It loads through `ctypes.CDLL`, never `PyDLL`, which holds the GIL through
+- `gui_app/backends/_spinc.py` is the only code that loads the Spinnaker DLL,
+  apart from `probe_flir.py`'s optional `--pyspin` stage (next rule). `_spinc`
+  loads through `ctypes.CDLL`, never `PyDLL`, which holds the GIL through
   every wait, inside a scoped `os.add_dll_directory`. Never add the SDK's
   `bin64\vs2015` to `PATH`: its Qt5 DLLs would shadow PyQt5's. Importing
   `_spinc` or `fake_spinc` loads no DLL.
@@ -250,9 +251,17 @@ until someone analyses it.
 
 ## FLIR backend
 
-- `FlirBackend` proves the frame-ID base, its restart at each start and the
-  nanosecond clock at open with a free-run self-test, and refuses a camera that
-  fails. It never executes `TimestampReset` or `TriggerSoftware`, and it
+[docs/FLIR.md](docs/FLIR.md) is the bring-up guide for FLIR cameras.
+
+- `FlirBackend` runs a free-run self-test at open. It refuses a camera whose
+  device clock reads 0, does not increase, restarts at each start, or runs in a
+  unit it cannot convert to nanoseconds. The same test asks whether the frame
+  ID restarts at 1 (or 0) at each start and steps by 1. Under the default
+  `camera.flir.block_id_source: auto`, a camera whose frame ID fails that test
+  is aligned by its count of trigger edges (the CounterValue chunk) instead. It
+  is refused only when it has no CounterValue chunk either, or when
+  `block_id_source: frame_id` is forced.
+- `FlirBackend` never executes `TimestampReset` or `TriggerSoftware`, and it
   releases every image before `EndAcquisition`.
 - `camera.trigger.overlap` defaults to `ReadOut`. A camera that does not overlap
   exposure with readout ignores a trigger that arrives during readout, and an
