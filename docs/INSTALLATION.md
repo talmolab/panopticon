@@ -849,29 +849,21 @@ desktop shortcut runs `pythonw.exe`.
 #### Check the network
 
 ```powershell
-uv run probe_network.py --sweep
+uv run probe_network.py
 ```
 
-This is the test for the whole step. It sends a GigE Vision discovery request
-from every host adapter, then grabs frames from each camera at packet sizes from
-1500 to 9000 bytes.
-
-- Every camera answers discovery whatever address it holds, so the adapter that
-  hears a camera is the switch it is plugged into. The tool flags a camera whose
-  address is outside that adapter's subnet.
-- A healthy path shows `complete=10/10` at every size up to 9000. Every size
-  passing up to 1500 and failing from 2000 means a device in that camera's path
-  is still at 1500 bytes.
-- The sweep opens the cameras through the backend of a profile, so it sweeps
-  FLIR GigE cameras too, and skips USB3 cameras. Until Panopticon has opened
-  your profile once, name it: `--profile my_rig`, or a path to the file.
-
-Do not test jumbo frames with `ping`. The reference rig's cameras answer only
-small echo requests, so `ping -f -l 8972` fails on a path that carries 9000-byte
-packets, and so does `ping -l 1472`. The sweep's real grabs are the test.
+It sends a GigE Vision discovery request from every host adapter and lists the
+cameras that answer each one. Every camera answers discovery whatever address
+it holds, so the adapter that hears a camera is the switch it is plugged into.
+The tool flags a camera whose address is outside that adapter's subnet.
 
 Then open pylon Viewer from the Start menu. Every camera should appear, open and
 show live video.
+
+Discovery uses small packets, so it passes on a path that drops 9000-byte
+packets. The packet-size sweep tests jumbo frames. It opens the cameras with
+your profile's settings, so it runs at the end of
+[step 7](#test-the-network-with-the-profile).
 
 ### Step 6 — make the camera settings file (.pfs)
 
@@ -949,6 +941,32 @@ after it, and a calibration then describes the wrong cameras.
 
 A profile with a mistake does not load. Panopticon leaves it out of the list and
 names the file and the field in a dialog once the window opens.
+
+#### Test the network with the profile
+
+For a GigE rig, test every camera's path with the profile's camera settings,
+with your profile's `name` in place of `my_rig`:
+
+```powershell
+uv run probe_network.py --sweep --profile my_rig
+```
+
+`--profile` also takes a path to the profile file. The sweep opens the cameras
+through the profile's backend and camera settings, then grabs frames from each
+camera at packet sizes from 1500 to 9000 bytes. It sweeps FLIR GigE cameras
+too, and skips USB3 cameras. It does not open the trigger board.
+
+- A healthy path shows `complete=10/10` at every size up to 9000.
+- Every size passing up to 1500 and failing from 2000 means a device in that
+  camera's path is still at 1500 bytes
+  ([Configure the switches](#configure-the-switches)).
+
+Do not test jumbo frames with `ping`. The reference rig's cameras answer only
+small echo requests, so `ping -f -l 8972` fails on a path that carries 9000-byte
+packets, and so does `ping -l 1472`. The sweep's real grabs are the test.
+
+Once Panopticon has opened the profile (step 9), `uv run probe_network.py --sweep`
+uses it without `--profile`.
 
 ### Step 8 — flash the trigger firmware
 
