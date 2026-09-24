@@ -646,6 +646,11 @@ def load_backend(name: str = "basler", camera_spec=None) -> CameraBackend:
     raise _unknown_backend(name)
 
 
+#: Backends that declare no BLOCK_RATE_HINTS (test_backend_contract checks
+#: their classes), for which block_rate_hints imports nothing.
+_BACKENDS_WITHOUT_HINTS = ("basler", "sim")
+
+
 def block_rate_hints(name: str) -> dict:
     """Backend `name`'s BLOCK_RATE_HINTS, read from its class without
     building it, or {} when it declares none, is unknown or cannot be
@@ -654,21 +659,20 @@ def block_rate_hints(name: str) -> dict:
     For the block-ID rate check that runs after a recording (post-hoc
     alignment), where no backend exists: session_metadata.json records each
     camera's backend name, and the check merges these clauses with the
-    trigger source's name as the live router does. Importing the flir or sim
-    module loads no SDK. {} gives the check's default advice, which is
-    Basler's, so a host that cannot import a backend loses only the wording.
-    Never raises.
+    trigger source's name as the live router does. {} gives the check's
+    default advice, which is Basler's, so a host that cannot import a
+    backend loses only the wording. Never raises.
+
+    Basler and sim declare no hints, so their modules are not imported:
+    importing basler loads pypylon and the pylon runtime, which an analysis
+    host aligning a Basler recording does not need. Importing the flir
+    module loads no SDK.
     """
-    if name not in KNOWN_BACKENDS:
+    if name not in KNOWN_BACKENDS or name in _BACKENDS_WITHOUT_HINTS:
         return {}
     try:
-        if name == "basler":
-            from gui_app.backends.basler import BaslerBackend as cls
-        elif name == "sim":
-            from gui_app.backends.sim import SimBackend as cls
-        else:
-            cls = _import_backend_attr(name, "gui_app.backends.flir",
-                                       "FlirBackend")
+        cls = _import_backend_attr(name, "gui_app.backends.flir",
+                                   "FlirBackend")
     except Exception:
         return {}
     hints = getattr(cls, "BLOCK_RATE_HINTS", None)
