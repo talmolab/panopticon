@@ -192,8 +192,7 @@ Check your own model's pinout before you wire it:
 On this camera:
 
 - For `Line0`, wire the board's pin to pin 2 and the board's GND to pin 5.
-- For `Line3`, wire the board's pin to pin 1 and the board's GND to pin 6. Use
-  `Line3` only on a camera powered over USB or PoE.
+- For `Line3`, wire the board's pin to pin 1 and the board's GND to pin 6.
 
 > [!WARNING]
 > On a Blackfly S, pin 1 (Line3) is also the camera's power input. On a camera
