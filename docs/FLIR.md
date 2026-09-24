@@ -13,7 +13,7 @@ Contents:
 1. [Install](#1-install)
 2. [Wire the trigger](#2-wire-the-trigger)
 3. [Write the profile](#3-write-the-profile)
-4. [Launch Panopticon once](#4-launch-panopticon-once)
+4. [Open your profile in Panopticon](#4-open-your-profile-in-panopticon)
 5. [Run the probe](#5-run-the-probe)
 6. [Record a short test](#6-record-a-short-test)
 7. [Send the results](#7-send-the-results)
@@ -279,30 +279,43 @@ A calibration runs at `calibration_frame_rate`, with `calibration_exposure_us`
 90% of the ceiling at that rate. A capped exposure shows as `CLAMPED` in that
 camera's exposure line in the log.
 
-## 4. Launch Panopticon once
+## 4. Open your profile in Panopticon
 
-Skip this section if you use your own trigger source.
+Do this section whatever your trigger source. On a new computer the first
+launch opens a shipped profile, and the launch after it opens yours. With
+Panopticon's board, the launches also leave the board carrying the
+recording-only sketch for your profile (camera triggers, no stimulation). The
+probe starts the board only once the board reports that sketch.
 
-Panopticon puts a recording-only sketch on the trigger board (camera triggers,
-no stimulation) when it opens a profile. The probe starts the board only once
-the board reports that sketch, so let Panopticon program the board before you
-run the probe.
+> [!WARNING]
+> Before the first launch on a new computer, unplug every Arduino and every
+> other serial device except Panopticon's trigger board. That launch opens a
+> shipped reference profile, which resets whatever device is on COM3 and tries
+> to reprogram it.
 
-1. Run `uv run gui.py`.
-2. Choose your profile in the profile dropdown. On the first launch on a new
-   computer, Panopticon has no profile of yours to remember. It opens the first
-   shipped profile that is ready (a Basler reference rig) and reports that it
-   cannot open that rig's cameras. That reference profile names COM3. If your
-   board is on COM3, this first launch also programs it with the reference
-   rig's sketch, which does no harm with only cameras on the board. Choosing
-   your profile replaces it.
-3. Wait until the PowerShell window shows
+1. Run `uv run gui.py`. On the first launch on a new computer, Panopticon has
+   no profile of yours to remember. It opens the first shipped profile that is
+   ready (a Basler reference rig) and reports that it cannot open that rig's
+   cameras. That reference profile names COM3.
+   - If your board is on COM3, Panopticon programs it with the reference rig's
+     sketch. This takes about 30 s, and does no harm with only cameras on the
+     board. The sidebar shows `Clearing stim firmware…` meanwhile.
+   - If a `Could not clear stim firmware` dialog appears, the board on COM3
+     could not be programmed, or there is none. Close the dialog. Step 4
+     checks your own board.
+2. Choose your profile in the profile dropdown. The dropdown is unavailable
+   while Panopticon programs a board. If your profile names another port,
+   Panopticon programs the board on that port now, in about 30 s.
+3. Quit, and run `uv run gui.py` again. This launch opens your profile, the one
+   you chose last. The first session loaded the Basler SDK for the reference
+   profile, and running both vendors' SDKs in one process is untested.
+4. With Panopticon's board, wait until the PowerShell window shows
    `board flashed with the recording-only sketch`, which takes about 30 s, or
-   `board already carries the recording-only sketch`. The sidebar shows
-   `Clearing stim firmware…` meanwhile.
-4. Quit. The next launch opens your profile, the one you chose last. Quitting
-   also matters because this first session loaded the Basler SDK for the
-   reference profile, and running both vendors' SDKs in one process is untested.
+   `board already carries the recording-only sketch`. A
+   `Could not clear stim firmware` dialog at this launch is about your own
+   board. Fix what its message names, such as a missing `arduino-cli` or the
+   wrong `serial_port`, and launch again.
+5. Quit.
 
 ## 5. Run the probe
 
@@ -551,7 +564,7 @@ A refusal about one camera starts with that camera's name and serial number.
 | `is open in another program` | Close SpinView or any other camera software, then choose the profile again. |
 | `is not an input on this camera` | Run `--find-line` and write the line it prints into `camera.trigger.line`. |
 | `is set as an output on this camera` | Set the line to Input in SpinView, or wire the trigger to another input line. |
-| `not the recording-only sketch` | Launch Panopticon with the profile once ([section 4](#4-launch-panopticon-once)), quit, and run the probe again. |
+| `not the recording-only sketch` | Open your profile in Panopticon ([section 4](#4-open-your-profile-in-panopticon)), quit, and run the probe again. |
 | `cannot be aligned by frame ID, and it offers no CounterValue chunk` | This model cannot record yet. Send the probe's output. |
 | `DeviceLinkThroughputLimit can go no higher` | The link cannot carry the frames. Lower `frame_rate` or the frame size, or check the cable and port. |
 | `AcquisitionFrameRate can go no higher than` | The camera cannot reach `frame_rate` at this frame size. Lower `frame_rate` or the frame size. |
