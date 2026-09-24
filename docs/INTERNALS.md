@@ -690,16 +690,19 @@ drifting behind, a different one each time.
 
 `gui_app/cpu_affinity.py` holds the placement, driven by the profile.
 [`pin_capture_threads`](CONFIGURATION.md#pin_capture_threads) gives each grab
-thread a performance core of its own while they last, at raised priority, and
-lets the rest float over the same pool; two grab threads never share a core.
-`capture_core_exclude` removes cores from the pool, for the cores that carry
-the NIC's DPCs. `encoder_pcores` and `pin_encoder_threads` place the encoder
-threads and ship off, because both measured worse than leaving the encoders
-to Windows. The performance cores are read from the operating system
+thread a performance core of its own while they last. The rest float over the
+same pool and share its cores with the pinned threads. Every grab thread runs
+at raised priority, and no two are pinned to one core. `capture_core_exclude`
+removes cores from the pool, for the cores that carry the NIC's DPCs.
+`encoder_pcores` and `pin_encoder_threads` place the encoder threads and ship
+off, because both measured worse than leaving the encoders to Windows. The
+performance cores are read from the operating system
 (`GetSystemCpuSetInformation`), because on the reference CPU they interleave
-with the efficiency cores: logical CPUs 0, 1, 10, 11, 12, 13, 22 and 23. Every
-call checks for Windows and does nothing elsewhere, because a failure to pin
-costs performance and must never stop a recording.
+with the efficiency cores: logical CPUs 0, 1, 10, 11, 12, 13, 22 and 23. The
+reference profile excludes 0 and 1, which leaves a pool of 6 cores for 9 grab
+threads: 6 are pinned and 3 float. Every call checks for Windows and does
+nothing elsewhere, because a failure to pin costs performance and must never
+stop a recording.
 
 ### Instrumentation
 
