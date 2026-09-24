@@ -1183,9 +1183,9 @@ choose a profile at launch.
 7. Check capacity again. RAM grows with the camera count and with
    `kick_max_lag` ([RAM](#ram)), and the GPU has to grant one NVENC session per
    camera ([GPU](#gpu)).
-8. Run `uv run probe_network.py --sweep` again: every camera should complete at
-   9000 bytes. Then calibrate from scratch, because an old `calibration.toml`
-   describes a camera set that no longer exists.
+8. Run `uv run probe_network.py --sweep --profile my_rig` again: every camera
+   should complete at 9000 bytes. Then calibrate from scratch, because an old
+   `calibration.toml` describes a camera set that no longer exists.
 
 ---
 
