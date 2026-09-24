@@ -1,6 +1,7 @@
 """Panopticon Acquisition GUI — launch with: conda run -n 3dpose python gui.py"""
 import os
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -23,49 +24,42 @@ _LOG_PATH = None
 _OPEN_DIALOGS = []
 
 
-class _Tee:
-    """Write to several streams at once (e.g. the console and a log file).
-
-    Under the pythonw launcher sys.stdout/stderr are None, so the diagnostic
-    prints from the grab threads would otherwise be discarded — this captures
-    them to a file so a crash can be diagnosed after the fact."""
-    def __init__(self, *streams):
-        self._streams = [s for s in streams if s is not None]
-
-    def write(self, data):
-        for s in self._streams:
-            try:
-                s.write(data)
-                s.flush()
-            except Exception:
-                pass
-
-    def flush(self):
-        for s in self._streams:
-            try:
-                s.flush()
-            except Exception:
-                pass
-
-
 def _setup_logging():
-    """Tee stdout/stderr to a timestamped log file under logs/ (pythonw discards
-    them otherwise). Returns the log path, or None if logging couldn't be set up."""
+    """Send stdout and stderr to a timestamped log file under logs/, and to
+    the console when there is one (pythonw has none).
+
+    gui_app.logging_setup stamps every line with its time and thread and
+    writes it from one background thread, so a print never waits for the
+    disk or the console. Returns the log path, or None if logging couldn't be
+    set up."""
     try:
-        LOG_DIR.mkdir(exist_ok=True)
-        log_path = LOG_DIR / f"panopticon_{datetime.now():%Y%m%d_%H%M%S}.log"
-        f = open(log_path, "a", buffering=1, encoding="utf-8")
-        sys.stdout = _Tee(sys.__stdout__, f)
-        sys.stderr = _Tee(sys.__stderr__, f)
-        # Dump every thread's Python stack into the log on a NATIVE crash
-        # (access violation / abort — e.g. Qt's 0xc0000409 fail-fast), which
-        # sys.excepthook can't see. Needs the real file, not the _Tee.
-        import faulthandler
-        faulthandler.enable(file=f, all_threads=True)
+        from gui_app import logging_setup
+        log_path = logging_setup.install(
+            LOG_DIR / f"panopticon_{datetime.now():%Y%m%d_%H%M%S}.log")
+        if log_path is None:
+            return None
         print(f"[startup] logging to {log_path}", flush=True)
         return log_path
     except Exception:
         return None
+
+
+def _flush_log(timeout_s: float = 1.0) -> None:
+    """Let the log writer catch up, on the Qt main thread only.
+
+    RULE: only the main thread waits. REASON: sys.excepthook also runs on
+    the thread whose Python code raised, a grab thread included, and no
+    thread that holds a camera may wait for the disk; the main thread's
+    wait is what puts a traceback in the file before a crash that may
+    follow it.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    try:
+        from gui_app import logging_setup
+        logging_setup.flush(timeout_s)
+    except Exception:
+        pass
 
 
 def _log_location() -> str:
@@ -320,7 +314,18 @@ def main():
     window.show()
     splash.finish(window)
 
-    sys.exit(app.exec_())
+    code = app.exec_()
+    _shutdown_log()
+    sys.exit(code)
+
+
+def _shutdown_log() -> None:
+    """Write out what the log writer still holds and stop it."""
+    try:
+        from gui_app import logging_setup
+        logging_setup.shutdown()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
@@ -328,5 +333,7 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         traceback.print_exc()
+        _flush_log()
         _report_startup_failure(e)
+        _shutdown_log()
         sys.exit(1)
