@@ -2016,5 +2016,5 @@ query, and runs at any time.
 
 Ping cannot test jumbo frames on these paths, because the cameras answer only
 small ICMP echoes. The sweep grabs real frames instead. How the
-maintainers' tests are kept, and which modules they cover, is in
+maintainers' tests are kept, and how to have a change tested, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md).
