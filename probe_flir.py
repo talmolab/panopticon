@@ -2275,18 +2275,23 @@ def _gil_probe(p: Probe, raw: _Raw, h) -> dict:
 
             def wait(stop):
                 from gui_app.backends.flir import FlirTimeout
-                frames = 0
+                seen = {"frames": 0, "errors": 0, "last_error": None}
                 while not stop.is_set():
                     try:
                         img = api.next_image(h, 2000)
                     except FlirTimeout:
                         continue
-                    except Exception:
+                    except Exception as e:
+                        # The pause keeps the meter from measuring a loop
+                        # that spins on the error; the count says the wait
+                        # was not the one measured.
+                        seen["errors"] += 1
+                        seen["last_error"] = _err(e)
                         time.sleep(0.05)
                         continue
                     api.image_release(img)
-                    frames += 1
-                return frames
+                    seen["frames"] += 1
+                return seen
 
             out["wait"] = meter.held(wait, GIL_WINDOW_S)
         finally:
@@ -2376,6 +2381,21 @@ def stage_selftest(p: Probe):
             p.check("selftest", f"{s} opens through the FLIR backend with the "
                     f"profile", "PASS" if err is None else "FAIL",
                     "" if err is None else err)
+
+
+def _wait_counts(held: dict | None):
+    """None when a GIL-meter wait took frames and fewer errors than frames,
+    else why its held fraction measures something other than a wait for
+    an image."""
+    res = (held or {}).get("result")
+    if not isinstance(res, dict):
+        return "not measured: the wait reported nothing"
+    frames, errors = res.get("frames", 0), res.get("errors", 0)
+    if frames and errors < frames:
+        return None
+    return (f"not measured: the wait took {frames} frames and hit {errors} "
+            f"errors" + (f", the last: {res['last_error']}"
+                         if res.get("last_error") else ""))
 
 
 def _selftest_checks(p: Probe, s: str, rec: dict):
@@ -2483,10 +2503,13 @@ def _selftest_checks(p: Probe, s: str, rec: dict):
     g = rec.get("gil")
     if g:
         frac = g.get("capi_wait_gil_held_fraction")
+        waited = _wait_counts(g.get("wait"))
         if not g.get("meter_ok"):
             status, ans = "WARN", "the GIL meter's controls failed"
         elif frac is None:
             status, ans = "WARN", "not measured"
+        elif waited is not None:
+            status, ans = "WARN", waited
         elif frac > GIL_HELD_FAIL:
             status, ans = "FAIL", (f"the wait holds the GIL ({frac:.0%} of the "
                                    f"time)")
@@ -4311,20 +4334,22 @@ def stage_pyspin(p: Probe):
                 cam.BeginAcquisition()
                 try:
                     def wait(stop):
-                        k = 0
+                        seen = {"frames": 0, "errors": 0, "last_error": None}
                         while not stop.is_set():
                             try:
                                 im = cam.GetNextImage(2000)
                             except Exception as e:
                                 # A timeout (-1011) retries at once; any
-                                # other error waits, so the meter does not
-                                # measure a spinning loop.
+                                # other error is counted and waits, so the
+                                # meter does not measure a spinning loop.
                                 if getattr(e, "errorcode", None) != -1011:
+                                    seen["errors"] += 1
+                                    seen["last_error"] = _err(e)
                                     time.sleep(0.05)
                                 continue
                             im.Release()
-                            k += 1
-                        return k
+                            seen["frames"] += 1
+                        return seen
                     rep["gil"] = meter.held(wait, GIL_WINDOW_S)
                 finally:
                     cam.EndAcquisition()
@@ -4342,7 +4367,8 @@ def stage_pyspin(p: Probe):
     zc = rep.get("zero_copy", {})
     view = zc.get("shares_memory") and not zc.get("owndata")
     frac = rep.get("gil", {}).get("held_fraction")
-    held = ("not measured" if frac is None else
+    waited = _wait_counts(rep.get("gil"))
+    held = ("not measured" if frac is None else waited if waited else
             f"held {frac:.0%} of the time")
     ans = (("GetNDArray is a view of the image buffer" if view else
             "GetNDArray copies") + f" ({zc.get('distinct_ptrs')} addresses over "
