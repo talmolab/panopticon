@@ -121,8 +121,9 @@ Calibrate stay disabled while it runs.
 
 | Message or symptom | Cause and fix |
 |---|---|
-| Cameras missing from pylon Viewer too | Addressing or the firewall. Give the cameras addresses on their adapter's subnet, and add the inbound UDP rules for `python.exe` and `pythonw.exe` ([INSTALLATION.md](INSTALLATION.md#step-5--put-the-cameras-on-the-network-gige)). |
-| `No camera answered on any adapter.` | From `probe_network.py`. Check power, cables and link lights, and the firewall rule the message prints. USB3 cameras never answer this discovery. |
+| Cameras missing from pylon Viewer too | Check power, cables and addressing. Give each camera an address on its adapter's subnet ([INSTALLATION.md step 5](INSTALLATION.md#the-addressing-scheme)). `uv run probe_network.py` lists the cameras each adapter hears. |
+| Cameras stream in pylon Viewer, but Panopticon does not find them or gets no frames | Check the firewall. Add the inbound UDP rule for the camera adapters, and delete any inbound rule that blocks Python ([INSTALLATION.md step 5](INSTALLATION.md#let-the-traffic-through-the-firewall)). |
+| `No camera answered on any adapter.` | From `probe_network.py`. Check power, cables and link lights, then the firewall ([INSTALLATION.md step 5](INSTALLATION.md#let-the-traffic-through-the-firewall)). USB3 cameras never answer this discovery. |
 | `on the WRONG SUBNET for the switch they are plugged into` | The camera's address does not match its switch's subnet, often after cables were swapped. Move the cable, or re-address the camera (pylon IP Configurator for Basler, SpinView for FLIR). |
 | `no candidate camera adapters found` | No adapter has an address on a private subnet. Give each camera adapter its static address. |
 | Cameras open but every frame is incomplete, `Failed_Buffer_Count` climbing | A device in the path is at 1500-byte frames. Set 9216 on every switch port, the uplink included, then run the sweep in [INSTALLATION.md step 7](INSTALLATION.md#test-the-network-with-the-profile). |

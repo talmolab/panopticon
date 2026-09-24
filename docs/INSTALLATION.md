@@ -440,7 +440,7 @@ deleting it.
 Panopticon runs on 64-bit Windows, and only Windows has been tested. Several
 parts are Windows-specific: the thread placement settings (they do nothing on
 other systems), `configure_nic.ps1`, `make_shortcut.ps1` and the firewall
-rules in step 5. On Linux, USB3 cameras draw their buffers from usbfs, and the
+rule in step 5. On Linux, USB3 cameras draw their buffers from usbfs, and the
 launch check warns when `usbfs_memory_mb` is too small for them.
 
 ### The reference rig
@@ -603,7 +603,8 @@ A GigE camera streams only when all of these hold:
   not appear at all.
 - Every switch between them passes jumbo frames. Otherwise it appears and
   delivers nothing.
-- Windows lets its traffic reach Panopticon. Otherwise it does not appear.
+- Windows lets its traffic reach Panopticon. Otherwise Panopticon does not find
+  it, or gets no frames from it.
 - The adapter is set up for the traffic the camera sends.
 
 USB3 cameras skip this step.
@@ -830,17 +831,24 @@ tl.RestartIpConfiguration(mac)          # applies without a power cycle
 
 #### Let the traffic through the firewall
 
-Discovery and streaming use UDP, and Windows blocks inbound UDP to an unknown
-program. From an elevated PowerShell, with your own path in place of this one:
+Discovery and streaming use UDP, and Windows blocks inbound UDP that no rule
+allows. Allow inbound UDP on the camera adapters. From an elevated PowerShell,
+with your own adapter names:
 
 ```powershell
-New-NetFirewallRule -DisplayName "PanopticonGigE" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Users\you\Desktop\panopticon\.venv\Scripts\python.exe"
-New-NetFirewallRule -DisplayName "PanopticonGigE-w" -Direction Inbound -Action Allow -Protocol UDP -Program "C:\Users\you\Desktop\panopticon\.venv\Scripts\pythonw.exe"
+New-NetFirewallRule -DisplayName "PanopticonGigE" -Direction Inbound -Action Allow -Protocol UDP -InterfaceAlias "Ethernet 3","Ethernet 4","Ethernet 5"
 ```
 
-Each command prints the rule it made, ending with `Enabled : True`. A rule
-matches one program, so it takes two: `uv run gui.py` runs `python.exe`, and the
-desktop shortcut runs `pythonw.exe`.
+It prints the rule it made, with `Enabled : True` and `Action : Allow` among
+its lines. The rule names no program, so it holds for whichever Python runs
+Panopticon. A rule for one program has to name the process that owns the
+sockets. `.venv\Scripts\python.exe` and `pythonw.exe` are launchers: each starts
+the Python that uv installed, and that Python owns the sockets.
+
+A block rule overrides every allow rule. If Windows once asked whether to let
+Python through the firewall and the answer was Cancel, it may have added one.
+Open *Windows Defender Firewall with Advanced Security*, look under
+*Inbound Rules* for a Python rule whose action is Block, and delete it.
 
 #### Check the network
 
