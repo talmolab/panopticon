@@ -83,9 +83,11 @@ Plan the cooling before you mount the cameras:
 During an acquisition Panopticon reads each camera's temperature every
 `thermal_poll_s` seconds. It warns in the status bar and in `WARNINGS.txt` when
 a camera comes within `thermal_warn_margin_c` of the shutdown temperature the
-camera reports, or when the camera reports its over-temperature state. The
-Critical flag alone raises no alert. The reference profile sets the margin to
-2 C, so it warns at 79 C on these cameras.
+camera reports, or when the camera reports its over-temperature state. On a
+camera that reports its shutdown temperature, the Critical flag alone raises no
+alert. A camera that reports none is judged by its own status, Critical
+included. The reference profile sets the margin to 2 C, so it warns at 79 C on
+these cameras.
 [CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) describes both
 settings.
 
@@ -354,12 +356,13 @@ cameras. [CONFIGURATION.md](CONFIGURATION.md#kick_max_lag) says what the lag
 limit costs and when to change it.
 
 The total has to be available when you press Record, with the operating system
-and the window on top, so budget about twice the pool plus the ring. The
-reference rig has 63.4 GiB for a nine-camera need of 33.1 GiB. A start that
-fits goes ahead without a prompt, and the log records the figures on a
-`[hw] RAM for N cameras` line. The launch check warns below 16 GB of RAM in
-total. That is the floor for running Panopticon at all: a 16 GB machine passes
-it and cannot hold a six-camera recording at the reference settings.
+and the window on top, so budget about twice that total. The reference rig has
+63.4 GiB for a nine-camera need of 33.1 GiB. A start that fits goes ahead
+without a prompt, and the log records the figures on a `[hw] RAM for N cameras`
+line. The launch check warns below 16 GiB of RAM as Windows reports it, so a
+16 GB machine usually gets the warning. That is the floor for running
+Panopticon at all, and a 16 GB machine cannot hold a six-camera recording at
+the reference settings.
 
 ### GPU
 
@@ -426,7 +429,7 @@ Record, because a consumer NVMe drive falls to about 1-2 GB/s once its write
 cache fills. Use a drive rated for that sustained rate, or split the cameras
 across drives.
 
-The launch check warns below 500 GB free and below 500 MB/s measured write
+The launch check warns below 500 GiB free and below 500 MB/s measured write
 speed. It measures the speed by writing 256 MB to the output directory and
 deleting it.
 
@@ -815,6 +818,9 @@ over broadcast, so it is the tool for a camera stranded on the wrong subnet.
 The same from Python, for scripting a rebuild:
 
 ```python
+from pypylon import pylon
+
+mac = "0030531A2B3C"                    # the camera's MAC, from its label or the IP Configurator
 tl = pylon.TlFactory.GetInstance().CreateTl("BaslerGigE")
 tl.BroadcastIpConfiguration(mac, True, False, "192.168.5.3", "255.255.255.0", "0.0.0.0", "")
 tl.RestartIpConfiguration(mac)          # applies without a power cycle
@@ -1129,6 +1135,10 @@ Shortcut written: C:\Users\you\Desktop\Panopticon.lnk
   Target : C:\Users\you\Desktop\panopticon\.venv\Scripts\pythonw.exe
   Args   : "C:\Users\you\Desktop\panopticon\gui.py"
   WorkDir: C:\Users\you\Desktop\panopticon
+
+No console window will appear. If the app fails to start and you
+need to see why, run _launch.bat instead -- it keeps the console
+open and pauses on failure so the traceback can be read.
 ```
 
 The shortcut starts the environment's `pythonw.exe`, which Windows never gives a
