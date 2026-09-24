@@ -1127,14 +1127,16 @@ choose a profile at launch.
 
 ### Adding cameras to a rig that already works
 
-1. Check the serial-number order before you install anything. Without
-   `camera_serials`, cameras are named `cam1` to `camN` in serial order, and
-   `calibration.toml` stores those names. New cameras keep the old names only if
-   their serials sort after every current one. If a new serial sorts between
-   them, every camera after it is renamed, and old calibrations describe the
-   wrong cameras. `uv run probe_network.py` lists the serials in the order
-   Panopticon uses. With `camera_serials` set, add the new serials to the list
-   in ascending order, and the same rule applies.
+1. Check the serial-number order before you install anything. Panopticon names
+   the cameras `cam1` to `camN` in ascending serial order, compared as text,
+   across every switch. `calibration.toml` stores those names. New cameras keep
+   the old names only if their serials sort after every current one. If a new
+   serial sorts between them, every camera after it is renamed. Old
+   calibrations then describe the wrong cameras, and existing recordings need
+   renaming or re-mapping as well. `uv run probe_network.py` lists each
+   switch's cameras separately, so sort all the serials it prints together.
+   The loader requires `camera_serials` in ascending order, so the same rule
+   applies with it set.
 2. Work out whether you need another host port and switch
    ([The host port and the switches](#the-host-port-and-the-switches)). Keeping
    the same number of cameras per port keeps the load on each port unchanged.
