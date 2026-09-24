@@ -1334,8 +1334,7 @@ def _static_facts() -> list:
                       ("python", lambda: f"{sys.version.split()[0]} "
                                          f"({sys.executable})"),
                       ("os", _os_text), ("cpu", _cpu_text),
-                      ("gpu", _gpu_text), ("packages", _package_text),
-                      ("network", _network_text)):
+                      ("gpu", _gpu_text), ("packages", _package_text)):
         try:
             facts.append((label, fn()))
         except Exception as e:
@@ -1371,7 +1370,8 @@ def environment_facts(camera_sdk: str = "") -> list:
     RULE: cold path only, never on the UI thread for the first call. REASON:
     the first call runs git and nvidia-smi, which take up to seconds; the
     facts that cannot change while the process runs are kept after it, and
-    later calls only read RAM and the cached NVENC count.
+    later calls only read RAM, the network links and the cached NVENC
+    count.
     """
     global _env_static
     with _env_lock:
@@ -1386,6 +1386,13 @@ def environment_facts(camera_sdk: str = "") -> list:
     except Exception as e:
         facts.insert(4, ("ram", _unavailable(e)))
     facts.insert(6, ("nvenc session cap", _nvenc_cap_text()))
+    # Read on every call, like RAM: a link can renegotiate (10 Gb/s down to
+    # 1 Gb/s) between launch and an acquisition, and the header is what
+    # records the speed that acquisition ran at.
+    try:
+        facts.append(("network", _network_text()))
+    except Exception as e:
+        facts.append(("network", _unavailable(e)))
     facts.append(("camera sdk", camera_sdk or "no camera backend loaded"))
     return facts
 
