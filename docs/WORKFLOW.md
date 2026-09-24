@@ -492,13 +492,15 @@ Skip this section when the session has no optogenetic stimulation.
 > [!WARNING]
 > Flashing resets the trigger board, and the laser driver input floats during
 > the reset. Switch the laser off or block the beam before you launch
-> Panopticon, and before Apply, Calibrate, or the first Record after an Apply.
+> Panopticon, before Apply, and, while a paradigm is Applied, before each
+> Calibrate and each Record that follows a calibration.
 
 Choosing a profile on a new computer, or switching to a profile on another
 serial port, flashes the board too. Fit the laser's own interlock if you need
 a hard gate.
 
-Set up stimulation after calibrating and before recording. Open the editor
+Set up stimulation after calibrating and before recording, so that Record
+starts without a flash. Open the editor
 with the Stimulation button. [OVERVIEW.md](OVERVIEW.md#the-stimulation-editor)
 names each of its controls. Stimulation needs Panopticon's trigger board, so
 the editor does not open on a profile with `trigger_source: external`.
