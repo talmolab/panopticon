@@ -57,14 +57,14 @@ checked by hand that no other one holds the hardware.
   suite takes an NVENC session. `test_sim_gui.py` reaches the GPU only with
   `PANOPTICON_TEST_GPU=1`. Never run the local-only `test_nvgil.py --gpu` and a
   GPU run of `test_sim_gui.py` at the same time.
-- A test that validates a fix drives the real GUI the way an operator does,
-  in the app launched with `gui.py` or a shortcut to it: let the preview run,
-  Record, stop, then Record again (and Calibrate) in the same process, and
-  watch the process's memory between acquisitions. Headless probes,
-  `CameraManager` scripts and scripts that build `MainWindow` themselves
-  diagnose; they do not validate.
-  Some defects show only that way: NV12 rings that outlive a recording pass
-  every probe and suite, and then refuse the second Record for lack of RAM.
+- A test that validates a fix drives the real GUI the way an operator does, in
+  the app launched with `gui.py` or a shortcut to it. Let the preview run,
+  Record, stop, then Record again (and Calibrate) in the same process, and watch
+  the process's memory between acquisitions. Headless probes, `CameraManager`
+  scripts and scripts that build `MainWindow` themselves diagnose a fault but do
+  not validate a fix. Some defects show only in the GUI: NV12 rings that outlive
+  a recording pass every probe and suite, and then refuse the second Record for
+  lack of RAM.
 - `.gitignore` anchors `/_*.py` to the repository root. Keep the anchor. An
   unanchored `_*.py` also matches every `__init__.py` and
   `gui_app/backends/_spinc.py`, keeps them out of every commit and breaks a
@@ -76,8 +76,8 @@ checked by hand that no other one holds the hardware.
   with `load_backend(profile.camera_backend)`, hands the instance to each
   `GrabThread` and reads its optional members with `getattr`. Nothing outside
   `backends/` imports pypylon or loads Spinnaker, so a rig without an SDK fails
-  in one place with a clear message. A new vendor is one new module, a name in `KNOWN_BACKENDS` and a
-  branch in `load_backend()`.
+  in one place with a clear message. A new vendor is one new module, a name in
+  `KNOWN_BACKENDS` and a branch in `load_backend()`.
 - `gui_app/backends/_spinc.py` is the only code that loads the Spinnaker DLL,
   apart from `probe_flir.py`'s optional `--pyspin` stage (next rule). `_spinc`
   loads through `ctypes.CDLL`, never `PyDLL`, which holds the GIL through
@@ -101,7 +101,7 @@ checked by hand that no other one holds the hardware.
   with no dates, names, commit hashes or story (`CONTRIBUTING.md`). The story
   goes in `docs/HISTORY.md`.
 - Blocking camera work (open, close, reconfigure) runs off the Qt main thread
-  through `ui_workers.CallableWorker`; on the main thread the window stops
+  through `ui_workers.CallableWorker`. On the main thread the window would stop
   responding. Quitting mid-session abandons the incomplete data and deletes it
   (`_abandon_and_cleanup`).
 - `rig_setup.apply_profile_to_manager` and `rig_setup.open_kwargs` are the path
@@ -125,18 +125,18 @@ checked by hand that no other one holds the hardware.
   line. In a capture worker the writer writes the worker's log file before it
   sends the line up the pipe to the parent, so a parent that stops reading
   cannot hold the worker's own log.
-- The session header prints at every level. `log_level` (normal, verbose or
-  debug; default verbose) adds cold-path detail only. `verbose` adds the
-  requested and read-back camera settings, `[state]` transitions and the stop
-  summary, and `debug` adds more, such as every `.pfs` feature the camera read
-  back. Nothing logs per frame at any level, and the grab loop's stats line
-  stays periodic.
+- The session header prints at every level. `log_level` takes normal, verbose or
+  debug and defaults to verbose. Each level above normal adds cold-path detail
+  only. `verbose` adds the requested and read-back camera settings, `[state]`
+  transitions and the stop summary, and `debug` adds more, such as every `.pfs`
+  feature the camera read back. Nothing logs per frame at any level, and the
+  grab loop's stats line stays periodic.
 - Regression runs compare the `[camN] exposure=` line verbatim, so read-backs go
   on lines of their own. Before comparing a log line with older output, strip
   the stamp `^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} \[[^\]]+\] `.
 - Every recording and calibration folder gets `session.log`, the slice of the
-  log from arm to finalize. Lines still queued at a native crash are lost;
-  faulthandler writes to the log file directly.
+  log from arm to finalize. Lines still queued at a native crash are lost, but
+  `faulthandler` writes its traceback straight to the log file.
 
 ## Capture invariants
 
@@ -153,18 +153,18 @@ until someone analyses it.
   `img` reads another frame's pixels or freed memory.
 - `result.PaddingX` and `result.PaddingY` are checked on every frame, before the
   `with`. A nonzero value retires the camera, because row padding shears every
-  frame. They are grab-result fields and always present; the `PaddingX`
-  nodemap feature is a different thing and is absent on the reference cameras.
-  On FLIR, `retrieve()` checks the first image after each start (8 bits per
-  pixel, a stride equal to the width, the opened size), and otherwise releases
-  it and raises `FlirFrameError`.
+  frame. They are grab-result fields and always present. The `PaddingX` nodemap
+  feature is a different thing, absent on the reference cameras. On FLIR,
+  `retrieve()` checks the first image after each start (8 bits per pixel, a
+  stride equal to the width, the opened size), and otherwise releases it and
+  raises `FlirFrameError`.
 - The NV12 ring is built with `np.full(..., 128, ...)`. That fills the chroma
   plane with its constant 128 and touches every page. `np.empty` or `np.zeros`
   puts a first-touch page fault (about 0.4 ms) back on the hot path.
 - In kick mode a ring slot is written only while it is on the free list. The
   router owns a slot from `submit()` until the frame is encoded or dropped
   (`attach_ring`). A camera whose encoder falls behind finds no free slot and
-  loses frames from its own video (`dropped_full`, no block ID); the pixels of a
+  loses frames from its own video (`dropped_full`, no block ID). The pixels of a
   queued frame are never overwritten. That camera's video is then shorter than
   the others, and the session warnings name it.
 - Every acquisition frees its NV12 rings when it stops. The grab thread drops
@@ -179,11 +179,11 @@ until someone analyses it.
   else. Encoders drain separately into `stream.h264` through PyNvVideoCodec
   (`gui_app/nvenc.py`) or libx264 (`gui_app/cpu_encode.py`). Encoding inline
   costs about 28% of frames (HISTORY.md).
-- A camera that cannot start, realign or deliver is retired (`router.retire`):
-  a failed StartGrabbing, a late arm (StartGrabbing returning after the
-  barrier), grabs that all fail for `FAILED_GRAB_RETIRE_S`, or no frame since the
-  triggers started. In kick mode the coordinator waits for every camera, so one
-  camera that never publishes force-drops every trigger for all of them.
+- A camera that cannot start, realign or deliver is retired (`router.retire`): a
+  failed StartGrabbing, a late arm (StartGrabbing returning after the barrier),
+  grabs that all fail for `FAILED_GRAB_RETIRE_S`, or no frame since the triggers
+  started. In kick mode the coordinator waits for every camera, so one camera
+  that never publishes force-drops every trigger for all of them.
 - `blockids.npy` records only frames that were persisted. A `queue.put_nowait`
   means the queue took the frame, not that it was encoded, and a dead encoder
   would map frame i to the wrong trigger. `sync_encode.stop()` reconciles each
@@ -194,30 +194,29 @@ until someone analyses it.
 - Block ID equals trigger ordinal is an axiom, and one failure breaks it without
   a trace. A block ID counts frames the camera acquired, not triggers fired. A
   camera over its exposure ceiling ignores the next pulse and consumes no ID, so
-  from then on its block ID N is trigger N+k, with no gap in `blockids.npy`.
-  The guard is `frame_sync.check_block_id_rate()`: the device clock is a
-  hardware clock, so block IDs must advance at the trigger rate. It runs from
+  from then on its block ID N is trigger N+k, with no gap in `blockids.npy`. The
+  guard is `frame_sync.check_block_id_rate()`: the device clock is a hardware
+  clock, so block IDs must advance at the trigger rate. It runs from
   `sync_encode.stop()`, from `align_recording()` before its `needs_alignment`
   early return, and from the main window's finalize in every non-kick mode.
-  `BLOCK_RATE_TOL = 0.003` is measured; do not widen it to 1% (HISTORY.md).
+  `BLOCK_RATE_TOL = 0.003` is measured. Do not widen it to 1% (HISTORY.md).
   Every camera off by the same amount means the reference (`frame_rate` or the
   timestamp unit) is wrong.
 - Every backend normalises its counters to the contract: block ID 1 is the
   first frame after each StartGrabbing, and `TimeStamp` is a device clock in
   nanoseconds that keeps running across a stream restart. The Basler backend
   logs each camera's timestamp tick rate and warns when it is not 1 GHz.
-- Cameras drop frames independently, so frame i is not the same trigger on
-  every camera. Each frame's block ID goes to `blockids.npy`, and the videos
-  are aligned by trigger in one of two ways. Real-time kick-out
-  (`realtime_kick: true`, the default) encodes a trigger only once every camera
-  caught it. Post-hoc alignment (`realtime_kick: false`, `gui_app/alignment.py`,
-  `2_align.py`) re-encodes to the common frames afterwards. A replace refuses
-  while a camera ended early, started late or stopped for more than 1 s, unless
-  that camera is excluded (`--exclude`, or `RETIRED.json`) or
-  `--truncate-to-shortest` is given. A replace decodes with
-  `-fps_mode passthrough` and refuses when a camera's decoded frame count is not
-  the length of its `blockids.npy`. Anything that rewrites `blockids.npy`
-  rewrites `stim_trace.csv`.
+- Cameras drop frames independently, so frame i is not the same trigger on every
+  camera. Each frame's block ID goes to `blockids.npy`. Real-time kick-out
+  (`realtime_kick: true`, the default) aligns the videos by trigger while
+  recording: it encodes a trigger only once every camera caught it. Post-hoc
+  alignment (`realtime_kick: false`, `gui_app/alignment.py`, `2_align.py`)
+  re-encodes to the common frames afterwards. A replace refuses while a camera
+  ended early, started late or stopped for more than 1 s, unless that camera is
+  excluded (`--exclude`, or `RETIRED.json`) or `--truncate-to-shortest` is
+  given. A replace decodes with `-fps_mode passthrough` and refuses when a
+  camera's decoded frame count is not the length of its `blockids.npy`. Anything
+  that rewrites `blockids.npy` rewrites `stim_trace.csv`.
 - A Basler 16-bit block ID wraps at 65535 (about 11 minutes at 100 fps). Every
   unwrap uses one rule, a drop of more than half a period is a wrap
   (`frame_sync.unwrap_one`, `frame_sync.unwrap_blockids` and
@@ -247,10 +246,10 @@ until someone analyses it.
   survivors aligned.
 - While every active camera is silent (`CameraManager.source_silent`), a camera
   with frames waits `SOURCE_DOWN_WAIT_WINDOWS` stall windows of that silence and
-  then re-arms as usual, because a stalled shared switch, NIC port or USB host
-  needs the re-arm. Re-arms that run out while every camera is silent retire no
-  camera. A camera with no frame since the triggers started is retired at its
-  first stall, unless every camera is silent; then it waits.
+  then re-arms as usual. A stalled shared switch, NIC port or USB host needs the
+  re-arm. Re-arms that run out while every camera is silent retire no camera. A
+  camera with no frame since the triggers started is retired at its first stall.
+  While every camera is silent, it waits instead.
 - A recording's kick-out losses reach the dialog and `WARNINGS.txt` as one line,
   "Effective frame rate X fps (target Y).", once they pass
   `KICKOUT_WARN_FRACTION`. The counts go to `session_metadata.json` (`kickout`)
@@ -305,11 +304,11 @@ until someone analyses it.
 ## NVENC
 
 - The driver caps concurrent NVENC sessions, and the cap is often what limits
-  the camera count. Probe it (`nvenc.probe_max_sessions`); never hardcode it.
+  the camera count. Probe it (`nvenc.probe_max_sessions`) and never hardcode it.
   `EndEncode()` does not free a session, the destructor does, so encoders are
   released with `_EncoderThread.release_encoder()`. NVENCSTATUS 21 is the
-  session limit: never descend a keyword fallback ladder on it, and keep the
-  GOP keys (`gop`, `idrperiod`, lowercase) on every rung.
+  session limit: never descend a keyword fallback ladder on it, and keep the GOP
+  keys (`gop`, `idrperiod`, lowercase) on every rung.
 - Prove the GOP from the bitstream (`nvenc.gop_is_honoured()`, run by the launch
   preflight). PyNvVideoCodec ignores keywords it does not know, so a misspelled
   key (`gopLength`, `idrPeriod`) gives one IDR for a whole recording while the
@@ -317,7 +316,7 @@ until someone analyses it.
   on the ffmpeg writers cannot repair it.
 - Every mp4 the rig writes carries `-g <fps>` and `-movflags +faststart`, so it
   loads and seeks in the browser labeler (LUC3D). Without `-g` a file can hold
-  one IDR; without `+faststart` the player reads the whole file before frame 1.
+  one IDR. Without `+faststart` the player reads the whole file before frame 1.
   Build writer commands from `gui_app/ffmpeg_cmd.py` (`h264_encoder_args` plus
   `mp4_container_args`). The rule covers the mp4 writers, not the Annex-B
   `.h264` streams the remux wraps.
@@ -339,10 +338,10 @@ until someone analyses it.
   stalls the stream, rewrites the staging buffer during the stall and compares
   the bitstream with the host path's. The launch preflight runs it at every
   launch, at the recording's frame size, and False means record with the host
-  upload. The process's one pinned warm-up encode (`nvenc._warm_pinned`)
-  decides for the whole process: if it fails, every later encoder gets the host
-  upload (`upload_stats()["pinned_disabled"]`). A pinned setup failure falls back to the
-  host upload for that encoder only, with a `WARNINGS.txt` line. A recording
+  upload. The process's one pinned warm-up encode (`nvenc._warm_pinned`) decides
+  for the whole process: if it fails, every later encoder gets the host upload
+  (`upload_stats()["pinned_disabled"]`). A pinned setup failure falls back to
+  the host upload for that encoder only, with a `WARNINGS.txt` line. A recording
   encoder whose `Encode` fails takes the path of any encoder failure (flush,
   then spill that camera's frames raw) and leaves the pinned path on for the
   others. In a working tree that has the local-only suites, also run
@@ -350,9 +349,9 @@ until someone analyses it.
 - In the window, the profile reaches `nvenc` only through
   `hardware_check.configure_nvenc_upload`, at launch and after a profile switch,
   before any encoder exists and before the GOP check. A capture worker applies
-  the choice its parent sends when it arms. `nvenc_context: own` needs
-  free GPU memory for one extra context per camera (`own_context_headroom`);
-  without it the shared context is used, with a warning.
+  the choice its parent sends when it arms. `nvenc_context: own` needs free GPU
+  memory for one extra context per camera (`own_context_headroom`). Without that
+  memory the shared context is used, with a warning.
 - A `PinnedUploadEncoder` counts itself closed only after its buffers, stream
   and context are freed, and the teardown line reads that count's snapshot. A
   leak warning at teardown is therefore real.
@@ -377,12 +376,12 @@ until someone analyses it.
   (`AcquisitionStartRefused`) before any exposure is written. Keep it a refusal:
   a recording made anyway skips triggers or drops frames.
 - FLIR: settings come from the profile's `camera:` block and the user set it
-  names. There is no `.pfs`, and `pfs_path`, `trigger_rate_limit`,
-  `gige_driver` and the `gev_*` fields are refused. The ceiling is the camera's
-  own ExposureTime maximum at the frame rate, and opening refuses an exposure
-  above 90% of it. `backend.open` receives `frame_size` and `frame_rate` only
-  when its signature names them; the Basler open is called with
-  `(device, pfs_path, max_num_buffer)` as before.
+  names. There is no `.pfs`, and `pfs_path`, `trigger_rate_limit`, `gige_driver`
+  and the `gev_*` fields are refused. The ceiling is the camera's own
+  ExposureTime maximum at the frame rate, and opening refuses an exposure above
+  90% of it. `backend.open` receives `frame_size` and `frame_rate` only when its
+  signature names them. The Basler open is called with
+  `(device, pfs_path, max_num_buffer)`.
 - Reference-rig recording exposure and gain are 3000 µs and 6 dB. Lower values
   crush the histogram, and about 7x total clips about 13% of pixels. Prefer more
   IR light, then exposure, then gain. Check any change on a recording: the
@@ -399,9 +398,9 @@ until someone analyses it.
 - A camera that reports its shutdown temperature (`temp_shutdown_c`) alerts at
   that temperature minus the profile's `thermal_warn_margin_c`, and always in
   the camera's own error state. The camera's Critical status alone does not
-  alert. Thresholds come from the camera, never from code. A camera that
-  reports no shutdown point is judged by its own status, and one that reports
-  neither cannot be judged; the log says which.
+  alert. Thresholds come from the camera, never from code. A camera that reports
+  no shutdown point is judged by its own status, and one that reports neither
+  cannot be judged. The log says which case applies.
 - Never write `BsliDeviceTemperatureOverwriteEnable` or
   `BsliDeviceTemperatureOverwriteValue`. They fake the reported temperature and
   defeat the camera's own over-temperature shutdown.
@@ -446,7 +445,7 @@ until someone analyses it.
 ## Optostim
 
 The node editor (sidebar, Stimulation) compiles a block graph into the Arduino
-sketch. `gui_app/widgets/stimulation_window.py` holds the canvas and its UI;
+sketch. `gui_app/widgets/stimulation_window.py` holds the canvas and its UI, and
 `gui_app/stim_compiler.py` turns the graph into the `.ino` with pure functions
 and no Qt.
 
@@ -456,19 +455,19 @@ and no Qt.
 - `allStimLow()` is the first statement in `setup()`, before `Serial.begin()`.
   `setup()` blocks on the handshake, so a later call leaves the pin floating,
   and a powered laser driver reads a floating pin as ON. The pins come from the
-  profile's `stim_safe_pins` (`[53]`, the laser, on the reference rig; `[]` on
-  3dface). Never hardcode pins in `stim_compiler.py`.
-- The sequence is compiled into the `.ino`, not sent over serial, so an edit does
-  nothing until Apply (arduino-cli compile and upload). Record refuses a canvas
-  that was never applied, a canvas edited since the last Apply, and an empty
-  canvas while an earlier Apply still holds a paradigm. Test asks to upload a
-  changed canvas and refuses after a failed Apply.
+  profile's `stim_safe_pins` (`[53]`, the laser, on the reference rig, and `[]`
+  on 3dface). Never hardcode pins in `stim_compiler.py`.
+- The sequence is compiled into the `.ino`, not sent over serial, so an edit
+  does nothing until Apply (arduino-cli compile and upload). Record refuses a
+  canvas that was never applied, a canvas edited since the last Apply, and an
+  empty canvas while an earlier Apply still holds a paradigm. Test asks to
+  upload a changed canvas and refuses after a failed Apply.
 - Two sketches are held and swapped per acquisition type (`_sketch_for`,
   `_ensure_sketch_for`). Calibration always gets the recording-only sketch, so a
   calibration can never activate stim. `_session_stim_ino` belongs to the
-  session and is never saved, so stim is opt-in per launch through Apply.
-  Derive whether the board holds a paradigm from `_sketch_for` and
-  `_session_stim_ino`; a separate flag drifts from the board.
+  session and is never saved, so stim is opt-in per launch through Apply. Derive
+  whether the board holds a paradigm from `_sketch_for` and `_session_stim_ino`.
+  A separate flag drifts from the board.
 - `updateStim()` does no floating-point math. The compiler resolves period and
   pulse width to integer microseconds (`block_timing()`), because an AVR float
   divide (about 30 µs) inside the trigger busy-wait blurs the ±0.35 µs edge
@@ -480,8 +479,8 @@ and no Qt.
 - `_extract_chains` stays cycle-safe: a revisit closes the loop through
   `loop_to`. A pure loop has no source, so it must be pinned or it compiles to
   nothing.
-- An Ending block stops the recording, and a loop keeps running; bound a loop
-  with a parallel timer chain. Two chains on one pin fight over it, and
+- An Ending block stops the recording. A loop keeps running, so bound it with a
+  parallel timer chain. Two chains on one pin fight over it, and
   `pin_conflicts()` blocks Apply and Test.
 - A stim block on a camera trigger pin (the profile's `trigger_pins`) injects
   edges into one camera and breaks block-ID alignment with no trace. Pins 0 and
@@ -515,7 +514,7 @@ and no Qt.
   cleared on every open and at the start of every ack wait.
 - Every start is confirmed by an `RDY <n_cams> <fps> <id>` ack, because a start
   can land in `loop()`'s reconfigure branch instead of a fresh `setup()`.
-  `start_triggers()` returns a bool over four branches:
+  `start_triggers()` returns a bool:
   1. ack: proceed;
   2. no ack: reset and retry;
   3. still no ack from a board that has never acked: assume pre-RDY firmware
@@ -551,7 +550,7 @@ and no Qt.
   input has an internal pullup far stronger than 6.8 kΩ, and a resistor stiff
   enough to beat it would exceed the Arduino's 20 mA per-pin limit. For a hard
   gate use the PSU interlock, or a normally-closed relay across MOD and GND held
-  open by a dedicated pin. Stay on the TTL toggle; analog mode maps 0-5 V onto
+  open by a dedicated pin. Stay on the TTL toggle. Analog mode maps 0-5 V onto
   laser power.
 - Flash only sketches that `stim_compiler` generates. A sketch without the
   `stim_safe_pins` boot guard, such as a stock trigger sketch, leaves the laser
@@ -582,20 +581,20 @@ and no Qt.
   on an E-core runs a few percent slow, which the grab loop's per-frame budget
   cannot absorb.
 - Keep capture threads off the cores that carry NIC DPC
-  (`capture_core_exclude`; `[0, 1]` on the reference rig, where those cores
-  spend about half their time in NIC DPC). A grab thread there is descheduled by
-  the traffic it is receiving.
+  (`capture_core_exclude`). A grab thread there is descheduled by the traffic it
+  is receiving. `capture_core_exclude` is `[0, 1]` on the reference rig, where
+  those cores spend about half their time in NIC DPC.
 - Do not confine RSS or encoders to a core subset. Confining RSS to the E-cores,
   pinning encoders to the P-cores and one encoder per E-core each measured worse
   (HISTORY.md). The defaults of `configure_nic.ps1` restore the vendor RSS
-  placement; pass other values only for a one-variable experiment.
+  placement. Pass other values only for a one-variable experiment.
 
 ## Multi-process capture (stage 1, experimental)
 
 - `capture_processes` above 0 selects `ProcessCameraManager`
   (`rig_setup.make_manager`), which captures the cameras in worker processes.
   The GUI opens no camera for such a profile
-  (`MainWindow._capture_processes_refusal`); only the local-only `probe_mp.py`
+  (`MainWindow._capture_processes_refusal`). Only the local-only `probe_mp.py`
   builds one. `session_metadata.json` records the request (`capture_processes`)
   and what ran (`capture_processes_used`).
 - `gui_app/mp` refuses a CPU other than x86-64, because its shared-memory
@@ -616,8 +615,8 @@ and no Qt.
   inside the bracket: a 0.08 ms copy reads as 2.7 ms. Separate executing from
   waiting with `QueryThreadCycleTime` (the local-only
   `tools/experiments/probe_gil_wait.py`). The budget is 300 µs or less of
-  GIL-held work per thread per frame, safe at 17 threads; about 1000 µs breaks
-  the 10 ms budget at 11 threads.
+  GIL-held work per thread per frame, which is safe at 17 threads. About 1000 µs
+  breaks the 10 ms budget at 11 threads.
 - Never measure with a second Panopticon running. Two instances contend for the
   GIL, the NVENC session cap and the cameras, and produce false divergence.
   `probe_guard` refuses to start beside another instance, and `gui.py`'s
