@@ -1071,8 +1071,9 @@ states, and the block-ID rate check guards it.
 
 ## 7. Encoding
 
-Nine cameras at 100 fps produce about 2 GB of pixels a second, so compression
-is part of the capture path, and the grab loop cannot wait for an encoder. The
+The reference rig's nine cameras produce about 2 GB of pixels a second, so
+compression is part of the capture path, and the grab loop cannot wait for an
+encoder. The
 encoders run on threads of their own, on frames prepared with a single copy.
 
 ### NV12 from Mono8
@@ -1416,11 +1417,11 @@ resolve the board, as the solve does.
 
 The detection rate is best effort. The worker waits at least 33 ms between
 ticks, and detection runs over the cameras one after another at 6-250 ms each,
-depending on how much texture the scene gives the marker detector. Nine
-cameras run at 10-20 ticks a second, and near 1 when several cameras see
-clutter. The thresholds below count ticks, so their wall-clock worth varies
-with the camera count and the scene; a slower tick means more frames behind
-each count, which errs on the safe side. The rate is logged as `[hud] coverage
+depending on how much texture the scene gives the marker detector. With the
+reference rig's nine cameras the worker runs at 10-20 ticks a second, and near
+1 when several cameras see clutter. The thresholds below count ticks, so their
+wall-clock worth varies with the camera count and the scene. A slower tick
+means more frames behind each count, which errs on the safe side. The rate is logged as `[hud] coverage
 ticks/s:` every 30 seconds.
 
 Per tick and per camera the HUD counts ArUco markers. Counting interpolated
