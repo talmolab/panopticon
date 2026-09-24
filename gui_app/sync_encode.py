@@ -48,7 +48,7 @@ import numpy as np
 #: no-op there, so this is all that stands between these modules and Linux.
 _O_BINARY = getattr(os, "O_BINARY", 0)
 
-from gui_app import encoders
+from gui_app import encoders, logging_setup
 from gui_app.frame_sync import FrameSyncCoordinator
 from gui_app.grab_thread import (_EncoderThread, _end_encode, write_split_point,
                                  DRAIN_SENTINEL_TIMEOUT_S, DRAIN_JOIN_TIMEOUT_S)
@@ -59,6 +59,34 @@ ABANDON_TIMEOUT_S = 5.0
 #: Ordinary kick-outs (triggers some camera missed, dropped from all of them)
 #: above this fraction of the decided triggers add a session warning at stop.
 KICKOUT_WARN_FRACTION = 0.005
+
+
+def kick_counts(coord, fps: int) -> dict:
+    """What the coordinator decided about a recording, for the log and for
+    session_metadata.json: triggers decided, kept in every camera's video,
+    kicked out (some camera missed them) and force-dropped (a camera fell
+    more than kick_max_lag behind), and the effective frame rate those give.
+
+    The effective rate is the kept triggers over the recording's duration in
+    trigger periods (decided / fps), so a recording that lost nothing reads
+    the target rate. None when nothing was decided.
+    """
+    decided = int(coord.decided_triggers)
+    released = int(coord.released_triggers)
+    forced = int(coord.forced_triggers)
+    kicked = decided - released - forced
+    effective = (float(fps) * released / decided) if decided > 0 else None
+    return {"target_fps": fps, "decided_triggers": decided,
+            "kept_triggers": released, "kicked_triggers": kicked,
+            "forced_triggers": forced,
+            "effective_fps": (None if effective is None
+                              else round(effective, 3))}
+
+
+def effective_rate_text(counts: dict) -> str:
+    """The one-line report of a recording's effective frame rate."""
+    return (f"Effective frame rate {counts['effective_fps']:.1f} fps "
+            f"(target {counts['target_fps']:g}).")
 
 
 def _release_loose_encoder(enc, timeout_s=None) -> None:
@@ -645,16 +673,21 @@ def session_warnings(coord, timestamps, block_ids, fps: int, max_lag: int,
         out.append(msg)
     # Ordinary kick-outs: a trigger one camera missed is dropped from all
     # of them. A few are normal transport loss; above
-    # KICKOUT_WARN_FRACTION the operator has to know how much is gone.
-    decided = coord.decided_triggers
-    kicked = decided - coord.released_triggers - forced_triggers
+    # KICKOUT_WARN_FRACTION the operator is told the recording's effective
+    # frame rate, in one line. RULE: the detail goes to the log and the
+    # counts to session_metadata.json (kick_counts), not to the dialog.
+    # REASON: the count, the share and the seconds are for whoever
+    # diagnoses the rig; the operator needs the rate the videos hold.
+    counts = kick_counts(coord, fps)
+    decided, kicked = counts["decided_triggers"], counts["kicked_triggers"]
     if decided > 0 and kicked > KICKOUT_WARN_FRACTION * decided:
-        msg = (f"{kicked} of {decided} triggers "
-               f"({100.0 * kicked / decided:.2f}%, "
-               f"{_seconds(kicked, fps)}) are missing from every camera's "
-               f"video because at least one camera did not deliver them. "
-               f"Each camera's own losses are in its log (failed grabs, "
-               f"stream stats); the videos stay aligned with each other.")
+        print(f"[sync] kick-out: {kicked} of {decided} triggers "
+              f"({100.0 * kicked / decided:.2f}%, {_seconds(kicked, fps)}) "
+              f"are missing from every camera's video because at least one "
+              f"camera did not deliver them. Each camera's own losses are "
+              f"in its log (failed grabs, stream stats); the videos stay "
+              f"aligned with each other.", flush=True)
+        msg = effective_rate_text(counts)
         print(f"[sync] WARNING: {msg}", flush=True)
         out.append(msg)
 
@@ -722,6 +755,8 @@ class SyncEncodeRouter:
         #: count the preflight cached is probed again.
         self.encoder_failures: list[str] = []
         self._log_every = max(int(fps), 1) * 5 * self._n   # ~5 s of submissions
+        #: kick_counts() of this recording, set by stop(); None before.
+        self.kick_counts = None
         self._since_log = 0
         #: Human-readable problems found at stop(). Empty means the recording's
         #: block-ID bookkeeping matches what was actually persisted.
@@ -959,7 +994,15 @@ class SyncEncodeRouter:
 
     def stop(self):
         """Flush the coordinator, drain + join encoders, return per-camera
-        (count, timestamps, block_ids)."""
+        (count, timestamps, block_ids).
+
+        Called once the grab threads have stopped submitting, so the
+        `[state]` lines here are on the cold path."""
+        t0 = time.monotonic()
+        logging_setup.transition(
+            f"kick-out router stop: flushing the coordinator "
+            f"({self._coord.pending_depth()} triggers pending, "
+            f"{self._n_backlog} frames waiting for encoder queue room)")
         with self._lock:
             self._route(self._coord.flush())
             # Everything still waiting for queue room goes in before the
@@ -968,7 +1011,11 @@ class SyncEncodeRouter:
             # moments, and a wedged one loses the rest of its backlog.
             if self._n_backlog:
                 self._drain_backlogs(time.monotonic() + DRAIN_SENTINEL_TIMEOUT_S)
+        t1 = time.monotonic()
         finish_encoders(self._sinks)
+        logging_setup.transition(
+            f"kick-out router stop: encoders drained and joined in "
+            f"{time.monotonic() - t1:.2f} s (flush {t1 - t0:.2f} s)")
         print(f"[sync] released={self._coord.released} dropped={self._coord.dropped} "
               f"forced={self._coord.forced} queue_full_drops={self.dropped_full}",
               flush=True)
@@ -989,9 +1036,18 @@ class SyncEncodeRouter:
         self.warnings.extend(session_warnings(
             self._coord, self.timestamps, self.block_ids, self._fps,
             self.max_lag, self._rate_hints))
+        #: This recording's kick-out counts (kick_counts), for the metadata.
+        self.kick_counts = kick_counts(self._coord, self._fps)
+        if logging_setup.verbose():
+            print(f"[sync] kick-out counts: {self.kick_counts}", flush=True)
+            for cam, reason in self._coord.retired_reasons:
+                print(f"[sync] cam{cam + 1} retired: {reason}", flush=True)
         for sink in self._sinks:
             sink.write_warnings_file()
             sink.release_ring()
+        logging_setup.transition(
+            f"kick-out router stop done in {time.monotonic() - t0:.2f} s: "
+            f"block IDs reconciled for {self._n} cameras")
         return [(len(self.block_ids[i]), self.timestamps[i], self.block_ids[i])
                 for i in range(self._n)]
 
