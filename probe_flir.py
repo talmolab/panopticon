@@ -1582,6 +1582,9 @@ def _deinit(p: Probe, dev):
 
 
 def stage_list(p: Probe):
+    """--list: every camera the SDK enumerates, what it reports about itself
+    (read only), the profile's camera block checked against it, and a
+    camera_serials line for the profile."""
     devs = p.devices(fresh=True)
     if not devs:
         p.check("list", "cameras enumerated", "FAIL",
@@ -1715,6 +1718,9 @@ def _watch_lines(raw: _Raw, names: list, seconds: float) -> dict:
 
 
 def stage_find_line(p: Probe):
+    """--find-line: the trigger source runs (the board at FIND_LINE_HZ, or
+    the operator's source), and each camera's input lines are watched for
+    FIND_LINE_S; the line that toggles is the one the wire is on."""
     prof = p.profile
     if prof is None or prof.camera is None:
         p.check("find_line", "stage runs", "FAIL",
@@ -2226,6 +2232,9 @@ def _backend_open(p: Probe, dev):
 
 
 def stage_selftest(p: Probe):
+    """--selftest: the free-run measurements on each camera through SpinC,
+    the GIL meter on the first, then the FLIR backend's own open with the
+    profile (its self-test and choices, or its refusal)."""
     devs = p.selected(fresh=True)
     if not devs:
         p.check("selftest", "cameras", "FAIL", "no camera to test")
@@ -2793,6 +2802,9 @@ def _analyse(p: Probe, stage: str, run: dict, stops: dict, fps: float) -> dict:
 
 
 def stage_triggered(p: Probe):
+    """--triggered: a triggered run of the profile's cameras through the FLIR
+    backend at frame_rate for the given seconds, its checks, then the
+    counter checks with Panopticon's board."""
     prof = p.profile
     if prof is None or prof.camera is None:
         p.check("triggered", "stage runs", "FAIL", "needs a FLIR profile")
@@ -3626,6 +3638,9 @@ def stage_exposure_sweep(p: Probe):
 
 # ============================================================ --wrap-test
 def stage_wrap_test(p: Probe):
+    """--wrap-test: once per camera model, free-run until the frame ID wraps
+    or passes 65535, with extended IDs off and on where the camera has
+    GevGVSPExtendedIDMode."""
     devs = p.selected(fresh=True)
     rep = {"per_camera": {}}
     p.report["wrap_test"] = rep
@@ -3766,6 +3781,9 @@ def _ps_get_string(ps, nodemap, name):
 
 
 def stage_pyspin(p: Probe):
+    """--pyspin: PySpin's GetNDArray (view or copy) and the GIL during a
+    PySpin wait, on one camera. PySpin is imported here and nowhere else;
+    under --fake only a module that declares PANOPTICON_FAKE is used."""
     sdk = p.report["sdk"]
     try:
         ps = importlib.import_module("PySpin")
@@ -3943,6 +3961,8 @@ def _collect_plan(p: Probe, root: Path) -> dict:
 
 
 def stage_collect(p: Probe):
+    """--collect: the session folder's logs, metadata and block IDs, the GUI
+    logs and the probe JSONs in one zip, by file name, so no video goes in."""
     root = Path(p.args.collect)
     rep = {"session_dir": str(root), "zip": None, "files": [], "missing": []}
     p.report["collect"] = rep
@@ -4073,6 +4093,7 @@ def validate_report(report) -> list:
 
 
 def print_table(report: dict, json_path: Path):
+    """The PASS/FAIL table, every unknown's answers, and the overall line."""
     checks = report["checks"]
     width = max([len(c["check"]) for c in checks] + [20])
     width = min(width, 64)
@@ -4168,6 +4189,10 @@ def _collect_only(args) -> bool:
 
 
 def main(argv=None) -> int:
+    """Parse `argv`, refuse beside a running Panopticon (except for a
+    --collect-only run), log to the run's own file, run the stages and
+    return the exit code: 0, 1 when a check failed, 130 when interrupted.
+    The guard's refusal exits 3 and argparse's usage error 2."""
     args = _parse(argv)
     if not _collect_only(args):
         # Every stage but --collect opens cameras or the trigger board.
