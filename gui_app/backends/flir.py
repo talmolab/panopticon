@@ -1519,9 +1519,9 @@ class FlirBackend:
             raise FlirConfigError(
                 f"{who}: camera.flir.sdk_dir is {want}, but this process "
                 f"loaded the Spinnaker library from {loaded} when it first "
-                f"enumerated cameras, before the profile's camera: block was "
-                f"read. Set the PANOPTICON_SPINNAKER_DIR environment variable "
-                f"to {want} and restart Panopticon, or remove "
+                f"loaded it (for another profile, a capture worker or the "
+                f"launch check). Set the PANOPTICON_SPINNAKER_DIR environment "
+                f"variable to {want} and restart Panopticon, or remove "
                 f"camera.flir.sdk_dir.")
 
     def _deinit_after_failed_open(self, cam) -> None:
