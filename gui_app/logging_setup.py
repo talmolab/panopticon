@@ -810,6 +810,31 @@ def mark():
     return _sink.mark() if _sink is not None else None
 
 
+#: Tries at putting a new session.log in place of the last one, and the
+#: pause between tries.
+REPLACE_TRIES = 20
+REPLACE_PAUSE_S = 0.05
+
+
+def _replace(tmp: Path, dest: Path) -> None:
+    """os.replace, tried again for up to REPLACE_TRIES * REPLACE_PAUSE_S.
+
+    RULE: a refused replace is tried again before the copy is given up.
+    REASON: on Windows a file another program has open cannot be replaced
+    (a viewer showing session.log, a virus scanner reading the copy just
+    written), and without the retry the session folder keeps the earlier
+    copy, the one without the encode. Runs after the finalize only.
+    """
+    for attempt in range(REPLACE_TRIES):
+        try:
+            os.replace(tmp, dest)
+            return
+        except PermissionError:
+            if attempt == REPLACE_TRIES - 1:
+                raise
+            time.sleep(REPLACE_PAUSE_S)
+
+
 def write_session_log(start, dest, note: str = "",
                       timeout: float = FLUSH_TIMEOUT_S) -> Path | None:
     """Copy the log from `start` (a `mark()`) to now into `dest`.
@@ -845,7 +870,7 @@ def write_session_log(start, dest, note: str = "",
             f.write(head.encode("utf-8"))
             f.write(data)
             f.write(tail.encode("utf-8"))
-        os.replace(tmp, dest)
+        _replace(tmp, dest)
     except OSError as e:
         print(f"[log] could not write {dest}: {e}", flush=True)
         try:
