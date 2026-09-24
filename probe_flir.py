@@ -749,6 +749,8 @@ class _BoardSource:
         self.teensy = None
         self.heard_id = None
         self.stopped = None
+        self.last_start_retried = False
+        self.retry_refused = False
 
     def describe(self) -> str:
         return f"the trigger board on {self.port}"
@@ -794,8 +796,28 @@ class _BoardSource:
     def before_arm(self, fps) -> None:
         pass
 
-    def start(self, fps, what: str = "") -> bool:
-        return bool(self.teensy.start_triggers(self.pins, int(round(fps))))
+    def start(self, fps, what: str = "", *, may_retry) -> bool:
+        """Start the board at `fps` and confirm the start with its RDY ack.
+
+        `may_retry` is start_triggers' veto on its reset and resend, asked
+        when the first ack does not come; None allows them. A caller whose
+        cameras are armed passes a veto, because the reset restarts the
+        board's pulse count but not the cameras' frame IDs: IDs that counted
+        the first attempt's triggers would carry them as an offset, followed
+        by a gap as long as the reset. `retry_refused` and
+        `last_start_retried` say what happened."""
+        self.retry_refused = False
+
+        def veto() -> bool:
+            ok = True if may_retry is None else bool(may_retry())
+            self.retry_refused = not ok
+            return ok
+
+        started = bool(self.teensy.start_triggers(
+            self.pins, int(round(fps)), may_retry=veto))
+        self.last_start_retried = bool(getattr(self.teensy,
+                                               "last_start_retried", False))
+        return started
 
     def stop(self, what: str = "") -> bool:
         ok = bool(self.teensy.stop_triggers(self.pins))
@@ -852,6 +874,8 @@ class _ExternalSource:
 
     kind = "external"
     host_started = False
+    last_start_retried = False
+    retry_refused = False
 
     def __init__(self, profile, fake: bool):
         self.fps = profile.frame_rate
@@ -868,7 +892,9 @@ class _ExternalSource:
         if self.op is not None:
             self.op.before_arm(fps)
 
-    def start(self, fps, what: str = "") -> bool:
+    def start(self, fps, what: str = "", *, may_retry=None) -> bool:
+        """Ask the operator to start the source. `may_retry` is the board's
+        veto and has nothing to veto here: the host sends no start."""
         from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S,
                                             ExternalTriggerSource)
         if what == "find-line":
@@ -898,6 +924,31 @@ class _ExternalSource:
         if self.op is not None:
             self.op.stop()
         return None
+
+
+def _start_failure(src, counted: dict | None = None) -> str:
+    """Why a start of `src` failed. `counted` holds the frames each camera
+    had retrieved when start_triggers asked whether it may reset."""
+    if not src.retry_refused:
+        return "the board did not confirm the start (no RDY ack)"
+    most = max(counted.values()) if counted else 0
+    had = (f"the cameras had already counted up to {most} triggers" if most
+           else "the cameras were already armed and counting")
+    return (f"the board did not confirm the start (no RDY ack), and {had}, "
+            f"so the probe did not reset and restart the board under them: a "
+            f"restart begins a new pulse count while the cameras keep the "
+            f"first one's frame IDs. The board may be triggering while its "
+            f"replies do not reach the host; the probe stopped it. Run the "
+            f"stage again, and check the board's USB cable if it fails the "
+            f"same way.")
+
+
+def _never_reset() -> bool:
+    """start_triggers' veto for the counter runs. Every counter run arms the
+    cameras and resets their counters before it starts the board, so a
+    start whose ack is missing has already put its edges on the counters,
+    and a reset and resend would leave them in every answer."""
+    return False
 
 
 # ================================================================ the probe
@@ -1757,9 +1808,11 @@ def stage_find_line(p: Probe):
             names[serial] = [n for n in raw.entries("LineSelector")] or \
                 [n for n in raw.entries("TriggerSource") if n.startswith("Line")]
         rate = FIND_LINE_HZ if src.host_started else prof.frame_rate
-        if not src.start(rate, "find-line"):
+        # The cameras read their line status and acquire nothing, so a reset
+        # and resend of an unconfirmed start costs this stage nothing.
+        if not src.start(rate, "find-line", may_retry=None):
             p.check("find_line", f"{src.describe()} starts at {rate:g} Hz",
-                    "FAIL", "the board did not confirm the start (no RDY ack)")
+                    "FAIL", _start_failure(src))
             return
         if not src.host_started:
             from gui_app.trigger_source import FIRST_TRIGGER_TIMEOUT_S
@@ -2571,17 +2624,28 @@ def _open_for_trigger(p: Probe, stage: str):
 
 
 def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
-                   seconds: float, record_pass: bool = True) -> dict | None:
+                   seconds: float, record_pass: bool = True,
+                   note: dict | None = None) -> dict | None:
     """Arm every camera, start the source, grab for `seconds`, stop, and
     return the run's raw results, or None after a FAIL. `record_pass` False
-    keeps the start and stop checks out of the table unless they fail."""
+    keeps the start and stop checks out of the table unless they fail.
+    `note` receives the start's outcome, which a failed run also has."""
     be = p.backend
     from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S, STOP_WAIT_S,
                                         ExternalTriggerSource)
     src.before_arm(fps)
     grabbers = []
-    started = stopped = False
+    attempted = started = stopped = False
     run = {"source": src.kind, "fps": fps}
+    counted = {}
+
+    def may_retry() -> bool:
+        # The cameras are armed and their grab threads run, so frames here
+        # mean the board ran the first attempt's triggers and only its ack
+        # is missing.
+        counted.update({g.cam.serial: g.frames_retrieved for g in grabbers})
+        return not any(counted.values())
+
     try:
         for cam in cams:
             be.start_grabbing(cam)
@@ -2601,15 +2665,30 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
             if record_pass:
                 p.check(stage, "no frame arrives before every camera is armed",
                         "PASS")
-        started = src.start(fps, "probe run")
+        attempted = True
+        started = src.start(fps, "probe run", may_retry=may_retry)
         t_start = time.perf_counter()
         run["start_confirmed"] = started
+        run["start_retried"] = src.last_start_retried
+        run["retry_refused"] = src.retry_refused
+        if counted:
+            run["frames_before_retry"] = dict(counted)
+        if note is not None:
+            note.update({k: run[k] for k in (
+                "start_confirmed", "start_retried", "retry_refused",
+                "frames_before_retry") if k in run})
         if not started:
             p.check(stage, f"{src.describe()} starts at {fps:g} Hz", "FAIL",
-                    "the board did not confirm the start (no RDY ack)")
+                    _start_failure(src, counted))
             return None
         if src.host_started:
-            if record_pass:
+            if src.last_start_retried:
+                p.check(stage, f"{src.describe()} starts at {fps:g} Hz",
+                        "WARN", "the board confirmed only after a reset and "
+                        "a second start. No camera had counted a trigger "
+                        "before the reset, so the run is kept; the reset "
+                        "floated the board's pins for about a second.")
+            elif record_pass:
                 p.check(stage, f"{src.describe()} starts at {fps:g} Hz",
                         "PASS", "RDY ack")
         else:
@@ -2673,10 +2752,13 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
         for g in grabbers:
             g.join(2.0)
         run["threads_alive"] = [g.cam.serial for g in grabbers if g.is_alive()]
-        if started and not stopped:
-            # A run that ends early still stops the triggers it started.
-            with contextlib.suppress(Exception):
-                src.stop("probe run")
+        if attempted and not stopped:
+            # A run that ends early still stops the triggers it started, and
+            # a start without its ack may have started them too.
+            try:
+                run["stop_after_early_end"] = src.stop("probe run")
+            except Exception as e:
+                run["stop_after_early_end"] = _err(e)
 
 
 def _stop_cams(p: Probe, cams, grabbers) -> dict:
@@ -2825,7 +2907,8 @@ def stage_triggered(p: Probe):
             return
         rep["board"] = ({"port": src.port, "sketch_id": src.heard_id}
                         if src.kind == "board" else None)
-        run = _run_triggered(p, "triggered", cams, src, fps, seconds)
+        run = _run_triggered(p, "triggered", cams, src, fps, seconds,
+                             note=rep)
         if run is None:
             for cam in cams:
                 with contextlib.suppress(Exception):
@@ -2953,6 +3036,23 @@ def _counter_checks(p: Probe, cams, src) -> dict:
     return out
 
 
+def _counter_start(p: Probe, src, key: str, label: str, active) -> bool:
+    """Start the board for one counter run, with no reset and resend under
+    the armed cameras (_never_reset). The start's outcome goes into each
+    camera's `key` record; a start without its ack fails the run."""
+    started = bool(src.start(COUNTER_HZ, may_retry=_never_reset))
+    note = {"confirmed": started, "retried": src.last_start_retried,
+            "retry_refused": src.retry_refused}
+    for _c, _raw, rec in active:
+        rec[key]["start"] = dict(note)
+    if not started:
+        p.check("triggered", f"{label}: {src.describe()} starts at "
+                f"{COUNTER_HZ} Hz", "FAIL",
+                f"{_start_failure(src)} {label[0].upper()}{label[1:]}'s "
+                f"answers are not measured.")
+    return started
+
+
 def _begin_all(p: Probe, rigs):
     for c, _r, _rec in rigs:
         p.api.begin(c.handle)
@@ -3005,7 +3105,7 @@ def _run_a(p: Probe, rigs, src):
                                        rec["run_a"]["frames"]))
             threads.append(t)
             t.start()
-        started = src.start(COUNTER_HZ)
+        started = _counter_start(p, src, "run_a", "counter run A", active)
         if started:
             time.sleep(RUN_A_S)
         src.stop()
@@ -3132,7 +3232,7 @@ def _run_b(p: Probe, rigs, src):
             pt = threading.Thread(target=poll, daemon=True, args=(raw, b, sels))
             pollers.append(pt)
             pt.start()
-        started = src.start(COUNTER_HZ)
+        started = _counter_start(p, src, "run_b", "counter run B", active)
         if started:
             time.sleep(RUN_B_DRAIN_S)
             for _c, _raw, rec in active:
@@ -3335,7 +3435,7 @@ def _run_c(p: Probe, rigs, src):
                                        rec["run_c"]["frames"]))
             threads.append(t)
             t.start()
-        started = src.start(COUNTER_HZ)
+        started = _counter_start(p, src, "run_c", "counter run C", active)
         t0 = time.perf_counter()
         if started:
             time.sleep(RUN_C_S)
@@ -3448,7 +3548,8 @@ def _run_delay(p: Probe, rigs, src):
     _begin_all(p, active)
     started = started_ok = False
     try:
-        started = src.start(COUNTER_HZ)
+        started = _counter_start(p, src, "delay_test",
+                                 "the counter delay test", active)
         pending = {c.serial for c, _r, _rec in active}
         deadline = time.perf_counter() + 3.0
         base = {c.serial: _counter_read(raw, "Counter0") for c, raw, _rec in active}
@@ -3521,7 +3622,7 @@ def _sweep_step(p: Probe, cams, src, fps: float, e: float, tol: float):
         got, _g = p.backend.set_exposure_gain(cam, exposure_us=e)
         row["per_camera"][cam.serial] = {"exposure_set": got}
     run = _run_triggered(p, "exposure_sweep", cams, src, fps, SWEEP_STEP_S,
-                         record_pass=False)
+                         record_pass=False, note=row)
     if run is None:
         return row, None
     stops = _stop_cams(p, cams, run["grabbers"])
