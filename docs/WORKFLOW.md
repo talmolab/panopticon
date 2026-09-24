@@ -430,7 +430,7 @@ The `Calibration Warnings` dialog also warns about:
 - a camera name that another acquisition of the session records with a
   different serial, because the calibration then describes other cameras.
 
-### Reading the pairwise plot
+### Reading the pairwise calibration plot
 
 `reprojection_error_histogram.png` is a bar chart titled
 `Pairwise calibration quality`, with one bar per camera pair. Each bar is the
