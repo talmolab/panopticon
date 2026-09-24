@@ -1,0 +1,26 @@
+# Template: only the fields every rig has to set. Every other field keeps
+# the default docs/CONFIGURATION.md gives.
+#
+# To use it, copy it into profiles/, give it a name of your own, and replace
+# every value marked SITE. Files in profiles/templates/ never appear in the
+# profile dropdown.
+#
+# Each field here has no default that suits another rig: the defaults are
+# empty, turn a check off, or describe the reference rig's wiring and camera.
+# For FLIR cameras, set camera_backend: flir, remove pfs_path and
+# trigger_rate_limit, and add a camera: block (see flir_usb3.yaml).
+name: my_rig                      # SITE
+camera_backend: basler            # SITE: basler or flir
+pfs_path: configs/mono8_1920x1200.pfs   # SITE: the .pfs saved from your cameras
+frame_width: 1920                 # SITE
+frame_height: 1200                # SITE
+frame_rate: 100                   # SITE
+trigger_rate_limit: 165           # SITE: the camera's maximum frame rate; never 0
+n_cameras: 4                      # SITE
+# SITE: your cameras' serial numbers, quoted, in ascending order as text.
+camera_serials: ["40000001", "40000002", "40000003", "40000004"]
+serial_port: COM3                 # SITE: the trigger board's port
+trigger_pins: [2, 4, 6, 8]        # SITE: every pin wired to a camera trigger input
+stim_safe_pins: []                # SITE: every pin wired to a laser or LED driver
+output_dir: data                  # SITE: your largest, fastest drive
+board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board

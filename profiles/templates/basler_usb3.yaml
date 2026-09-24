@@ -1,0 +1,40 @@
+# Template: Basler USB3 cameras on Panopticon's trigger board.
+#
+# To use it, copy it into profiles/, give it a name of your own, and replace
+# every value marked SITE. Files in profiles/templates/ never appear in the
+# profile dropdown. docs/CONFIGURATION.md describes every field.
+#
+# The values suit four Basler acA1300-200um cameras at 1280x1024 Mono8 and
+# 100 fps, the 3dface rig's camera. USB3 cameras have no GigE settings, so
+# this file sets no gige_driver and no gev_ field: a gev_ field fails the
+# camera open on a USB3 camera.
+name: basler_usb3                 # SITE: unique among the files in profiles/
+metadata_defaults:                # SITE: pre-filled in the sidebar
+  experimenter: ""
+  assay: ""
+camera_backend: basler
+pfs_path: configs/mono8_mono.pfs  # SITE: the .pfs saved from your cameras
+encoder: auto
+n_cameras: 4                      # SITE
+# SITE: your cameras' serial numbers, quoted, in ascending order as text.
+# cam1 is the first entry.
+camera_serials: ["40000001", "40000002", "40000003", "40000004"]
+frame_width: 1280                 # SITE: Width in the .pfs
+frame_height: 1024                # SITE: Height in the .pfs
+frame_rate: 100
+calibration_frame_rate: 30
+trigger_rate_limit: 165           # SITE: the camera's maximum frame rate; never 0
+quality: 21
+realtime_encode: true
+realtime_kick: true
+kick_max_lag: 240
+max_num_buffer: 600               # at least kick_max_lag; 4 x 600 x 1.3 MB = 2.9 GiB
+
+output_dir: data                  # SITE: your largest, fastest drive
+board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
+
+serial_port: COM3                 # SITE: Device Manager > Ports (COM & LPT)
+trigger_pins: [2, 4, 6, 8]        # SITE: every pin wired to a camera trigger input
+stim_safe_pins: []                # SITE: every pin wired to a laser or LED driver
+
+thermal_poll_s: 20
