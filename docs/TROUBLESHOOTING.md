@@ -336,8 +336,8 @@ It shows the exposure applied and the ceiling it was checked against. When the
 exposure asked for is over the ceiling, Panopticon applies the ceiling, and the
 line goes on with ` CLAMPED from <value> us` and the ceiling it applied. A line
 without `CLAMPED` means the exposure was under the computed ceiling, unless the
-line says `ceiling none` or the camera's exposure could not be read when it
-opened: the clamp then had nothing to compare. Otherwise the inputs to the
+line's ceiling reads `none` or the camera's exposure could not be read when it
+opened. The clamp then had nothing to compare. Otherwise the inputs to the
 ceiling are the next suspects: `trigger_rate_limit` against the camera's real
 maximum frame rate, and `frame_rate` against what the board drives.
 
