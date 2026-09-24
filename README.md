@@ -24,7 +24,8 @@ support is in testing.
 - Records and solves a ChArUco calibration, and writes `calibration.toml` in
   aniposelib's format.
 - Compiles an optogenetic stimulation paradigm into the trigger board's firmware, and
-  writes a per-frame record of what it delivered.
+  writes `stim_trace.csv`: for every frame, the stimulus the paradigm was set to
+  deliver. The file is modelled from the firmware and cannot show that the laser fired.
 
 The videos and the calibration open in [LUC3D](https://talmolab.github.io/luc3d/), a
 browser-based tool for multi-view pose annotation
