@@ -498,9 +498,11 @@ What changes:
 - Stimulation needs Panopticon's board, so the Stimulation editor is
   unavailable.
 - Panopticon cannot read your source's rate. Set `frame_rate` and
-  `calibration_frame_rate` to the rates you run it at. The block-ID rate check
-  after each recording compares the two.
-- The profile refuses `serial_port`, `trigger_pins` and `stim_safe_pins`.
+  `calibration_frame_rate` to the rates you run it at. After each recording,
+  the block-ID rate check compares the rate at which each camera's block IDs
+  advanced with the rate you set.
+- The profile refuses `serial_port`, `trigger_pins` and a non-empty
+  `stim_safe_pins`.
 - Wire the source's output to each camera's trigger input with a common ground,
   as in [Wire the trigger](#2-wire-the-trigger). Check that one output can drive
   every input it feeds.
