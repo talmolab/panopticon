@@ -296,9 +296,11 @@ never runs stimulation while you stand in the arena.
 Flip Calibrate on. The cameras switch to triggered mode at
 `calibration_frame_rate` (30 fps on the reference rig), and the preview shows
 every frame. The profile's `calibration_exposure_us` and `calibration_gain_db`
-replace the recording values for this acquisition only. Panopticon caps that
-exposure at 90% of the exposure ceiling at the calibration rate. When it does,
-the camera's exposure line in the log says `CLAMPED`
+replace the recording exposure and gain for this acquisition only. An exposure
+of 0 or a gain of -1 keeps the recording value, and the reference rig keeps its
+recording gain this way. Panopticon caps the exposure at 90% of the exposure
+ceiling at the calibration rate. When it does, the camera's exposure line in
+the log says `CLAMPED`
 ([CONFIGURATION.md](CONFIGURATION.md#calibration_exposure_us)). The next
 recording uses the exposure from the camera settings again.
 
@@ -309,10 +311,8 @@ board, and a blurred board yields no corners.
 
 The coverage display in the sidebar shows what the cameras have seen.
 [OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
-what READY needs. The figures were drawn for a six-camera
-profile, before the caption gained its `groups` segment. Your caption reads
-`paired <worst>/<target>  grid <worst>/<cells>  groups <n>/1`, against your
-profile's thresholds.
+what READY needs, and gives the caption's format. The figures come from a
+six-camera profile, and their captions lack the `groups` segment yours shows.
 
 | | |
 |---|---|
@@ -403,11 +403,12 @@ view of one row of the board, and says how many it skipped per camera.
 
 A solve that drops cameras still succeeds. The `Calibration Warnings` dialog
 then starts with `PARTIAL: solved N of M cameras.` and names each dropped
-camera with its reason. The log ends with the cameras that went in:
+camera with its reason. The log then names the cameras that went in:
 
 ```
 Calibration complete (PARTIAL).
   ...\calibration\calibration.toml
+  REPORT_PATH=...\calibration\calibration_report.json
   Cameras: cam1 cam2 cam3 cam5 cam6
 ```
 
@@ -417,8 +418,10 @@ see it.
 
 The solve fails, with a `Calibration Failed` dialog, when too few cameras are
 left to place: fewer than two with detections or lens models, no pair that saw
-the board together, or fewer than two connected. It also fails
-without a calibration folder or videos, and with a board file it cannot use.
+the board together, or fewer than two connected. It also fails with a board
+file it cannot use. Before any solve runs, a missing calibration folder or
+missing videos give a `No Data` dialog, and a missing board file a
+`Missing Board Config` dialog.
 
 The `Calibration Warnings` dialog also warns about:
 
