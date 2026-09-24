@@ -31,8 +31,8 @@ Live video from every open camera. The grid has as many rows as the square
 root of the camera count, rounded down, and as many columns as it then needs.
 That puts 4 cameras in 2 × 2, 6 in two rows of three, 9 in 3 × 3. The preview
 shows each frame downsampled 3× per axis, so 1920 × 1200 becomes 640 × 400. It
-repaints on a timer that slows as the camera count grows, which keeps display
-work away from capture.
+repaints every 33 × N / 6 ms for N cameras, at least 33 ms and at most 100 ms
+apart, which keeps display work away from capture.
 
 | State | Cameras | Frames the preview gets |
 |---|---|---|
@@ -54,8 +54,10 @@ camera, and double-click it again to go back.
 
 #### 3. Frame rate
 
-The camera's delivered frame rate over its last ten frames, refreshed about
-three times a second. It should read about 30 at idle, the calibration rate
+The camera's delivered frame rate over its last ten frames, refreshed every
+tenth repaint (1). That is about three times a second up to six cameras, and
+twice a second on the nine-camera reference rig. It should read about 30 at
+idle, the calibration rate
 while calibrating and the trigger rate while recording. One pane reading low
 while the others are right is usually the first sign of trouble with that
 camera's link or trigger.
@@ -195,7 +197,7 @@ not. Do not end Panopticon during a flash
 
 Carries the hardware check's progress, snapshot results, the solve's progress
 and the encode summary after a stop. During a recording it reports capture
-health about three times a second.
+health each time the frame-rate labels (3) refresh.
 [WORKFLOW.md](WORKFLOW.md#while-it-records) lists the messages. Problems found
 after a stop also go into `WARNINGS.txt`, because a dialog is easily
 dismissed.

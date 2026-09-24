@@ -757,8 +757,9 @@ every tenth frame during a recording.
 
 With real-time kick-out (`realtime_kick: true`, the default), Panopticon
 drops every trigger that some camera missed while it records, so every video
-holds the same triggers. The status bar reports capture health about three
-times a second. In kick-out it counts how many triggers the slowest camera is
+holds the same triggers. The status bar reports capture health each time
+the [frame-rate labels](OVERVIEW.md#3-frame-rate) refresh. In kick-out it
+counts how many triggers the slowest camera is
 behind the fastest, against a cap of `kick_max_lag` (480 on the reference
 rig).
 
