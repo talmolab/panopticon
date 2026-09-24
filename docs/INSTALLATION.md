@@ -100,10 +100,12 @@ on that false value.
 ### A trigger source
 
 Panopticon always triggers the cameras in hardware. Free-running cameras drift
-apart, because each runs on its own oscillator. A shared TTL edge makes frame
-*N* of every camera the same instant, to within the cameras' trigger-to-exposure
-jitter, and each frame carries the camera's count of the triggers it acquired,
-its [block ID](GLOSSARY.md#block-id). Alignment rests on that count.
+apart, because each runs on its own oscillator. A shared TTL trigger makes frame
+*N* of every camera the same instant, to within the gap between trigger pins
+([Wiring the trigger line](#wiring-the-trigger-line)) and the cameras'
+trigger-to-exposure jitter. Each frame carries the camera's count of the
+triggers it acquired, its [block ID](GLOSSARY.md#block-id). Alignment rests on
+that count.
 
 | Source | Profile | Stimulation |
 |---|---|---|
@@ -160,12 +162,12 @@ Each camera also needs:
   driven by current, so read two numbers in the camera's I/O documentation: the
   switching threshold and the current the input draws.
 
-The sketch switches every pin in `trigger_pins` inside one `noInterrupts()`
-block, so every pin changes at the same moment. campy, the firmware this one
-comes from, documents about 30 ns between pins. One pin can therefore drive
-several cameras, if it can source the current they all draw. An ATmega2560 pin
-is rated for about 20 mA. One pin per camera gives each input the full 20 mA.
-The reference rig drives nine cameras from six pins.
+The sketch writes every pin in `trigger_pins` in one loop with interrupts off,
+so no interrupt can widen the gap between pins. The pins still change one after
+another, microseconds apart. Cameras on one pin share one edge. One pin can
+therefore drive several cameras, if it can source the current they all draw.
+An ATmega2560 pin is rated for about 20 mA. One pin per camera gives each input
+the full 20 mA. The reference rig drives nine cameras from six pins.
 
 A camera driven with too little current misses a trigger now and then. A
 missed trigger consumes no block ID and leaves no gap in `blockids.npy`, so the
