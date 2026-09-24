@@ -511,12 +511,11 @@ It provides the camera driver, pylon Viewer (step 6), and the IP Configurator
 and PylonGigEConfigurator (step 5).
 
 For FLIR cameras, skip this step and install the Spinnaker SDK as
-[FLIR.md](FLIR.md#1-install) describes. `camera.flir.sdk_dir` and the
-`PANOPTICON_SPINNAKER_DIR` environment variable may name the SDK's install
-folder, or the folder inside it that holds `SpinnakerC_v140.dll`
-(`bin64\vs2015`). Panopticon never adds that folder to `PATH`, because it also
-holds Qt libraries that would replace PyQt5's. The library is 64-bit, so
-Panopticon needs a 64-bit Python, which uv installs.
+[FLIR.md](FLIR.md#1-install) describes. The folder that `camera.flir.sdk_dir`
+or `PANOPTICON_SPINNAKER_DIR` names may also be `bin64\vs2015` inside the
+install, which holds `SpinnakerC_v140.dll`. Panopticon never adds that folder
+to `PATH`, because it also holds Qt libraries that would replace PyQt5's. The
+library is 64-bit, so Panopticon needs a 64-bit Python, which uv installs.
 
 Check the install:
 
@@ -764,10 +763,9 @@ Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Interrupt Modera
 A newly added port does not inherit these settings, and Energy Efficient
 Ethernet and interrupt moderation default to on. Set them on every camera port.
 
-Receive-side scaling (RSS) spreads a port's receive work over cores.
 `configure_nic.ps1 -Check` reads each camera port's receive buffers, interrupt
-moderation, RSS and DPC placement, and prints PASS or WARN for each. It changes
-nothing, so it is safe during a recording. Run it from an elevated PowerShell:
+moderation, RSS ([CPU](#cpu)) and DPC placement, and prints PASS or WARN for
+each. It changes nothing, so it is safe during a recording. Run it from an elevated PowerShell:
 without elevation Windows reports RSS values that are not the adapter's
 settings, and the script then leaves the RSS check unjudged. Any other tool
 that reads RSS, `Get-NetAdapterRss` included, needs elevation too.
@@ -1269,11 +1267,9 @@ maximum 2 frames.
 
 `Resend_Request_Count` counts packets lost and asked for again, and
 `Failed_Buffer_Count` counts frames given up on. A high resend count with no
-failed buffers means the link recovers every packet. Each resend still arrives
-late and completes that camera's frame late, so the camera falls behind with no
-frame lost ([the flow-control measurement](#configure-the-switches)). Treat a
-resend count a thousand times the other cameras' as a fault even when every
-frame arrives.
+failed buffers means the link recovers every packet, each one late
+([Configure the switches](#configure-the-switches)). Treat a resend count a
+thousand times the other cameras' as a fault even when every frame arrives.
 
 Measure on an otherwise idle machine. Other programs' CPU load once moved the
 cycle from 10.00 to 10.32 ms, which builds up 5.6 seconds of backlog in 150

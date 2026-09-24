@@ -104,7 +104,7 @@ Calibrate stay disabled while it runs.
 | Message or symptom | Cause and fix |
 |---|---|
 | `cores detected (4+ recommended for multi-camera capture)` | The CPU is below the floor for running at all ([INSTALLATION.md](INSTALLATION.md#cpu)). |
-| `GB total (16 GB+ recommended)` | The RAM is below the floor for running at all, and a 16 GB machine usually gets this ([INSTALLATION.md](INSTALLATION.md#ram)). The capacity check at Record decides whether a recording fits. |
+| `GB total (16 GB+ recommended)` | The RAM is below the floor for running at all ([INSTALLATION.md](INSTALLATION.md#ram)). The capacity check at Record decides whether a recording fits. |
 | `GB free (500 GB+ recommended)` | The output drive has little free space. Real-time H.264 needs little, and raw capture needs a lot ([INSTALLATION.md](INSTALLATION.md#disk)). |
 | `Disk write speed: <n> MB/s` | The output drive writes slowly. It matters only for raw capture ([INSTALLATION.md](INSTALLATION.md#disk)). |
 | `No working NVENC on this machine` | Neither NVENC library works. The report's `Using:` line names the encoder installed instead. Check the NVIDIA driver. |
@@ -128,7 +128,7 @@ Calibrate stay disabled while it runs.
 | `no candidate camera adapters found` | No adapter has an address on a private subnet. Give each camera adapter its static address. |
 | Cameras open but every frame is incomplete, `Failed_Buffer_Count` climbing | A device in the path is at 1500-byte frames. Set 9216 on every switch port, the uplink included, then run the sweep in [INSTALLATION.md step 7](INSTALLATION.md#test-the-network-with-the-profile). |
 | The sweep prints `FAIL` after a `complete=` count | Frames did not arrive whole at that packet size. See the row above. |
-| High `Resend_Request_Count`, with or without lost frames | Check the switches' flow control first ([INSTALLATION.md](INSTALLATION.md#configure-the-switches)), on every port and the uplink. Then jumbo frames, Energy Efficient Ethernet, and cameras per port. Resends arrive late, so a camera with many can fall behind with no frame lost. |
+| High `Resend_Request_Count`, with or without lost frames | Check the switches' flow control first ([INSTALLATION.md](INSTALLATION.md#configure-the-switches)), on every port and the uplink. Then jumbo frames, Energy Efficient Ethernet, and cameras per port. |
 | About a quarter of the frames missing, in single-frame gaps | `gige_driver: filter` drops a frame with a lost packet instead of asking for it again. Use `socket`. |
 | A camera records at half the trigger rate, and its port runs at 2.5 Gbit/s | The inter-packet delay makes each frame take longer than the trigger period ([INSTALLATION.md](INSTALLATION.md#the-cameras-own-link)). Move it to a 5 Gbit/s port. |
 | Cameras disappear right after a network adapter change | Changing adapter settings resets the adapter. The cameras come back within seconds. |
@@ -216,7 +216,7 @@ Most of these appear in the status bar.
 | `EVERY CAMERA IS RETIRED: nothing is being recorded. Stop the recording.` | Stop, and read the retirement reasons in the log. |
 | `NO FRAMES from <cams> for <n> s` | Those cameras have delivered nothing for that long. Check their trigger cables and network links. |
 | `NO FRAMES FROM ANY CAMERA for <n> s: the trigger board may have stopped.` | Every camera stopped receiving frames at once, so the trigger source or the network to all cameras stopped. A `No frames from any camera` dialog opens and says whether the board's serial link still answers. On a profile with `stim_safe_pins` the dialog says to check the laser: do so. |
-| `CAMERA TEMPERATURE: <cam> <t> C` | The camera is near its shutdown temperature, or in its over-temperature state. Check its airflow and mount ([INSTALLATION.md](INSTALLATION.md#camera-temperature)). A camera at its shutdown point stops delivering. |
+| `CAMERA TEMPERATURE: <cam> <t> C` | The camera is near its shutdown temperature, or in its over-temperature state. Check its airflow and mount ([INSTALLATION.md](INSTALLATION.md#camera-temperature)). |
 | One camera's pane shows about half the trigger rate | Exposure over the ceiling, or a 2.5 Gbit/s link ([The network](#the-network)). The camera ignores every second trigger. See [the out-of-sync section](#the-recording-looks-fine-but-the-views-are-out-of-sync). |
 | `Waiting for the first trigger: start your trigger source now` | `trigger_source: external`: start your source. |
 | `Triggers arriving:` | `trigger_source: external`: the recording runs. Stop your source to finish it. |
@@ -268,7 +268,7 @@ runs after the encode, and its rows appear in dialogs of their own, such as
 | `Alignment failed: <error> — videos left as-is` | The status line for the row above. |
 | `Not replacing any video:` | A camera recorded nothing, or no trigger is common to every camera. The message gives the `--exclude` or `--truncate-to-shortest` command to run. |
 | `raw.bin holds <n> whole frames but <n> were recorded` | The disk lost the last frames of this camera. Its block IDs and frame times were cut to the frames on disk. |
-| One camera stops delivering partway through a recording, the others fine | Check its temperature first, then its power and its link. A camera at its shutdown temperature stops sending frames. |
+| One camera stops delivering partway through a recording, the others fine | Check its temperature first ([INSTALLATION.md](INSTALLATION.md#camera-temperature)), then its power and its link. |
 | `cycle` in a grab thread's line above the trigger period | That grab loop does not finish inside one period. Another program uses the CPU, or a change added work to the loop ([INSTALLATION.md](INSTALLATION.md#3-verify-it-works)). |
 | `Buffer_Underrun_Count` above 0 | The driver's buffer pool ran dry, so the host fell behind. The network is not the cause. |
 | A video does not seek in LUC3D | The mp4 lacks a keyframe every second. The launch check proves the keyframe setting, and says `GOP NOT APPLIED` when it fails. Report the log and the encoder the report names. |
