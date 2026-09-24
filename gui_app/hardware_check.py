@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1146,6 +1147,247 @@ def format_report(report: HardwareReport) -> str:
         for w in report.warnings:
             lines.append(f"  - {w}")
     return "\n".join(lines)
+
+
+# --- the session header's environment facts ---------------------------------
+#: Distributions the header reports by version, read from their installed
+#: metadata so that none of them is imported: on a FLIR rig, importing
+#: pypylon to read its version would load an SDK the rig does not use.
+HEADER_PACKAGES = ("pypylon", "PyNvVideoCodec", "numpy",
+                   ("opencv-contrib-python", "opencv-python",
+                    "opencv-python-headless"), "PyQt5", "psutil")
+
+#: What Windows reports through a 32-bit bits-per-second counter for a link
+#: at or above 2**32 b/s, in the Mb/s psutil gives.
+_SPEED_32BIT_MBPS = 2 ** 32 // 10 ** 6
+
+_env_lock = threading.Lock()
+#: The facts that do not change while the process runs, gathered once.
+_env_static: list | None = None
+
+
+def _unavailable(e) -> str:
+    return f"unavailable ({type(e).__name__}: {e})"
+
+
+def _quiet_run(cmd, timeout_s: float = 5.0):
+    """subprocess.run without a console window over the GUI under pythonw."""
+    try:
+        quiet = ffmpeg_cmd.quiet_popen_kwargs()
+    except Exception:
+        quiet = {}
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=timeout_s, stdin=subprocess.DEVNULL,
+                          **quiet)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _panopticon_version() -> str:
+    """The version in pyproject.toml and the git commit, or why not."""
+    root = _repo_root()
+    try:
+        import tomllib
+        with open(root / "pyproject.toml", "rb") as f:
+            version = str(tomllib.load(f)["project"]["version"])
+    except Exception as e:
+        version = _unavailable(e)
+    try:
+        r = _quiet_run(["git", "-C", str(root), "rev-parse", "--short=12",
+                        "HEAD"])
+        if r.returncode != 0 or not r.stdout.strip():
+            return f"{version}, not a git checkout"
+        commit = r.stdout.strip()
+        r = _quiet_run(["git", "-C", str(root), "status", "--porcelain",
+                        "--untracked-files=no"])
+        dirty = (" with uncommitted changes to tracked files"
+                 if r.returncode == 0 and r.stdout.strip() else "")
+        return f"{version}, git commit {commit}{dirty}"
+    except FileNotFoundError:
+        return f"{version}, not a git checkout (git is not installed)"
+    except Exception as e:
+        return f"{version}, git commit {_unavailable(e)}"
+
+
+def _os_text() -> str:
+    import platform
+    text = platform.platform()
+    try:
+        v = sys.getwindowsversion()
+        text += f" (Windows build {v.build})"
+    except AttributeError:
+        pass
+    return text
+
+
+def _cpu_model() -> str:
+    """The CPU's marketing name: the registry on Windows, /proc/cpuinfo on
+    Linux, platform.processor() otherwise."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+        try:
+            return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        pass
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.lower().startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    import platform
+    return platform.processor() or "unavailable (not reported)"
+
+
+def _cpu_text() -> str:
+    try:
+        model = _cpu_model()
+    except Exception as e:
+        model = _unavailable(e)
+    try:
+        layout = (f"{psutil.cpu_count(logical=False) or '?'} physical cores, "
+                  f"{psutil.cpu_count(logical=True) or '?'} logical")
+    except Exception as e:
+        layout = _unavailable(e)
+    try:
+        from gui_app import cpu_affinity
+        classes = cpu_affinity.describe_classes(cpu_affinity.cpu_classes())
+        classes = classes.replace("[affinity] CPU efficiency classes: ",
+                                  "efficiency classes ")
+    except Exception as e:
+        classes = f"core classes {_unavailable(e)}"
+    return f"{model}; {layout}; {classes}"
+
+
+def _gpu_text() -> str:
+    try:
+        r = _quiet_run(["nvidia-smi", "--query-gpu=name,driver_version,"
+                        "memory.total", "--format=csv,noheader"], 10.0)
+    except FileNotFoundError:
+        return "unavailable (nvidia-smi is not on PATH)"
+    except Exception as e:
+        return _unavailable(e)
+    rows = [row.strip() for row in r.stdout.splitlines() if row.strip()]
+    if r.returncode != 0 or not rows:
+        return f"unavailable (nvidia-smi exit {r.returncode})"
+    out = []
+    for i, row in enumerate(rows):
+        parts = [x.strip() for x in row.split(",")]
+        if len(parts) >= 3:
+            out.append(f"GPU {i} {parts[0]}, NVIDIA driver {parts[1]}, "
+                       f"{parts[2]}")
+        else:
+            out.append(f"GPU {i} {row}")
+    return "; ".join(out)
+
+
+def _package_text() -> str:
+    from importlib import metadata
+    out = []
+    for entry in HEADER_PACKAGES:
+        names = entry if isinstance(entry, tuple) else (entry,)
+        for name in names:
+            try:
+                out.append(f"{name} {metadata.version(name)}")
+                break
+            except metadata.PackageNotFoundError:
+                continue
+            except Exception as e:
+                out.append(f"{name} {_unavailable(e)}")
+                break
+        else:
+            out.append(f"{names[0]} not installed")
+    return ", ".join(out)
+
+
+def _network_text() -> str:
+    """Every network interface that is up, with the link speed and MTU the
+    OS reports. Which camera sits behind which port is probe_network.py's
+    job; this records what each port negotiated."""
+    try:
+        stats = psutil.net_if_stats()
+    except Exception as e:
+        return _unavailable(e)
+    out = []
+    for name, st in sorted(stats.items()):
+        if not st.isup or name.lower().startswith(("loopback", "lo")):
+            continue
+        if not st.speed:
+            speed = "speed not reported"
+        elif st.speed == _SPEED_32BIT_MBPS:
+            speed = f"at least {st.speed} Mb/s (the OS counter's top)"
+        else:
+            speed = f"{st.speed} Mb/s"
+        out.append(f"{name} {speed} MTU {st.mtu}")
+    return "; ".join(out) or "no interface is up"
+
+
+def _static_facts() -> list:
+    facts = []
+    for label, fn in (("panopticon", _panopticon_version),
+                      ("python", lambda: f"{sys.version.split()[0]} "
+                                         f"({sys.executable})"),
+                      ("os", _os_text), ("cpu", _cpu_text),
+                      ("gpu", _gpu_text), ("packages", _package_text),
+                      ("network", _network_text)):
+        try:
+            facts.append((label, fn()))
+        except Exception as e:
+            facts.append((label, _unavailable(e)))
+    return facts
+
+
+def _nvenc_cap_text() -> str:
+    if _nvenc_probe_error:
+        return f"unknown (the last probe could not run: {_nvenc_probe_error})"
+    if _nvenc_sessions is None:
+        return "not probed yet (the hardware check reports it)"
+    if _nvenc_sessions < 0:
+        return "NVENC unavailable in this process"
+    if _nvenc_saturated:
+        return (f"at least {_nvenc_sessions} (the probe stopped at the count "
+                f"it needed)")
+    return f"{_nvenc_sessions} (the driver refused the next session)"
+
+
+def environment_facts(camera_sdk: str = "") -> list:
+    """(label, value) pairs for the session header: Panopticon's version
+    and git commit, Python, the OS build, the CPU model and core layout,
+    RAM, the GPU and NVIDIA driver, the NVENC session cap, package versions,
+    the network interfaces, and `camera_sdk` (the loaded backend's
+    sdk_report, the Spinnaker version and DLL path on a FLIR rig).
+
+    RULE: never raises, and a fact that cannot be read says "unavailable"
+    with the reason. REASON: the header is written at every acquisition
+    start, and a missing tool on a volunteer's machine must cost a line of
+    the header, not the start.
+
+    RULE: cold path only, never on the UI thread for the first call. REASON:
+    the first call runs git and nvidia-smi, which take up to seconds; the
+    facts that cannot change while the process runs are kept after it, and
+    later calls only read RAM and the cached NVENC count.
+    """
+    global _env_static
+    with _env_lock:
+        if _env_static is None:
+            _env_static = _static_facts()
+        facts = list(_env_static)
+    try:
+        mem = psutil.virtual_memory()
+        facts.insert(4, ("ram", f"{mem.total / 2 ** 30:.1f} GiB total, "
+                                f"{mem.available / 2 ** 30:.1f} GiB "
+                                f"available"))
+    except Exception as e:
+        facts.insert(4, ("ram", _unavailable(e)))
+    facts.insert(6, ("nvenc session cap", _nvenc_cap_text()))
+    facts.append(("camera sdk", camera_sdk or "no camera backend loaded"))
+    return facts
 
 
 class HardwareCheckThread(QThread):
