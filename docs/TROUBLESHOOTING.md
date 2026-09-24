@@ -426,7 +426,7 @@ to read the pairwise plot.
 | `STOP NOT CONFIRMED — stim may still be running.` | The board did not accept the stop, and a looping chain never ends on its own. Power-cycle the board and switch the laser off. |
 | The paradigm did not run | It was probably never applied. Editing the canvas changes nothing until **Apply**. `matches_uploaded_firmware` in `stim_paradigm.json` records whether the canvas matched the flash. |
 | A paradigm ran that nobody chose | The launch flash should prevent it. Look for `Could not clear stim firmware` at launch. Firmware survives closing Panopticon. |
-| `[teensy] no ack — reopening port to force a board reset` | Once is normal: the start is retried after a reset. |
+| `[teensy] no ack — reopening port to force a board reset` | Once is normal: the start is retried after a reset. The reset floats the board's pins during that start ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `[teensy] board speaks RDY but did not confirm — aborting` | The board has confirmed before, so silence now is a fault. The start was rolled back. Check the cable and the power. |
 
 ## The post-session tools
