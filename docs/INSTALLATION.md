@@ -215,10 +215,17 @@ The frame rate moves the number most: 1280x1024 at 100 fps still needs
 
 The link speed also decides how long one frame takes to send. The camera leaves
 a gap between its packets, the [inter-packet delay](GLOSSARY.md#inter-packet-delay)
-(`GevSCPD` on a Basler camera), so that cameras sharing a port do not burst into each other. One frame
-then takes (packets per frame) x (packet time on the wire + delay). That time
-has to fit inside the trigger period. A camera still sending when the next
-trigger arrives ignores that trigger.
+(`GevSCPD` on a Basler camera), so that cameras sharing a port do not burst
+into each other. A delay of 0 sends each frame as one burst, and the bursts of
+cameras sharing a port collide at the switch. One frame then takes
+(packets per frame) x (packet time on the wire + delay). That time has to fit
+inside the trigger period. A camera still sending when the next trigger
+arrives ignores that trigger.
+
+Keep the frame time at least a millisecond inside the period. On the reference
+rig at 5 Gbit/s and 100 fps, `GevSCPD` 20000 (about 8.9 ms per frame) kept the
+full frame rate. At 22000 (about 9.5 ms) every camera recorded half the
+trigger rate.
 
 With the reference camera settings (9000-byte packets, `GevSCPD` 10000, which is
 10 µs) a 1920x1200 frame is about 260 packets:
@@ -233,8 +240,8 @@ the 10 ms period, although the link's bandwidth would carry the camera's
 1.84 Gbit/s. The recording looks normal, and the block-ID rate check after it
 reports that camera at half the trigger rate. Keep
 every camera on a port that negotiates 5 Gbit/s or more. On a 2.5 Gbit/s link,
-`GevSCPD` would have to drop to about 3000, and the rig would need testing again
-at that setting.
+`GevSCPD` would have to drop to about 3000 (about 8.3 ms per frame), and the rig
+would need testing again at that setting.
 
 #### The host port and the switches
 
