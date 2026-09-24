@@ -342,9 +342,10 @@ until someone analyses it.
   then spill that camera's frames raw) and leaves the pinned path on for the
   others. In a working tree that has the local-only suites, also run
   `test_nvgil.py --gpu` after a PyNvVideoCodec or driver update.
-- The profile reaches `nvenc` only through
+- In the window, the profile reaches `nvenc` only through
   `hardware_check.configure_nvenc_upload`, at launch and after a profile switch,
-  before any encoder exists and before the GOP check. `nvenc_context: own` needs
+  before any encoder exists and before the GOP check. A capture worker applies
+  the choice its parent sends when it arms. `nvenc_context: own` needs
   free GPU memory for one extra context per camera (`own_context_headroom`);
   without it the shared context is used, with a warning.
 - A `PinnedUploadEncoder` counts itself closed only after its buffers, stream
