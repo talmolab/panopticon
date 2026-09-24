@@ -48,7 +48,8 @@ These modules run while the cameras stream:
   their priority;
 - `gui_app/camera_manager.py`, which starts and stops every acquisition;
 - `gui_app/trigger_source.py`, which arms every camera before the first trigger;
-- `gui_app/logging_setup.py`, which every print from a capture thread goes through;
+- `gui_app/logging_setup.py`, which takes every print from a capture thread and must
+  never make that thread wait;
 - `gui_app/mp/`, the multi-process capture workers;
 - `gui_app/backends/`, the camera backends.
 
@@ -68,9 +69,8 @@ Without that, the change waits.
 [CLAUDE.md](CLAUDE.md) holds the rules these modules rely on. Among them: the grab loop
 reads each frame through a zero-copy view, the NV12 ring is pre-faulted, NVENC sessions
 are counted, and `blockids.npy` lists only frames that were persisted. Every mp4 gets
-`-g <fps>` and `+faststart`, and no capture thread waits for the log. Read it before you
-edit the capture path. A change that breaks one of those rules is wrong, whatever the
-tests say.
+`-g <fps>` and `+faststart`. Read it before you edit the capture path. A change that
+breaks one of those rules is wrong, whatever the tests say.
 
 ## Adding a camera backend
 
