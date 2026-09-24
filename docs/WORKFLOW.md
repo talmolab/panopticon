@@ -244,10 +244,10 @@ mouse ID sends it to another folder. Until you type into Date, it moves to the
 new day when you press Calibrate or Record. A session started after midnight
 is then filed under the day it started.
 
-A value that cannot be part of a folder name is refused with a
-`Check the session details` dialog. That covers a slash, `..`, a reserved
-Windows name and a trailing dot or space. The fields lock while an acquisition
-or a solve runs.
+A Date that is not a `YYYYMMDD` calendar date is refused with a
+`Check the session details` dialog. So is a value that cannot be part of a
+folder name, such as one with a slash, `..`, a reserved Windows name or a
+trailing dot or space.
 
 Press Snapshot to save one full-resolution PNG per camera into
 `<session>/snapshots/<date>_<HHMMSS>/`.
@@ -832,8 +832,8 @@ order:
    and nothing is kept. Cancel on the prompt also ends the start and keeps
    nothing.
 4. To finish, stop the source. The recording ends once no camera has received
-   a frame for 2 s. If you press Record first, the label reads
-   `STOP YOUR TRIGGER SOURCE`. Panopticon waits up to 30 s for the source to
+   a frame for 2 s. If you flip Record off before you stop the source, the
+   label reads `STOP YOUR TRIGGER SOURCE`. Panopticon waits up to 30 s for the source to
    stop, then stops the cameras itself and notes it in `WARNINGS.txt`.
 
 Panopticon cannot read the source's rate. After the recording, the block-ID
@@ -970,9 +970,9 @@ Closing the window while work runs asks first, with No as the default:
 | State | What Yes does |
 |---|---|
 | `RECORDING` or `CALIBRATING` | Deletes the unfinished capture |
-| `ENCODING` | Keeps the capture. Run `0_encode.py`, then `2_align.py`, on the folder |
+| `ENCODING` | Keeps the capture. Run `0_encode.py`, then `2_align.py` on the folder, with `--replace` for a recording made without kick-out |
 | `ALIGNING` | Keeps the videos, partly aligned. Run `2_align.py --replace`, then `3_stim_trace.py` |
-| A solve or a camera operation | Cancels it, and deletes no data |
+| A solve, a profile switch or a camera operation | Cancels it, and deletes no data |
 
 The dialog names the commands for your folder. Panopticon does not close
 during a firmware flash.
