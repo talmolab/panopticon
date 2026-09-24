@@ -126,12 +126,19 @@ To see which adapter each camera answers on, run:
 uv run probe_network.py
 ```
 
-Once the profile exists (section 3), `uv run probe_network.py --sweep` grabs
-frames from each camera at packet sizes from 1500 to 9000 bytes, and prints how
-many arrived complete at each size. A clean cutoff between two sizes means a
-device in that camera's path does not pass jumbo frames. The GigE template sets
-`camera.flir.packet_size: 9000`, which needs every size in the sweep to pass.
-The sweep skips USB3 cameras.
+Once the profile exists (section 3), run the packet-size sweep with your
+profile's name:
+
+```powershell
+uv run probe_network.py --sweep --profile my_lab
+```
+
+It grabs frames from each camera at packet sizes from 1500 to 9000 bytes, and
+prints how many arrived complete at each size. A clean cutoff between two sizes
+means a device in that camera's path does not pass jumbo frames. The GigE
+template sets `camera.flir.packet_size: 9000`, which needs every size in the
+sweep to pass. The sweep skips USB3 cameras. Keep `--profile`: without it, the
+sweep uses a shipped Basler profile until Panopticon has opened yours.
 
 ### The trigger board
 
