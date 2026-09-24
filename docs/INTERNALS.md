@@ -627,12 +627,10 @@ case moved wall time by a factor of 127 while the executed cycles moved by
 
 The frame is copied out as soon as it is retrieved, because the driver buffer
 has to go back promptly and the encoder takes the frame later. The copy goes
-into an NV12 buffer, the layout NVENC takes: a full-size 8-bit luma plane and
-a half-size chroma plane. A Mono8 frame is the luma plane and neutral chroma is
-a constant 128, so the copy is one memcpy into the top `height` rows
-([NV12 from Mono8](#nv12-from-mono8)). Allocating a buffer per frame would put
-an allocation and a first-touch page fault on the loop, so each grab thread
-allocates its ring once, when a recording starts:
+into a buffer in NVENC's input layout, [NV12](#nv12-from-mono8), and is one
+memcpy into the buffer's top `height` rows. Allocating a buffer per frame
+would put an allocation and a first-touch page fault on the loop, so each grab
+thread allocates its ring once, when a recording starts:
 
 ```python
 slot = np.full((height * 3 // 2, width), 128, np.uint8)   # one NV12 buffer
