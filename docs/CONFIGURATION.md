@@ -686,10 +686,13 @@ Text, a path. Default `""`. Reference rig: `data`.
 
 - Does: The folder sessions are written under, as
   `<output_dir>\<date>\<mouse_1>_<mouse_2>\` ([WORKFLOW.md](WORKFLOW.md#paths-and-names)).
-  The sidebar's folder button overrides it until you switch profile or restart.
+  The sidebar's folder button overrides it until you restart, or switch to a
+  profile that sets `output_dir`.
 - Change when: Point it at your largest, fastest drive.
-- Goes wrong: The disk check at Record measures this drive. Left empty, the
-  sidebar uses `data` in the repository folder.
+- Goes wrong: The disk check at Record measures the folder the button shows. Left
+  empty, the sidebar keeps the folder it already shows, which can be another
+  profile's `output_dir`, a folder picked by hand, or its default, `data` in the
+  repository folder. Set it in every profile.
 
 #### `board_config`
 
