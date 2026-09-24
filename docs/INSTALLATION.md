@@ -361,7 +361,8 @@ ring), 31.2 GiB available. Lower `max_num_buffer` or `kick_max_lag` in the rig
 profile, or close other applications.
 ```
 
-Above 75% of available memory it warns and asks before proceeding.
+When it fits, the start goes ahead without a prompt, and the log records the
+figures on a `[hw] RAM for N cameras: ...` line.
 
 Separately, the startup check warns below 16 GB of RAM in total, a floor for the
 application to run at all. A 16 GB machine passes the launch check happily and
@@ -1229,20 +1230,27 @@ opens with one live preview pane per camera, free-running at about 30 fps.
 The figure shows six panes because that is how many cameras the rig it was
 captured on had open; yours has one per camera that enumerated.
 
-The console shows one block per camera:
+The console shows one block per camera. Each line starts with the time, to
+the millisecond, and the thread that printed it:
 
 ```
-[startup] logging to C:\Users\you\Desktop\panopticon\logs\panopticon_20260903_191735.log
-[acq] profile: 3dpose
-[cam1] 41920544 1920x1200 Mono8
-[cam1] extended (64-bit) block IDs: enabled
-[cam1] GigE stream driver: SocketDriver (SocketBufferSize=262144 KB)
+2026-09-03 19:17:35.101 [MainThread] [startup] logging to C:\Users\you\Desktop\panopticon\logs\panopticon_20260903_191735.log
+2026-09-03 19:17:35.402 [MainThread] [acq] profile: 3dpose
+2026-09-03 19:17:36.120 [MainThread] [cam1] 41920544 1920x1200 Mono8
+2026-09-03 19:17:36.121 [MainThread] [cam1] extended (64-bit) block IDs: enabled
+2026-09-03 19:17:36.121 [MainThread] [cam1] GigE stream driver: SocketDriver (SocketBufferSize=262144 KB)
 ...
-[grab0] StartGrabbing (recording=False)
-[grab0] zero-copy view OK (PaddingX=0 PaddingY=0)
-[acq] board already carries the recording-only sketch (no stim); skipping flash
-[acq] opening teensy on COM3
+2026-09-03 19:17:37.004 [grab0] [grab0] StartGrabbing (recording=False)
+2026-09-03 19:17:37.015 [grab0] [grab0] zero-copy view OK (PaddingX=0 PaddingY=0)
+2026-09-03 19:17:37.300 [session-header] [header] ===== Panopticon session header: launch =====
+...
+2026-09-03 19:17:38.950 [MainThread] [acq] board already carries the recording-only sketch (no stim); skipping flash
+2026-09-03 19:17:38.951 [MainThread] [acq] opening teensy on COM3
 ```
+
+The `[header]` block lists the software and its version, the computer, the
+GPU and driver, every profile field and each open camera. Quote it when you
+report a problem.
 
 The last two lines arrive about a second and a half after the window does. The
 firmware check and the serial open are deferred so the window can paint and
@@ -1475,7 +1483,6 @@ of your message.
 | `No cameras are open. Recording would run the trigger protocol — and any baked-in stim paradigm — while saving nothing.` | Open the cameras first: pick a profile whose `pfs_path` resolves and whose cameras enumerate. |
 | `The profile records 1920x1200 but the cameras are configured for ...` | The profile's `frame_width`/`frame_height` disagree with the ROI the cameras report. Refused before anything is started, so the cameras stay in preview and the session directory is untouched. Fix whichever is wrong — the `.pfs` or the profile — and start again. |
 | `Not enough RAM for N cameras: ...` | The buffers do not fit in available memory. The message breaks it into pool and ring. Lower `max_num_buffer` or `kick_max_lag` in the rig profile, or close other applications. Both are profile fields: neither `MAX_NUM_BUFFER` nor `MaxNumBuffer` appears in the YAML you edit. |
-| `RAM is tight for N cameras: ...` | Over 75% of available memory. It asks before proceeding. |
 | `NVENC granted only N concurrent sessions but M cameras need one each.` | The driver's session cap is below the camera count, often because another process holds sessions (a browser's hardware encode, an orphaned ffmpeg). Close them, record fewer cameras, or set `realtime_encode: false` in the profile to put every camera on the raw path deliberately. Both shipped profiles carry that field set to `true`, so it is a value you change rather than a line you add. Read the *Disk* part of section 1 first: raw needs roughly 500x the space. |
 | `NVENC granted no encode sessions, so real-time encoding cannot start.` | No sessions available at all. Set `realtime_encode: false` in the profile to write raw frames and encode afterwards, and read the *Disk* part of section 1 first, because that is a completely different disk budget. |
 | `Disk may be short: a 10-minute recording would need ~N GiB` | A warning, not a refusal: 10 minutes is an assumed worst case, not a known length. A shorter recording is fine. |

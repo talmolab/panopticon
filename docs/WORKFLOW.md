@@ -1031,9 +1031,9 @@ expectation. Three hard failures that cannot be overridden:
   KB a frame, so raw is roughly 500 times larger. Six cameras that fell back
   would want some 770 GiB for ten minutes against about 1.7 GB encoded.
 
-Two more, tight RAM and short disk space, are warnings you can override with
-**Start anyway?**, because the disk figure assumes a ten-minute recording and a
-shorter one may fit.
+Short disk space is a warning you can override with **Start anyway?**,
+because the disk figure assumes a ten-minute recording and a shorter one may
+fit.
 
 **An existing recording in the target folder** is checked last, and it is never
 overwritten without a prompt. If the folder holds a non-empty `.mp4`,
