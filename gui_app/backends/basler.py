@@ -11,6 +11,7 @@ about these cameras; the comments are the point, not decoration.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from gui_app import logging_setup
@@ -240,28 +241,96 @@ class BaslerBackend:
         except Exception:
             return "?"
 
+    #: A selector qualifier on a GenApi 3.5 .pfs line: "{TriggerSelector=
+    #: FrameStart}".
+    _QUALIFIER = re.compile(r"\{\s*([^=}]+?)\s*=\s*([^}]*?)\s*\}")
+
     @staticmethod
-    def pfs_features(pfs_path) -> tuple:
-        """([(name, value)] of the .pfs lines that name a feature without a
-        selector, number of selector-qualified lines). A qualified line
-        (name, "{Selector=Value}" and value, tab-separated) applies under
-        one selector value,
-        and reading it back would mean writing the selector, so it is only
-        counted. Returns None for a file that cannot be read."""
+    def _is_selector(name: str) -> bool:
+        """A GenICam selector, by the SFNC name every selector has
+        (TriggerSelector, LineSelector, GainSelector)."""
+        return name.endswith("Selector")
+
+    @classmethod
+    def pfs_features(cls, pfs_path) -> tuple:
+        """What the camera holds after loading the .pfs, as far as the file
+        says: ([(name, value)] to read back, in file order; the number of
+        writes not read back because they were made under another selector
+        value). Returns None for a file that cannot be read.
+
+        A .pfs writes a selector-dependent feature once per selector value,
+        either on qualified lines (GenApi 3.5: name, "{Selector=Value}",
+        value) or in sequential sections (GenApi 3.1: a "Selector Value"
+        line, the feature's line, the next selector value), and writes the
+        selector back after each feature. After the load each selector holds
+        the last value the file gives it, and a dependent feature reads its
+        value for that selector value only.
+
+        RULE: a write is read back only when every selector it was made
+        under is at its final value; the others are counted, not compared.
+        REASON: comparing an earlier section's write (TriggerMode for
+        FrameBurstStart) with what the camera reads under the final selector
+        value (FrameStart) marks a setting that landed as "(differs)", dozens
+        of times per camera on a 3.1 file, which hides a real one. Each
+        selector is read back at its final value, and a feature written
+        twice under the final values at its last write.
+
+        RULE: a selector whose last write in the file is a qualifier with
+        another value than its last plain line has no known final value,
+        and nothing written under it is read back. REASON: a 3.5 file can
+        end a group with qualified lines and no plain line after them
+        (LineSource, which only the output lines have), and the camera then
+        holds either value, depending on whether the loader puts a selector
+        back after a qualified write.
+        """
         try:
             text = Path(pfs_path).read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             return None
-        plain, qualified = [], 0
-        for line in text.splitlines():
+        # (name, value, {selector: value it was written under}), in order.
+        writes = []
+        plain: dict = {}    # selector -> (line number, value) of its last line
+        qualified: dict = {}  # selector -> (line number, value), last qualifier
+        above: dict = {}    # the selector lines directly above this line
+        for i, line in enumerate(text.splitlines()):
             if not line.strip() or line.startswith("#"):
                 continue
-            fields = line.split("\t")
+            fields = [f.strip() for f in line.split("\t")]
             if len(fields) >= 3 and fields[1].startswith("{"):
-                qualified += 1
+                # A qualifier that does not parse names no selector the
+                # file sets, so its write is counted, never compared.
+                under = dict(cls._QUALIFIER.findall(fields[1]))
+                for sel, val in under.items():
+                    qualified[sel] = (i, val)
+                writes.append((fields[0], fields[2], under or {"?": "?"}))
+                above = {}
             elif len(fields) >= 2:
-                plain.append((fields[0].strip(), fields[1].strip()))
-        return plain, qualified
+                name, value = fields[0], fields[1]
+                if cls._is_selector(name):
+                    plain[name] = (i, value)
+                    above[name] = value
+                    writes.append((name, value, None))
+                    continue
+                writes.append((name, value, dict(above)))
+                above = {}
+        final = {}
+        for sel, (i, value) in plain.items():
+            q = qualified.get(sel)
+            if q is None or q[0] < i or q[1] == value:
+                final[sel] = value
+        held: dict = {}
+        scoped = 0
+        for name, value, under in writes:
+            if under is None:
+                if name in final:
+                    held[name] = final[name]
+                else:
+                    scoped += 1
+            elif all(final.get(s) == v for s, v in under.items()):
+                held[name] = value
+            else:
+                scoped += 1
+        return list(held.items()), scoped
 
     @classmethod
     def _log_pfs_readback(cls, cam, pfs_path, serial) -> None:
@@ -273,9 +342,9 @@ class BaslerBackend:
             print(f"[basler] {serial} .pfs read-back skipped: {pfs_path} "
                   f"could not be read here", flush=True)
             return
-        plain, qualified = features
+        held, scoped = features
         differ = same = unread = 0
-        for name, want in plain:
+        for name, want in held:
             got = cls._read(cam, name)
             if cls._unread(got):
                 unread += 1
@@ -291,8 +360,8 @@ class BaslerBackend:
                       f"{got}{verdict}", flush=True)
         print(f"[basler] {serial} .pfs read-back of {Path(pfs_path).name}: "
               f"{same} features as written, {differ} differ, {unread} not "
-              f"readable, {qualified} selector-qualified lines not read "
-              f"back", flush=True)
+              f"readable; writes under another selector value, not read "
+              f"back: {scoped}", flush=True)
 
     # ---------------------------------------------------------- timestamp clock
     #: The tick rate the capture path assumes: `GrabResultProtocol.TimeStamp`
