@@ -596,7 +596,7 @@ Dead ends, do not retry:
 
 ## 10. Standing dead ends (index)
 
-Everything already tried and reverted, so nobody spends a rig day on it again:
+Everything already tried or ruled out, so nobody spends a rig day on it again:
 
 - Bigger `kick_max_lag` (1000 starved capture, 24% loss).
 - `trigger_rate_limit: 0` (8-15% loss in transmission).
