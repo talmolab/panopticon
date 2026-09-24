@@ -553,8 +553,9 @@ whenever the serial port is opened or the board is flashed:
   sketches per launch, recording-only and recording plus stimulation, and
   swaps them itself. After an Apply, a calibration flashes the recording-only
   sketch (`Flashing recording-only firmware…`). The next recording flashes the
-  paradigm back (`Flashing recording + stimulation firmware…`). Each flash
-  takes about 30 s;
+  paradigm back (`Flashing recording + stimulation firmware…`). After a failed
+  launch flash, the first Calibrate or Record can flash the recording-only
+  sketch too. Each flash takes about 30 s;
 - at the first Calibrate, Record or Test after the port could not be opened.
   At launch the log then says `will retry on first use`. After an Apply the
   editor's status line says that Record reopens the port;
