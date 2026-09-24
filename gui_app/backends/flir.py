@@ -3253,8 +3253,8 @@ class FlirBackend:
                         f"EndAcquisition and {exposures} after it", False,
                         None)
             last = cam._last_counter
-            if (not period and cam.block_id_source == "trigger_counter"
-                    and last is not None and last > edges):
+            if (cam.block_id_source == "trigger_counter"
+                    and last is not None and cam._ctr_signed(edges, last) < 0):
                 return (f"its last image's CounterValue chunk read {last}, "
                         f"more than the {edges} edges on {line} its counter "
                         f"read at the stop", True, None)
