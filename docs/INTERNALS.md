@@ -908,18 +908,20 @@ while it is measured on the rig. The design, in brief:
 
 ### The problem
 
-Triggering the cameras together is necessary but not enough. Cameras lose
-frames independently, to a resend that never completes or a buffer the driver
-gives up on, and each loss shifts every later frame one position earlier in
-that camera's video. From the first loss on, frame i of one camera's video is a
-different trigger from frame i of another's.
+Cameras triggered together still lose frames independently, to a resend that
+never completes or a buffer the driver gives up on. Each loss shifts every
+later frame one position earlier in that camera's video. From the first loss
+on, frame i of one camera's video is a different trigger from frame i of
+another's.
 
 The block ID makes the correspondence recoverable. Every recorded frame's block
 ID goes into `blockids.npy`, so a position in a video maps back to a trigger
 number by lookup. Real-time kick-out and the post-hoc intersection each turn
-that into aligned videos. They give the same answer (see
-[The equivalence of the two paths](#the-equivalence-of-the-two-paths)) and
-differ in when they pay for it.
+that into aligned videos, and they differ in when they pay for it. They keep
+the same frames unless a camera falls more than `kick_max_lag` triggers
+behind. Kick-out then force-drops, and keeps a subset of the intersection's
+frames (see
+[The equivalence of the two paths](#the-equivalence-of-the-two-paths)).
 
 ### Real-time kick-out (the default)
 
