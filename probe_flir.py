@@ -985,7 +985,7 @@ class _ExternalSource:
 #: level every few milliseconds, which a short pulse can fall between.
 _FIND_LINE_PULSE_HINT = (
     f"The probe reads each line's level every few milliseconds, so a pulse "
-    f"shorter than about {FIND_LINE_PULSE_MS} ms can pass unseen: if no wire "
+    f"shorter than about {FIND_LINE_PULSE_MS} ms can pass unseen. If no wire "
     f"is found, run the source at about {FIND_LINE_HZ} Hz with pulses at "
     f"least {FIND_LINE_PULSE_MS} ms wide for this stage.")
 
@@ -1022,13 +1022,19 @@ def _start_failure(src, counted: dict | None = None) -> str:
     most = max(counted.values()) if counted else 0
     had = (f"the cameras had already counted up to {most} triggers" if most
            else "the cameras were already armed and counting")
-    return (f"the board did not confirm the start (no RDY ack), and {had}, "
-            f"so the probe did not reset and restart the board under them: a "
-            f"restart begins a new pulse count while the cameras keep the "
-            f"first one's frame IDs. The board may be triggering while its "
-            f"replies do not reach the host, so the probe stopped it. Run the "
-            f"stage again, and check the board's USB cable if it fails the "
-            f"same way.")
+    return (f"the board did not confirm the start (no RDY ack), and {had}. "
+            f"The probe did not reset and restart the board under them, "
+            f"because a restart begins a new pulse count while the cameras "
+            f"keep the first one's frame IDs. The board may be triggering "
+            f"while its replies do not reach the host, so the probe stopped "
+            f"it. Run the stage again, and check the board's USB cable if it "
+            f"fails the same way.")
+
+
+#: A counter answer's why_not when its run's start was not acknowledged:
+#: the board may have been triggering while its replies were lost, so the
+#: start is unconfirmed, not known to have failed.
+_START_UNCONFIRMED = "the board's start was not confirmed (no RDY ack)"
 
 
 def _never_reset() -> bool:
@@ -1347,7 +1353,7 @@ class Probe:
                 self.check(stage, "trigger board stood down",
                            "PASS" if src.stood_down else "FAIL",
                            "" if src.stood_down else
-                           "the stop was not confirmed; power-cycle the board")
+                           "the stop was not confirmed. Power-cycle the board.")
             return None
         if first and src.kind == "board":
             self.check(stage, "trigger board runs the recording-only sketch",
@@ -1367,8 +1373,8 @@ class Probe:
         if src.kind == "board" and closed is not None:
             self.check("board", "trigger board stood down",
                        "PASS" if closed else "FAIL",
-                       "" if closed else "the stop was not confirmed; "
-                       "power-cycle the board")
+                       "" if closed else "the stop was not confirmed. "
+                       "Power-cycle the board.")
 
     def spec_for(self, serial: str):
         spec = getattr(self.profile, "camera", None)
@@ -3043,10 +3049,10 @@ def _train_text(tr: dict, fps: float, external: bool) -> str:
         return (f"{tr['acquired_by_stop']} triggers acquired in "
                 f"{tr['train_s']:.1f} s ({tr['expected']} at {fps:g} Hz)")
     hint = (" Keep your trigger source running until the probe asks you to "
-            "stop it, and check" if external else " Check")
-    return ("; ".join(parts) + "." + hint + " the trigger and ground wires "
-            "of this camera, and the block-ID rate check for triggers the "
-            "camera ignored.")
+            "stop it." if external else "")
+    return ("; ".join(parts) + "." + hint + " Check the trigger and ground "
+            "wires of this camera, and the block-ID rate check for triggers "
+            "the camera ignored.")
 
 
 def _analyse(p: Probe, stage: str, run: dict, stops: dict, fps: float) -> dict:
@@ -3494,7 +3500,7 @@ def _run_a(p: Probe, rigs, src):
         a["frames"] = [[f, v] for f, v, _t in a["frames"]]
         if not started_ok:
             p.answer("counter_chunk_latch", c.serial, None,
-                     why_not="the board did not start")
+                     why_not=_START_UNCONFIRMED)
             continue
         if len(frames) < 3:
             p.answer("counter_chunk_latch", c.serial, None,
@@ -3671,7 +3677,7 @@ def _run_b(p: Probe, rigs, src):
         if not started_ok:
             for uid in ("exposure_latency_after_edge", "exposes_while_host_stopped",
                         "counters_count_as_set", "counters_read_while_streaming"):
-                p.answer(uid, c.serial, None, why_not="the board did not start")
+                p.answer(uid, c.serial, None, why_not=_START_UNCONFIRMED)
             continue
         p.answer("counters_read_while_streaming", c.serial,
                  "readable while triggered frames stream"
@@ -3873,7 +3879,7 @@ def _run_c(p: Probe, rigs, src):
         cc["pulses_estimate"] = (round(COUNTER_HZ * (t1 - t0)) if started_ok
                                  else None)
         if not started_ok:
-            cc["why_not"] = "the board did not start"
+            cc["why_not"] = _START_UNCONFIRMED
         _counts_answer(p, c, rec)
 
 
@@ -4012,7 +4018,7 @@ def _run_delay(p: Probe, rigs, src):
                      d.get("exposures_after"))
         if not started_ok or e is None:
             ans = None
-            why = ("the board did not start" if not started_ok else
+            why = (_START_UNCONFIRMED if not started_ok else
                    "no edge arrived within 3 s")
             p.answer("delayed_exposure_at_end", c.serial, ans, why_not=why, **d)
             continue
