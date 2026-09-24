@@ -403,9 +403,10 @@ acquisition's folder beside `session_metadata.json`. The full log of each launch
 ### WARNINGS.txt
 
 A file Panopticon writes into an acquisition folder, and sometimes into a camera's
-folder, when there is something to report: a retired camera, forced drops, a camera
-that ignored triggers, or the effective frame rate. A recording with no `WARNINGS.txt`
-under its folder had none of these.
+folder, when there is something to report. Examples are a retired camera, forced drops,
+a camera that ignored triggers, the effective frame rate, and the note that a camera
+encoded on the CPU with libx264. A recording with no `WARNINGS.txt` under its folder
+had nothing to report.
 
 ### Multi-process capture
 
