@@ -64,9 +64,9 @@ Contents:
 | `The profile has no camera: block.` | A FLIR profile needs its `camera:` block ([FLIR.md](FLIR.md#3-write-the-profile)). |
 | `camera.flir.sdk_dir is not a folder:` | Point it at the Spinnaker install folder, or remove it to search the default places. |
 | `The profile sets capture_processes: <n>.` | Capturing in several processes is experimental, and the window captures in one. Set `capture_processes: 0`. |
-| `A solve is running` | A profile switch waits for the calibration solve to finish. |
-| `Firmware upload in progress` | A profile switch or a quit waits for the board's flash to finish, about 30 s. Interrupting it leaves the board without its laser-safety boot guard. |
-| `The hardware check is running` | A profile switch or a start waits for the hardware check. The status bar says when it is done. |
+| `A solve is running` | The profile switch was refused, and the list shows the old profile again. Choose the profile again once the calibration solve has finished. |
+| `Firmware upload in progress` | The profile switch or the close was refused while the board is flashed, about 30 s. Choose the profile, or close the window, again once the upload reports that it is done. Interrupting a flash leaves the board without its laser-safety boot guard. |
+| `The hardware check is running` | The profile switch or the start was refused. Choose the profile, or start, again once the status bar says the check is done. |
 
 ## Opening the cameras
 
