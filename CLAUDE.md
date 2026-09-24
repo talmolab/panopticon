@@ -253,8 +253,10 @@ until someone analyses it.
   `KICKOUT_WARN_FRACTION`. The counts go to `session_metadata.json` (`kickout`)
   and the detail to the log. Forced drops, the block-ID rate check and
   retirements keep messages of their own.
-- RAM either refuses the start, when the need exceeds what is available, or
-  raises no warning. Running out of RAM mid-session loses frames.
+- The RAM check at each acquisition start either refuses the start, when the
+  need exceeds what is available, or raises no warning. Running out of RAM
+  mid-session loses frames. The launch hardware check warns separately when the
+  computer has less than 16 GB in total.
 
 ## FLIR backend
 
