@@ -37,6 +37,7 @@ _OPEN_KWARG_FIELDS = {
     "gev_bandwidth_reserve_pct": "gev_bandwidth_reserve_pct",
     "gev_bandwidth_reserve_accum": "gev_bandwidth_reserve_accum",
     "camera": "camera_spec",
+    "frame_rate": "frame_rate",
 }
 
 #: open_all keywords that open_kwargs never drops for a manager that does not

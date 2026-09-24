@@ -465,6 +465,7 @@ class ProcessCameraManager(QObject):
     geometry_mismatch = CameraManager.geometry_mismatch
     pinning_report = CameraManager.pinning_report
     _source_silence_warnings = CameraManager._source_silence_warnings
+    _rate_hints = CameraManager._rate_hints
 
     def __init__(self, profile, backend: str | None = None,
                  log_dir: Path | None = None):
@@ -1015,7 +1016,8 @@ class ProcessCameraManager(QObject):
                  max_num_buffer: int = 1000, only_serials=None,
                  backend: str | None = None, expect_geometry=None,
                  gev_bandwidth_reserve_pct=None,
-                 gev_bandwidth_reserve_accum=None, camera_spec=None):
+                 gev_bandwidth_reserve_accum=None, camera_spec=None,
+                 frame_rate=None):
         """CameraManager.open_all, with the cameras opened by the workers.
 
         The parent resolves cam1..camN and applies the camera-count
@@ -1024,6 +1026,11 @@ class ProcessCameraManager(QObject):
         its own share with the same keywords. The cameras must agree on
         their geometry, as they must in one process. Returns True, or a
         falsy CameraOpenError carrying the reason.
+
+        frame_rate is in the signature because rig_setup.open_kwargs passes
+        only the keywords a manager names: without it the workers' open
+        would never see the profile's frame_rate, and a backend that checks
+        the rate at open would check it only at the first acquisition.
         """
         if self._workers:
             self.close_all()
@@ -1036,6 +1043,11 @@ class ProcessCameraManager(QObject):
         if backend is not None and backend != self._backend_name:
             self._backend_name = backend
             self._backend_obj = None
+        if self._backend_obj is None and camera_spec is not None:
+            # As in CameraManager.open_all: a backend can load its SDK from a
+            # folder the camera: block names, once per process.
+            self._backend_obj = load_backend(self._backend_name,
+                                             camera_spec=camera_spec)
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
             return self._open_failed("No cameras found")
@@ -1059,7 +1071,7 @@ class ProcessCameraManager(QObject):
                   "expect_geometry": expect_geometry,
                   "gev_bandwidth_reserve_pct": gev_bandwidth_reserve_pct,
                   "gev_bandwidth_reserve_accum": gev_bandwidth_reserve_accum,
-                  "camera_spec": camera_spec}
+                  "camera_spec": camera_spec, "frame_rate": frame_rate}
         calls = {w: w.call("open", kwargs=kwargs, flags=self._flags(),
                            affinity=self._affinity())
                  for w in self._workers}
@@ -1515,7 +1527,8 @@ class ProcessCameraManager(QObject):
                 "forced drops, kick-outs, the block-ID rate and retirements",
                 lambda: sync_encode.session_warnings(
                     core, [r[1] for r in results], [r[2] for r in results],
-                    self._fps, self._max_lag)))
+                    self._fps, self._max_lag,
+                    rate_hints=self._rate_hints())))
             warnings.extend(self._checked(
                 "The trigger-source check",
                 "a trigger source that fell silent",
