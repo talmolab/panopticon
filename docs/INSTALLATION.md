@@ -1222,11 +1222,15 @@ shortcut open the simulated rig. To go back to your rig, run
 
 ### With real cameras
 
-The simulated rig shows that the software works. Only the rig can show whether
-this machine, network and set of cameras keep up with the trigger. Run
-`uv run probe_network.py --sweep` to confirm every camera's path carries
-9000-byte packets, then record a short session in the window, and read the
-per-camera lines the grab threads print when it stops.
+On the rig, confirm that every camera's path carries 9000-byte packets:
+
+```powershell
+uv run probe_network.py --sweep --profile my_rig
+```
+
+Then record at least 3000 frames per camera in the window, 30 s at 100 fps.
+Each grab thread prints a line every 1000 frames while recording (`cycle=`,
+`avg_wait`, `avg_proc`, `deliv_lag`), and a `stream stats` line at the stop.
 
 A healthy recording shows:
 
@@ -1256,14 +1260,13 @@ released=6022  dropped=0  forced=0  queue_full_drops=0
 with each camera's lag behind the leader at median 0, 95th percentile 1 and
 maximum 2 frames.
 
-Two stream counters are easy to misread. `Resend_Request_Count` counts packets
-lost and asked for again, and `Failed_Buffer_Count` counts frames given up on. A
-high resend count with no failed buffers means the link recovers every packet,
-and each resend still arrives late and completes that camera's frame late. On
-the reference rig the cameras behind a switch with flow control off ran 16,800
-resends per 90 s against 10 for the others. They were the cameras that fell
-behind, and no frame was lost. Treat a resend count a thousand times the other
-cameras' as a fault even when every frame arrives.
+`Resend_Request_Count` counts packets lost and asked for again, and
+`Failed_Buffer_Count` counts frames given up on. A high resend count with no
+failed buffers means the link recovers every packet. Each resend still arrives
+late and completes that camera's frame late, so the camera falls behind with no
+frame lost ([the flow-control measurement](#configure-the-switches)). Treat a
+resend count a thousand times the other cameras' as a fault even when every
+frame arrives.
 
 Measure on an otherwise idle machine. Other programs' CPU load once moved the
 cycle from 10.00 to 10.32 ms, which builds up 5.6 seconds of backlog in 150
