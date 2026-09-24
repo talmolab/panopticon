@@ -485,7 +485,7 @@ Text. Default `pinned`. Reference rig: not set.
   page-locked memory per camera. At launch Panopticon checks that PyNvVideoCodec
   copies on the encoder's stream; if the check fails, the session uses `host` and
   the log says why. An encoder that cannot get page-locked memory uses `host` by
-  itself, and `WARNINGS.txt` says so. `session_metadata.json` records what each
+  itself, and `WARNINGS.txt` says so (`real-time encode uses the host upload`). `session_metadata.json` records what each
   acquisition used (`nvenc_upload_used`). The setting does nothing on libx264.
 
 #### `nvenc_context`
@@ -507,8 +507,11 @@ Text. Default `shared`. Reference rig: not set.
 True or false. Default `true`. Reference rig: `true`.
 
 - Does: `true` drops, during the recording, every trigger that some camera
-  missed, so the videos come out aligned. `false` records every frame each camera
-  caught and aligns the videos after the recording with a full re-encode.
+  missed, so the videos come out aligned. When more than 0.5% of the triggers are
+  dropped, the post-session dialog and `WARNINGS.txt` give the recording's
+  `Effective frame rate`, and `session_metadata.json` holds the counts
+  (`kickout`). `false` records every frame each camera caught and aligns the
+  videos after the recording with a full re-encode.
 - Change when: Leave `true`. Set `false` only to compare with post-session
   alignment.
 - Goes wrong: With `false`, the post-session pass re-encodes every video, which
