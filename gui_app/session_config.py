@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from gui_app.backends import KNOWN_BACKENDS
+from gui_app.logging_setup import DEFAULT_LOG_LEVEL, LOG_LEVELS
 # One definition of the Serial0 pins, shared with the stimulation compiler, so
 # the trigger-pin refusal and the stim-pin refusal can never disagree.
 from gui_app.stim_compiler import RESERVED_SERIAL_PINS
@@ -759,6 +760,15 @@ class RigProfile:
     # and validate() refuses serial_port, trigger_pins and a non-empty
     # stim_safe_pins there: each names a board this mode never opens.
     trigger_source: str = "board"
+    # How much the session log says; one of gui_app.logging_setup.LOG_LEVELS.
+    # "normal" logs what every level logs: each line with its time and
+    # thread, and the session header at launch and at each acquisition
+    # start. "verbose" adds every camera setting written with the value read
+    # back, each acquisition state transition, and the per-camera summary at
+    # stop. "debug" adds more cold-path detail, such as every .pfs feature
+    # read back. No level logs anything per frame or makes a capture thread
+    # wait for the disk, so the level can be raised without costing frames.
+    log_level: str = DEFAULT_LOG_LEVEL
 
     #: The keys the profile file sets, recorded by ``load``. A dataclass
     #: default cannot tell a key the file left out from one it set to the
@@ -949,6 +959,10 @@ class RigProfile:
                 f"thermal_warn_margin_c {margin:g} must be a positive number "
                 f"of degrees C: the thermal warning starts this far below the "
                 f"shutdown temperature each camera reports")
+        if self.log_level not in LOG_LEVELS:
+            raise ValueError(
+                f"log_level {self.log_level!r} is not one of "
+                f"{list(LOG_LEVELS)}")
         if self.nvenc_upload not in NVENC_UPLOAD_MODES:
             raise ValueError(
                 f"nvenc_upload {self.nvenc_upload!r} is not one of "
@@ -1624,6 +1638,10 @@ class SessionConfig:
             # frame_rate is assumed, and the block-ID rate check is the only
             # test of it.
             trigger_source=prof.trigger_source if prof else None,
+            # How much of this acquisition the session log (session.log)
+            # holds, so a reader knows whether a missing line means the event
+            # did not happen or the level did not log it.
+            log_level=prof.log_level if prof else None,
             **_environment_metadata(),
         )
         if acq_type is not None:
