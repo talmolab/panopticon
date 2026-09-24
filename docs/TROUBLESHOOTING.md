@@ -223,8 +223,12 @@ Most of these appear in the status bar.
 
 ## After a recording
 
-These appear in the `Recording completed with problems` dialog and in the
-recording's `WARNINGS.txt`.
+These go to the recording's `WARNINGS.txt`. Most also appear in the
+`Recording completed with problems` dialog. In the default kick-out mode, the
+rows about unequal videos appear in a `Videos are not equal length` dialog.
+With `realtime_kick: false` or `realtime_encode: false`, the post-hoc alignment
+runs after the encode, and its rows appear in dialogs of their own, such as
+`Alignment reported problems`.
 
 | Message or symptom | Cause and fix |
 |---|---|
@@ -255,9 +259,9 @@ recording's `WARNINGS.txt`.
 | `real-time encode uses the host upload, not the configured pinned upload` | The pinned GPU upload was not available for this camera. The video is the same, and the grab threads could fall behind. The log's `[nvenc]` lines say why. |
 | `reached <t> C during this acquisition` | The camera ran hot. Check its airflow and mount before the next recording. |
 | `A camera at its shutdown point stops delivering frames` | The camera reached its shutdown temperature, and its recording may end there. Let it cool before the next recording. |
-| `retired during the recording, so` | The videos are not equal length. Pair the retired camera's frames with the others by block ID (`blockids.npy`), not by frame number. `2_align.py` leaves a retired camera out by default. |
-| `The cameras did not all keep the same frames` | With `realtime_kick: false`: run `2_align.py --replace` as the message says. |
-| `The post-hoc alignment did not run on this recording` | With `realtime_kick: false` the videos are left as recorded, and frame *i* is not the same trigger on every camera. Fix the cause, then run `2_align.py --replace`. |
+| `retired during the recording, so` | Kick-out mode. The retired camera's video ends early, so the videos are not equal length. Pair its frames with the others by block ID (`blockids.npy`), not by frame number. `2_align.py` leaves a retired camera out by default. |
+| `The cameras did not all keep the same frames` | Kick-out mode. A camera's video ended early or lost frames, and the videos are left as recorded. Run the `2_align.py` command the message gives. `--replace --exclude <cams>` aligns the other cameras, and `--truncate-to-shortest` cuts every camera to the triggers they share. |
+| `The post-hoc alignment did not run on this recording` | The videos are left as recorded, and frame *i* is not the same trigger on every camera. Fix the cause, then run `2_align.py --replace`. |
 | `The post-hoc alignment failed` | The videos are left as recorded and are not aligned. Run `2_align.py --replace` once the cause is fixed. |
 | `Alignment failed: <error> — videos left as-is` | The status line for the row above. |
 | `Not replacing any video:` | A camera recorded nothing, or no trigger is common to every camera. The message gives the `--exclude` or `--truncate-to-shortest` command to run. |
