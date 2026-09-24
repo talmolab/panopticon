@@ -70,8 +70,14 @@ _DERIVED_OPEN_KWARGS = {
 
 def apply_profile_to_manager(mgr, profile: RigProfile,
                              log=functools.partial(print, flush=True)) -> list | None:
-    """Copy the thread-placement flags onto ``mgr`` and set the capture core
-    pool from ``profile.capture_core_exclude``.
+    """Put the profile's ``log_level`` in force, copy the thread-placement
+    flags onto ``mgr`` and set the capture core pool from
+    ``profile.capture_core_exclude``.
+
+    The log level is process state (gui_app.logging_setup), set here so a
+    probe logs at the level its profile names, as the window does: a
+    comparison of two levels on a probe otherwise runs both at the program
+    default. The level and the pool each get one line through ``log``.
 
     Returns the core pool that was set, or None when affinity is unavailable
     (non-Windows, non-hybrid CPU, or an import failure). Affinity is an
@@ -83,6 +89,13 @@ def apply_profile_to_manager(mgr, profile: RigProfile,
     default prints unbuffered so the line reaches a redirected log file
     before the cameras open.
     """
+    try:
+        from gui_app import logging_setup
+        level = logging_setup.set_level(
+            getattr(profile, "log_level", logging_setup.DEFAULT_LOG_LEVEL))
+        log(f"[rig] log level {level}")
+    except Exception as e:
+        log(f"[rig] could not set the log level: {e}")
     for name in MANAGER_FLAGS:
         setattr(mgr, name, bool(getattr(profile, name, False)))
     try:
