@@ -920,6 +920,13 @@ def check_capacity(n_cams: int, width: int, height: int,
     detail = (f"{need_gb:.1f} GiB needed ({pool_gb:.1f} driver pool"
               + (f" + {ring_gb:.1f} NV12 ring" if realtime else "")
               + f"), {avail_gb:.1f} GiB available")
+    # RULE: RAM either refuses the start or raises no warning at all.
+    # REASON: a need under what is available records normally, and a prompt
+    # before every recording on a rig that always sits near the line trains
+    # the operator to click through it. Running out mid-session loses
+    # frames, so a need over what is available refuses the start. The figure
+    # goes to the log either way.
+    print(f"[hw] RAM for {n_cams} cameras: {detail}", flush=True)
     if need_gb > avail_gb:
         # RULE: name the profile field, `max_num_buffer`. REASON: the pool
         # depth actually used comes from the profile; MAX_NUM_BUFFER in
@@ -930,8 +937,6 @@ def check_capacity(n_cams: int, width: int, height: int,
             f"Not enough RAM for {n_cams} cameras: {detail}. Lower "
             f"`max_num_buffer` or `kick_max_lag` in the rig profile, or close "
             f"other applications.")
-    elif need_gb > 0.75 * avail_gb:
-        warnings.append(f"RAM is tight for {n_cams} cameras: {detail}.")
 
     # --- the encode path -----------------------------------------------------
     # `raw_mode` and `encodes_realtime` are kept apart on purpose: the first is
