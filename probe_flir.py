@@ -112,6 +112,9 @@ FIND_LINE_HZ = 10
 FIND_LINE_S = 1.0
 FIND_LINE_SAMPLE_S = 0.002
 FIND_LINE_MIN_TOGGLES = 4
+#: The pulse width --find-line asks an external source for when no wire is
+#: found: several of its line reads, so a pulse is high for at least one.
+FIND_LINE_PULSE_MS = 10
 
 #: --selftest: the free-run rate, acquisitions and frames per acquisition for
 #: the frame-ID and clock tests, and the host pool they run with. Three
@@ -922,26 +925,30 @@ class _ExternalSource:
     def start(self, fps, what: str = "", *, may_retry=None) -> bool:
         """Ask the operator to start the source. `may_retry` is the board's
         veto and has nothing to veto here: the host sends no start."""
-        from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S,
-                                            ExternalTriggerSource)
+        from gui_app.trigger_source import FIRST_TRIGGER_TIMEOUT_S
         if what == "find-line":
             print(f"[probe] Start your trigger source now, at {fps:g} Hz. The "
                   f"probe watches each camera's input lines for up to "
-                  f"{FIRST_TRIGGER_TIMEOUT_S:.0f} s.", flush=True)
+                  f"{FIRST_TRIGGER_TIMEOUT_S:.0f} s. {_FIND_LINE_PULSE_HINT}",
+                  flush=True)
         else:
-            print("[probe] " + ExternalTriggerSource.prompt_text(
-                fps, FIRST_TRIGGER_TIMEOUT_S, what or "probe run"), flush=True)
+            print(f"[probe] Every camera is armed. Start your trigger source "
+                  f"now, at {fps:g} Hz, and keep it running until the probe "
+                  f"asks you to stop it. The probe waits up to "
+                  f"{FIRST_TRIGGER_TIMEOUT_S:.0f} s for the first trigger.",
+                  flush=True)
         if self.op is not None:
             self.op.start(fps)
         return True
 
     def stop(self, what: str = "") -> bool:
-        from gui_app.trigger_source import STOP_WAIT_S, ExternalTriggerSource
+        from gui_app.trigger_source import STOP_WAIT_S
         if what == "find-line":
             print("[probe] You can stop your trigger source now.", flush=True)
         else:
-            print("[probe] " + ExternalTriggerSource.stop_prompt_text(
-                STOP_WAIT_S, what or "probe run"), flush=True)
+            print(f"[probe] Stop your trigger source now. The probe waits up "
+                  f"to {STOP_WAIT_S:.0f} s for every camera to stop receiving "
+                  f"frames.", flush=True)
         if self.op is not None:
             self.op.stop()
         self.stopped = True
@@ -951,6 +958,39 @@ class _ExternalSource:
         if self.op is not None:
             self.op.stop()
         return None
+
+
+#: --find-line's advice for an external source: the probe reads each line's
+#: level every few milliseconds, which a short pulse can fall between.
+_FIND_LINE_PULSE_HINT = (
+    f"The probe reads each line's level every few milliseconds, so a pulse "
+    f"shorter than about {FIND_LINE_PULSE_MS} ms can pass unseen: if no wire "
+    f"is found, run the source at about {FIND_LINE_HZ} Hz with pulses at "
+    f"least {FIND_LINE_PULSE_MS} ms wide for this stage.")
+
+
+def _early_frames_text(counts: dict):
+    """Why a run whose cameras received frames before every one was armed
+    is refused, or None when none did."""
+    early = [(s, int(n)) for s, n in counts.items() if int(n) > 0]
+    if not early:
+        return None
+    names = [f"{s} ({n} frame{'s' if n != 1 else ''})" for s, n in early]
+    names = (names[0] if len(names) == 1 else
+             ", ".join(names[:-1]) + " and " + names[-1])
+    return (f"{names} received frames before every camera was armed: the "
+            f"trigger was already running while the cameras armed, so their "
+            f"frame counts start on different pulses. Stop the trigger source "
+            f"and run the probe again, starting the source only when the "
+            f"probe asks for it.")
+
+
+def _no_trigger_text(fps, timeout_s: float) -> str:
+    return (f"no camera received a trigger within {timeout_s:.0f} s of the "
+            f"prompt. Check that your trigger source runs at {fps:g} Hz and "
+            f"that its output reaches every camera's trigger input, on the "
+            f"line and edge the profile's camera settings name (--find-line "
+            f"finds the line), then run the probe again.")
 
 
 def _start_failure(src, counted: dict | None = None) -> str:
@@ -1854,7 +1894,8 @@ def stage_find_line(p: Probe):
             if not seen:
                 p.check("find_line", "a trigger reaches a camera", "FAIL",
                         f"no input line changed within "
-                        f"{FIRST_TRIGGER_TIMEOUT_S:.0f} s of the prompt")
+                        f"{FIRST_TRIGGER_TIMEOUT_S:.0f} s of the prompt. "
+                        f"{_FIND_LINE_PULSE_HINT}")
                 return
         else:
             time.sleep(0.2)
@@ -1886,7 +1927,9 @@ def stage_find_line(p: Probe):
         if not wired:
             p.check("find_line", f"{serial} trigger wire found", "FAIL",
                     "no input line toggled. Check the wiring, the ground "
-                    "reference and the input's voltage rating.")
+                    "reference and the input's voltage rating."
+                    + ("" if src.host_started else
+                       " " + _FIND_LINE_PULSE_HINT))
             continue
         if len(wired) > 1:
             p.check("find_line", f"{serial} trigger wire found", "WARN",
@@ -2746,10 +2789,10 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
             time.sleep(ExternalTriggerSource.settle_s(fps))
             early = {g.cam.serial: g.frames_retrieved for g in grabbers}
             run["frames_before_arm"] = early
-            refusal = ExternalTriggerSource.early_frame_refusal(early)
+            refusal = _early_frames_text(early)
             if refusal is not None:
                 p.check(stage, "no frame arrives before every camera is armed",
-                        "FAIL", refusal.replace("\n", " "))
+                        "FAIL", refusal)
                 return None
             if record_pass:
                 p.check(stage, "no frame arrives before every camera is armed",
@@ -2787,9 +2830,7 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
                 time.sleep(0.05)
             if not any(g.frames_retrieved for g in grabbers):
                 p.check(stage, "a trigger reaches the cameras", "FAIL",
-                        ExternalTriggerSource.no_trigger_text(
-                            fps, FIRST_TRIGGER_TIMEOUT_S, "the probe")
-                        .replace("\n", " "))
+                        _no_trigger_text(fps, FIRST_TRIGGER_TIMEOUT_S))
                 return None
             t_start = min(g.first_frame_at for g in grabbers
                           if g.first_frame_at is not None)
