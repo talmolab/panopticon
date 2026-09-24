@@ -425,7 +425,10 @@ Run each with the probe, for example `uv run probe_flir.py --exposure-sweep`.
 2. Fill in the metadata and record for 2 minutes: press **Record**, and press it
    again to stop. Take a screenshot of the window while it records.
    [WORKFLOW.md](WORKFLOW.md#8-record) describes a recording in full.
-3. Wait for encoding to finish and the post-session dialog to appear, then quit.
+3. Wait until encoding finishes and the sidebar status returns to `IDLE`, then
+   quit. A dialog appears only when something went wrong, such as
+   `Recording completed with problems`, and what it says is also in
+   `WARNINGS.txt`.
 4. Collect the recording:
 
    ```powershell
