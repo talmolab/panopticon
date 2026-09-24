@@ -973,8 +973,8 @@ and any `forced_by[...]` entry, names the camera responsible. A `max_lag` costs
 RAM ([The NV12 ring](#the-nv12-ring)), and a larger one is not better: on the
 six-camera rig `kick_max_lag: 1000` starved capture and lost 24% of frames. A
 cap below the lag the rig really shows force-drops triggers every camera
-captured. The comment on `kick_max_lag` in `profiles/3dpose.yaml` records why
-the reference rig uses 480.
+captured. [HISTORY.md](HISTORY.md) records the 240 and 480 measurements
+behind the reference rig's 480.
 
 `retire(cam, reason)` removes a camera from the set, hands back its queued
 frames and records the reason, so it reaches the operator. The survivors stay
