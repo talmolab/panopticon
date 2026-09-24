@@ -9,7 +9,7 @@ camera_backend: basler
 # the NVENC session limit from turning into a refused recording.
 encoder: auto
 # Sidebar pre-fill for a new session. These are this rig's operator and assay,
-# written into every session_metadata.json, so they live here and not in code.
+# written into every session_metadata.json, so they live in the profile.
 metadata_defaults:
   experimenter: IT
   assay: open_field

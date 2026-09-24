@@ -6,8 +6,8 @@ camera_backend: basler
 # Video encoder: auto = NVENC when the driver grants a session per camera, else
 # libx264.
 encoder: auto
-# Sidebar pre-fill for a new session; written into every session_metadata.json,
-# so the values are this rig's, not a code default.
+# Sidebar pre-fill for a new session. These are this rig's values, written into
+# every session_metadata.json, so they live in the profile.
 metadata_defaults:
   experimenter: IT
   assay: ""

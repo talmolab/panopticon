@@ -23,7 +23,10 @@ frame_width: 1280                 # SITE: Width in the .pfs
 frame_height: 1024                # SITE: Height in the .pfs
 frame_rate: 100
 calibration_frame_rate: 30
-trigger_rate_limit: 165           # SITE: the camera's maximum frame rate; never 0
+# SITE: your camera's maximum frame rate at this frame size, from its data
+# sheet; never 0. 165 is below this camera's maximum: triggers stay safe, but
+# the exposure ceiling is shorter than the camera allows.
+trigger_rate_limit: 165
 quality: 21
 realtime_encode: true
 realtime_kick: true
