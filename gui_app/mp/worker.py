@@ -728,7 +728,11 @@ class Worker:
         self.conn = conn
         self.gate = gate
         self.state = shm.WorkerState.SPAWNED
-        backend = load_backend(args["backend"])
+        # With the profile's camera: block, so a backend whose SDK folder
+        # the block names (camera.flir.sdk_dir) loads it from there in this
+        # process too.
+        backend = load_backend(args["backend"], camera_spec=getattr(
+            args["profile"], "camera", None))
         restore = getattr(backend, "restore_spawn_state", None)
         if args.get("backend_state") is not None:
             if restore is None:
