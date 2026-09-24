@@ -832,7 +832,12 @@ class CameraManager(QObject):
 
         Never raises for a bad profile: a frame rate at or above the limiter
         is refused by RigProfile.load, so it cannot reach this call inside a
-        Qt slot.
+        Qt slot. The one refusal is the backend's: a camera whose
+        exposure_ceiling_us raises the backend's RefusalException cannot
+        record at `fps`, and a collecting call raises
+        AcquisitionStartRefused naming every such camera before any exposure
+        is written. A call that does not collect (the preview restore) only
+        prints the reason.
         """
         # Problems found here, published to last_warnings only when the
         # caller collects (see the docstring).
@@ -847,8 +852,20 @@ class CameraManager(QObject):
         # The raw ceiling is the backend's (a camera's own physics; see
         # OptionalBackendMembers.exposure_ceiling_us), with the 10% margin
         # applied here for every backend alike.
-        ceilings = [self._raw_ceiling_us(i, cam, fps, limit, found)
+        refused: list = []
+        ceilings = [self._raw_ceiling_us(i, cam, fps, limit, found, refused)
                     for i, cam in enumerate(self._cameras)]
+        if refused:
+            # RULE: a camera that cannot record at this rate refuses the
+            # start; the preview restore only prints it. REASON: a
+            # recording made anyway skips triggers or drops frames, and a
+            # WARNINGS.txt line reports that only after the session is lost.
+            text = "\n".join(refused)
+            print(f"[acq] cannot record at {fps:g} fps: {text}", flush=True)
+            if collect:
+                raise AcquisitionStartRefused(
+                    f"These cameras cannot record at {fps:g} fps:\n{text}"
+                    f"\n\nNothing was recorded.")
         ceilings = [None if c is None else c * 0.9 for c in ceilings]
         if any(c is not None and c <= 0 for c in ceilings):
             # fps >= limit: no exposure fits the trigger period at all.
@@ -971,14 +988,18 @@ class CameraManager(QObject):
             return True
         return True
 
-    def _raw_ceiling_us(self, i: int, cam, fps, limit: float, found: list):
+    def _raw_ceiling_us(self, i: int, cam, fps, limit: float, found: list,
+                        refused: list):
         """Camera i's exposure ceiling in us before the 0.9 margin.
 
         From the backend's exposure_ceiling_us when it has one; otherwise the
         limiter formula (in trigger mode the frame-rate timer starts after
         exposure ends, so the interval is exposure + 1/limit), which is the
         same number the Basler backend returns. A backend whose read fails
-        leaves the trigger period as the only bound, and says so.
+        leaves the trigger period as the only bound, and says so in `found`.
+        The exception is the backend's RefusalException: the camera cannot
+        record at `fps`, and "camN: reason" goes to `refused` instead, for
+        apply_exposure_gain to refuse the start on.
         """
         fps = float(fps)
         fn = getattr(self._backend, "exposure_ceiling_us", None)
@@ -989,6 +1010,11 @@ class CameraManager(QObject):
         try:
             return float(fn(cam, fps, limit))
         except Exception as e:
+            refusal = getattr(self._backend, "RefusalException", None)
+            if (isinstance(refusal, type) and issubclass(refusal, Exception)
+                    and isinstance(e, refusal)):
+                refused.append(f"{self._cn(i)}: {e}")
+                return 1e6 / fps
             msg = (f"{self._cn(i)}: the backend could not report its exposure "
                    f"ceiling ({type(e).__name__}: {e}), so exposure is "
                    f"bounded by the trigger period alone")
@@ -1172,7 +1198,21 @@ class CameraManager(QObject):
         # configuration that is about to be replaced. Note the ceiling below is
         # computed from self._trigger_rate_limit — the same number
         # _set_trigger_mode writes — and is NOT read back from the camera.
-        self.apply_exposure_gain(fps, exposure_us, gain_db)
+        try:
+            self.apply_exposure_gain(fps, exposure_us, gain_db)
+        except AcquisitionStartRefused:
+            # A camera cannot record at this rate (the backend's
+            # RefusalException). Undone like a trigger-mode failure, so the
+            # cameras are back in preview when the refusal reaches the caller.
+            if self._router is not None:
+                try:
+                    self._router.abandon()
+                except Exception:
+                    pass
+                self._router = None
+            self._set_freerun_mode()
+            self._start_grab_threads()
+            raise
         self._start_grab_threads(raw_paths=raw_paths, display_every=display_every,
                                  realtime=realtime, width=width, height=height, quality=quality,
                                  fps=fps)
