@@ -50,11 +50,12 @@ checked by hand that no other one holds the hardware.
     `probe_flir.py`, and `test_probe_network.py` after `probe_network.py`;
   - `test_flir_doc.py` after `docs/FLIR.md` or anything it quotes;
   - `test_history_claude.py` after this file or `docs/HISTORY.md`.
-- `bash tools/run_suite.sh <log_dir>` runs every hardware-free suite (all but
+- In a working tree that has the local-only files,
+  `bash tools/run_suite.sh <log_dir>` runs every hardware-free suite (all but
   `test_sync_router.py`) one at a time, each through `tools/run_nogpu.py`, so no
   suite takes an NVENC session. `test_sim_gui.py` reaches the GPU only with
-  `PANOPTICON_TEST_GPU=1`. Never run `test_nvgil.py --gpu` and a GPU run of
-  `test_sim_gui.py` at the same time.
+  `PANOPTICON_TEST_GPU=1`. Never run the local-only `test_nvgil.py --gpu` and a
+  GPU run of `test_sim_gui.py` at the same time.
 - A test that validates a fix drives the real GUI the way an operator does:
   launch, let the preview run, Record, stop, then Record again (and Calibrate)
   in the same process, and watch the process's memory between acquisitions.
@@ -101,8 +102,8 @@ checked by hand that no other one holds the hardware.
   responding. Quitting mid-session abandons the incomplete data and deletes it
   (`_abandon_and_cleanup`).
 - `rig_setup.apply_profile_to_manager` and `rig_setup.open_kwargs` are the path
-  from a profile to a camera manager. The window, `probe_lag.py` (which
-  `probe_mp.py` runs) and the capture workers go through them, and
+  from a profile to a camera manager. The window, the local-only `probe_lag.py`
+  (which `probe_mp.py` runs) and the capture workers go through them, and
   `apply_profile_to_manager` puts the profile's `log_level` in force.
   `probe_flir.py` and `probe_network.py` open cameras through the backend
   directly.
@@ -337,8 +338,9 @@ until someone analyses it.
   host upload for that encoder only, with a `WARNINGS.txt` line. A recording
   encoder whose `Encode` fails takes the path of any encoder failure (flush,
   then spill that camera's frames raw) and leaves the pinned path on for the
-  others. After a
-  PyNvVideoCodec or driver update, run `test_nvgil.py --gpu`.
+  others. The launch preflight repeats the proof at every launch. In a working
+  tree that has the local-only suites, also run `test_nvgil.py --gpu` after a
+  PyNvVideoCodec or driver update.
 - The profile reaches `nvenc` only through
   `hardware_check.configure_nvenc_upload`, at launch and after a profile switch,
   before any encoder exists and before the GOP check. `nvenc_context: own` needs
