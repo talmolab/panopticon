@@ -57,9 +57,8 @@ camera, and double-click it again to go back.
 
 The camera's delivered frame rate over its last ten frames, refreshed every
 tenth repaint (1). That is about three times a second up to six cameras, and
-twice a second on the nine-camera reference rig. It should read about 30 at
-idle, the calibration rate while calibrating and the trigger rate while
-recording. One pane reading low while the others are right is usually the
+twice a second on the nine-camera reference rig. It should match the camera
+rate that the table under (1) gives for the current state. One pane reading low while the others are right is usually the
 first sign of trouble with that camera's link or trigger.
 
 ### Metadata

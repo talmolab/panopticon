@@ -143,10 +143,9 @@ names, and start Panopticon again.
 
 ![Panopticon at idle](images/main_idle.png)
 
-Every camera has a live pane, and each pane reads about `30 fps`. Between
-acquisitions the cameras run free at 30 fps for the preview. They switch to
-the trigger rate only while you calibrate or record. The state label at the
-bottom right reads `IDLE`.
+Every camera has a live pane, and each pane's frame rate reads the
+[idle preview rate](OVERVIEW.md#1-camera-grid). The state label at the bottom
+right reads `IDLE`.
 
 If a pane is missing or black, fix that before anything else.
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) explains the messages a camera open
@@ -298,8 +297,7 @@ paradigm is on the board, Panopticon first flashes the recording-only sketch
 never runs stimulation while you stand in the arena.
 
 Flip Calibrate on. The cameras switch to triggered mode at
-`calibration_frame_rate` (30 fps on the reference rig), and the preview shows
-every frame. The profile's `calibration_exposure_us` and `calibration_gain_db`
+`calibration_frame_rate` (30 fps on the reference rig). The profile's `calibration_exposure_us` and `calibration_gain_db`
 replace the recording exposure and gain for this acquisition only. An exposure
 of 0 or a gain of -1 keeps the recording value, and the reference rig keeps its
 recording gain this way. Panopticon caps the exposure at 90% of the exposure
@@ -761,8 +759,7 @@ that ends before then puts it back.
 The state label reads `RECORDING` in red. Each pane's frame rate should read
 the trigger rate, 100 fps on the reference rig. One pane at about half the
 rate usually means that camera's exposure is over the ceiling
-([CONFIGURATION.md](CONFIGURATION.md#trigger_rate_limit)). The preview shows
-every tenth frame during a recording.
+([CONFIGURATION.md](CONFIGURATION.md#trigger_rate_limit)).
 
 With real-time kick-out (`realtime_kick: true`, the default), Panopticon
 drops every trigger that some camera missed while it records, so every video
@@ -922,8 +919,9 @@ Check the session before the animal goes back, while the rig is still set up:
 2. No `WARNINGS.txt` anywhere under the acquisition folder.
 3. The block IDs ([Check the block IDs](#check-the-block-ids)).
 4. One frame of each video. Open an mp4 and check that the animal is neither
-   black nor blown out. The preview cannot show this, because it runs free at
-   30 fps and is downsampled. Check an exposure change against a recording.
+   black nor blown out. The preview cannot show this
+   ([OVERVIEW.md](OVERVIEW.md#1-camera-grid) says how it differs from a
+   recording), so check an exposure change against a recording.
    For more light, add infrared illumination first, then exposure, then gain
    ([CONFIGURATION.md](CONFIGURATION.md#pfs_path)).
 5. After a stimulated recording, the stimulation files
