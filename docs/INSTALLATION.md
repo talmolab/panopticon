@@ -1102,9 +1102,9 @@ Check in that output:
 The firmware check and the serial port open about a second and a half after the
 window, so the window can draw first.
 
-The hardware check runs in the background from the start, and the status bar
-says `Checking hardware` until it reports. Record and Calibrate stay disabled
-meanwhile. It measures the disk and the CPU encoder, and probes the NVENC
+The hardware check starts with the window and runs in the background. The
+status bar says `Checking hardware` until it reports, and Record and Calibrate
+stay disabled meanwhile. It measures the disk and the CPU encoder, and probes the NVENC
 session cap as [GPU](#gpu) describes. Its report goes to the log:
 
 - `[hw] NVENC sessions: 11 (at least — probe stopped at its limit), needed 11`
