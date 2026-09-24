@@ -445,6 +445,35 @@ class _RouterView:
         return self._coord.pending_depth()
 
 
+def start_refusal_text(refused) -> str:
+    """The message for a start that capture processes refused.
+
+    `refused` holds (camera names, WorkerFailed) for every process that did
+    not start. RULE: every refusing process is named, not the first.
+    REASON: each process refuses for its own cameras, so a message built
+    from one sends the operator to fix those cameras and meet the next
+    process's at the next Record. A process that refused through
+    AcquisitionStartRefused gives its own message; any other failure is
+    worded with its cameras. "Nothing was recorded." ends the whole
+    message once, when any part ends with it or any process failed.
+    """
+    tail = "\n\nNothing was recorded."
+    parts = []
+    ended = False
+    for names, err in refused:
+        if getattr(err, "kind", None) == "AcquisitionStartRefused":
+            text = str(err)
+        else:
+            ended = True
+            text = (f"The capture process for {names} could not start the "
+                    f"acquisition: {err}")
+        if text.endswith(tail):
+            ended = True
+            text = text[:-len(tail)]
+        parts.append(text)
+    return "\n\n".join(dict.fromkeys(parts)) + (tail if ended else "")
+
+
 class ProcessCameraManager(QObject):
     error = pyqtSignal(str)
 
@@ -1273,12 +1302,8 @@ class ProcessCameraManager(QObject):
                     if good or r.kind != "AcquisitionStartRefused"]
             _await({w: w.call("cancel") for w in undo}, RESUME_TIMEOUT_S)
             self._end_acquisition(abandon=True)
-            w, err = refused[0]
-            msg = str(err)
-            if err.kind != "AcquisitionStartRefused":
-                msg = (f"The capture process for {w.names} could not start "
-                       f"the acquisition: {msg}\n\nNothing was recorded.")
-            raise AcquisitionStartRefused(msg)
+            raise AcquisitionStartRefused(start_refusal_text(
+                [(w.names, err) for w, err in refused]))
         for w in self._workers:
             self.last_warnings.extend(replies[w][1].get("warnings", []))
         print(f"[acq] multi-process capture: {len(self._workers)} capture "
