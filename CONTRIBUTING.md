@@ -41,9 +41,13 @@ These modules run while the cameras stream:
 
 - `gui_app/grab_thread.py`, the per-camera grab loop;
 - `gui_app/frame_sync.py`, the kick-out coordinator;
-- `gui_app/sync_encode.py`, `gui_app/nvenc.py` and `gui_app/cuda_driver.py`, the
-  encoder threads and the GPU upload;
+- `gui_app/sync_encode.py`, `gui_app/encoders.py`, `gui_app/nvenc.py`,
+  `gui_app/cpu_encode.py` and `gui_app/cuda_driver.py`, the encoder threads, the NVENC
+  and libx264 encoders, and the GPU upload;
+- `gui_app/cpu_affinity.py`, which places the capture threads on CPU cores and sets
+  their priority;
 - `gui_app/camera_manager.py`, which starts and stops every acquisition;
+- `gui_app/trigger_source.py`, which arms every camera before the first trigger;
 - `gui_app/logging_setup.py`, which every print from a capture thread goes through;
 - `gui_app/mp/`, the multi-process capture workers;
 - `gui_app/backends/`, the camera backends.
