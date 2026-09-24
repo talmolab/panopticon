@@ -1685,9 +1685,10 @@ before the "already aligned" early return, because gapless block IDs make the
 intersection total and the pass would otherwise find nothing to report.
 
 Each warning names the camera and the probable cause. For a camera running
-slow, that is an exposure over the ceiling. The advice comes from the backend
-(`BLOCK_RATE_HINTS`): the `.pfs` and the limiter on Basler, the camera block
-and `TriggerOverlap` on FLIR. Block IDs running faster than the trigger get a
+slow, that is an exposure over the ceiling. A backend that declares
+`BLOCK_RATE_HINTS` supplies the advice (on FLIR, the camera block and the
+trigger overlap). Without them the check gives its default advice, which is
+Basler's: the `.pfs` and the limiter. Block IDs running faster than the trigger get a
 different message, because a camera cannot acquire more frames than it was
 triggered for; that pattern means the reference rate or the clock unit is
 wrong, or a re-arm resynced to the wrong number.
