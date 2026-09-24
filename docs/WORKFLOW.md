@@ -127,6 +127,11 @@ The same holds when the remembered profile, or the one `--profile` names, does
 not load. A `Choose your rig's profile` dialog says why. Choose the profile in
 the dropdown at the top of the sidebar ([section 2](#2-choose-a-profile)).
 
+If no profile loads at all, a `No rig profile` dialog appears instead, and
+Record and Calibrate stay disabled. The board has not been cleared then and
+may still carry a paradigm. Switch the laser off, fix the profile the dialog
+names, and start Panopticon again.
+
 ### A good launch
 
 ![Panopticon at idle](images/main_idle.png)
