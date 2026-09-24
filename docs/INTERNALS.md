@@ -1717,7 +1717,7 @@ recording on disk.
 ### What is on disk
 
 A session folder describes itself: the geometry, the timing, what the stimulus
-did and every warning sit beside the videos.
+was programmed to do and every warning sit beside the videos.
 
 ```
 <output_dir>/<date>/<mouse1>_<mouse2>/
