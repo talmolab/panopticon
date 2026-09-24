@@ -77,7 +77,7 @@ in the list.
 | Message or symptom | Cause and fix |
 |---|---|
 | `No cameras found` | Nothing enumerated. Check power, cables and link lights, and close pylon Viewer, SpinView or anything else holding the cameras. For GigE cameras, run `uv run probe_network.py` ([The network](#the-network)). |
-| `Expected <n> cameras but <m> are available to open.` | The count differs from `n_cameras`, and the message lists the serials found. Camera names are positions ([camera_serials](CONFIGURATION.md#camera_serials)), so Panopticon opens none. Power-cycle the missing camera. After adding cameras, follow [INSTALLATION.md](INSTALLATION.md#adding-cameras-to-a-rig-that-already-works). |
+| `Expected <n> cameras but <m> are available to open.` | The count differs from `n_cameras`. Camera names are positions ([camera_serials](CONFIGURATION.md#camera_serials)), so Panopticon opens none. `uv run probe_network.py` shows which cameras answer, and flags one on the wrong subnet. Power-cycle a missing camera. After adding cameras, follow [INSTALLATION.md](INSTALLATION.md#adding-cameras-to-a-rig-that-already-works). |
 | `Requested cameras did not enumerate:` | A serial in `camera_serials` did not appear. Power-cycle that camera. |
 | `ignoring <n> enumerated device(s) not in the profile's camera_serials` | Log line. A camera not in `camera_serials` stays closed. Add its serial if it belongs to the rig. |
 | `Camera <serial> failed to open/configure:` | It enumerated and would not configure. The next line gives the reason. Power-cycle it, or close the program holding it. Panopticon then closes every camera. |
