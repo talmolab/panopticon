@@ -114,10 +114,9 @@ finishes.
 
 #### 9. Solve
 
-Runs the calibration solve on the calibration folder the session fields name,
-then copies `calibration.toml` into `recording/`. It takes a few minutes,
-during which the state label reads `CALIBRATING...` in purple. See
-[WORKFLOW.md](WORKFLOW.md#6-solve).
+Runs the calibration solve for the session the fields name. The state label
+(16) shows it while it runs. [WORKFLOW.md](WORKFLOW.md#6-solve) says what it
+reads and writes.
 
 #### 10. Snapshot
 
