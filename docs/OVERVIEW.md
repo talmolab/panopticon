@@ -17,7 +17,7 @@ appears only during a calibration and the progress bar (15) only while videos
 are finalised.
 
 The camera grid fills the left of the window, and a sidebar 260 px wide fills
-the right. The sidebar holds three groups, Metadata, Acquisition and Display,
+the right. The sidebar holds the Metadata, Acquisition and Display groups,
 with the state label at its foot. The status bar runs along the bottom of the
 window. There is no settings window: everything else lives in the rig profile
 ([CONFIGURATION.md](CONFIGURATION.md)). The window opens at about 80% of the
@@ -66,14 +66,15 @@ camera's link or trigger.
 
 #### 4. Profile
 
-Chooses the rig profile, one YAML file in `profiles/`. Choosing one closes the
-cameras and opens the new profile's, off the UI thread. Panopticon remembers
-the choice on this computer. On a computer with no remembered profile the
-dropdown shows `Choose a profile`, and Panopticon opens no camera and no
-serial port until you choose. The dropdown is locked during an acquisition.
-It refuses a switch while a solve, a firmware flash, a stimulation Test or the
-hardware check runs. [WORKFLOW.md](WORKFLOW.md#2-choose-a-profile) covers what
-a switch does to the trigger board.
+Chooses the rig profile, one YAML file in `profiles/`.
+[WORKFLOW.md](WORKFLOW.md#2-choose-a-profile) says what a switch does to the
+cameras and the trigger board. On a computer with no remembered profile the
+dropdown shows `Choose a profile`.
+
+The dropdown is disabled from the start of an acquisition until its videos
+are finalised, during a solve, and during a blocking operation (16). A switch
+during an editor upload, a stimulation Test or the hardware check is refused
+with a dialog that says what to wait for.
 
 #### 5. Output directory
 
@@ -88,15 +89,13 @@ the two mice build the folder and file names, and all eight go into
 `session_metadata.json`. Assay, Experimenter, Cohort, Cage and Notes start with
 the profile's `metadata_defaults`.
 [WORKFLOW.md](WORKFLOW.md#4-fill-in-the-metadata) gives the defaults and the
-checks. The fields, the output directory and the dropdown lock while an
-acquisition or a solve runs.
+checks.
 
 ### Acquisition
 
 Calibrate and Record are toggles, and while one is on the other is disabled.
 Solve, Snapshot and Stimulation are buttons. A typical session goes Calibrate,
-Solve, Record. Record and Calibrate stay disabled while the hardware check
-runs, at launch and after a profile switch.
+Solve, Record.
 
 #### 7. Calibrate
 
@@ -122,10 +121,11 @@ during which the state label reads `CALIBRATING...` in purple. See
 
 #### 10. Snapshot
 
-Saves one full-resolution PNG per camera into
-`<session>/snapshots/<date>_<HHMMSS>/`. Snapshots come from the full frame, so
-the brightness and contrast sliders do not affect them. Use them to judge
-focus, which the downsampled preview hides.
+Saves one full-resolution PNG per camera into the session folder
+([WORKFLOW.md](WORKFLOW.md#4-fill-in-the-metadata)), and the status bar
+confirms `Snapshot: saved k/N cameras → <folder>`. Snapshots come from the
+full frame, so the brightness and contrast sliders do not affect them. Use
+them to judge focus, which the downsampled preview hides.
 
 #### 11. Stimulation
 
@@ -148,8 +148,8 @@ still records.
 
 Both sliders range from -100 to +100 and change only the preview. The
 recording, the snapshots and the board detection use the camera frames as
-they arrive. If the board is too dark to detect, add light or raise
-`calibration_exposure_us` ([WORKFLOW.md](WORKFLOW.md#work-towards-ready)).
+they arrive. [WORKFLOW.md](WORKFLOW.md#work-towards-ready) says what to do
+when the board is too dark to detect.
 
 #### 15. Progress
 
@@ -257,11 +257,8 @@ At READY the graph turns solid white and the caption reads `READY — m:ss`, wit
 the timer stopped. Detection goes on, and each further sighting still goes
 into the solve's list of frames.
 
-When a calibration stops, Panopticon writes `codet_frames.json` beside the
-videos: the trigger numbers at which two or more cameras saw the board. When
-the file matches the videos, the solve decodes only those frames. The display
-reads full-resolution frames, the same frames the videos hold, so the
-brightness and contrast sliders do not affect it.
+When a calibration stops, these sightings reach the solve through
+`codet_frames.json` ([WORKFLOW.md](WORKFLOW.md#6-solve)).
 
 ---
 
@@ -306,10 +303,12 @@ One second of the wave the Freq and PW fields describe
 #### 3. Pin
 
 The output pin. It has no default, and an empty Pin is refused with
-`Enter a pin number.` Apply, Test, Calibrate and Record refuse three kinds of
-pin: a camera trigger pin (the profile's `trigger_pins`), pins 0 and 1, which
-carry the board's serial link, and a pin the board does not have.
-[WORKFLOW.md](WORKFLOW.md#pins) explains why.
+`Enter a pin number.` Apply, Test, Calibrate and Record refuse a camera
+trigger pin (the profile's `trigger_pins`), pins 0 and 1, which carry the
+board's serial link, and a pin the board does not have.
+[WORKFLOW.md](WORKFLOW.md#pins) explains why. Two chains may not drive one
+pin. One chain may use a pin in several blocks, because its blocks run one
+after another.
 
 #### 4. Freq (Hz)
 
@@ -357,11 +356,16 @@ stop succeeded.
 
 Runs the paradigm on the board with no camera pins. The stimulation outputs
 fire, and no camera is triggered or recorded. The button reads Stop Test while
-a test runs. Test runs whatever the board carries, so when the canvas differs
-from the last upload it offers to upload first, and after a failed Apply it
-refuses. It uses the main window's serial link and does not reset the board.
-If the board does not confirm the stop, a dialog tells you to power-cycle the
-board and switch the laser off.
+a test runs, and the status line counts down (`Testing — 12 s remaining.`). A
+looping test reads `Testing — looping, press Stop Test to end.`, and only Stop
+Test or closing the editor ends it.
+
+Test runs whatever the board carries, so when the canvas differs from the last
+upload it offers to upload first, and after a failed Apply it refuses. It uses
+the main window's serial link and does not reset the board. If the board does
+not confirm the stop, the status line reads
+`STOP NOT CONFIRMED — stim may still be running.` and a dialog appears.
+Power-cycle the board and switch the laser off.
 
 #### 11. Apply to Arduino
 

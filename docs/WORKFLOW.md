@@ -165,9 +165,8 @@ board a stop and closes its link. The new board then gets the launch sequence,
 including the 30 s flash. Choosing a profile on a new computer runs the same
 sequence on that profile's board.
 
-The dropdown refuses a switch while an acquisition, an encode or a solve runs.
-It also refuses one during a firmware flash, a stimulation Test or the
-hardware check. Each refusal says what to wait for.
+[OVERVIEW.md](OVERVIEW.md#4-profile) says when the dropdown is disabled and
+when it refuses a switch.
 
 ### Camera names
 
@@ -248,10 +247,8 @@ Windows name and a trailing dot or space. The fields lock while an acquisition
 or a solve runs.
 
 Press Snapshot to save one full-resolution PNG per camera into
-`<session>/snapshots/<date>_<HHMMSS>/`. The status bar confirms
-`Snapshot: saved k/N cameras → <folder>`. Snapshots ignore the preview's
-brightness and contrast, so they show focus and exposure as the camera records
-them.
+`<session>/snapshots/<date>_<HHMMSS>/`.
+[OVERVIEW.md](OVERVIEW.md#10-snapshot) says what a snapshot shows.
 
 ---
 
@@ -335,18 +332,16 @@ When a count stops climbing, find the one that is stuck:
   between them.
 
 You can stop before READY appears. The recording is still a valid calibration,
-and the solve reports how many cameras it could place. READY latches: once it
-appears, the display freezes and its timer stops. Behind the display,
-detection goes on, and each board sighting you add is one more frame for the
-solve.
+and the solve reports how many cameras it could place.
 
-The brightness and contrast sliders change the preview only. If the board is
-too dark to detect, add infrared light first, then raise
-`calibration_exposure_us`.
+If the board is too dark to detect, add infrared light first, then raise
+`calibration_exposure_us`. The
+[brightness and contrast sliders](OVERVIEW.md#13-and-14-brightness-and-contrast)
+do not help.
 
 Flip Calibrate off to finish. Panopticon writes `codet_frames.json` beside the
-videos. It lists the triggers at which two or more cameras saw the board. The
-videos are then finalised as for a recording ([section 9](#9-after-you-stop)).
+videos for the solve ([section 6](#6-solve)). The videos are then finalised as
+for a recording ([section 9](#9-after-you-stop)).
 
 ---
 
@@ -360,8 +355,9 @@ goes to the status bar and the log. Solve gives up after 30 minutes. A second
 press during a solve shows `A solve is already running`. The session fields
 and the dropdown stay locked until the solve ends.
 
-When `codet_frames.json` matches the videos, the solve decodes only the frames
-it lists. Otherwise it scans the videos, looking at every third frame until it
+`codet_frames.json` lists the triggers at which two or more cameras saw the
+board. When it matches the videos, the solve decodes only those frames.
+Otherwise it scans the videos, looking at every third frame until it
 finds the board (`--skip 3`). A hint file it cannot use, for example one
 written for other videos, raises a warning.
 
@@ -505,10 +501,8 @@ serial port, flashes the board too. Fit the laser's own interlock if you need
 a hard gate.
 
 Set up stimulation after calibrating and before recording, so that Record
-starts without a flash. Open the editor
-with the Stimulation button. [OVERVIEW.md](OVERVIEW.md#the-stimulation-editor)
-names each of its controls. Stimulation needs Panopticon's trigger board, so
-the editor does not open on a profile with `trigger_source: external`.
+starts without a flash. Open the editor with the Stimulation button.
+[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) names each of its controls.
 
 ![The stimulation editor](images/stim_clean.png)
 
@@ -534,8 +528,7 @@ camera would break cross-camera block-ID alignment.
 ```
 
 Pins 0 and 1 carry the board's serial link and are refused too, as is a pin
-the board does not have. Pin has no default, and an empty Pin is refused with
-`Enter a pin number.`
+the board does not have.
 
 ### When the board resets
 
@@ -586,39 +579,27 @@ Record refuses to start when the canvas and the board would disagree:
 | `Cannot record with this stim workflow` | A failed Apply, an upload in progress, or a graph problem the editor shows in red, such as a forbidden pin |
 | `Stop the stimulation test first` | A Test is running |
 
-The last two refuse Calibrate as well. Test offers to upload first when the
-canvas differs from the last upload, and refuses after a failed Apply.
-
-A paradigm stays on the board after you quit, and the next launch reflashes
-the recording-only sketch. To reuse a saved paradigm, Load it and press Apply.
+The last two refuse Calibrate as well. To reuse a saved paradigm in a later
+launch, Load it and press Apply.
 
 ### Build a paradigm
 
 A block drives one pin with one square wave for a set time. An arrow means
 "when this block ends, start that one", so a chain runs in sequence. Chains
 that are not connected run at the same time.
+[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) describes each field and
+button, and the rules a graph must follow.
 
-1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block. Freq, PW
-   and Dur left blank become 0, 0 and 1.
+1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block.
 2. Drag from a port on one block to a port on another to connect them.
-3. Click a block to load its values. Press Enter in a field to apply an edit
-   to the selected block.
-4. Read the preview's caption before you Apply. 10 Hz with a 100 ms pulse is
-   `100% duty — constant ON, not 10 Hz`, and a pulse longer than its period is
-   constant ON as well ([the waveform preview](OVERVIEW.md#the-waveform-preview)).
+3. For a pause, add a block at [0 Hz](OVERVIEW.md#4-freq-hz). For a loop,
+   tick [Starting](OVERVIEW.md#7-starting) on one of its blocks. To stop the
+   recording when a block finishes, tick [Ending](OVERVIEW.md#8-ending) on it.
+4. Read the preview's caption before you Apply. A pulse as long as its period
+   or longer holds the pin HIGH for the whole block
+   ([the waveform preview](OVERVIEW.md#the-waveform-preview)).
 5. Save writes the graph as JSON, by default `stim_config.json` in the output
    folder. Load reads one back.
-
-A block at 0 Hz holds its pin LOW for its duration. That is how you write a
-pause.
-
-- Any block with no incoming arrow starts a chain. A loop has none, so tick
-  Starting on one of its blocks, or the loop never runs.
-- Ending stops the recording when that block first finishes. A looping chain
-  keeps running until then, so bound a loop with a parallel chain that holds
-  the Ending block. The status line shows `Recording will stop N s after start.`
-- Two chains on one pin are refused. One chain may use a pin in several
-  blocks, because its blocks run one after another.
 
 ### A worked paradigm
 
@@ -638,13 +619,10 @@ press Record.
 
 ### Test
 
-Test runs the paradigm on the board with no camera pins, so no camera is
-triggered and nothing is recorded. The status line counts down
-(`Testing — 12 s remaining.`). For a loop it reads
-`Testing — looping, press Stop Test to end.`, and only Stop Test ends it.
-Closing the editor stops a test as well. If the board does not confirm the
-stop, the status line reads `STOP NOT CONFIRMED — stim may still be running.`
-and a dialog appears. Power-cycle the board and switch the laser off.
+Press Test to run the paradigm on the board with no camera triggered and
+nothing recorded. [OVERVIEW.md](OVERVIEW.md#10-test) describes its countdown,
+how a looping test ends, and what to do when the board does not confirm the
+stop.
 
 ### After a stimulated recording
 
