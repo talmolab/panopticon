@@ -266,10 +266,11 @@ Settings a bring-up may need beyond the template's `SITE` values:
 
 Each template's comments explain the rest of its values.
 
-Loading the profile refuses the Basler-only fields in a FLIR profile
-(`pfs_path`, `trigger_rate_limit`, `gige_driver`, `gev_bandwidth_reserve_pct`,
-`gev_bandwidth_reserve_accum`), and each message names the FLIR setting to use
-instead. Opening the cameras then checks every value against what each camera
+Loading the profile refuses the Basler-only fields in a FLIR profile:
+`pfs_path`, `trigger_rate_limit`, `gige_driver` other than `auto`,
+`gev_bandwidth_reserve_pct` and `gev_bandwidth_reserve_accum`. Each message
+says to remove the field, and names the FLIR setting to use where there is one.
+Opening the cameras then checks every value against what each camera
 reports, and refuses one outside the camera's range. The message names the
 camera, the setting and the range.
 
