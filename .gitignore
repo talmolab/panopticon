@@ -21,14 +21,14 @@ docs/PERF_EXPERIMENTS.md
 # (untracked 2026-09-21; git history preserves them, so `git log -- <path>` and
 # a checkout of an older commit still have them). The offline test suite still
 # runs locally; CONTRIBUTING.md explains where it lives. probe_network.py,
-# gui_app/probe_guard.py and configure_nic.ps1 stay TRACKED on purpose — the
-# install guide points users to them.
+# gui_app/probe_guard.py and configure_nic.ps1 stay tracked, because the
+# install guide points users to them. probe_flir.py is not ignored either: a
+# FLIR volunteer runs it, so it belongs in the product tree once it is added.
 /test_*.py
 /probe_abuse.py
 /probe_cpu_load.py
 /probe_lag.py
 /probe_mp.py
-/probe_flir.py
 /probe_seq.py
 /tools/
 /docs/make_screenshots.py

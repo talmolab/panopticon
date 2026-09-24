@@ -99,6 +99,7 @@ import threading
 import time
 from pathlib import Path
 
+from gui_app import logging_setup
 from gui_app.backends._spinc import (
     SPINNAKER_ERR_ACCESS_DENIED, SPINNAKER_ERR_RESOURCE_IN_USE, FlirError,
     FlirSdkUnavailable, FlirTimeout, SpinC)
@@ -268,6 +269,32 @@ def _ipv4(value) -> str | None:
     return ".".join(str((v >> s) & 0xFF) for s in (24, 16, 8, 0))
 
 
+def _same_value(want, got: str) -> bool:
+    """Whether a read-back matches the value written: as numbers when both
+    are numbers (within a camera's float rounding), else as text."""
+    words = {"true": 1.0, "false": 0.0}
+
+    def num(v):
+        if isinstance(v, bool):
+            return float(v)
+        text = str(v).strip().lower()
+        return words[text] if text in words else float(text)
+    try:
+        a, b = num(want), num(got)
+        return abs(a - b) <= max(1e-6, 1e-4 * abs(a))
+    except (KeyError, TypeError, ValueError):
+        return str(want).strip() == str(got).strip()
+
+
+def _json_text(value) -> str:
+    """A dict for a log line, compact; never raises."""
+    import json
+    try:
+        return json.dumps(value, default=str, sort_keys=True)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
 def _nearest_steps(value: int, lo: int, inc: int) -> tuple:
     below = lo + ((value - lo) // inc) * inc
     return below, below + inc
@@ -285,6 +312,11 @@ class _Nodes:
         self._handle = handle
         self._maps: dict = {}
         self._cache: dict = {}
+        #: While a list, each write appends (node, requested, read back) to
+        #: it; None outside a configuration phase (FlirBackend._phase_begin
+        #: and _phase_end). A write from a grab thread (the counter reset at
+        #: StartGrabbing) is never inside one, so it reads nothing back.
+        self.writes = None
 
     def _map(self, which: str):
         m = self._maps.get(which)
@@ -364,6 +396,25 @@ class _Nodes:
         except FlirError as e:
             raise FlirConfigError(
                 f"{self.who}: setting {name} to {value!r} failed: {e}") from e
+        if self.writes is not None:
+            label = name if which == "device" else f"{which}.{name}"
+            self.writes.append((label, value, self._read_back(h, fn)))
+
+    def _read_back(self, h, setter) -> str:
+        """The value a node reads after a write, as text; never raises."""
+        api = self.api
+        getter = {api.int_set: api.int_get, api.float_set: api.float_get,
+                  api.bool_set: api.bool_get,
+                  api.enum_set_symbolic: api.enum_get_symbolic}.get(setter)
+        try:
+            if getter is None or not api.node_readable(h):
+                return "not readable"
+            value = getter(h)
+        except Exception as e:
+            return f"unreadable ({type(e).__name__})"
+        if isinstance(value, float):
+            return f"{value:g}"
+        return str(value)
 
     def seti(self, name, value, which="device") -> None:
         self._write(name, which, int(value), self.api.int_set)
@@ -1307,6 +1358,46 @@ class FlirBackend:
         """The `SpinC` (or `FakeSpinC`) this backend drives."""
         return self._api
 
+    # ----------------------------------------------------- read-back logging
+    #: Writes per read-back line, so a phase with dozens of writes stays
+    #: readable.
+    READBACK_PER_LINE = 8
+
+    def _phase_begin(self, cam):
+        """Start collecting cam's writes for the read-back log, at verbose.
+        Returns whether this call started it: a phase inside another (the
+        exposure check at open) adds its writes to the outer one."""
+        n = cam.nodes
+        if n.writes is not None or not logging_setup.verbose():
+            return False
+        n.writes = []
+        return True
+
+    def _phase_end(self, cam, started: bool, phase: str) -> None:
+        """Print what the phase wrote, each as requested -> read back, and
+        stop collecting. The callers run it in a finally, so a refusal
+        part-way still logs the writes that happened."""
+        if not started:
+            return
+        rows, cam.nodes.writes = cam.nodes.writes or [], None
+        if not rows:
+            return
+        per = self.READBACK_PER_LINE
+        parts = []
+        for name, want, got in rows:
+            want_txt = f"{want:g}" if isinstance(want, float) else str(want)
+            if got == "not readable" or str(got).startswith("unreadable"):
+                # A write-only node, or a read that failed: not a mismatch.
+                mark = " (not read back)"
+            else:
+                mark = "" if _same_value(want, got) else " (differs)"
+            parts.append(f"{name} {want_txt} -> {got}{mark}")
+        chunks = [parts[k:k + per] for k in range(0, len(parts), per)]
+        for k, chunk in enumerate(chunks):
+            part = f" ({k + 1}/{len(chunks)})" if len(chunks) > 1 else ""
+            print(f"[flir] {cam.serial} {phase} read-back{part}: "
+                  + ", ".join(chunk), flush=True)
+
     # ------------------------------------------------------------ discovery
     def enumerate_devices(self) -> list:
         """Every camera the SDK detects, sorted by serial number as text.
@@ -1407,11 +1498,14 @@ class FlirBackend:
                 f"{who} could not be initialised ({e}). Power-cycle it and "
                 f"reselect the profile.") from e
         cam = FlirCamera(self, device, spec, max_num_buffer)
+        started = self._phase_begin(cam)
         try:
             self._configure(cam, frame_size, frame_rate)
         except BaseException:
+            self._phase_end(cam, started, "open (refused part-way)")
             self._deinit_after_failed_open(cam)
             raise
+        self._phase_end(cam, started, "open")
         with self._lock:
             self._open.append(cam)
         return cam
@@ -1429,9 +1523,9 @@ class FlirBackend:
             raise FlirConfigError(
                 f"{who}: camera.flir.sdk_dir is {want}, but this process "
                 f"loaded the Spinnaker library from {loaded} when it first "
-                f"enumerated cameras, before the profile's camera: block was "
-                f"read. Set the PANOPTICON_SPINNAKER_DIR environment variable "
-                f"to {want} and restart Panopticon, or remove "
+                f"loaded it (for another profile, a capture worker or the "
+                f"launch check). Set the PANOPTICON_SPINNAKER_DIR environment "
+                f"variable to {want} and restart Panopticon, or remove "
                 f"camera.flir.sdk_dir.")
 
     def _deinit_after_failed_open(self, cam) -> None:
@@ -1482,6 +1576,9 @@ class FlirBackend:
         self._apply_exposure_gain_at_open(cam)
         self._configure_counters(cam)
         self._self_test(cam)
+        if logging_setup.verbose():
+            print(f"[flir] {cam.serial}: self-test result "
+                  f"{_json_text(cam.selftest)}", flush=True)
         self._choose_block_id_source(cam)
         cam._choose_hot_path()
         n.seti("StreamBufferCountManual", cam.max_num_buffer, "tlstream")
@@ -2207,11 +2304,30 @@ class FlirBackend:
 
     # ------------------------------------------------------------ describe
     def describe(self, cam) -> dict:
-        """Width, height and pixel format read back from the camera."""
+        """Width, height and pixel format read back from the camera, with
+        the model, the interface, and the firmware version and link speed
+        when the camera reports them (for the session header)."""
         n = cam.nodes
-        return {"width": n.geti("Width"), "height": n.geti("Height"),
-                "pixel_format": n.gete("PixelFormat"), "serial": cam.serial,
-                "model": cam.model}
+        out = {"width": n.geti("Width"), "height": n.geti("Height"),
+               "pixel_format": n.gete("PixelFormat"), "serial": cam.serial,
+               "model": cam.model}
+        if cam.interface:
+            out["interface"] = cam.interface
+        try:
+            if n.readable("DeviceFirmwareVersion"):
+                out["firmware"] = n.gets("DeviceFirmwareVersion")
+        except Exception:
+            pass
+        try:
+            if n.readable("DeviceLinkSpeed"):
+                out["link_speed"] = (f"{n.geti('DeviceLinkSpeed') * 8 / 1e6:g}"
+                                     f" Mb/s (DeviceLinkSpeed)")
+            elif n.readable("DeviceCurrentSpeed", "tldevice"):
+                out["link_speed"] = (f"{n.gete('DeviceCurrentSpeed', 'tldevice')}"
+                                     f" (DeviceCurrentSpeed)")
+        except Exception:
+            pass
+        return out
 
     # --------------------------------------------------------------- modes
     def _stop_if_streaming(self, cam) -> None:
@@ -2241,6 +2357,13 @@ class FlirBackend:
         The last recording's trigger witness is dropped, because
         `acquisition_warnings` read it at that recording's stop and a later
         recording must not report it again."""
+        started = self._phase_begin(cam)
+        try:
+            self._set_freerun(cam, fps)
+        finally:
+            self._phase_end(cam, started, "free-run")
+
+    def _set_freerun(self, cam, fps: float) -> None:
         self._stop_if_streaming(cam)
         cam._triggered = False
         cam._arm_pending = False
@@ -2267,6 +2390,13 @@ class FlirBackend:
         saying so and naming the pacing the camera actually uses. Any earlier
         trigger witness is dropped, so a camera armed here that never starts
         grabbing reports none; its first StartGrabbing starts a new one."""
+        started = self._phase_begin(cam)
+        try:
+            self._set_triggered(cam, rate_limit, announce)
+        finally:
+            self._phase_end(cam, started, "trigger mode")
+
+    def _set_triggered(self, cam, rate_limit: float, announce: bool) -> None:
         self._stop_if_streaming(cam)
         cam.witness = None
         n = cam.nodes
@@ -2325,6 +2455,14 @@ class FlirBackend:
         if gain_unit not in (None, "dB", "raw"):
             raise ValueError(f"gain_unit must be None, 'dB' or 'raw', not "
                              f"{gain_unit!r}")
+        started = self._phase_begin(cam)
+        try:
+            return self._set_exposure_gain(cam, exposure_us, gain_db,
+                                           gain_unit)
+        finally:
+            self._phase_end(cam, started, "exposure/gain")
+
+    def _set_exposure_gain(self, cam, exposure_us, gain_db, gain_unit):
         n = cam.nodes
         exp = gain = None
         if exposure_us is not None and n.has("ExposureTime"):
@@ -2364,7 +2502,12 @@ class FlirBackend:
         cached = cam._ceilings.get(key)
         if cached is not None:
             return cached
-        ceiling = self._measure_ceiling(cam, fps)
+        started = self._phase_begin(cam)
+        try:
+            ceiling = self._measure_ceiling(cam, fps)
+        finally:
+            self._phase_end(cam, started,
+                            f"exposure ceiling measurement at {fps:g} fps")
         cam._ceilings[key] = ceiling
         return ceiling
 
@@ -2764,6 +2907,10 @@ class FlirBackend:
         past what their reads can prove (`_wrap_reach`), edges the reads
         could not place (a range), and a witness whose counters failed, were
         never read at a stop, or whose sentences could not be built."""
+        if logging_setup.verbose():
+            print(f"[flir] {cam.serial}: trigger witness at stop "
+                  f"(frames acquired {frames_acquired}): "
+                  f"{_json_text(getattr(cam, 'witness', None))}", flush=True)
         try:
             return self._witness_sentences(cam, int(frames_acquired))
         except Exception as e:
