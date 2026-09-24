@@ -557,6 +557,13 @@ The probe works with your source too:
 - On a camera without counters there is no count of ignored triggers. The
   block-ID rate check after each recording is then the only check, as on a
   Basler rig, and the log says the camera has no counters.
+- On a camera whose trigger counters are narrower than 32 bits, the count of
+  ignored triggers covers only a recording shorter than half the counter's
+  range. For a 16-bit counter that is 32,768 frames, or 5.5 minutes at 100 fps.
+  A longer recording's `WARNINGS.txt` says `its trigger witness is limited` and
+  gives no count. If the camera offers the `CounterValue` chunk, set
+  `camera.flir.block_id_source: trigger_counter`, and each ignored trigger then
+  shows as a gap in its block IDs.
 - Where the camera's `ExposureTime` maximum does not follow the frame rate,
   Panopticon estimates the exposure ceiling from the camera's readout time, and
   the log says so. `--exposure-sweep` measures the real ceiling.
