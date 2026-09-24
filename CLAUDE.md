@@ -71,11 +71,11 @@ checked by hand that no other one holds the hardware.
   an underscore module, check `git ls-files "*__init__.py" "*_spinc.py"`.
 - Camera vendor code lives in `gui_app/backends/`. `backends/__init__.py`
   defines the `CameraBackend` and `GrabResultProtocol` contracts,
-  `KNOWN_BACKENDS` and `load_backend(name)`. `camera_manager` and `grab_thread`
-  reach a backend through `load_backend(profile.camera_backend)` and read its
-  optional members with `getattr`. Nothing outside `backends/` imports pypylon
-  or loads Spinnaker, so a rig without an SDK fails in one place with a clear
-  message. A new vendor is one new module, a name in `KNOWN_BACKENDS` and a
+  `KNOWN_BACKENDS` and `load_backend(name)`. `camera_manager` loads a backend
+  with `load_backend(profile.camera_backend)`, hands the instance to each
+  `GrabThread` and reads its optional members with `getattr`. Nothing outside
+  `backends/` imports pypylon or loads Spinnaker, so a rig without an SDK fails
+  in one place with a clear message. A new vendor is one new module, a name in `KNOWN_BACKENDS` and a
   branch in `load_backend()`.
 - `gui_app/backends/_spinc.py` is the only code that loads the Spinnaker DLL,
   apart from `probe_flir.py`'s optional `--pyspin` stage (next rule). `_spinc`
