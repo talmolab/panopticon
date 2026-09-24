@@ -18,9 +18,14 @@ frame_height: 1200
 frame_rate: 100
 calibration_frame_rate: 30   # a slowly waved board gains nothing from 100 fps
 quality: 21
-encode_parallel: 3           # cameras finished at once after Stop: mp4 copies here, encodes in raw mode
-realtime_encode: true        # H.264 on the GPU during capture; false writes raw frames and encodes after Stop
-realtime_kick: true          # drop, during capture, every trigger some camera missed, so the videos come out aligned
+# Cameras finished at once after Stop: mp4 copies here, encodes in raw mode.
+encode_parallel: 3
+# H.264 on the GPU during capture; false writes raw frames and encodes after
+# Stop.
+realtime_encode: true
+# Drop, during capture, every trigger some camera missed, so the videos come
+# out aligned.
+realtime_kick: true
 # Driver buffers per camera. RAM = n_cameras x this x 2.304 MB: 11.6 GiB at
 # 9 x 600, 19.3 GiB at 9 x 1000. It must be at least kick_max_lag: a lagging
 # camera's backlog waits in this pool, so a shallower pool empties before the
@@ -115,7 +120,10 @@ serial_port: COM3
 # the profile loads.
 trigger_pins: [2, 4, 6, 8, 10, 12]
 
-gige_driver: socket          # socket = user-space driver with packet resends; filter (in-kernel, less CPU) discards a frame that lost a packet, about 23% of frames at 6 x 100 fps here
+# socket is the user-space driver, with packet resends. filter (in-kernel,
+# less CPU) discards a frame that lost a packet: about 23% of frames at
+# 6 x 100 fps on this rig.
+gige_driver: socket
 
 # Optostim pins the board drives low at boot, before it waits for the host, so
 # a powered laser driver does not read a floating pin as on. Pin 53 is the
