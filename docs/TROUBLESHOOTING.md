@@ -70,8 +70,9 @@ Contents:
 
 ## Opening the cameras
 
-These appear in a `Camera Error` dialog when a profile opens its cameras. After
-fixing the cause, choose the profile again in the list.
+These appear in a `Camera Error` dialog when a profile opens its cameras, except
+the rows marked as log lines. After fixing the cause, choose the profile again
+in the list.
 
 | Message or symptom | Cause and fix |
 |---|---|
@@ -88,9 +89,9 @@ fixing the cause, choose the profile again in the list.
 | `The profile records <w>x<h> but the cameras are configured for <w>x<h>` | At Calibrate or Record: the open cameras' frame size and the profile disagree. Nothing started. Fix the `.pfs` or the profile. |
 | `backend has no bandwidth-reserve control` | `gev_bandwidth_reserve_pct` or `gev_bandwidth_reserve_accum` is set for a backend without it. Remove both from the profile. |
 | `is not available on this camera (a GigE Vision transport feature)` | A GigE setting reached a camera without it, such as a USB3 camera. Remove the setting from the profile. |
-| `but the capture path reads TimeStamp as nanoseconds` | This camera's clock ticks at another rate, so the delivery lag, the stall recovery and the block-ID rate check are wrong for it. Report the model. |
-| `extended (64-bit) block IDs:` followed by `UNAVAILABLE` | Information. The 16-bit block ID wraps every 65,535 frames (about 11 minutes at 100 fps), and Panopticon unwraps it. |
-| `FATAL: PaddingX=<n> PaddingY=<n> — rows would shear. Refusing to record.` | The camera pads its rows, which the frame copy cannot handle. That camera is retired, and the others record. Check its width setting. |
+| `but the capture path reads TimeStamp as nanoseconds` | Log line. This camera's clock ticks at another rate, so the delivery lag, the stall recovery and the block-ID rate check are wrong for it. Report the model. |
+| `extended (64-bit) block IDs:` followed by `UNAVAILABLE` | Log line, for information. The 16-bit block ID wraps every 65,535 frames (about 11 minutes at 100 fps), and Panopticon unwraps it. |
+| `FATAL: PaddingX=<n> PaddingY=<n> — rows would shear. Refusing to record.` | Log line. The camera pads its rows, which the frame copy cannot handle. That camera is retired, and the others record. Check its width setting. |
 | A pane stays black while its frame rate counts | A display setting. The Brightness and Contrast sliders change the preview only. |
 | The preview is dark | Exposure and gain come from the `.pfs` (or the FLIR `camera:` block). Add light first, then exposure up to the [exposure ceiling](CONFIGURATION.md#exposure-ceiling), then gain. |
 
@@ -102,10 +103,10 @@ Calibrate stay disabled while it runs.
 
 | Message or symptom | Cause and fix |
 |---|---|
-| `cores detected (4+ recommended for multi-camera capture)` | Fewer than 4 physical cores. A floor for running at all ([INSTALLATION.md](INSTALLATION.md#cpu)). |
-| `GB total (16 GB+ recommended)` | Less than 16 GB of RAM. The capacity check at Record decides whether a recording fits ([INSTALLATION.md](INSTALLATION.md#ram)). |
+| `cores detected (4+ recommended for multi-camera capture)` | The CPU is below the floor for running at all ([INSTALLATION.md](INSTALLATION.md#cpu)). |
+| `GB total (16 GB+ recommended)` | The RAM is below the floor for running at all, and a 16 GB machine usually gets this ([INSTALLATION.md](INSTALLATION.md#ram)). The capacity check at Record decides whether a recording fits. |
 | `GB free (500 GB+ recommended)` | The output drive has little free space. Real-time H.264 needs little, and raw capture needs a lot ([INSTALLATION.md](INSTALLATION.md#disk)). |
-| `Disk write speed: <n> MB/s` | The output drive wrote below 500 MB/s. It matters only for raw capture. |
+| `Disk write speed: <n> MB/s` | The output drive writes slowly. It matters only for raw capture ([INSTALLATION.md](INSTALLATION.md#disk)). |
 | `No working NVENC on this machine` | Neither NVENC library works. The report's `Using:` line names the encoder installed instead. Check the NVIDIA driver. |
 | `The real-time GPU encode path (PyNvVideoCodec) is unavailable` | Recording then needs libx264 on the CPU. Run `uv sync`, and check the NVIDIA driver. |
 | `ffmpeg's h264_nvenc test encode failed` | The post-session encodes run on the CPU instead, which is slower. |
@@ -122,9 +123,9 @@ Calibrate stay disabled while it runs.
 |---|---|
 | Cameras missing from pylon Viewer too | Addressing or the firewall. Give the cameras addresses on their adapter's subnet, and add the inbound UDP rules for `python.exe` and `pythonw.exe` ([INSTALLATION.md](INSTALLATION.md#step-5--put-the-cameras-on-the-network-gige)). |
 | `No camera answered on any adapter.` | From `probe_network.py`. Check power, cables and link lights, and the firewall rule the message prints. USB3 cameras never answer this discovery. |
-| `on the WRONG SUBNET for the switch they are plugged into` | A camera sits behind a switch whose subnet does not match its address, often after cameras were unplugged and put back crossed. The camera SDK may not list it. Move the cable, or re-address the camera (pylon IP Configurator for Basler, SpinView for FLIR). |
+| `on the WRONG SUBNET for the switch they are plugged into` | The camera's address does not match its switch's subnet, often after cables were swapped. Move the cable, or re-address the camera (pylon IP Configurator for Basler, SpinView for FLIR). |
 | `no candidate camera adapters found` | No adapter has an address on a private subnet. Give each camera adapter its static address. |
-| Cameras open but every frame is incomplete, `Failed_Buffer_Count` climbing | A device in the path is at 1500-byte frames. Set 9216 on every switch port, the uplink included, then run `uv run probe_network.py --sweep`. Passing at 1500 and failing from 2000 up confirms it. Do not test this with `ping`. |
+| Cameras open but every frame is incomplete, `Failed_Buffer_Count` climbing | A device in the path is at 1500-byte frames. Set 9216 on every switch port, the uplink included, then run the sweep in [INSTALLATION.md step 7](INSTALLATION.md#test-the-network-with-the-profile). |
 | The sweep prints `FAIL` after a `complete=` count | Frames did not arrive whole at that packet size. See the row above. |
 | High `Resend_Request_Count`, with or without lost frames | Check the switches' flow control first ([INSTALLATION.md](INSTALLATION.md#configure-the-switches)), on every port and the uplink. Then jumbo frames, Energy Efficient Ethernet, and cameras per port. Resends arrive late, so a camera with many can fall behind with no frame lost. |
 | About a quarter of the frames missing, in single-frame gaps | `gige_driver: filter` drops a frame with a lost packet instead of asking for it again. Use `socket`. |
@@ -213,7 +214,7 @@ Most of these appear in the status bar.
 | `s BEHIND REAL TIME (<cam>). Frames will be lost when the buffer pool fills. Stop and investigate.` | The same, by more than a second. Stop and check that camera. |
 | `EVERY CAMERA IS RETIRED: nothing is being recorded. Stop the recording.` | Stop, and read the retirement reasons in the log. |
 | `NO FRAMES from <cams> for <n> s` | Those cameras have delivered nothing for that long. Check their trigger cables and network links. |
-| `NO FRAMES FROM ANY CAMERA for <n> s: the trigger board may have stopped.` | Every camera stopped receiving frames at once, so the trigger source or the network to all cameras stopped. A `No frames from any camera` dialog opens. If it says the board's serial link is gone, the board lost power or was unplugged, and its stimulation pins are undriven: check the laser now. |
+| `NO FRAMES FROM ANY CAMERA for <n> s: the trigger board may have stopped.` | Every camera stopped receiving frames at once, so the trigger source or the network to all cameras stopped. A `No frames from any camera` dialog opens and says whether the board's serial link still answers. On a profile with `stim_safe_pins` the dialog says to check the laser: do so. |
 | `CAMERA TEMPERATURE: <cam> <t> C` | The camera is near its shutdown temperature, or in its over-temperature state. Check its airflow and mount ([INSTALLATION.md](INSTALLATION.md#camera-temperature)). A camera at its shutdown point stops delivering. |
 | One camera's pane shows about half the trigger rate | Exposure over the ceiling, or a 2.5 Gbit/s link ([The network](#the-network)). The camera ignores every second trigger. See [the out-of-sync section](#the-recording-looks-fine-but-the-views-are-out-of-sync). |
 | `Waiting for the first trigger: start your trigger source now` | `trigger_source: external`: start your source. |
@@ -243,7 +244,7 @@ runs after the encode, and its rows appear in dialogs of their own, such as
 | `stream dead after <n> re-arms` | The stream kept stalling. Check the camera's link and power. |
 | `camera did not start grabbing` | The camera would not start. Power-cycle it. |
 | `could not allocate its NV12 ring` | Out of memory at the start. Lower `kick_max_lag`, or close other programs. |
-| `found no free NV12 ring slot` | The camera's encoder fell behind the trigger, and frames were dropped from that camera. Check the GPU load and the log. |
+| `found no free NV12 ring slot` | The camera's encoder fell behind the trigger, and frames were dropped from that camera. Its video is shorter than the others, so pair its frames by block ID (`blockids.npy`). Check the GPU load and the log. |
 | `frames were dropped because its encoder queue stayed full` | The encoder did not keep up. The drops are gaps in `blockids.npy`, which alignment accounts for. |
 | `no real-time encoder could be created` | That camera wrote raw frames to `raw.bin`, and the encode ran after the session. Usually the NVENC session cap. |
 | `the encoder failed after <n> frames` | The rest was written raw to `raw_tail.bin` and merged at encode time. |
@@ -332,11 +333,13 @@ every acquisition start:
 ```
 
 It shows the exposure applied and the ceiling it was checked against. When the
-exposure asked for is over the ceiling, Panopticon applies the ceiling and the
-line ends in ` CLAMPED from <value> us`. A line without `CLAMPED` means the
-exposure was under the computed ceiling. The inputs to the ceiling are then the
-next suspects: `trigger_rate_limit` against the camera's real maximum frame
-rate, and `frame_rate` against what the board drives.
+exposure asked for is over the ceiling, Panopticon applies the ceiling, and the
+line goes on with ` CLAMPED from <value> us` and the ceiling it applied. A line
+without `CLAMPED` means the exposure was under the computed ceiling, unless the
+line says `ceiling none` or the camera's exposure could not be read when it
+opened: the clamp then had nothing to compare. Otherwise the inputs to the
+ceiling are the next suspects: `trigger_rate_limit` against the camera's real
+maximum frame rate, and `frame_rate` against what the board drives.
 
 A recording with this fault cannot be repaired. Its frames carry the wrong
 trigger numbers, and trimming frames cannot correct that. Record it again once
