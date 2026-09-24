@@ -7,18 +7,18 @@
 #
 # To use it, copy it into profiles/, give it a name of your own, and replace
 # every value marked SITE. Files in profiles/templates/ never appear in the
-# profile dropdown.
+# profile dropdown. docs/CONFIGURATION.md ("Your own TTL source") gives the
+# whole procedure and describes every field.
 #
 # With trigger_source: external a recording runs like this:
 #   1. Keep your trigger source stopped and press Record.
-#   2. Panopticon arms every camera and watches them for a moment. If any
-#      camera receives a frame, the source was already running, and the
+#   2. Panopticon arms every camera and watches them for at least 0.5 s. If
+#      any camera receives a frame, the source was already running, and the
 #      recording is refused: each camera would count its frames from a
 #      different pulse.
 #   3. When Panopticon asks, start your source at frame_rate. The recording
-#      begins with its first pulse. If no pulse arrives in time
-#      (FIRST_TRIGGER_TIMEOUT_S in gui_app/trigger_source.py), the start is
-#      cancelled and nothing is kept.
+#      begins with its first pulse. If no pulse arrives within 45 s, the start
+#      is cancelled and nothing is kept.
 #   4. To finish, stop your source, or press Record off and then stop it.
 #      The recording ends once every camera has stopped receiving frames.
 # Calibrate works the same way, with the source at calibration_frame_rate.

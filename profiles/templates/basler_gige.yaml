@@ -1,0 +1,78 @@
+# Template: Basler GigE cameras on Panopticon's trigger board, with every
+# profile field. docs/CONFIGURATION.md describes each one.
+#
+# To use it, copy it into profiles/, give it a name of your own, and replace
+# every value marked SITE. Files in profiles/templates/ never appear in the
+# profile dropdown.
+#
+# The values suit four Basler a2A1920-165g5m 5GigE cameras at 1920x1200
+# Mono8 and 100 fps, the reference rig's camera.
+
+# --- Identity ---------------------------------------------------------------
+name: basler_gige                 # SITE: unique among the files in profiles/
+metadata_defaults:                # SITE: pre-filled in the sidebar
+  experimenter: ""
+  assay: ""
+
+# --- Cameras ----------------------------------------------------------------
+camera_backend: basler            # basler | flir | sim | flir_sim
+pfs_path: configs/mono8_1920x1200.pfs   # SITE: the .pfs saved from your cameras
+# camera:                         # FLIR only; a Basler camera's settings are its .pfs
+frame_width: 1920                 # SITE: Width in the .pfs
+frame_height: 1200                # SITE: Height in the .pfs
+n_cameras: 4                      # SITE
+# SITE: your cameras' serial numbers, quoted, in ascending order as text.
+# cam1 is the first entry.
+camera_serials: ["40000001", "40000002", "40000003", "40000004"]
+
+# --- Timing and exposure ----------------------------------------------------
+frame_rate: 100                   # recording trigger rate, Hz
+calibration_frame_rate: 30        # calibration trigger rate, Hz
+trigger_rate_limit: 165           # SITE: the camera's maximum frame rate; never 0
+calibration_exposure_us: 5000     # 0 keeps the .pfs exposure
+calibration_gain_db: -1           # any negative value keeps the .pfs gain
+
+# --- Encoding ---------------------------------------------------------------
+encoder: auto                     # auto | nvenc | x264 | raw
+realtime_encode: true             # false writes whole frames to disk
+quality: 21                       # H.264 QP, 0 to 51; lower is larger
+encode_parallel: 3                # cameras finished at once after Stop
+nvenc_upload: pinned              # pinned | host
+nvenc_context: shared             # shared | own
+
+# --- Alignment and memory ---------------------------------------------------
+realtime_kick: true               # align during the recording
+kick_max_lag: 240                 # raise only after a test on your rig
+max_num_buffer: 600               # at least kick_max_lag; 4 x 600 x 2.3 MB = 5.1 GiB
+capture_processes: 0              # experimental; the window records only at 0
+
+# --- GigE network -----------------------------------------------------------
+gige_driver: socket               # socket | filter | auto
+# gev_bandwidth_reserve_pct: 10   # unset keeps the .pfs value
+# gev_bandwidth_reserve_accum: 4  # unset keeps the .pfs value
+
+# --- Trigger source and stimulation -----------------------------------------
+trigger_source: board             # board | external
+serial_port: COM3                 # SITE: Device Manager > Ports (COM & LPT)
+trigger_pins: [2, 4, 6, 8]        # SITE: every pin wired to a camera trigger input
+stim_safe_pins: []                # SITE: every pin wired to a laser or LED driver
+
+# --- Paths ------------------------------------------------------------------
+output_dir: data                  # SITE: your largest, fastest drive
+board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
+
+# --- Calibration coverage ---------------------------------------------------
+calibration_min_per_cam_shared: 120
+calibration_min_edge: 40
+calibration_min_grid_cells: 3     # quarters of each view, of 4
+
+# --- CPU placement (Windows, hybrid CPUs) -----------------------------------
+pin_capture_threads: false        # turn on after a test shows a camera falling behind
+capture_core_exclude: [0]
+encoder_pcores: false
+pin_encoder_threads: false
+
+# --- Monitoring and logging -------------------------------------------------
+thermal_poll_s: 20
+thermal_warn_margin_c: 3
+log_level: verbose                # normal | verbose | debug
