@@ -758,18 +758,37 @@ def dropped_lines() -> int:
     return _sink.dropped if _sink is not None else 0
 
 
-def log_status() -> dict:
+#: The counts in log_status(), each a total since the launch.
+LOG_COUNT_KEYS = ("lines_dropped", "lines_not_written",
+                  "console_lines_dropped")
+
+
+def log_status(since: dict | None = None) -> dict:
     """The log's losses for session_metadata.json: lines dropped from the
     queue, lines a failed file write lost and the last such error, and lines
-    the console did not show. Zeros and None when not installed."""
+    the console did not show. Zeros and None when not installed.
+
+    The counts are totals since the launch. With `since`, an earlier
+    log_status(), each count is what was lost after it (an acquisition's
+    own losses, from its arm), and the launch totals go under
+    "since_launch".
+    """
     sink = _sink
     if sink is None:
-        return {"lines_dropped": 0, "lines_not_written": 0,
-                "file_error": None, "console_lines_dropped": 0}
-    return {"lines_dropped": sink.dropped,
-            "lines_not_written": sink.lines_not_written,
-            "file_error": sink.file_error,
-            "console_lines_dropped": sink.console_dropped}
+        status = {"lines_dropped": 0, "lines_not_written": 0,
+                  "file_error": None, "console_lines_dropped": 0}
+    else:
+        status = {"lines_dropped": sink.dropped,
+                  "lines_not_written": sink.lines_not_written,
+                  "file_error": sink.file_error,
+                  "console_lines_dropped": sink.console_dropped}
+    if since is None:
+        return status
+    totals = {k: status[k] for k in LOG_COUNT_KEYS}
+    for k in LOG_COUNT_KEYS:
+        status[k] = max(0, status[k] - int(since.get(k) or 0))
+    status["since_launch"] = totals
+    return status
 
 
 def flush(timeout: float = FLUSH_TIMEOUT_S) -> bool:

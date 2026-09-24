@@ -214,6 +214,9 @@ class MainWindow(QMainWindow):
     #: logging_setup.mark() taken when the current acquisition was armed:
     #: where its session.log slice of the log starts. None before one.
     _log_mark = None
+    #: logging_setup.log_status() at the same moment, so the metadata counts
+    #: the acquisition's own log losses, not the launch's.
+    _log_status_mark = None
 
     @property
     def _state(self) -> State:
@@ -1951,6 +1954,7 @@ class MainWindow(QMainWindow):
         # Where this acquisition's session.log starts: before its first
         # line, the header included.
         self._log_mark = logging_setup.mark()
+        self._log_status_mark = logging_setup.log_status()
         print(f"[acq] start_acquisition({acq_type}) fps={fps} realtime={rt} "
               f"kick={kick}: switching cameras to trigger mode", flush=True)
 
@@ -4008,7 +4012,8 @@ class MainWindow(QMainWindow):
                 "level": logging_setup.level(),
                 "file": str(logging_setup.log_path()),
                 "session_log": logging_setup.SESSION_LOG_NAME,
-                **logging_setup.log_status()}
+                **logging_setup.log_status(
+                    since=self._log_status_mark or {})}
         upload = self._upload_record()
         if upload is not None:
             extra["nvenc_upload_used"] = upload
