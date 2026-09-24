@@ -581,8 +581,12 @@ packages out:
 uv sync --no-group rig
 ```
 
-That environment runs the simulated rig ([SIMULATION.md](SIMULATION.md)) and the
-post-session tools.
+Pass `--no-group rig` to every `uv run` on that machine as well, for example
+`uv run --no-group rig gui.py --profile sim`. A plain `uv run` installs the
+default groups again, the camera and GPU packages included, and needs the
+internet to do it. `_launch.bat` runs a plain `uv run`, so start Panopticon
+from PowerShell there. With the flag, that environment runs the simulated rig
+([SIMULATION.md](SIMULATION.md)) and the post-session tools.
 
 On the rig, check the main imports:
 
@@ -593,10 +597,9 @@ uv run python -c "import pypylon.pylon, PyQt5, numpy; print('ok')"
 Expected: `ok`. Anything else means the sync did not finish. Run `uv sync`
 again and read its error.
 
-This step and the clone are the only ones that need the internet. Afterwards
-acquisition, encoding, the calibration solve and the post-session tools run
-offline, in the environment `uv sync` built. Run each script as
-`uv run python <script>.py`.
+Once a full `uv sync` has run, acquisition, encoding, the calibration solve and
+the post-session tools need no internet. They run offline, in the environment
+`uv sync` built. Run each script as `uv run python <script>.py`.
 
 ### Step 5 — put the cameras on the network (GigE)
 
@@ -1176,10 +1179,18 @@ The simulated rig needs no hardware at all:
 uv run gui.py --profile sim
 ```
 
+On a machine installed with `uv sync --no-group rig`, run
+`uv run --no-group rig gui.py --profile sim` instead
+([step 4](#step-4--install-the-python-dependencies)).
+
 Preview, Calibrate, Record, Stop and the stimulation editor's Apply then run end
 to end. [SIMULATION.md](SIMULATION.md) walks through it. Point the output folder
 somewhere scratch first, because the `sim` profile writes to the repository's
 `data` folder.
+
+Panopticon now remembers `sim`, so the next plain launch and the desktop
+shortcut open the simulated rig. To go back to your rig, run
+`uv run gui.py --profile my_rig`.
 
 ### With real cameras
 

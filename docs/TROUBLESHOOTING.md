@@ -39,7 +39,7 @@ Contents:
 |---|---|
 | `The term 'uv' is not recognized` | PowerShell was open before uv was installed. Open a new window. If it persists, sign out of Windows and back in. |
 | `The term 'git' is not recognized` | Install Git for Windows, then open PowerShell again. |
-| `uv sync` fails to download | No internet, or a proxy in the way. The clone and `uv sync` are the only steps that need the internet. |
+| `uv sync` fails to download | No internet, or a proxy in the way. After a full `uv sync`, Panopticon and its tools run offline. On a machine installed with `uv sync --no-group rig`, a plain `uv run` downloads the camera and GPU packages again, so pass `--no-group rig` to every `uv run` there ([INSTALLATION.md step 4](INSTALLATION.md#step-4--install-the-python-dependencies)). |
 | `cannot be loaded because running scripts is disabled` | Run the script as `powershell -ExecutionPolicy Bypass -File <script>.ps1`. |
 | `No venv at <path>` | From `make_shortcut.ps1`: `uv sync` has not run in this copy of the repository. |
 | `Panopticon failed to start` | The window never opened. The dialog gives the error and the log file. Common first-run causes: the camera SDK missing, a profile that will not load, or an incomplete `uv sync`. |
