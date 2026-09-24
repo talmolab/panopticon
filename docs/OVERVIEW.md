@@ -137,8 +137,9 @@ trigger board to run a paradigm on.
 
 Appears in this slot during a calibration
 ([below](#the-calibration-coverage-hud)). It stays hidden when OpenCV is
-missing or the profile's `board_config` file does not exist. The calibration
-still records.
+missing, when the profile's `board_config` file does not exist, and when the
+file cannot be used (the log says `[hud] coverage detector unavailable`). The
+calibration still records.
 
 ### Display
 
@@ -416,8 +417,8 @@ the pin HIGH in both cases, and the block reads `constant ON`.
 
 Hidden until they have something to show:
 
-- The coverage display (12), during a calibration, when OpenCV and the board
-  file are available.
+- The coverage display (12), during a calibration, when OpenCV is installed
+  and the board file can be used.
 - The progress bar (15), while videos are encoded or aligned.
 
 Disabled while they would do the wrong thing:
