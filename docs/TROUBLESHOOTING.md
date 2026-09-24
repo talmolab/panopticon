@@ -54,7 +54,7 @@ Contents:
 
 | Message or symptom | Cause and fix |
 |---|---|
-| `Choose your rig's profile` | Nothing is remembered on this computer, or the remembered profile, or the one `--profile` names, did not load. Until you choose one in the list at the top of the sidebar, Panopticon opens no camera and no serial port, runs no hardware check and flashes nothing. The choice is remembered. |
+| `Choose your rig's profile` | No profile is remembered on this computer, or the one to open did not load. Choose one in the list at the top of the sidebar ([INSTALLATION.md step 9](INSTALLATION.md#step-9--first-launch)). |
 | `Panopticon has not opened a profile on this computer yet.` | The first line of the dialog above on a new computer. |
 | `No profile named <name> loaded (gui.py --profile).` | `--profile` names a profile that is not in `profiles/`, or that did not load. The dialog lists the skipped files. |
 | `The profile this computer opened last, <name>, did not load.` | The remembered profile has an error now. The dialog names the file and the field. Fix it and launch again. |
