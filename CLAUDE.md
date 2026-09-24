@@ -101,9 +101,11 @@ checked by hand that no other one holds the hardware.
   responding. Quitting mid-session abandons the incomplete data and deletes it
   (`_abandon_and_cleanup`).
 - `rig_setup.apply_profile_to_manager` and `rig_setup.open_kwargs` are the path
-  from a profile to a camera manager. The window, the probes and the capture
-  workers all go through them, and `apply_profile_to_manager` puts the
-  profile's `log_level` in force.
+  from a profile to a camera manager. The window, `probe_lag.py` (which
+  `probe_mp.py` runs) and the capture workers go through them, and
+  `apply_profile_to_manager` puts the profile's `log_level` in force.
+  `probe_flir.py` and `probe_network.py` open cameras through the backend
+  directly.
 
 ## Logging
 

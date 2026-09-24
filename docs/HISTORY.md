@@ -568,9 +568,9 @@ Dead ends, do not retry:
   boot, until the operator chose a profile. Such a launch now opens no camera
   and no serial port and flashes nothing until the operator chooses, and
   `gui.py --profile NAME` opens and remembers a profile (`bf345be`).
-- 2026-09-24: `rig_setup` applies the profile's `log_level`, so the probes and
-  the capture workers log at it, and a normal-versus-verbose comparison measures
-  something (`8d03136`).
+- 2026-09-24: `rig_setup` applies the profile's `log_level`, so `probe_lag.py`
+  (which `probe_mp.py` runs) and the capture workers log at it, and a
+  normal-versus-verbose comparison measures something (`8d03136`).
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
