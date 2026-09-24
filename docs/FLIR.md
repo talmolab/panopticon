@@ -235,8 +235,9 @@ does not carry into a recording.
    - `frame_width` and `frame_height`: the region each camera records, in even
      numbers, centred on the sensor.
    - `frame_rate`.
-   - `camera.exposure_us` and `camera.gain_db`. The exposure has to fit inside
-     the trigger period: 10,000 µs at 100 fps.
+   - `camera.exposure_us` and `camera.gain_db`. Keep the exposure under 90% of
+     the camera's [exposure ceiling](#the-exposure-ceiling) at `frame_rate`.
+     The ceiling is at most the trigger period, 10,000 µs at 100 fps.
    - `camera.trigger.line`: a first guess is fine, because `--find-line` checks
      it in section 5.
    - `serial_port` and `trigger_pins`, for the trigger board.
@@ -258,17 +259,25 @@ Settings a bring-up may need beyond the template's `SITE` values:
 
 Each template's comments explain the rest of its values.
 
-Panopticon measures each camera's exposure ceiling at `frame_rate` (the longest
-exposure at which it still takes every trigger) and caps the exposure at 90% of
-it. A capped exposure shows as `CLAMPED` in that camera's exposure line in the
-log.
-
 Loading the profile refuses the Basler-only fields in a FLIR profile
 (`pfs_path`, `trigger_rate_limit`, `gige_driver`, `gev_bandwidth_reserve_pct`,
 `gev_bandwidth_reserve_accum`), and each message names the FLIR setting to use
 instead. Opening the cameras then checks every value against what each camera
 reports, and refuses one outside the camera's range. The message names the
 camera, the setting and the range.
+
+### The exposure ceiling
+
+Panopticon measures each camera's exposure ceiling at `frame_rate`: the longest
+exposure at which the camera still takes every trigger. Opening the cameras
+refuses an exposure above 90% of the ceiling. The message includes
+`is above what this camera can expose at frame_rate` and the longest exposure
+allowed.
+
+A calibration runs at `calibration_frame_rate`, with `calibration_exposure_us`
+(0 keeps the recording exposure). Panopticon caps the calibration's exposure at
+90% of the ceiling at that rate. A capped exposure shows as `CLAMPED` in that
+camera's exposure line in the log.
 
 ## 4. Launch Panopticon once
 
@@ -545,5 +554,7 @@ A refusal about one camera starts with that camera's name and serial number.
 | `not the recording-only sketch` | Launch Panopticon with the profile once ([section 4](#4-launch-panopticon-once)), quit, and run the probe again. |
 | `cannot be aligned by frame ID, and it offers no CounterValue chunk` | This model cannot record yet. Send the probe's output. |
 | `DeviceLinkThroughputLimit can go no higher` | The link cannot carry the frames. Lower `frame_rate` or the frame size, or check the cable and port. |
+| `AcquisitionFrameRate can go no higher than` | The camera cannot reach `frame_rate` at this frame size. Lower `frame_rate` or the frame size. |
+| `is above what this camera can expose` | Lower `camera.exposure_us` to the longest exposure the message gives, or add light. |
 | `REFUSING TO START: Panopticon is already running` | Quit Panopticon and any other probe, then run the probe again. |
 | `received frames before every camera was armed` | Your source was running while the cameras armed. Stop it, and start it only when asked. |
