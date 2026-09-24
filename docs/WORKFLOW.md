@@ -964,9 +964,13 @@ Closing the window while work runs asks first, with No as the default:
 | `ALIGNING` | Keeps the videos, partly aligned. Run `2_align.py --replace`, then `3_stim_trace.py` |
 | A solve or a camera operation | Cancels it, and deletes no data |
 
-The dialog names the commands for your folder. Quitting always sends the board
-a stop, so closing Panopticon cannot leave a paradigm or the laser running.
-Panopticon does not close during a firmware flash.
+The dialog names the commands for your folder. Panopticon does not close
+during a firmware flash.
+
+Quitting sends the board a stop whenever Panopticon holds its serial port. If
+the board does not confirm it, the `Trigger board did not confirm the stop`
+dialog of [Stopping](#stopping) appears before the window closes. Power-cycle
+the board and switch the laser off.
 
 ---
 
