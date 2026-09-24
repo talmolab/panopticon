@@ -992,13 +992,20 @@ resistor too low for the board's per-pin current limit. The laser's own
 interlock is the only hard gate. [WORKFLOW.md](WORKFLOW.md) says when a session
 flashes the board.
 
-Each time Panopticon opens a profile it builds the recording-only sketch and
-compares it with the one this computer last flashed, and it flashes the board
-when they differ. It then opens the serial port and asks the board which sketch
-it runs, and flashes again once if the board's answer disagrees. A stimulation
-paradigm stays in the board's flash memory through closing the window, a power
-cycle and unplugging the cable. This check means the board carries no
-stimulation at launch unless you Apply one in the session.
+At launch, and when you switch to a profile on another serial port, Panopticon
+builds the recording-only sketch and compares it with the one this computer
+last flashed. It flashes the board when they differ, then opens the
+serial port and asks the board which sketch it runs, and flashes again once if
+the board's answer disagrees. A stimulation paradigm stays in the board's flash
+memory through closing the window, a power cycle and unplugging the cable. This
+check means the board carries no stimulation at launch unless you Apply one in
+the session.
+
+A switch between profiles on the same port flashes nothing. If their
+`trigger_pins` or `stim_safe_pins` differ, the first Calibrate or Record flashes
+the board, so switch the laser off before it. Until that flash the board keeps
+the previous profile's boot guard, which may leave this profile's laser pin
+undriven.
 
 To set it up:
 
