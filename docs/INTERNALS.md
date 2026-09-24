@@ -31,9 +31,9 @@ Contents:
 
 ## 1. Shape of the system
 
-Several cameras must expose at the same instant, and each frame must reach disk
-carrying the number of the trigger it answered. One hardware clock in front of
-the cameras and one integer per frame behind them do both.
+Every camera exposes on the same hardware trigger, and every frame reaches disk
+with the number of the trigger it answered, its block ID. Frames of different
+cameras are matched by that number.
 
 A trigger source drives a TTL line into every camera's trigger input, so every
 camera exposes on the same edge. By default the source is Panopticon's trigger
@@ -231,8 +231,8 @@ flowchart TD
 ```
 
 The never-sent-RDY branch lets firmware without the handshake record, and the
-has-sent-RDY branch stops a board that went quiet from recording an empty
-session. Merging the two branches either way breaks one of those cases.
+has-sent-RDY branch stops a board that stopped answering from recording an
+empty session. Merging the two branches either way breaks one of those cases.
 
 The window passes a `may_retry` that refuses the reset once any camera has
 counted a frame. The cameras are armed before the start, so a frame means the
@@ -310,9 +310,9 @@ shortest interval between frames is
 minimum interval = exposure + 1 / AcquisitionFrameRate
 ```
 
-`AcquisitionFrameRate` looks irrelevant under hardware triggering, and yet it
-still sets that floor. The trigger period must exceed the floor for the camera
-to take every trigger, which gives the ceiling on usable exposure:
+`AcquisitionFrameRate` sets that floor under hardware triggering too. The
+trigger period must exceed the floor for the camera to take every trigger,
+which gives the ceiling on usable exposure:
 
 ```
 exposure_max = 1/frame_rate - 1/AcquisitionFrameRate
@@ -338,9 +338,9 @@ cannot reach a recording.
 Calibration runs the arithmetic the other way. At a 30 fps
 `calibration_frame_rate` the period is 33.3 ms instead of 10 ms, so
 [`calibration_exposure_us`](CONFIGURATION.md#calibration_exposure_us) can be
-much longer than any recording exposure; the reference rig uses 5 ms. What
-limits it is motion blur. A board moved briskly under a long exposure smears,
-and its ChArUco corners stop resolving in the poses you are trying to add.
+much longer than any recording exposure; the reference rig uses 5 ms. Motion
+blur limits it. A board moved briskly under a long exposure smears, and its
+ChArUco corners stop resolving in the poses you are trying to add.
 
 ### What happens over the ceiling
 
@@ -349,12 +349,11 @@ periods, the camera is busy when the next pulse arrives, ignores it, and
 answers the next one. At a 100 fps trigger the camera then delivers about 50
 fps.
 
-The frames it delivers are complete and sharp, and their numbering is wrong. A
-block ID counts frames the camera acquired, not triggers the board fired. An
-ignored trigger produces no frame, so it consumes no block ID, and from then
-on this camera's block ID N is trigger N+k for a k that keeps growing. No
-frame was lost anywhere, so the block IDs stay gapless and no counter moves.
-The camera's frames get paired with other cameras' frames from other instants.
+A block ID counts the frames a camera acquired. An ignored trigger produces no
+frame, so it consumes no block ID, and from then on this camera's block ID N is
+trigger N+k for a k that keeps growing. No frame was lost anywhere, so the
+block IDs stay gapless, no counter moves and every frame is whole. The camera's
+frames get paired with other cameras' frames from other instants.
 [The failure that leaves no gap](#the-failure-that-leaves-no-gap) covers the
 check that catches it.
 
@@ -408,11 +407,11 @@ calibration exposure above it is clamped.
 
 ## 4. The network
 
-Nine cameras at 1.84 Gbit/s each arrive over UDP, which may lose packets. Two
-questions matter: whether the pixels reach the host, and whether a missing
-frame was lost by the network or by a host too slow to receive it. The two
-look the same in a video file and have different fixes. This section is about
-GigE Vision cameras.
+This section covers GigE Vision cameras, which stream over UDP and may lose
+packets. On the reference rig nine cameras send 1.84 Gbit/s each. A frame can
+go missing on the network or in a host too slow to receive it. The two look the
+same in a video file and have different fixes, and the camera's stream
+counters tell them apart ([The counters that matter](#the-counters-that-matter)).
 
 ### GVSP and the block ID
 
@@ -422,7 +421,7 @@ ID that the camera assigns when it acquires the frame. The driver reassembles
 the packets into a buffer from a per-camera pool, and a complete buffer
 becomes a grab result, the object the capture loop receives.
 
-The pipeline relies on the block ID for two reasons:
+The pipeline relies on the block ID:
 
 - It is the trigger number. Every camera receives the same edge and numbers
   from 1 when grabbing starts, so block ID N names the same trigger on every
@@ -487,8 +486,8 @@ resends themselves fail. The switch settings are in
 The profile's [`max_num_buffer`](CONFIGURATION.md#max_num_buffer) sets the
 driver buffers per camera, applied at open. The pool costs
 `n_cameras x max_num_buffer x frame bytes`: 19.3 GiB at nine cameras and 1000
-buffers, which is why the reference rig uses 600 (11.6 GiB, still 6 s of slack
-at 100 fps). In kick-out mode the loader refuses a pool smaller than
+buffers. The reference rig uses 600 to fit its RAM (11.6 GiB, still 6 s of
+slack at 100 fps). In kick-out mode the loader refuses a pool smaller than
 `kick_max_lag`, because a lagging camera's backlog waits in its pool, and a
 pool that runs dry first loses frames the coordinator would have waited for.
 Frames leave the pool oldest first.
@@ -525,8 +524,8 @@ failed packets than packets in total. Every backend also reports
 The host finishes interrupt work for each received packet in deferred
 procedure calls (DPCs), on the core the NIC's receive queue is bound to. On the
 nine-camera reference rig, CPUs 0 and 1 carried 55-56% DPC time and one
-efficiency core 66%, against under 3% on the rest. That is why capture threads
-stay off CPUs 0 and 1
+efficiency core 66%, against under 3% on the rest. The reference profile keeps
+capture threads off CPUs 0 and 1
 ([`capture_core_exclude`](CONFIGURATION.md#capture_core_exclude)). A healthy
 port discards no packets at the NIC (`ReceivedDiscardedPackets` 0), and
 resends recover the few a busy port drops. `configure_nic.ps1 -Check` reports
@@ -609,10 +608,10 @@ threads, and 17 for nine cameras.
 | 300 µs | 0.130 | 0.321 | 0.324 | 0.128 |
 | 1000 µs | 0.130 | 1.031 | 10.19 | 17.14 |
 
-The bottom row is the copying accessor's regime, and it collapses. Hence the
-acceptance rule for any change on the capture path: 300 µs or less of GIL-held
-work per thread per frame is safe even at 17 threads. About 1000 µs breaks a
-10 ms budget at 11.
+The bottom row is the copying accessor's regime: at 11 competitors the copy
+takes 10.19 ms, more than the 10 ms period. A change on the capture path must keep
+GIL-held work at 300 µs or less per thread per frame, which the table shows is
+safe even at 17 threads.
 
 On the six-camera rig, the switch to the zero-copy view took the mean loop
 `cycle` from 12.0 ms to 10.00 ms, the trigger period. It took
@@ -649,13 +648,13 @@ at 240 it is 504 slots and 1.62 GiB. The ring grows with `kick_max_lag`, and it
 is what makes a nine-camera RAM budget tight. The capacity check at each start
 sizes RAM with the same `ring_slots()` the grab thread uses.
 
-`np.full(..., 128, ...)` does two jobs: it fills the chroma plane once, and it
-touches every page, so the loop never takes a first-touch page fault (about
-0.4 ms). `np.empty` and `np.zeros` would put that fault back on the loop. A
-`MemoryError` during the allocation retires the camera instead of escaping
-`run()` and taking the window with it.
+`np.full(..., 128, ...)` fills the chroma plane once and touches every page, so
+the loop never takes a first-touch page fault (about 0.4 ms). `np.empty` and
+`np.zeros` would put that fault back on the loop. A `MemoryError` during the
+allocation retires the camera instead of escaping `run()` and taking the
+window with it.
 
-Two rules govern the ring's slots in kick-out mode:
+In kick-out mode the ring's slots follow these rules:
 
 - A slot is written only while it is free. `SyncEncodeRouter.attach_ring()`
   turns the ring into a free list, and the grab thread takes one slot per
@@ -672,7 +671,7 @@ Two rules govern the ring's slots in kick-out mode:
   every grab thread has exited. The ring is the largest allocation in the
   program, and the grab thread, the router and the encoder threads refer to
   one another. Without these steps the ring stays allocated until the
-  collector's oldest generation runs, which a quiet window may never do, and
+  collector's oldest generation runs, which an idle window may never do, and
   the next acquisition then finds no RAM.
 
 In the decoupled mode (`realtime_kick: false`) a slot is taken only by a
@@ -762,7 +761,7 @@ the whole session.
 `StartGrabbing()` restarts the block-ID counter at 1, so every camera must be
 armed before the first trigger. A camera armed after it counts from a later
 trigger than the others: every one of its frames is paired with the wrong
-trigger, with no gap and a clean rate check. Three checks keep that from
+trigger, with no gap and a clean rate check. These checks keep that from
 happening:
 
 - The window refuses the start when `not_ready()` names any camera after the
@@ -809,20 +808,19 @@ is not used. The resync refuses when the gap does not land within 0.25 of a
 period of a whole number of periods. The camera is then retired, because
 frames under a guessed trigger number are worse than a lost camera.
 
-The ladder has two exceptions:
+These cases leave the ladder:
 
 - A camera with no frame at all since the triggers started is retired at its
   first stall, without re-arming. With no frame history a restarted counter
   can never be re-based, so re-arms would only cost every camera forced drops.
-- Every active camera silent at once (at least two cameras, for more than a
-  second) points at what they share. Either the trigger source stopped, or
-  the switch, port or USB controller they all use stalled. No camera is
-  retired for it. A camera with frames behind it waits out two
-  stall windows and re-arms at the third, which clears a shared transport
-  stall; a camera with no frame keeps waiting. On the board path the window
-  raises one alarm per silence that names the board and, on a profile with
-  stimulation pins, the laser, because a board without power leaves its pins
-  undriven.
+- Every active camera going without frames at once (at least two cameras, for
+  more than a second) points at what they share. Either the trigger source
+  stopped, or the switch, port or USB controller they all use stalled. No
+  camera is retired for it. A camera with frames behind it waits out two stall
+  windows and re-arms at the third, which clears a shared transport stall. A
+  camera with no frame keeps waiting. On the board path the window raises one
+  alarm per silence that names the board and, on a profile with stimulation
+  pins, the laser, because a board without power leaves its pins undriven.
 
 Retiring is the way out in every other case. In kick-out mode the coordinator
 waits for every camera, so a camera that stops publishing would force-drop
@@ -915,8 +913,8 @@ different trigger from frame i of another's.
 
 The block ID makes the correspondence recoverable. Every recorded frame's block
 ID goes into `blockids.npy`, so a position in a video maps back to a trigger
-number by lookup. Two mechanisms turn that into aligned videos. They give the
-same answer (see
+number by lookup. Real-time kick-out and the post-hoc intersection each turn
+that into aligned videos. They give the same answer (see
 [The equivalence of the two paths](#the-equivalence-of-the-two-paths)) and
 differ in when they pay for it.
 
@@ -1040,10 +1038,9 @@ retired camera (`RETIRED.json`) and a camera with no frames. `2_align.py`
 leaves out a retired camera by default, and refuses to replace while a camera
 with no frames takes part.
 
-The trade: the intersection sees the whole recording, so it keeps slightly
-more frames, since the jitter that makes the live coordinator force a drop
-does not affect it. It costs a full re-encode of every video. Kick-out costs
-bounded RAM instead.
+The intersection sees the whole recording, so the jitter that makes the live
+coordinator force a drop does not affect it, and it keeps slightly more frames.
+It costs a full re-encode of every video, where kick-out costs bounded RAM.
 
 ### The equivalence of the two paths
 
@@ -1060,17 +1057,16 @@ order per camera. They establish these properties:
    the same frames.
 3. With skew inside `max_lag`, the sets are still equal.
 4. With forcing (skew beyond `max_lag`), the released set is a subset of the
-   intersection. Forcing can only discard triggers the intersection would
-   have kept; it never adds one. A kick-out recording is never wrong, only
-   sometimes shorter.
+   intersection. Forcing only discards triggers the intersection would have
+   kept, and adds none.
 5. Across the 16-bit wrap (70,000 triggers with wrapped IDs), the released set
    still equals the intersection.
 6. Retirement resumes releases and keeps the survivors aligned, a retired
    camera's late frames never re-enter, and forced drops are blamed on the
    lagging camera.
 
-All six rest on the assumption [Data integrity](#9-data-integrity) states, and
-the block-ID rate check guards it.
+Each property rests on the assumption [Data integrity](#9-data-integrity)
+states, and the block-ID rate check guards it.
 
 ---
 
@@ -1300,10 +1296,10 @@ ffmpeg -y -nostdin -hide_banner -loglevel warning -fflags +genpts -r <fps> -i st
 There is no re-encode and no GPU, and it takes seconds. The timestamps are
 generated at a constant `fps`, so frame indices survive into the mp4
 unchanged; the real instant of frame i comes from `blockids.npy`. A stream
-copy keeps the GOP the encoder wrote, which is why the launch check proves
-NVENC's GOP from the bitstream ([NVENC sessions](#nvenc-sessions)).
+copy keeps the GOP the encoder wrote, so the launch check proves NVENC's GOP
+from the bitstream ([NVENC sessions](#nvenc-sessions)).
 
-Every path that writes an mp4 needs two options, for LUC3D, the browser-based
+Every path that writes an mp4 needs these options for LUC3D, the browser-based
 3D labelling tool this pipeline feeds, written by Eric Leonardis and hosted by
 the Talmo Lab (<https://talmolab.github.io/luc3d/>):
 
@@ -1365,7 +1361,7 @@ The splice works because both segments start with their own SPS, PPS and IDR.
 `encoded.json` records where the stream ends and the tail begins, so a merge
 that fails can cut the metadata to the frames the mp4 holds instead of
 over-claiming. `raw_tail.bin` is read back as whole `width x height` frames,
-which is why a short write stops the spill.
+so the spill stops at the first short write.
 
 At start, kick-out mode needs an encoder for every camera. When the router
 cannot create them all, it releases the sessions it did get, and the start is
@@ -1445,15 +1441,19 @@ starve oblique cameras.
 
 A tick in which two or more cameras pass `edge_threshold` adds one to each
 such camera's count, one to each such pair's co-detections, and a hint to
-`codet_frames`. READY needs all three: every camera at `min_per_cam_shared`;
-the graph of pairs with at least `min_edge` co-detections forming one
-connected component; and every camera having seen the board in at least
-`MIN_GRID_CELLS` of the four cells of its field of view, by the markers'
-centroid. The graph needs one component, not every pair, because the board is
-one-sided and opposed cameras can never see it together. The grid condition
-keeps a board waved in one spot from producing degenerate intrinsics. READY
-latches, and counting goes on after it, because every co-detection is more data
-for the solve. [WORKFLOW.md](WORKFLOW.md) shows the graph at each stage.
+`codet_frames`. READY needs all of these:
+
+- Every camera has `min_per_cam_shared` co-detection ticks.
+- The pairs with at least `min_edge` co-detections form one connected graph.
+  The graph needs one component, not every pair, because the board is
+  one-sided and opposed cameras can never see it together.
+- Every camera has seen the board in at least `MIN_GRID_CELLS` of the four
+  cells of its field of view, by the markers' centroid. A board waved in one
+  spot would otherwise give degenerate intrinsics.
+
+READY latches, and counting goes on after it, because every co-detection is
+more data for the solve. [WORKFLOW.md](WORKFLOW.md) shows the graph at each
+stage.
 
 At stop the hints go to `calibration/codet_frames.json` (format 3): per tick,
 the block ID of each co-detecting camera's frame. The solve maps each block ID
@@ -1556,9 +1556,9 @@ Stage by stage:
   copies the toml beside the recording, and LUC3D reads it.
 
 There is no global bundle adjustment. The extrinsics are pairwise stereo
-results chained along a tree, so error accumulates with tree depth. That is
-why the tree weighs each pair's RMS by its views, and why the pairwise chart
-is the quality signal to read. A bundle adjustment over the same correspondences
+results chained along a tree, so error accumulates with tree depth. The tree
+therefore weighs each pair's RMS by its views, and the pairwise chart is the
+quality signal to read. A bundle adjustment over the same correspondences
 is where a better global solution would come from.
 
 ### Camera order
@@ -1580,9 +1580,8 @@ name it solved.
 ## 9. Data integrity
 
 A recording claims that frame i of every camera's video shows the same
-instant. A recording where the claim is false can look like one where it
-holds: the videos play, the frame counts match, and the file sizes are
-normal.
+instant. A recording where the claim is false can still have equal frame
+counts on every camera.
 
 ### What guarantees frame i is the same instant everywhere
 
@@ -1596,7 +1595,7 @@ It holds only while each camera produces one frame per trigger, because a
 block ID counts the frames a camera acquired. That count matches the pulses
 only when the camera answers every pulse.
 
-Given that, five links carry an instant to a frame index in a file:
+These links carry an instant to a frame index in a file:
 
 1. One clock, one edge. Every camera is triggered by the same source, with no
    host time in the path. On Basler cameras exposure comes from the same
@@ -1639,7 +1638,7 @@ Every other row of that table leaves its evidence in `blockids.npy` as a gap:
 a block ID was consumed and no frame survived to carry it, and the
 intersection sees the hole. A camera whose exposure exceeds the ceiling
 ignores the trigger instead ([Exposure](#what-happens-over-the-ceiling)) and
-consumes no block ID, and every piece of evidence points the wrong way:
+consumes no block ID. For that camera:
 
 - its block IDs stay gapless, so the release rule, which compares block IDs
   and nothing else, sees a clean, in-order stream;
@@ -1714,8 +1713,8 @@ recording on disk.
 
 ### What is on disk
 
-A session folder describes itself: geometry, timing, what the stimulus did,
-and any doubts the software has about its own output sit beside the videos.
+A session folder describes itself: the geometry, the timing, what the stimulus
+did and every warning sit beside the videos.
 
 ```
 <output_dir>/<date>/<mouse1>_<mouse2>/
@@ -1766,10 +1765,9 @@ the log level and lines lost, and each camera's serial and stream counters.
 
 ## 10. Extending it
 
-Most of the design is independent of the reference rig. The changes people
-want are other cameras and other operating systems, and neither takes much
-code. The hard part is noticing which properties of the reference hardware the
-pipeline relies on.
+Most of the design is independent of the reference rig, and other cameras or
+another operating system take little code. A port must keep the hardware
+properties the pipeline relies on, which the backend contract below lists.
 
 ### The camera backend contract
 
@@ -1793,10 +1791,10 @@ The cold path (enumerate, open, describe, mode switches, teardown,
 statistics) goes through backend methods, because it runs a few times per
 session. The hot path does not: `retrieve()` returns a native result object
 with the attributes the contract names, and the grab loop calls
-`StartGrabbing`, `StopGrabbing` and `IsGrabbing` on the native handle. Call
-overhead is not the reason (a call is about 60 ns). The reason is that the hot
+`StartGrabbing`, `StopGrabbing` and `IsGrabbing` on the native handle. The hot
 path has invariants a wrapper tends to break: the frame view must not outlive
-`Release()`, and it must not be copied on the way through.
+`Release()`, and it must not be copied on the way through. The call overhead
+a wrapper would add is small by comparison, about 60 ns a call.
 
 The cold-path members:
 
@@ -1845,7 +1843,7 @@ Details the contract spells out, and the pipeline depends on:
   `backends.block_rate_hints(name)` reads a backend's `BLOCK_RATE_HINTS` from
   its class, for the rate check that runs on a recording after the session.
 
-The guarantees matter more than the API:
+The pipeline depends on these guarantees:
 
 1. A per-frame trigger number that starts at 1 for the first frame after each
    `StartGrabbing` and adds one per acquired frame. The backend normalises its
@@ -1956,8 +1954,8 @@ the contract. None of it has run on FLIR hardware yet.
 
 ### What is Windows-specific
 
-Less than it looks. The reference rig runs Windows, but the platform
-dependencies are shallow and most already do nothing elsewhere:
+The reference rig runs Windows. The platform dependencies are shallow, and
+most already do nothing on other systems:
 
 | Item | Where | On Linux |
 |---|---|---|
@@ -2006,9 +2004,9 @@ profile fields ([CONFIGURATION.md](CONFIGURATION.md)).
 
 ### Probes
 
-Two diagnostics ship with the code. Every stage that opens a camera refuses
-to run while Panopticon runs (`gui_app/probe_guard.py`); `probe_network.py`'s
-discovery only sends a query, and runs at any time.
+Every probe stage that opens a camera refuses to run while Panopticon runs
+(`gui_app/probe_guard.py`). The discovery in `probe_network.py` only sends a
+query, and runs at any time.
 
 | Command | What it answers | Needs |
 |---|---|---|
@@ -2017,6 +2015,6 @@ discovery only sends a query, and runs at any time.
 | `uv run probe_flir.py --list` (and its other stages) | What each FLIR camera reports, which line its trigger is on, and the behaviours the FLIR backend cannot know in advance | FLIR cameras; `--fake` needs none ([FLIR.md](FLIR.md#5-run-the-probe)) |
 
 Ping cannot test jumbo frames on these paths, because the cameras answer only
-small ICMP echoes, which is why the sweep grabs real frames. How the
+small ICMP echoes. The sweep grabs real frames instead. How the
 maintainers' tests are kept, and which modules they cover, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md).
