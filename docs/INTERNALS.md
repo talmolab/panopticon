@@ -211,9 +211,9 @@ a profile is open until quit, and each start reuses that open port. The board
 therefore resets at launch, when a profile on another port is chosen, and when
 firmware is flashed, and not at the start of a recording.
 
-A start can therefore reach the sketch in `loop()` instead of a fresh
-`setup()`, so every start is confirmed. `TeensyController.start_triggers()`
-returns True or False:
+A start can reach the sketch in `loop()` instead of a fresh `setup()`, so
+every start is confirmed. `TeensyController.start_triggers()` returns True or
+False:
 
 ```mermaid
 flowchart TD
@@ -240,7 +240,7 @@ counted a frame. The cameras are armed before the start, so a frame means the
 board is already triggering and only its ack is missing. A reset would restart
 the board's trigger count and stimulation state but not the cameras' block
 IDs, and `stim_trace.csv` would then place every stimulus late by the first
-attempt's triggers. The start is rolled back instead.
+attempt's triggers. The window rolls the start back.
 
 `ACK_TIMEOUT` is 4 s. The sketch's configuration path takes about 1.5 s (a
 `delay(500)`, then a one-second `parseFloat()` timeout while it drains its
@@ -1587,7 +1587,7 @@ counts on every camera.
 
 ### What guarantees frame i is the same instant everywhere
 
-The assumption everything rests on:
+The pipeline assumes:
 
 > A block ID is a trigger number. Block ID N on any camera names the Nth
 > trigger the source fired, so two frames with the same block ID were exposed
@@ -2020,6 +2020,6 @@ query, and runs at any time.
 | `uv run probe_flir.py --list` (and its other stages) | What each FLIR camera reports, which line its trigger is on, and the behaviours the FLIR backend cannot know in advance | FLIR cameras; `--fake` needs none ([FLIR.md](FLIR.md#5-run-the-probe)) |
 
 Ping cannot test jumbo frames on these paths, because the cameras answer only
-small ICMP echoes. The sweep grabs real frames instead. How the
-maintainers' tests are kept, and how to have a change tested, is in
+small ICMP echoes. The sweep grabs real frames. How the maintainers' tests
+are kept, and how to have a change tested, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md).
