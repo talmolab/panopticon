@@ -1,0 +1,68 @@
+# Template: a simulated FLIR rig on the simulated trigger board.
+#
+# The flir_sim backend runs the real FLIR backend (gui_app/backends/flir.py)
+# over a simulated Spinnaker library (gui_app/backends/fake_spinc.py), paced
+# by the same virtual trigger clock as the sim profile. No camera, no
+# Spinnaker SDK and no trigger board is needed.
+#
+# To select it in the GUI, copy it into profiles/. Files in
+# profiles/templates/ never appear in the profile dropdown.
+#
+# fake_spinc builds its cameras from this file: n_cameras, camera_serials,
+# frame_width and frame_height here are the simulated rig's shape, so a
+# bigger simulated rig is an edit here and nowhere else.
+name: flir_sim
+camera_backend: flir_sim
+# The simulated board: TeensyController opens a virtual port that drives the
+# clock the simulated cameras read.
+serial_port: sim
+# auto, so a host without an NVIDIA GPU records with libx264.
+encoder: auto
+
+n_cameras: 3
+# Quoted and in ascending order as text, as on a real FLIR rig.
+camera_serials: ["90000001", "90000002", "90000003"]
+# The simulated sensor is this size, so the frame fills it.
+frame_width: 640
+frame_height: 400
+frame_rate: 100
+calibration_frame_rate: 30
+quality: 21
+encode_parallel: 3
+realtime_encode: true
+realtime_kick: true
+kick_max_lag: 240
+# The simulated pool is not a RAM budget, but the capacity preflight reads
+# this number, so it stays a plausible one. It must be at least kick_max_lag.
+max_num_buffer: 600
+
+metadata_defaults:
+  experimenter: ""
+  assay: ""
+
+# The camera settings a FLIR profile needs. The simulated cameras take their
+# trigger on Line3.
+camera:
+  pixel_format: Mono8
+  exposure_us: 3000
+  gain_db: 6.0
+  trigger:
+    line: Line3
+    activation: RisingEdge
+    overlap: ReadOut
+  flir:
+    user_set: Default
+    gamma_enable: false
+    link_throughput_limit: auto
+    block_id_source: auto
+
+output_dir: data
+board_config: configs/boards/charuco_8x8_15mm.yaml
+trigger_pins: [2, 4, 6]
+# Held LOW at boot on the simulated board, as on the sim profile, so the
+# stimulation editor runs the same checks it runs on a real board.
+stim_safe_pins: [53]
+pin_capture_threads: false
+# The simulated temperatures do not change; the poll runs the FLIR backend's
+# thermals() during a simulated recording.
+thermal_poll_s: 20
