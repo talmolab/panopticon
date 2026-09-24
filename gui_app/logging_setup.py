@@ -678,6 +678,18 @@ class StampedStream:
             if entry[1]:
                 self._finish(entry)
 
+    def finish_own(self) -> None:
+        """Queue the calling thread's unfinished line as it stands.
+
+        RULE: a flush while other threads run finishes only the caller's
+        line. REASON: another thread's print may have written its text and
+        not yet its newline; finishing it splits that line in two, and a
+        fragment it appends between the two steps is lost.
+        """
+        entry = getattr(_tls, self._key, None)
+        if entry is not None and entry[1]:
+            self._finish(entry)
+
     def flush(self) -> None:
         return None
 
@@ -763,11 +775,13 @@ def log_status() -> dict:
 def flush(timeout: float = FLUSH_TIMEOUT_S) -> bool:
     """Wait up to `timeout` for everything printed so far to reach the file.
     True when it did, or when nothing is installed. Cold path only: the
-    excepthook, shutdown, session.log."""
+    excepthook, session.log. The calling thread's unfinished line is
+    written as it stands; other threads' wait for their newline (shutdown
+    writes every thread's)."""
     if _sink is None:
         return True
     for s in _streams:
-        s.finish_pending()
+        s.finish_own()
     return _sink.flush(timeout) is not None
 
 
