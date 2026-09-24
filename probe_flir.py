@@ -572,19 +572,24 @@ class _GilMeter:
 class _Raw:
     """One camera's nodes through the SpinC methods, for the probe's own
     measurements. Nothing here raises: a node the camera lacks reads None,
-    and every failure is kept in `errors` for the JSON."""
+    and every failure is kept in `errors`, which each stage puts in the
+    camera's record, and printed once, so no failed write passes unseen."""
 
     def __init__(self, api, handle, who: str):
         self.api = api
         self.h = handle
         self.who = who
         self.errors: list = []
+        self._printed: set = set()
         self._maps: dict = {}
         self._kind: dict = {}
 
     def _note(self, text: str) -> None:
         if len(self.errors) < 200:
             self.errors.append(text)
+        if text not in self._printed and len(self._printed) < 50:
+            self._printed.add(text)
+            print(f"[probe] {self.who}: {text}", flush=True)
 
     def node(self, name: str, which: str = "device"):
         try:
@@ -684,7 +689,9 @@ class _Raw:
         None, or the error text."""
         n = self.node(name, which)
         if n is None:
-            return f"{name}: the camera has no such node"
+            text = f"{name} = {value!r}: the camera has no such node"
+            self._note(text)
+            return text
         a = self.api
         try:
             if isinstance(value, bool):
@@ -704,7 +711,9 @@ class _Raw:
     def execute(self, name: str):
         n = self.node(name)
         if n is None:
-            return f"{name}: the camera has no such node"
+            text = f"{name}: the camera has no such node"
+            self._note(text)
+            return text
         try:
             self.api.command(n)
         except Exception as e:
@@ -1863,6 +1872,8 @@ def stage_find_line(p: Probe):
                     "PASS" if closed else "FAIL",
                     "" if closed else "the stop was not confirmed; "
                     "power-cycle the board")
+        rep["raw_errors"] = {serial: raw.errors
+                             for serial, (raw, _dev) in raws.items()}
         for _raw, dev in raws.values():
             _deinit(p, dev)
     lines_for = {}
@@ -3097,10 +3108,69 @@ def stage_triggered(p: Probe):
 
 
 # -------------------------------------------------------- counter checks
+class _Writes:
+    """The node writes and commands one counter run depends on, and the
+    texts of those that failed. A run whose set-up write failed does not
+    measure what its answers claim, so the failures decide which answers
+    it gives."""
+
+    def __init__(self, raw: _Raw):
+        self.raw = raw
+        self.failed: list = []
+
+    def write(self, name: str, value, which: str = "device") -> bool:
+        err = self.raw.write(name, value, which)
+        if err is not None:
+            self.failed.append(err)
+        return err is None
+
+    def execute(self, name: str) -> bool:
+        err = self.raw.execute(name)
+        if err is not None:
+            self.failed.append(err)
+        return err is None
+
+    @contextlib.contextmanager
+    def under(self, selector: str, entry: str):
+        with self.raw.under(selector, entry) as ok:
+            if not ok:
+                self.failed.append(f"{selector} = {entry!r} could not be "
+                                   f"selected")
+            yield ok
+
+    def reset_counters(self, counters) -> None:
+        """CounterReset on every counter the backend set, then Counter0
+        selected, as every counter run leaves it for its reads."""
+        for sel in counters:
+            if self.write("CounterSelector", sel):
+                self.execute("CounterReset")
+        self.write("CounterSelector", "Counter0")
+
+
+def _setup_warn(p: Probe, c, label: str, failed: list) -> str:
+    """WARN the set-up writes of `label` that failed on camera `c`, and
+    return the why_not for the answers that depend on them."""
+    p.check("triggered", f"{c.serial} {label} set-up", "WARN",
+            "; ".join(failed))
+    return f"the probe could not set up {label}: {failed[0]}"
+
+
+def _restored(rec: dict, w: _Writes) -> None:
+    """Keep the restores that failed in the camera's record."""
+    if w.failed:
+        rec.setdefault("restore_failed", []).extend(w.failed)
+
+
+def _grab_error(errs: dict, e: BaseException) -> None:
+    errs["grab_errors"] = errs.get("grab_errors", 0) + 1
+    errs["last_grab_error"] = _err(e)
+
+
 def _drain(p: Probe, h, stop: threading.Event, pause: threading.Event,
-           out: list):
+           out: list, errs: dict):
     """Take images from camera `h` until `stop`, holding off while `pause`
-    is set; append (frame_id, chunk counter or None, host time)."""
+    is set; append (frame_id, chunk counter or None, host time). Errors
+    other than a timeout are counted in `errs`."""
     api = p.api
     from gui_app.backends.flir import FlirTimeout
     spelling = [None]
@@ -3112,7 +3182,10 @@ def _drain(p: Probe, h, stop: threading.Event, pause: threading.Event,
             img = api.next_image(h, GRAB_TIMEOUT_MS)
         except FlirTimeout:
             continue
-        except Exception:
+        except Exception as e:
+            # The pause keeps a camera that fails every wait from spinning
+            # this thread.
+            _grab_error(errs, e)
             time.sleep(0.01)
             continue
         try:
@@ -3131,19 +3204,29 @@ def _drain(p: Probe, h, stop: threading.Event, pause: threading.Event,
             api.image_release(img)
 
 
-def _drain_until_quiet(p: Probe, h, out: list):
-    """After the board stops: take the queued images until one timeout (or
-    any other error, which ends the drain as well)."""
+def _drain_until_quiet(p: Probe, h, out: list, errs: dict):
+    """After the board stops: take the queued images until one timeout. Any
+    other error ends the drain as well, and is counted in `errs`."""
     api = p.api
+    from gui_app.backends.flir import FlirTimeout
     while True:
         try:
             img = api.next_image(h, GRAB_TIMEOUT_MS)
-        except Exception:
+        except FlirTimeout:
+            return
+        except Exception as e:
+            _grab_error(errs, e)
             return
         try:
             out.append((int(api.image_frame_id(img)), None, time.perf_counter()))
         finally:
             api.image_release(img)
+
+
+#: The counter runs' record keys and names, in the order they run.
+COUNTER_RUNS = (("run_a", "counter run A"), ("run_b", "counter run B"),
+                ("run_c", "counter run C"),
+                ("delay_test", "the counter delay test"))
 
 
 def _counter_checks(p: Probe, cams, src) -> dict:
@@ -3175,6 +3258,20 @@ def _counter_checks(p: Probe, cams, src) -> dict:
     except Exception as e:
         p.error("triggered", e)
         p.check("triggered", "counter checks", "FAIL", _err(e))
+    for c, raw, rec in with_counters:
+        rec["raw_errors"] = raw.errors
+        for key, label in COUNTER_RUNS:
+            r = rec.get(key) or {}
+            if r.get("grab_errors"):
+                p.check("triggered", f"{c.serial} {label} image waits", "WARN",
+                        f"{r['grab_errors']} failed with an error other than "
+                        f"a timeout, the last: {r['last_grab_error']}")
+        if rec.get("restore_failed"):
+            p.check("triggered", f"{c.serial} settings put back after the "
+                    f"counter checks", "WARN",
+                    "could not put back: " + "; ".join(rec["restore_failed"])
+                    + ". The camera closes at the end of the stage, and its "
+                    "next open loads the user set.")
     return out
 
 
@@ -3220,19 +3317,29 @@ def _run_a(p: Probe, rigs, src):
         a["chunk_mode_before"] = raw.read("ChunkModeActive")
         with raw.under("ChunkSelector", "CounterValue"):
             a["chunk_enable_before"] = raw.read("ChunkEnable")
-        raw.write("ChunkModeActive", True)
-        with raw.under("ChunkSelector", "CounterValue"):
-            raw.write("ChunkEnable", True)
+        w = _Writes(raw)
+        w.write("ChunkModeActive", True)
+        with w.under("ChunkSelector", "CounterValue") as selected:
+            if selected:
+                w.write("ChunkEnable", True)
         a["chunk_counter_selector"] = raw.has("ChunkCounterSelector")
         if a["chunk_counter_selector"]:
-            raw.write("ChunkCounterSelector", "Counter0")
-        raw.write("CounterSelector", "Counter0")
-        raw.execute("CounterReset")
+            w.write("ChunkCounterSelector", "Counter0")
+        if w.write("CounterSelector", "Counter0"):
+            w.execute("CounterReset")
         a["counter1_before"] = (_counter_read(raw, "Counter1")
                                 if "Counter1" in c.counters else None)
         # Left on Counter1: a chunk that follows CounterSelector reads it.
-        raw.write("CounterSelector", "Counter1" if "Counter1" in c.counters
-                  else "Counter0")
+        w.write("CounterSelector", "Counter1" if "Counter1" in c.counters
+                else "Counter0")
+        if w.failed:
+            # The latch and the carrier are read off the chunk this set-up
+            # enables and the counter it resets.
+            a["setup_failed"] = w.failed
+            p.answer("counter_chunk_latch", c.serial, None,
+                     why_not=_setup_warn(p, c, "counter run A", w.failed))
+            _restore_a(c, raw, rec)
+            continue
         active.append((c, raw, rec))
     if not active:
         return
@@ -3244,7 +3351,7 @@ def _run_a(p: Probe, rigs, src):
         for c, _raw, rec in active:
             t = threading.Thread(target=_drain, daemon=True,
                                  args=(p, c.handle, stop, pause,
-                                       rec["run_a"]["frames"]))
+                                       rec["run_a"]["frames"], rec["run_a"]))
             threads.append(t)
             t.start()
         started = _counter_start(p, src, "run_a", "counter run A", active)
@@ -3261,17 +3368,13 @@ def _run_a(p: Probe, rigs, src):
         for t in threads:
             t.join(3.0)
         for c, _raw, rec in active:
-            _drain_until_quiet(p, c.handle, rec["run_a"]["frames"])
+            _drain_until_quiet(p, c.handle, rec["run_a"]["frames"],
+                               rec["run_a"])
         _end_all(p, active)
     for c, raw, rec in active:
         a = rec["run_a"]
         a["edges_after"] = _counter_read(raw, "Counter0")
-        raw.write("CounterSelector", "Counter0")
-        if c.block_id_source != "trigger_counter":
-            with raw.under("ChunkSelector", "CounterValue"):
-                raw.write("ChunkEnable", bool(a["chunk_enable_before"]))
-            if a["chunk_mode_before"] is not None:
-                raw.write("ChunkModeActive", bool(a["chunk_mode_before"]))
+        _restore_a(c, raw, rec)
         frames = [(f, v) for f, v, _t in a["frames"] if v is not None]
         a["frames"] = [[f, v] for f, v, _t in a["frames"]]
         if not started_ok:
@@ -3306,7 +3409,8 @@ def _run_a(p: Probe, rigs, src):
                 latch = ("counts the edge that started the image"
                          if diffs == [0] else
                          "latched before the edge that started the image")
-        elif all(v >= before for v in vals) and len(diffs) == 1                 and diffs[0] >= before - 1:
+        elif (all(v >= before for v in vals) and len(diffs) == 1
+              and diffs[0] >= before - 1):
             carrier = "the counter CounterSelector names when acquisition starts"
         elif len(diffs) == 1 and diffs[0] in (0, -1):
             carrier = ("Counter0 (ChunkCounterSelector)"
@@ -3326,6 +3430,20 @@ def _run_a(p: Probe, rigs, src):
                      "counter1_before": before, "diffs": diffs})
 
 
+def _restore_a(c, raw: _Raw, rec: dict) -> None:
+    """Put back what run A changed. A camera whose block IDs come from the
+    CounterValue chunk keeps the chunk on: the backend reads it."""
+    a = rec["run_a"]
+    w = _Writes(raw)
+    w.write("CounterSelector", "Counter0")
+    if c.block_id_source != "trigger_counter":
+        with w.under("ChunkSelector", "CounterValue"):
+            w.write("ChunkEnable", bool(a["chunk_enable_before"]))
+        if a["chunk_mode_before"] is not None:
+            w.write("ChunkModeActive", bool(a["chunk_mode_before"]))
+    _restored(rec, w)
+
+
 def _run_b(p: Probe, rigs, src):
     """Counter reads while the camera streams, the exposure latency after
     each edge, and whether exposures continue while no frame is taken."""
@@ -3333,11 +3451,26 @@ def _run_b(p: Probe, rigs, src):
     for c, raw, rec in rigs:
         b = rec["run_b"] = {"frames": [], "samples": [], "read_errors": 0}
         b["buffers_before"] = raw.read("StreamBufferCountManual", "tlstream")
-        raw.write("StreamBufferCountManual", RUN_B_BUFFERS, "tlstream")
-        for sel in c.counters:
-            raw.write("CounterSelector", sel)
-            raw.execute("CounterReset")
-        raw.write("CounterSelector", "Counter0")
+        # The pause answer needs the small pool, and the latency and count
+        # answers need counters reset to 0; a failed write drops only the
+        # answers that depend on it.
+        pool = _Writes(raw)
+        if pool.write("StreamBufferCountManual", RUN_B_BUFFERS, "tlstream"):
+            b["buffers_set"] = raw.read("StreamBufferCountManual", "tlstream")
+            if b["buffers_set"] != RUN_B_BUFFERS:
+                pool.failed.append(f"StreamBufferCountManual reads "
+                                   f"{b['buffers_set']} after writing "
+                                   f"{RUN_B_BUFFERS}")
+        if pool.failed:
+            b["pool_failed"] = pool.failed
+            b["pool_why_not"] = _setup_warn(p, c, "counter run B's host pool",
+                                            pool.failed)
+        ctr = _Writes(raw)
+        ctr.reset_counters(c.counters)
+        if ctr.failed:
+            b["counters_failed"] = ctr.failed
+            b["counters_why_not"] = _setup_warn(
+                p, c, "counter run B's counter reset", ctr.failed)
         b["delay_s"] = getattr(c, "_trigger_delay_s", 0.0)
         active.append((c, raw, rec))
     stop, pause = threading.Event(), threading.Event()
@@ -3367,7 +3500,8 @@ def _run_b(p: Probe, rigs, src):
             b = rec["run_b"]
             b["phase"] = "drain"
             t = threading.Thread(target=_drain, daemon=True,
-                                 args=(p, c.handle, stop, pause, b["frames"]))
+                                 args=(p, c.handle, stop, pause, b["frames"],
+                                       b))
             threads.append(t)
             t.start()
             sels = [(s, w) for s, w in c.counters.items()]
@@ -3401,15 +3535,18 @@ def _run_b(p: Probe, rigs, src):
         for t in threads:
             t.join(3.0)
         for c, _raw, rec in active:
-            _drain_until_quiet(p, c.handle, rec["run_b"]["frames"])
+            _drain_until_quiet(p, c.handle, rec["run_b"]["frames"],
+                               rec["run_b"])
         _end_all(p, active)
     for c, raw, rec in active:
         b = rec["run_b"]
         final = {what: _counter_read(raw, sel) for sel, what in c.counters.items()}
-        raw.write("CounterSelector", "Counter0")
+        w = _Writes(raw)
+        w.write("CounterSelector", "Counter0")
         if b["buffers_before"] is not None:
-            raw.write("StreamBufferCountManual", int(b["buffers_before"]),
-                      "tlstream")
+            w.write("StreamBufferCountManual", int(b["buffers_before"]),
+                    "tlstream")
+        _restored(rec, w)
         b["final"] = final
         frames = [f for f, _v, _t in b["frames"]]
         b["frame_count"] = len(frames)
@@ -3428,9 +3565,19 @@ def _run_b(p: Probe, rigs, src):
                  read_time_ms=b.get("read_time_ms"),
                  free_run=p.report["unknowns"]["counters_read_while_streaming"]
                  ["answers"].get(c.serial))
-        _latency_answer(p, c, b, samples)
-        _pause_answer(p, c, b, samples)
-        b["counts_verdict"] = _counts_verdict(c, b)
+        if b.get("counters_why_not"):
+            p.answer("exposure_latency_after_edge", c.serial, None,
+                     why_not=b["counters_why_not"])
+            b["counts_verdict"] = (f"not measured: {b['counters_why_not']}",
+                                   None)
+        else:
+            _latency_answer(p, c, b, samples)
+            b["counts_verdict"] = _counts_verdict(c, b)
+        if b.get("pool_why_not"):
+            p.answer("exposes_while_host_stopped", c.serial, None,
+                     why_not=b["pool_why_not"])
+        else:
+            _pause_answer(p, c, b, samples)
 
 
 def _first_time(samples, key, n):
@@ -3492,7 +3639,7 @@ def _pause_answer(p: Probe, c, b: dict, samples: list):
         ans = (f"not decided: the exposure counter did not move while no frame "
                f"was taken ({de} edges), so it may count only as frames are "
                f"taken")
-    elif dx <= RUN_B_BUFFERS + 1:
+    elif dx <= (b.get("buffers_set") or RUN_B_BUFFERS) + 1:
         ans = (f"stops exposing once the host pool is full: {dx} exposures "
                f"for {de} edges")
     else:
@@ -3552,15 +3699,21 @@ def _run_c(p: Probe, rigs, src):
             _counts_answer(p, c, rec)
             continue
         cc["exposure_before"] = rg.get("value")
-        err = raw.write("ExposureTime", float(want))
-        if err is not None:
-            cc["why_not"] = err
+        # The verdict needs the long exposure and counters reset to 0.
+        w = _Writes(raw)
+        if w.write("ExposureTime", float(want)):
+            cc["exposure_set"] = raw.read("ExposureTime")
+            got = cc["exposure_set"]
+            if got is None or got < 0.99 * want:
+                w.failed.append(f"ExposureTime reads {got} after writing "
+                                f"{want:.0f}")
+        w.reset_counters(c.counters)
+        if w.failed:
+            cc["setup_failed"] = w.failed
+            cc["why_not"] = _setup_warn(p, c, "counter run C", w.failed)
+            _restore_c(raw, rec)
             _counts_answer(p, c, rec)
             continue
-        for sel in c.counters:
-            raw.write("CounterSelector", sel)
-            raw.execute("CounterReset")
-        raw.write("CounterSelector", "Counter0")
         cc["frames"] = []
         active.append((c, raw, rec))
     if not active:
@@ -3574,7 +3727,7 @@ def _run_c(p: Probe, rigs, src):
         for c, _raw, rec in active:
             t = threading.Thread(target=_drain, daemon=True,
                                  args=(p, c.handle, stop, pause,
-                                       rec["run_c"]["frames"]))
+                                       rec["run_c"]["frames"], rec["run_c"]))
             threads.append(t)
             t.start()
         started = _counter_start(p, src, "run_c", "counter run C", active)
@@ -3593,14 +3746,13 @@ def _run_c(p: Probe, rigs, src):
         for t in threads:
             t.join(3.0)
         for c, _raw, rec in active:
-            _drain_until_quiet(p, c.handle, rec["run_c"]["frames"])
+            _drain_until_quiet(p, c.handle, rec["run_c"]["frames"],
+                               rec["run_c"])
         _end_all(p, active)
     for c, raw, rec in active:
         cc = rec["run_c"]
         final = {what: _counter_read(raw, sel) for sel, what in c.counters.items()}
-        raw.write("CounterSelector", "Counter0")
-        if cc.get("exposure_before") is not None:
-            raw.write("ExposureTime", float(cc["exposure_before"]))
+        _restore_c(raw, rec)
         cc["frames"] = len(cc["frames"])
         cc.update(final)
         cc["pulses_estimate"] = (round(COUNTER_HZ * (t1 - t0)) if started_ok
@@ -3608,6 +3760,16 @@ def _run_c(p: Probe, rigs, src):
         if not started_ok:
             cc["why_not"] = "the board did not start"
         _counts_answer(p, c, rec)
+
+
+def _restore_c(raw: _Raw, rec: dict) -> None:
+    """Put back the exposure run C lengthened."""
+    cc = rec["run_c"]
+    w = _Writes(raw)
+    w.write("CounterSelector", "Counter0")
+    if cc.get("exposure_before") is not None:
+        w.write("ExposureTime", float(cc["exposure_before"]))
+    _restored(rec, w)
 
 
 def _ignore_verdict(cc: dict) -> tuple:
@@ -3674,16 +3836,19 @@ def _run_delay(p: Probe, rigs, src):
         period_us = 1e6 / COUNTER_HZ
         delay = float(min(rg["max"], DELAY_TEST_MAX_US, 0.5 * period_us))
         d["delay_before"] = rg.get("value")
-        err = raw.write("TriggerDelay", delay)
-        if err is not None:
-            d["error"] = err
-            p.answer("delayed_exposure_at_end", c.serial, None, why_not=err)
+        # The answer compares the edge and exposure counts from 0, against
+        # the delay the camera reads back.
+        w = _Writes(raw)
+        if w.write("TriggerDelay", delay):
+            d["delay_us"] = raw.read("TriggerDelay")
+        w.reset_counters(c.counters)
+        if w.failed:
+            d["setup_failed"] = w.failed
+            p.answer("delayed_exposure_at_end", c.serial, None,
+                     why_not=_setup_warn(p, c, "the counter delay test",
+                                         w.failed))
+            _restore_delay(raw, rec)
             continue
-        d["delay_us"] = raw.read("TriggerDelay")
-        for sel in c.counters:
-            raw.write("CounterSelector", sel)
-            raw.execute("CounterReset")
-        raw.write("CounterSelector", "Counter0")
         active.append((c, raw, rec))
     if not active:
         return
@@ -3727,9 +3892,7 @@ def _run_delay(p: Probe, rigs, src):
     for c, raw, rec in active:
         d = rec["delay_test"]
         rec["delay_test"]["edges_final"] = _counter_read(raw, "Counter0")
-        raw.write("CounterSelector", "Counter0")
-        if d.get("delay_before") is not None:
-            raw.write("TriggerDelay", float(d["delay_before"]))
+        _restore_delay(raw, rec)
         e, x0, x1 = (d.get("edges_at_end"), d.get("exposures_at_end"),
                      d.get("exposures_after"))
         if not started_ok or e is None:
@@ -3749,6 +3912,16 @@ def _run_delay(p: Probe, rigs, src):
         else:
             ans = "cancelled: EndAcquisition dropped the pending exposure"
         p.answer("delayed_exposure_at_end", c.serial, ans, **d)
+
+
+def _restore_delay(raw: _Raw, rec: dict) -> None:
+    """Put back the TriggerDelay the delay test set."""
+    d = rec["delay_test"]
+    w = _Writes(raw)
+    w.write("CounterSelector", "Counter0")
+    if d.get("delay_before") is not None:
+        w.write("TriggerDelay", float(d["delay_before"]))
+    _restored(rec, w)
 
 
 # ======================================================= --exposure-sweep
@@ -3931,13 +4104,22 @@ def stage_wrap_test(p: Probe):
                 raw.write("ExposureTime", float(rg["min"]))
             if raw.has("AcquisitionFrameRateEnable"):
                 raw.write("AcquisitionFrameRateEnable", False)
-            raw.write("StreamBufferCountMode", "Manual", "tlstream")
+            if raw.has("StreamBufferCountMode", "tlstream"):
+                raw.write("StreamBufferCountMode", "Manual", "tlstream")
             raw.write("StreamBufferCountManual", 200, "tlstream")
             modes = ["Off", "On"] if raw.has("GevGVSPExtendedIDMode") else [None]
             for mode in modes:
-                if mode is not None:
-                    raw.write("GevGVSPExtendedIDMode", mode)
-                rec[f"extended_{mode or 'native'}"] = _wrap_run(p, dev.handle)
+                key = f"extended_{mode or 'native'}"
+                err = (None if mode is None
+                       else raw.write("GevGVSPExtendedIDMode", mode))
+                if err is not None:
+                    # The verdict names the ID mode, so a mode the camera
+                    # refused is not measured under that name.
+                    rec[key] = {"frames": 0, "ids": None,
+                                "verdict": f"not decided: {err}"}
+                    continue
+                rec[key] = _wrap_run(p, dev.handle)
+            rec["raw_errors"] = raw.errors
             rep["per_camera"][dev.serial] = rec
             parts = []
             for k, v in rec.items():
