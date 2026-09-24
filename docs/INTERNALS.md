@@ -611,9 +611,9 @@ threads, and 17 for nine cameras.
 | 1000 µs | 0.130 | 1.031 | 10.19 | 17.14 |
 
 The bottom row is the copying accessor's regime: at 11 competitors the copy
-takes 10.19 ms, more than the 10 ms period. A change on the capture path must keep
-GIL-held work at 300 µs or less per thread per frame, which the table shows is
-safe even at 17 threads.
+takes 10.19 ms, more than the 10 ms period. A change on the capture path must
+keep GIL-held work at 300 µs or less per thread per frame, which the table
+shows is safe even at 17 threads.
 
 On the six-camera rig, the switch to the zero-copy view took the mean loop
 `cycle` from 12.0 ms to 10.00 ms, the trigger period. It took
@@ -986,9 +986,9 @@ ring slot is freed.
 At stop the router computes the kick-out counts
 (`sync_encode.kick_counts()`), and the window writes them into
 `session_metadata.json` (`kickout`: triggers decided, kept, kicked out and
-forced, and the effective frame rate). Forced drops always produce a warning. Ordinary kick-outs above
-0.5% of the decided triggers produce one line, "Effective frame rate X fps
-(target Y).", and the detail goes to the log.
+forced, and the effective frame rate). Forced drops always produce a warning.
+Ordinary kick-outs above 0.5% of the decided triggers produce one line,
+"Effective frame rate X fps (target Y).", and the detail goes to the log.
 
 ### The release backlog
 
@@ -1075,8 +1075,8 @@ states, and the block-ID rate check guards it.
 
 The reference rig's nine cameras produce about 2 GB of pixels a second, so
 compression is part of the capture path, and the grab loop cannot wait for an
-encoder. The
-encoders run on threads of their own, on frames prepared with a single copy.
+encoder. The encoders run on threads of their own, on frames prepared with a
+single copy.
 
 ### NV12 from Mono8
 
@@ -1105,9 +1105,9 @@ and the router use (`encoders.set_default_factory()`). It runs at launch, again
 after every profile switch, and again at every start against the cameras that
 are open. [CPU_ENCODE.md](CPU_ENCODE.md#choosing-the-encoder) gives the rule
 for each value, and covers the libx264 path. Record and Calibrate stay
-disabled until the launch check reports, because it installs the encoder and the NVENC upload
-setting, and its session probe holds every session the driver grants while it
-counts.
+disabled until the launch check reports, because it installs the encoder and
+the NVENC upload setting, and its session probe holds every session the driver
+grants while it counts.
 
 ### NVENC sessions
 
@@ -1119,10 +1119,10 @@ process until the driver refuses or the count asked for is reached, and the
 child's exit frees them all. The encoder selection and the capacity check ask
 for `n_cameras + 2`. When the probe grants fewer than `n_cameras`, no start
 proceeds on NVENC, because a camera without a session would fall back to
-`raw.bin`, which writes every frame whole. The cap is often what limits how many cameras
-one GPU can encode, so more cameras need a GPU whose driver grants more
-sessions. The remux after a real-time recording is a stream copy and uses no
-session. The raw-mode encode, the tail merge and the alignment re-encode run
+`raw.bin`, which writes every frame whole. The cap is often what limits how
+many cameras one GPU can encode, so more cameras need a GPU whose driver grants
+more sessions. The remux after a real-time recording is a stream copy and uses
+no session. The raw-mode encode, the tail merge and the alignment re-encode run
 ffmpeg's `h264_nvenc` (libx264 where that failed the launch check), up to
 `encode_parallel` jobs at once.
 
@@ -1235,9 +1235,9 @@ and a context left current on any of them would outlive the encoder.
 [`nvenc_context`](CONFIGURATION.md#nvenc_context) `shared` runs every encoder
 in the device's primary context, retained once per process. `own` gives each
 encoder a context of its own. It needs free GPU memory for one context per
-camera, measured at launch, or falls back to `shared`. `cuda_driver.py` calls the CUDA
-driver through ctypes (never `PyDLL`), because ctypes releases the GIL for the
-length of each call.
+camera, measured at launch, or falls back to `shared`. `cuda_driver.py` calls
+the CUDA driver through ctypes (never `PyDLL`), because ctypes releases the GIL
+for the length of each call.
 
 GPU bench on 2026-09-22 (RTX 5080, driver 610.47, PyNvVideoCodec 2.1.0, real
 reference-rig frames, 9 streams at 100 fps). Each cell gives two repetitions:
@@ -1423,8 +1423,8 @@ depending on how much texture the scene gives the marker detector. With the
 reference rig's nine cameras the worker runs at 10-20 ticks a second, and near
 1 when several cameras see clutter. The thresholds below count ticks, so their
 wall-clock worth varies with the camera count and the scene. A slower tick
-means more frames behind each count, which errs on the safe side. The rate is logged as `[hud] coverage
-ticks/s:` every 30 seconds.
+means more frames behind each count, which errs on the safe side. The rate is
+logged as `[hud] coverage ticks/s:` every 30 seconds.
 
 Per tick and per camera the HUD counts ArUco markers. Counting interpolated
 ChArUco corners would be stricter than the solve's eligibility and would
