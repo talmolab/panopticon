@@ -310,7 +310,18 @@ class CameraBackend(Protocol):
         wider format raises nothing anywhere: a Mono12 frame is uint16 and the
         NV12 copy truncates it mod 256, yielding a full-length, aligned
         recording whose images are noise. `width`/`height` are ints and
-        `serial` a str."""
+        `serial` a str.
+
+        Optional keys, each text as the backend words it: `model` (used when
+        the enumerated device does not answer GetModelName), `firmware`,
+        `interface` (GigE or USB3, for example) and `link_speed`. The
+        manager keeps them in camera_info (`firmware`, `interface` and
+        `link_speed` are camera_manager.DEVICE_FACT_KEYS) and prints them
+        in every session header, so a log says which camera, firmware and
+        link each recording came from; `model` also goes to
+        session_metadata.json as camera_models. A key a backend leaves out
+        reads "unavailable" in the header ("not reported" for link_speed).
+        None of them is checked against the profile."""
 
     def set_freerun(self, cam, fps: float) -> None:
         """Untriggered preview mode at `fps` (the app uses 30).
