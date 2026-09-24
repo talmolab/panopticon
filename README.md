@@ -107,9 +107,10 @@ block the beam first: the board's pins float while it resets
 | [`n_cameras`](docs/CONFIGURATION.md#n_cameras) | How many cameras must be present. Any other count refuses to open. |
 | [`pfs_path`](docs/CONFIGURATION.md#pfs_path) or [`camera`](docs/CONFIGURATION.md#camera) | Camera settings: a Basler `.pfs` file, or the FLIR `camera:` block. |
 | [`frame_rate`](docs/CONFIGURATION.md#frame_rate) | The recording trigger rate. Keep exposure under the [exposure ceiling](docs/GLOSSARY.md#exposure-ceiling). |
-| [`serial_port`](docs/CONFIGURATION.md#serial_port), [`trigger_pins`](docs/CONFIGURATION.md#trigger_pins) | The trigger board's port, and every pin wired to a camera. |
+| [`serial_port`](docs/CONFIGURATION.md#serial_port), [`trigger_pins`](docs/CONFIGURATION.md#trigger_pins) | The trigger board's port, and every pin wired to a camera. A camera on an unlisted pin gets no triggers. |
 | [`stim_safe_pins`](docs/CONFIGURATION.md#stim_safe_pins) | Every pin wired to a laser or LED driver, held low from boot. |
 | [`output_dir`](docs/CONFIGURATION.md#output_dir) | Where sessions go. Use your largest, fastest drive. |
+| [`metadata_defaults`](docs/CONFIGURATION.md#metadata_defaults) | Your lab's defaults for the sidebar, saved with every session. A copied profile carries another lab's names. |
 
 Without `camera_serials`, cameras are named in the order they enumerate, so one missing
 camera renames every camera after it and puts the calibration on the wrong cameras.
