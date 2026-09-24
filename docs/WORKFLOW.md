@@ -89,10 +89,17 @@ Panopticon does four things:
    and those two toggles stay disabled until it reports. The check measures
    the output drive, probes how many NVENC sessions the GPU driver grants,
    times a libx264 encode and picks the encoder. A `Hardware Check` dialog
-   appears only when something is short. That means fewer than 4 CPU cores,
-   under 16 GB of RAM, under 500 GB free or under 500 MB/s of writing on the
-   output drive, or no working NVENC. The dialog stops nothing. The status bar
-   then reads `Hardware check done: encoding with <encoder>`.
+   lists any problem it finds, for example:
+   - fewer than 4 CPU cores, under 16 GB of RAM, under 500 GB free or under
+     500 MB/s of writing on the output drive;
+   - an NVENC path that does not work, or an encoder that ignores the
+     keyframe setting, which would leave recordings with one keyframe and
+     hard to seek;
+   - an encoder choice that will refuse the next Record;
+   - a check that could not finish.
+
+   Read the dialog. It stops nothing. The status bar then reads
+   `Hardware check done: encoding with <encoder>`.
 3. It puts the trigger board back to the recording-only sketch, which
    triggers the cameras and drives no stimulation pin. A paradigm lives in
    the board's flash memory and survives quitting, a power cycle and an
