@@ -33,7 +33,9 @@ rig.
 Start Panopticon from the desktop shortcut, `_launch.bat` or a terminal:
 
 - Double-click the desktop shortcut, if `make_shortcut.ps1` has made one. It
-  opens no console window.
+  opens no console window. It also installs no new dependency, so after an
+  update that changes `pyproject.toml`, run `uv sync` once or use
+  `_launch.bat`.
 - Double-click `_launch.bat` in the repository folder. It runs
   `uv run python gui.py`, which first installs any dependency that
   `pyproject.toml` has gained. Its console stays open if Panopticon exits with
@@ -61,19 +63,20 @@ millisecond, and the name of the thread that printed it:
 2026-09-24 10:15:02.481 [MainThread] [acq] profile: 3dpose
 ```
 
-The log opens with a header of `[header]` lines. It describes the computer:
-the Panopticon version and git commit, Python, Windows, the CPU, RAM, the GPU
-and NVIDIA driver, the NVENC session cap, package versions and the network
-links. It then lists every field of the profile and each open camera. The
-header is written again at every profile switch and at the start of every
-acquisition.
+Near the top, the log holds a header of `[header]` lines. It describes the
+computer: the Panopticon version and git commit, Python, Windows, the CPU,
+RAM, the GPU and NVIDIA driver, the NVENC session cap, package versions and
+the network links. It then lists every field of the profile and each open
+camera. The header is written again at every profile switch and at the start
+of every acquisition.
 
 The profile's `log_level` sets how much else the log holds
 ([CONFIGURATION.md](CONFIGURATION.md#log_level)). The default, `verbose`, adds
 the camera settings Panopticon asked for and read back, and a `[state]` line
 at each step of an acquisition. No level logs each frame, and printing never
 makes a capture thread wait. If the log writer falls behind, it drops lines
-and says so with `[log] N log lines dropped`.
+and says so with `[log] N log lines dropped`. `probe_flir.py` writes its own
+log at `verbose`, or at `debug` when the profile asks for it.
 
 Quote the launch log and the acquisition's `session.log`
 ([section 10](#10-what-the-session-leaves-on-disk)) when you report a problem.
