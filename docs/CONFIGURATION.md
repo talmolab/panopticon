@@ -400,9 +400,10 @@ Number, microseconds. Default `0`. Reference rig: `5000`.
 
 - Does: The exposure used while calibrating, and only then. `0` keeps the
   recording exposure (the `.pfs` value on Basler, `camera.exposure_us` on FLIR).
-  Panopticon caps it at 90% of the exposure ceiling at `calibration_frame_rate`,
-  and logs `CLAMPED` when it lowers it. Each recording restores the recording
-  exposure, so a calibration exposure cannot reach a recording.
+  Panopticon caps it at the [exposure limit](#exposure-ceiling) for
+  `calibration_frame_rate`, and logs `CLAMPED` when it lowers it. Each recording
+  restores the recording exposure, so a calibration exposure cannot reach a
+  recording.
 - Change when: When the board is too dark to detect while calibrating.
 - Goes wrong: Too long, and a moving board blurs until its corners are no longer
   found. At 30 fps, motion blur limits the exposure long before the ceiling does,
@@ -445,18 +446,17 @@ True or false. Default `true`. Reference rig: `true`.
   `raw.bin` and encodes after Stop.
 - Change when: Set `false` only when the computer cannot encode every camera live
   and the disk can take the [raw rate](#disk).
-- Goes wrong: `false` writes about 500 times the H.264 volume: 230 MB/s for each
-  1920×1200 camera at 100 fps. With `false`, `realtime_kick` has no effect, and
-  the videos are aligned after the encode as they are with `realtime_kick: false`.
+- Goes wrong: `false` writes about 500 times the H.264 volume ([raw rate](#disk)).
+  With `false`, `realtime_kick` has no effect, and the videos are aligned after
+  the encode as they are with `realtime_kick: false`.
 
 #### `quality`
 
 Integer, 0 to 51. Default `21`. Reference rig: `21`.
 
 - Does: The H.264 quantiser (QP) every encoder uses. Lower gives higher quality
-  and larger files. At 21, a 1920×1200 frame on the reference rig averages about
-  4.6 KB. `session_metadata.json` records it, and `2_align.py` and `0_encode.py`
-  reuse it.
+  and larger files ([frame size at 21](#disk)). `session_metadata.json` records
+  it, and `2_align.py` and `0_encode.py` reuse it.
 - Change when: To trade file size against image detail.
 - Goes wrong: A value outside 0 to 51 is refused when the profile loads. File size
   depends on the scene as well as the QP, so measure it on a test recording.
@@ -544,8 +544,8 @@ Integer. Default `1000`. Reference rig: `600`.
 
 - Does: The driver buffers queued per camera (`MaxNumBuffer` on Basler,
   `StreamBufferCountManual` on FLIR). A camera that falls behind keeps its backlog
-  here. The pool takes `n_cameras × max_num_buffer × width × height` bytes: 11.6 GiB
-  for nine 1920×1200 cameras at 600.
+  here. The pool takes `n_cameras × max_num_buffer × width × height` bytes
+  ([RAM](#ram)).
 - Change when: Lower it when the RAM check refuses a start. Raise it when
   `buffers_underrun` in the recording's `session_metadata.json`
   (`camera_stream_stats`) is above 0.
@@ -949,8 +949,8 @@ Number, microseconds. Required.
   another value.
 - Change when: To match your lighting. Add light before you raise gain.
 - Goes wrong: The loader refuses 0 or less, and an exposure as long as the
-  `frame_rate` trigger period. Opening the cameras refuses an exposure above 90%
-  of each camera's own [exposure ceiling](#exposure-ceiling) at `frame_rate`
+  `frame_rate` trigger period. Opening the cameras refuses an exposure above
+  each camera's own [exposure limit](#exposure-ceiling) at `frame_rate`
   (`is above what this camera can expose`).
 
 #### `camera.gain_db`
@@ -1237,12 +1237,13 @@ The longest exposure at which a camera still takes every trigger.
 - FLIR: Panopticon measures each camera's ceiling at F from what the camera
   reports ([FLIR.md](FLIR.md#the-exposure-ceiling)).
 
-Panopticon keeps a 10% margin below the ceiling:
+Panopticon keeps a 10% margin below the ceiling, so the exposure limit is 90% of
+it:
 
-- On Basler it lowers an exposure above 90% of the ceiling at every acquisition
-  start, and the `[camN] exposure=` line says `CLAMPED`.
-- On FLIR, opening the cameras refuses a recording exposure above 90% of the
-  ceiling at `frame_rate`. It caps a calibration exposure and logs `CLAMPED`.
+- On Basler it lowers an exposure above the limit at every acquisition start,
+  and the `[camN] exposure=` line says `CLAMPED`.
+- On FLIR, opening the cameras refuses a recording exposure above the limit at
+  `frame_rate`. It caps a calibration exposure and logs `CLAMPED`.
 
 With `trigger_rate_limit: 165`:
 
@@ -1284,8 +1285,9 @@ room for Windows and the window itself: plan for about twice the total.
 - Real-time H.264: about 4,600 bytes per frame at `quality: 21` on the reference
   rig, so N × F × 4,600 bytes per second. Nine cameras at 100 fps write 4.1 MB/s,
   about 15 GB an hour.
-- Raw capture (`realtime_encode: false`): N × F × W × H bytes per second. One
-  1920×1200 camera at 100 fps writes 230 MB/s, 129 GiB every 10 minutes.
+- Raw capture (`realtime_encode: false`): N × F × W × H bytes per second, the
+  [network](#network) rate of every camera together. One 1920×1200 camera at
+  100 fps fills 129 GiB every 10 minutes.
 
 At each start Panopticon estimates a 10-minute recording against the free space
 on the output folder's drive, and warns when it is short. It does not refuse, because
