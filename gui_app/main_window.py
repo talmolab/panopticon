@@ -236,7 +236,10 @@ class MainWindow(QMainWindow):
                 f"window {old.value if old is not None else 'start'} -> "
                 f"{new.value}")
 
-    def __init__(self):
+    def __init__(self, profile_name: str | None = None):
+        """``profile_name`` is gui.py's --profile: the profile to open and
+        remember for later launches. None opens the one this computer
+        remembers."""
         super().__init__()
         self.setWindowTitle("Panopticon")
         self.setMinimumSize(1000, 400)
@@ -367,30 +370,60 @@ class MainWindow(QMainWindow):
         self._thermal_timer = QTimer()
         self._thermal_timer.timeout.connect(self._poll_thermals)
 
-        # Prefer whatever profile this machine used last — the profile list is
-        # shared with the 3dface rig, so alphabetical order picks the wrong one
-        # here. Fall back to the first profile that can open its cameras
-        # (RigProfile.settings_ready: a Basler profile's .pfs exists, a FLIR
-        # profile has its camera: block).
-        self._profile = self._sidebar.current_profile
-        if self._sidebar.select_profile(self._sidebar.remembered_profile()):
+        # The profile named by --profile, else the one this computer
+        # remembers.
+        # RULE: with neither, the window opens no camera and no serial port
+        # and flashes nothing until the operator chooses a profile, and the
+        # choice is remembered (_profile_choice). REASON: the profile names
+        # the serial port and the pins the board holds low at boot, and any
+        # profile picked for the operator is another rig's. Opening it resets
+        # the device on that rig's port and flashes that rig's sketch, which
+        # holds none of this rig's pins low, and a floating pin reads as ON
+        # to a powered laser driver.
+        #: Why the operator has to choose a profile, or "" once one is open.
+        self._profile_choice = ""
+        #: True once the launch hardware check has surveyed the host.
+        self._host_surveyed = False
+        remembered = self._sidebar.remembered_profile()
+        wanted = remembered if profile_name is None else profile_name
+        if wanted and self._sidebar.select_profile(wanted):
             self._profile = self._sidebar.current_profile
+            if profile_name is not None:
+                self._sidebar.accept_profile(self._profile)
         else:
-            for prof in self._sidebar.profiles:
-                if prof.settings_ready() is None:
-                    self._sidebar.select_profile(prof.name)
-                    self._profile = prof
-                    break
-        print(f"[acq] profile: {self._profile.name}", flush=True)
+            # No profile is open. The empty name is what every no-profile
+            # check in this window reads (RigProfile's own default name is
+            # "default").
+            self._profile = RigProfile(name="")
+            if self._sidebar.profiles:
+                self._sidebar.clear_profile_choice()
+                self._profile_choice = self._profile_choice_text(
+                    profile_name, remembered)
+        if self._profile_choice:
+            print("[acq] profile: none chosen on this computer yet; no camera "
+                  "or serial port is opened until one is chosen", flush=True)
+        else:
+            print(f"[acq] profile: {self._profile.name or '(none loaded)'}",
+                  flush=True)
         self._apply_log_level()
 
-        self._open_cameras()
+        if self._profile.name:
+            self._open_cameras()
         # The launch header: off the UI thread, because the first gathering
         # of the environment facts runs git and nvidia-smi.
         self._log_header_async("launch")
         self._size_to_screen()
-        self._sidebar.set_status("IDLE", "#888")
-        self._run_hardware_check()
+        if self._profile.name:
+            self._sidebar.set_status("IDLE", "#888")
+            self._run_hardware_check()
+        else:
+            # The hardware check runs once a profile is open, because it
+            # checks the host against the profile (_on_profile_switch_done).
+            self._sidebar.set_status(
+                "Choose a profile" if self._profile_choice else "No profile",
+                "#ffaa00")
+            self._sidebar.set_toggles_enabled(False)
+            self._sidebar.set_solve_enabled(False)
         # Two things, in this order, deferred so the window paints and
         # Windows finishes registering the taskbar entry first. The serial
         # open in _warm_serial blocks the main thread for ~1 s (Arduino
@@ -404,10 +437,23 @@ class MainWindow(QMainWindow):
         # Arduino, and during the reset + bootloader every pin floats, which
         # fires a connected laser. Doing it at launch keeps that flash out of
         # the experiment. arduino-cli needs the port to itself, hence the order.
-        QTimer.singleShot(1500, self._ensure_clean_firmware)
+        # With no profile open, choosing one runs this sequence instead
+        # (_prepare_board_after_switch).
+        if self._profile.name:
+            QTimer.singleShot(1500, self._ensure_clean_firmware)
         # After the window is up, so the warning is a dialog over a live
         # window rather than a message behind the splash screen.
         QTimer.singleShot(0, self._show_profile_warnings)
+
+    @staticmethod
+    def _profile_choice_text(asked: str | None, remembered: str) -> str:
+        """Why the launch asks for a profile: the first line of its dialog."""
+        if asked is not None:
+            return f"No profile named {asked!r} loaded (gui.py --profile)."
+        if remembered:
+            return (f"The profile this computer opened last, {remembered!r}, "
+                    f"did not load.")
+        return "Panopticon has not opened a profile on this computer yet."
 
     def _apply_log_level(self) -> None:
         """Put the profile's log_level in force for the whole process."""
@@ -735,6 +781,8 @@ class MainWindow(QMainWindow):
         output_dir = self._profile.output_dir if self._profile else ""
         n_cams = self._camera_mgr.num_cameras or (
             self._profile.n_cameras if self._profile else 0)
+        if survey:
+            self._host_surveyed = True
         self._hw_check_pending = True
         self._sidebar.set_toggles_enabled(False)
         self.statusBar().showMessage(
@@ -764,6 +812,19 @@ class MainWindow(QMainWindow):
         another rig's settings, or none at all.
         """
         warnings = self._sidebar.profile_warnings
+        if self._profile_choice:
+            QMessageBox.information(
+                self, "Choose your rig's profile",
+                "\n".join(warnings + [self._profile_choice])
+                + "\n\nChoose your rig's profile in the list at the top of "
+                  "the sidebar, or start Panopticon with "
+                  "gui.py --profile <name>. Until then Panopticon opens no "
+                  "camera and no serial port, and programs no board.\n\n"
+                  "Choosing a profile opens its cameras and puts its "
+                  "recording-only sketch on the board at its serial_port. "
+                  "Panopticon opens the profile you choose at every later "
+                  "launch.")
+            return
         if not self._profile.name:
             self._sidebar.set_toggles_enabled(False)
             self._sidebar.set_solve_enabled(False)
@@ -888,6 +949,11 @@ class MainWindow(QMainWindow):
         # cameras opened, so the sidebar takes its fields and the next launch
         # comes up on it.
         self._sidebar.accept_profile(self._profile)
+        if self._profile_choice:
+            print(f"[acq] profile {self._profile.name!r} chosen; later "
+                  f"launches open it", flush=True)
+            self._profile_choice = ""
+            self._sidebar.set_solve_enabled(True)
         self._apply_camera_open_result(ok)
         self._log_header_async(f"profile switch to {self._profile.name}")
         self._size_to_screen()
@@ -898,7 +964,7 @@ class MainWindow(QMainWindow):
         # state set by the last check, so without it the new profile records
         # on the old profile's encoder and upload path, against a bench
         # measured at the old frame size.
-        self._run_hardware_check(survey=False)
+        self._run_hardware_check(survey=not self._host_surveyed)
         self._prepare_board_after_switch(
             getattr(self, "_switch_from_port", self._profile.serial_port))
 
@@ -4852,6 +4918,14 @@ class MainWindow(QMainWindow):
             f"{result['out_dir']}{tail}")
 
     def _on_stimulation(self):
+        if not self._profile.name:
+            # The editor flashes and drives the board on the profile's port,
+            # with the profile's pins held low at boot.
+            QMessageBox.information(
+                self, "Choose a profile first",
+                "The Stimulation editor programs the trigger board your "
+                "profile names. Choose your rig's profile first.")
+            return
         if self._external_trigger():
             # The editor's Apply and Test drive the trigger board, which this
             # profile never opens; say why instead of offering them.

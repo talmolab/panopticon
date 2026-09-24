@@ -128,7 +128,10 @@ there and nowhere else; the application never writes them into the profile.
 
 Selecting a profile closes and reopens all the cameras, so the sidebar reads
 `Switching cameras…` and the controls grey out for a second or two. The choice
-is remembered per machine.
+is remembered per machine. On a machine where Panopticon has not opened a
+profile yet, the window asks you to choose one, and opens no camera and no
+serial port until you do. `uv run gui.py --profile <name>` opens the named
+profile and remembers it.
 
 One refusal is built in. If the profile sets `n_cameras` to a non-zero number
 and a different number of cameras enumerates, the open is refused outright, with

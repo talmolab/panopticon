@@ -48,13 +48,10 @@ board acks with `RDY <n> <fps> <id>`, the videos and `blockids.npy`,
 
 Three things are worth knowing before the first run:
 
-- **The first launch comes up on another rig's profile.** The choice is
-  remembered per machine, and with nothing remembered the window falls back to
-  the first profile whose `.pfs` exists — a `basler` one. On a host with no
-  `pypylon` that open fails, and the launch reports it in a **Camera Error**
-  dialog naming `camera_backend` instead of taking the window down with it.
-  Dismiss it and pick **sim**; the dropdown is there because the startup open
-  is guarded.
+- **The first launch asks for a profile.** The choice is remembered per
+  machine, and with nothing remembered the window opens no camera and no
+  serial port until you pick one. Pick **sim** in the dropdown, or launch with
+  `uv run gui.py --profile sim`.
 - **Set the output directory.** The profile's default is the repository's
   `data/`, the same tree a real session goes to. Point it somewhere scratch.
 - **Nothing is flashed.** `stim_compiler.upload(ino, "sim")` short-circuits

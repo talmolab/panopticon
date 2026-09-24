@@ -288,41 +288,32 @@ camera's exposure line in the log.
 
 ## 4. Open your profile in Panopticon
 
-Do this section whatever your trigger source. On a new computer the first
-launch opens a shipped profile, and the launch after it opens yours. With
-Panopticon's board, the launches also leave the board carrying the
-recording-only sketch for your profile (camera triggers, no stimulation). The
-probe starts the board only once the board reports that sketch.
+Do this section whatever your trigger source. With Panopticon's board, it
+leaves the board carrying the recording-only sketch for your profile (camera
+triggers, no stimulation). The probe starts the board only once the board
+reports that sketch.
 
 > [!WARNING]
-> Before the first launch on a new computer, unplug every Arduino and every
-> other serial device except Panopticon's trigger board. That launch opens a
-> shipped reference profile, which resets whatever device is on COM3 and tries
-> to reprogram it.
+> Before you open your profile, check that its `serial_port` names
+> Panopticon's trigger board. Opening the profile resets the device on that
+> port and reprograms it with the recording-only sketch.
 
-1. Run `uv run gui.py`. On the first launch on a new computer, Panopticon has
-   no profile of yours to remember. It opens the first shipped profile that is
-   ready (a Basler reference rig) and reports that it cannot open that rig's
-   cameras. That reference profile names COM3.
-   - If your board is on COM3, Panopticon programs it with the reference rig's
-     sketch. This takes about 30 s, and does no harm with only cameras on the
-     board. The sidebar shows `Clearing stim firmware…` meanwhile.
-   - If a `Could not clear stim firmware` dialog appears, the board on COM3
-     could not be programmed, or there is none. Close the dialog. Step 4
-     checks your own board.
-2. Choose your profile in the profile dropdown. The dropdown is unavailable
-   while Panopticon programs a board. If your profile names another port,
-   Panopticon programs the board on that port now, in about 30 s.
-3. Quit, and run `uv run gui.py` again. This launch opens your profile, the one
-   you chose last. The first session loaded the Basler SDK for the reference
-   profile, and running both vendors' SDKs in one process is untested.
-4. With Panopticon's board, wait until the PowerShell window shows
+1. Run `uv run gui.py --profile my_lab`, with your profile's `name` in place of
+   `my_lab`. Panopticon opens that profile and remembers it, so later launches
+   open it without `--profile`.
+   - Without `--profile`, on a computer where Panopticon has not opened a
+     profile yet, the window asks you to choose one. Until you choose, it opens
+     no camera and no serial port, and programs no board. Choose yours in the
+     profile dropdown.
+2. With Panopticon's board, wait until the PowerShell window shows
    `board flashed with the recording-only sketch`, which takes about 30 s, or
-   `board already carries the recording-only sketch`. A
-   `Could not clear stim firmware` dialog at this launch is about your own
-   board. Fix what its message names, such as a missing `arduino-cli` or the
-   wrong `serial_port`, and launch again.
-5. Quit.
+   `board already carries the recording-only sketch`. The sidebar shows
+   `Clearing stim firmware…` meanwhile. The dropdown is unavailable while
+   Panopticon programs a board.
+3. A `Could not clear stim firmware` dialog is about your board. Fix what its
+   message names, such as a missing `arduino-cli` or the wrong `serial_port`,
+   and launch again.
+4. Quit.
 
 ## 5. Run the probe
 

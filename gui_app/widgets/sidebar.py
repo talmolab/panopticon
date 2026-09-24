@@ -66,6 +66,8 @@ class SidebarWidget(QWidget):
                    f"complete example) and restart.")
             print(f"[profile] {msg}", flush=True)
             self._profile_warnings.append(msg)
+        # Shown while no profile is chosen (clear_profile_choice).
+        self._profile_combo.setPlaceholderText("Choose a profile")
         self._profile_combo.currentIndexChanged.connect(self._on_profile_changed)
         layout.addWidget(self._profile_combo)
         # The fields are built below; the first profile's values are applied
@@ -77,6 +79,7 @@ class SidebarWidget(QWidget):
         sep.setStyleSheet("color: #444;")
         layout.addWidget(sep)
 
+        self._default_output_dir = default_output_dir
         self._output_dir = default_output_dir
         self._dir_button = QPushButton()
         self._dir_button.setStyleSheet(
@@ -397,14 +400,38 @@ class SidebarWidget(QWidget):
     def restore_profile_choice(self, name: str) -> bool:
         """Point the dropdown back at the running profile after a refused
         switch, without emitting and without re-applying its fields, so an
-        output directory chosen by hand survives the refusal."""
+        output directory chosen by hand survives the refusal.
+
+        A name no profile has (the window runs none yet) puts the dropdown
+        back to no choice, so it never shows a rig the window is not running.
+        """
         for i, profile in enumerate(self._profiles):
             if profile.name == name:
                 self._profile_combo.blockSignals(True)
                 self._profile_combo.setCurrentIndex(i)
                 self._profile_combo.blockSignals(False)
                 return True
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.setCurrentIndex(-1)
+        self._profile_combo.blockSignals(False)
         return False
+
+    def clear_profile_choice(self) -> None:
+        """Show no profile as chosen, without emitting profile_changed.
+
+        The dropdown shows its placeholder, the output directory goes back
+        to the default, and the metadata fields the operator has not typed
+        into are emptied, so the form carries nothing from a profile nobody
+        chose. Choosing any entry then emits profile_changed, the first one
+        included.
+        """
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.setCurrentIndex(-1)
+        self._profile_combo.blockSignals(False)
+        self._set_output_dir(self._default_output_dir)
+        for key, field in self._fields.items():
+            if key != "date" and key not in self._user_edited:
+                field.setText("")
 
     def _apply_profile(self, profile: RigProfile):
         """Take the output directory and the metadata defaults from a profile.

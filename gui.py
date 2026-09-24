@@ -266,11 +266,33 @@ def make_splash():
     return px
 
 
+def _take_profile_arg(argv: list) -> tuple:
+    """Split ``--profile NAME`` (or ``--profile=NAME``) out of argv.
+
+    Returns (name, the other arguments). The name is None when the flag is
+    absent, and "" when it has no value, which the window reports as a
+    profile that did not load.
+    """
+    name = None
+    rest = []
+    args = iter(argv)
+    for a in args:
+        if a == "--profile":
+            name = next(args, "")
+        elif a.startswith("--profile="):
+            name = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+    return name, rest
+
+
 def main():
     # --force starts a second copy anyway, for an operator who has checked
-    # the machine by hand. Qt never sees it.
+    # the machine by hand. --profile NAME opens that profile and remembers
+    # it for later launches. Qt sees neither.
     force = "--force" in sys.argv[1:]
-    qt_argv = [a for a in sys.argv if a != "--force"]
+    profile_name, qt_argv = _take_profile_arg(
+        [a for a in sys.argv if a != "--force"])
     # One grab thread and one encoder thread per camera, plus the UI, all
     # sharing the GIL during a recording. The default 5 ms switch interval
     # lets a GIL-holding thread stall the others for whole milliseconds; 1 ms
@@ -316,7 +338,7 @@ def main():
     app.processEvents()
 
     from gui_app.main_window import MainWindow
-    window = MainWindow()
+    window = MainWindow(profile_name=profile_name)
     window.show()
     splash.finish(window)
 

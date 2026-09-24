@@ -1187,7 +1187,8 @@ Find the board's port for `serial_port`: Device Manager > *Ports (COM & LPT)*, o
 
 which prints e.g. `COM3`.
 
-On the first launch after installing, the log shows:
+On the first launch after installing, once your profile is open (step 9),
+the log shows:
 
 ```
 [acq] board may carry a stim paradigm from a previous session — flashing the recording-only sketch
@@ -1211,8 +1212,13 @@ Start it up. The console reports what it found, camera by camera, which is the
 quickest way to confirm the previous eight steps landed.
 
 ```powershell
-uv run gui.py
+uv run gui.py --profile 3dpose
 ```
+
+Use your profile's `name` in place of `3dpose`. Panopticon remembers it, so
+later launches need only `uv run gui.py`. A first launch without `--profile`
+asks you to choose a profile in the sidebar's dropdown, and opens no camera
+and no serial port until you do.
 
 A splash panel reads *Panopticon / Loading cameras...*, then the main window
 opens with one live preview pane per camera, free-running at about 30 fps.

@@ -108,8 +108,10 @@ gain. Changing it closes every camera and reopens them against the new profile:
 a second or two, off the UI thread, so the window stays responsive.
 
 Profile files are shared between rigs through git, so the choice is remembered
-per machine rather than in the repo. The startup default is the profile last
-used here, failing that the first profile whose `.pfs` file exists.
+per machine rather than in the repo. A launch opens the profile last used here,
+or the one `gui.py --profile <name>` names. On a machine with neither, the
+window opens no camera and no serial port, and programs no board, until you
+choose a profile in this dropdown.
 
 Selecting a profile also resets the output directory to that profile's
 `output_dir`. Profile switching is ignored unless the app is idle.
