@@ -170,9 +170,9 @@ the frame size and the frame rate to its camera.
 ## Configure a new rig, step by step
 
 1. Write down the frame size, frame rate and camera count. Work out the network
-   load, RAM and disk with the [sizing formulas](#sizing-formulas), and stop if a
-   number does not fit your hardware. More cameras need a more capable GPU, and
-   the driver's limit on NVENC sessions is often what caps the camera count.
+   load, RAM, disk and [NVENC sessions](#nvenc-sessions) with the
+   [sizing formulas](#sizing-formulas), and stop if a number does not fit your
+   hardware.
 2. Copy a [template](#templates) into `profiles/<your_rig>.yaml` and set `name`.
 3. Make the camera settings. Basler: set the frame size, Mono8, exposure and gain
    in pylon Viewer and save a `.pfs` into `configs/` ([Basler cameras: the .pfs
@@ -226,13 +226,13 @@ it out). Relative paths are read from the repository folder, the one that holds
 Text. Default: the file name without `.yaml`. Reference rig: `3dpose`.
 
 - Does: Names the profile in the profile dropdown and in `session_metadata.json`
-  (`rig`). This computer remembers the last profile opened by its name.
+  (`rig`).
 - Change when: Always, when you copy a profile or a template. Use a name no other
   file in `profiles/` uses.
 - Goes wrong: Two files with the same name both appear in the dropdown under one
   label, and the remembered choice opens the first of them in file-name order.
-  After a rename, the next launch does not find the remembered name and asks you
-  to choose a profile. An empty name loads, but Panopticon uses an empty name to
+  After a rename, the next launch does not find the
+  [remembered](#where-settings-live) name and asks you to choose a profile. An empty name loads, but Panopticon uses an empty name to
   mean that no profile is chosen.
 
 #### `metadata_defaults`
@@ -356,8 +356,8 @@ Integer, Hz. Default `100`. Reference rig: `100`.
 - Goes wrong: A higher rate shortens the [exposure ceiling](#exposure-ceiling)
   and raises network load, disk use and CPU load in proportion. On `basler` and
   `sim`, a rate at or above `trigger_rate_limit` is refused when the profile
-  loads. With `trigger_source: external`, Panopticon cannot read your source's
-  rate, and the block-ID rate check after each recording is the only comparison.
+  loads. With `trigger_source: external`, set it to your source's rate
+  ([Your own TTL source](#your-own-ttl-source)).
 
 #### `calibration_frame_rate`
 
@@ -616,9 +616,9 @@ Text. Default `board`. Reference rig: not set.
   you run, such as a pulse generator or a DAQ, and Panopticon opens no serial
   port. [Trigger source](#trigger-source) describes both.
 - Change when: Set `external` for a trigger source of your own.
-- Goes wrong: With `external`, stimulation is unavailable, and the profile refuses
-  `serial_port`, `trigger_pins` and a non-empty `stim_safe_pins`. A source already
-  running when the cameras arm refuses the recording.
+- Goes wrong: A source already running when the cameras arm refuses the
+  recording. [Your own TTL source](#your-own-ttl-source) lists what else
+  `external` changes.
 
 #### `serial_port`
 
@@ -1353,9 +1353,9 @@ then.
 
 ## What the loader checks, and what it does not
 
-Panopticon loads every profile at launch. A refused profile is left out of the
-profile dropdown, and a dialog names the file and the reason. The tables quote the
-start of each message or a phrase from it.
+Panopticon checks each profile as it loads it at launch, and
+[Where settings live](#where-settings-live) says what you see when it refuses
+one. The tables quote the start of each message or a phrase from it.
 
 ### Refused when the profile loads
 
@@ -1540,5 +1540,5 @@ already recorded or measured.
 - `metadata_defaults`, `output_dir`, `quality`, `log_level`,
   `thermal_warn_margin_c` and the coverage thresholds change nothing already
   recorded.
-- Renaming a profile: this computer remembers profiles by name, so the next launch
-  asks you to choose one.
+- Renaming a profile makes the next launch ask you to choose one
+  ([name](#name)).
