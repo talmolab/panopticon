@@ -917,7 +917,7 @@ class CameraManager(QObject):
 
         Never raises for a bad profile: a frame rate at or above the limiter
         is refused by RigProfile.load, so it cannot reach this call inside a
-        Qt slot. The one refusal is the backend's: a camera whose
+        Qt slot. The backend can refuse: a camera whose
         exposure_ceiling_us raises the backend's RefusalException cannot
         record at `fps`, and a collecting call raises
         AcquisitionStartRefused naming every such camera before any exposure
@@ -992,9 +992,14 @@ class CameraManager(QObject):
             note = ""
             if (ceiling_us is not None and want_exp is not None
                     and want_exp > ceiling_us):
-                note = (f" CLAMPED from {want_exp:.0f} us: at {fps:g} fps with "
-                        f"{limiter} the ceiling is {ceiling_us:.0f} us, and "
-                        f"exceeding it would halve the frame rate silently")
+                # A CEILING_BASIS is a phrase ("the ExposureTime limit this
+                # camera reports"), so it goes in parentheses; the Basler
+                # limiter is a setting and reads as one.
+                where = (f"the ceiling ({basis}) is" if basis
+                         else f"with {limiter} the ceiling is")
+                note = (f" CLAMPED from {want_exp:.0f} us: at {fps:g} fps "
+                        f"{where} {ceiling_us:.0f} us, and exceeding it "
+                        f"would halve the frame rate silently")
                 want_exp = ceiling_us
             # The unit is stated only for a value that came from the PROFILE,
             # where gain is documented in dB: the backend then refuses a raw
