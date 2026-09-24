@@ -386,15 +386,20 @@ class CameraManager(QObject):
         return [dict(d) for d in self._camera_info]
 
     def sdk_report(self) -> str:
-        """The loaded backend's sdk_report() (its SDK version and where it
-        was loaded from), or "" when no backend is loaded or it reports
-        none. Never loads a backend and never raises."""
-        backend = self._backend_obj
-        fn = getattr(backend, "sdk_report", None)
-        if fn is None:
+        """The camera SDK line of the backend this manager has loaded (its
+        version and where it was loaded from, gui_app.backends.sdk_report),
+        or "" when none is loaded. Never raises.
+
+        RULE: asked only once a backend is loaded, and through the registry.
+        REASON: a report asked earlier loads the SDK from its default folder
+        and fixes it for the process, which a later profile's
+        camera.flir.sdk_dir then cannot change; and the registry answers a
+        simulated backend without loading any library."""
+        if self._backend_obj is None:
             return ""
         try:
-            return str(fn() or "")
+            from gui_app import backends
+            return str(backends.sdk_report(self._backend_name) or "")
         except Exception as e:
             return f"unavailable ({type(e).__name__}: {e})"
 
