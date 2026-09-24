@@ -69,7 +69,10 @@ cameras, no fans):
   81 C.
 - The heatsinks lowered the idle temperature by 2-4 C. A second heatsink on the
   hottest camera lowered it by another 2.7 C.
-- A 150 s recording added about 1-2 C.
+- Recording raised the temperature by about 0.3-0.7 C per minute with the
+  heatsinks, and by 1.1-1.3 C per minute before them. From the hottest
+  camera's idle level of about 77.5 C, a recording reaches 80 C within about
+  3-8 minutes, 1 C below the shutdown.
 
 Plan the cooling before you mount the cameras:
 
