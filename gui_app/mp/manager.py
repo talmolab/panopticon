@@ -465,6 +465,7 @@ class ProcessCameraManager(QObject):
     geometry_mismatch = CameraManager.geometry_mismatch
     pinning_report = CameraManager.pinning_report
     _source_silence_warnings = CameraManager._source_silence_warnings
+    _rate_hints = CameraManager._rate_hints
 
     def __init__(self, profile, backend: str | None = None,
                  log_dir: Path | None = None):
@@ -1521,7 +1522,8 @@ class ProcessCameraManager(QObject):
                 "forced drops, kick-outs, the block-ID rate and retirements",
                 lambda: sync_encode.session_warnings(
                     core, [r[1] for r in results], [r[2] for r in results],
-                    self._fps, self._max_lag)))
+                    self._fps, self._max_lag,
+                    rate_hints=self._rate_hints())))
             warnings.extend(self._checked(
                 "The trigger-source check",
                 "a trigger source that fell silent",

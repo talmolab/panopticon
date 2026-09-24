@@ -425,6 +425,23 @@ class CameraManager(QObject):
             return "the profile's camera: block"
         return "the .pfs"
 
+    def _rate_hints(self) -> dict:
+        """The advice clauses of the block-ID rate warning for this rig
+        (frame_sync.check_block_id_rate): the backend's BLOCK_RATE_HINTS,
+        when it declares them, plus the name of what drove the triggers.
+
+        RULE: one dict holds both. REASON: the check reads ceiling_hint,
+        timestamp_hint and source_hint from the same dict, so passing only
+        the source's name gives a camera without the Basler limiter the
+        limiter's advice, and passing only the backend's clauses names the
+        wrong trigger source.
+        """
+        backend = self._backend_obj
+        hints = dict(getattr(backend, "BLOCK_RATE_HINTS", None) or {})
+        hints["source_hint"] = source_name(
+            getattr(self, "trigger_source", "board"))
+        return hints
+
     def _open_failed(self, message: str) -> CameraOpenError:
         """Report an open failure once, and return it.
 
@@ -843,11 +860,19 @@ class CameraManager(QObject):
         # caller collects (see the docstring).
         found: list = []
         limit = float(getattr(self, "_trigger_rate_limit", 165.0) or 0.0)
-        # RULE: with the limiter off the log says so instead of quoting a
-        # default. _set_trigger_mode really did disable AcquisitionFrameRate,
-        # so the only bound left is the trigger period itself, and a log line
-        # quoting a limiter that is not running is worse than no line at all.
-        limiter = (f"AcquisitionFrameRate={limit:g}" if limit > 0
+        # RULE: the line names what bounds the exposure on this backend: its
+        # CEILING_BASIS when it declares one, otherwise the Basler limiter.
+        # With the limiter off the line says so instead of quoting a default.
+        # REASON: _set_trigger_mode really did disable AcquisitionFrameRate,
+        # and a camera without that limiter is bounded by something else, so
+        # a line quoting a limiter that is not running sends the operator to
+        # the wrong setting. The instance is read rather than the loading
+        # property: with no camera open there is nothing to configure, and
+        # no reason to import a vendor SDK.
+        backend = self._backend_obj
+        basis = getattr(backend, "CEILING_BASIS", None)
+        limiter = (str(basis) if basis
+                   else f"AcquisitionFrameRate={limit:g}" if limit > 0
                    else "limiter disabled")
         # The raw ceiling is the backend's (a camera's own physics; see
         # OptionalBackendMembers.exposure_ceiling_us), with the 10% margin
@@ -873,9 +898,15 @@ class CameraManager(QObject):
             # numbers were set some other way; clamping to a non-positive
             # ceiling would record at the sensor minimum and report success,
             # when the real fault is that the camera skips triggers.
-            msg = (f"frame rate {fps:g} is at or above the trigger rate limit "
-                   f"{limit:g}: the camera skips triggers at this rate and no "
-                   f"exposure ceiling exists, so exposure is left as asked")
+            if basis:
+                msg = (f"at {fps:g} fps no exposure fits under {basis}: the "
+                       f"camera skips triggers at this rate, so exposure is "
+                       f"left as asked")
+            else:
+                msg = (f"frame rate {fps:g} is at or above the trigger rate "
+                       f"limit {limit:g}: the camera skips triggers at this "
+                       f"rate and no exposure ceiling exists, so exposure is "
+                       f"left as asked")
             print(f"[acq] WARNING: {msg}", flush=True)
             found.append(msg)
             ceilings = [None if c is not None and c <= 0 else c
@@ -1157,8 +1188,7 @@ class CameraManager(QObject):
                                  pin_encoders=self.pin_encoder_threads,
                                  enc_pcores=self.encoder_pcores,
                                  encoder_factory=self.encoder_factory,
-                                 rate_hints={"source_hint": source_name(
-                                     self.trigger_source)})
+                                 rate_hints=self._rate_hints())
             if not router.available:
                 self._start_grab_threads()      # back to preview
                 # Reported like a mid-session encoder failure: the cached
