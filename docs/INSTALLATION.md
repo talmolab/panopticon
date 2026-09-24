@@ -23,7 +23,7 @@ pixel.
 A part too small for its load loses frames while the recording carries on, so
 size each part before you buy it.
 
-Everything follows from the size of one frame:
+A frame's size is its width times its height, in bytes:
 
 ```
 frame_bytes = width x height                (Mono8)
@@ -31,8 +31,7 @@ frame_bytes = width x height                (Mono8)
 ```
 
 [CONFIGURATION.md](CONFIGURATION.md#sizing-formulas) collects the formulas for
-network, RAM, disk and NVENC sessions. This section explains them and gives the reference
-rig's figures.
+network, RAM, disk and NVENC sessions.
 
 ### Cameras
 
@@ -159,8 +158,8 @@ Each camera also needs:
   I/O connector. The reference rig's cameras take 12 V through the I/O
   connector.
 - A signal its input accepts. A Mega drives 5 V. An opto-isolated input is
-  driven by current, so read two numbers in the camera's I/O documentation: the
-  switching threshold and the current the input draws.
+  driven by current. The camera's I/O documentation gives its switching
+  threshold and the current it draws.
 
 The sketch writes every pin in `trigger_pins` in one loop with interrupts off,
 so no interrupt can widen the gap between pins. The pins still change one after
@@ -469,11 +468,7 @@ point to check your own figures against.
 
 ## 2. Install the software
 
-Steps 1 to 4 build a Python environment that can talk to the cameras. Step 5
-builds the network the cameras stream over, steps 6 and 7 write the files that
-describe your rig, and step 8 puts firmware you can account for on the trigger
-board. Step 9 is the first launch, and step 10 makes it a double-click. Do them
-in order, and check the result of each.
+Do the steps in order, and check the result of each.
 
 FLIR cameras: follow steps 1, 3 and 4 here, then [FLIR.md](FLIR.md) from its
 Spinnaker install onward.

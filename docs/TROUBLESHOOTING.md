@@ -80,7 +80,7 @@ in the list.
 | `Expected <n> cameras but <m> are available to open.` | The count differs from `n_cameras`, and the message lists the serials found. Camera names are positions ([camera_serials](CONFIGURATION.md#camera_serials)), so Panopticon opens none. Power-cycle the missing camera. After adding cameras, follow [INSTALLATION.md](INSTALLATION.md#adding-cameras-to-a-rig-that-already-works). |
 | `Requested cameras did not enumerate:` | A serial in `camera_serials` did not appear. Power-cycle that camera. |
 | `ignoring <n> enumerated device(s) not in the profile's camera_serials` | Log line. A camera not in `camera_serials` stays closed. Add its serial if it belongs to the rig. |
-| `Camera <serial> failed to open/configure:` | It enumerated and would not configure. The next line gives the reason. Power-cycle it, or close the program holding it. Panopticon closes every camera rather than open a partial set. |
+| `Camera <serial> failed to open/configure:` | It enumerated and would not configure. The next line gives the reason. Power-cycle it, or close the program holding it. Panopticon then closes every camera. |
 | `PixelFormat is <format>, not Mono8.` | The `.pfs` (or the FLIR `camera:` block) sets a wider format. The capture path stores one byte per pixel, so a wider frame would be cut to its low byte. Set `PixelFormat` to `Mono8`. |
 | `differs from the profile's` | A camera's frame size differs from the profile's `frame_width` and `frame_height`. Fix the `.pfs` or the profile so they agree. |
 | `differs from camera 1` | One camera has a different frame size. Apply the same `.pfs` to every camera. |
