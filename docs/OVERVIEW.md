@@ -78,8 +78,8 @@ with a dialog that says what to wait for.
 #### 5. Output directory
 
 The folder that sessions are written under. The button shows the path
-shortened in the middle, with the full path as its tooltip. Choosing a profile
-resets it to the profile's `output_dir`.
+shortened in the middle, with the full path as its tooltip.
+[WORKFLOW.md](WORKFLOW.md#3-set-the-output-directory) says when it resets.
 
 #### 6. Session fields
 
