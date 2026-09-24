@@ -73,7 +73,11 @@ KEPT_ON_OVERWRITE = ("calibration.toml",)
 #: whatever stim_paradigm.json it finds: one left from a stimulated take would
 #: label every frame of a new, unstimulated take as stimulated.
 STIM_FILES = ("stim_paradigm.json", "stim_paradigm.ino", "stim_trace.csv")
-STALE_SESSION_FILES = ("WARNINGS.txt", "codet_frames.json") + STIM_FILES
+#: session.log is among them because a take that never reaches its finalize
+#: writes none, and the earlier take's would sit beside it claiming to be
+#: its log.
+STALE_SESSION_FILES = (("WARNINGS.txt", "codet_frames.json") + STIM_FILES
+                       + (logging_setup.SESSION_LOG_NAME,))
 
 
 def _has_capture_data(video_dir: Path) -> bool:
