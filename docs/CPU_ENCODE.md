@@ -34,6 +34,11 @@ never learn which encoder they got.
 - `raw`: raw frames written during capture and encoded after the session.
   This needs `realtime_encode: false` (below).
 
+When the session cap cannot be probed, `auto` and `nvenc` keep NVENC. The
+capacity check then warns before the start ("The NVENC session cap could not
+be probed ...") that a camera without a session falls back to `raw.bin`, and
+asks whether to start.
+
 When `auto` falls back, the capacity check warns before the recording ("...
 Recording on the CPU with libx264 instead ...") and asks whether to start. Each
 camera recorded on libx264 carries a note in its `WARNINGS.txt` ("Real-time

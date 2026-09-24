@@ -176,7 +176,8 @@ These rules protect the timing and the laser:
   the Arduino's 20 mA per-pin limit.
 
 The operating rule that follows from the last two, switching the laser off
-before anything resets the board, is in [WORKFLOW.md](WORKFLOW.md).
+before anything resets the board, is in
+[WORKFLOW.md](WORKFLOW.md#7-optional-stimulation).
 
 ### The serial protocol
 
@@ -980,9 +981,10 @@ every remaining trigger with no forcing, since no more frames are coming. Every
 frame the coordinator does not release goes back through `on_drop`, so its
 ring slot is freed.
 
-At stop the router writes the kick-out counts into `session_metadata.json`
-(`kickout`: triggers decided, kept, kicked out and forced, and the effective
-frame rate). Forced drops always produce a warning. Ordinary kick-outs above
+At stop the router computes the kick-out counts
+(`sync_encode.kick_counts()`), and the window writes them into
+`session_metadata.json` (`kickout`: triggers decided, kept, kicked out and
+forced, and the effective frame rate). Forced drops always produce a warning. Ordinary kick-outs above
 0.5% of the decided triggers produce one line, "Effective frame rate X fps
 (target Y).", and the detail goes to the log.
 
