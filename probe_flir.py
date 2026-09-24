@@ -793,7 +793,7 @@ class _BoardSource:
 
     def open(self):
         """None when the board is ready, else why it cannot be used. Only
-        the first call opens the port; a later one returns its answer."""
+        the first call opens the port. A later one returns its answer."""
         if not self.tried:
             self.tried = True
             self.refusal = self._open()
@@ -826,7 +826,7 @@ class _BoardSource:
         if heard is None or heard != self.want_id:
             said = (f"reports sketch {heard}" if heard else
                     "did not report a sketch identity")
-            # identify() already sent a stop; the close confirms it, and the
+            # identify() already sent a stop. The close confirms it, and the
             # board stays closed for the rest of the run.
             self.stood_down = self.close()
             return (f"the trigger board on {self.port} {said}, not the "
@@ -1024,7 +1024,7 @@ def _start_failure(src, counted: dict | None = None) -> str:
             f"so the probe did not reset and restart the board under them: a "
             f"restart begins a new pulse count while the cameras keep the "
             f"first one's frame IDs. The board may be triggering while its "
-            f"replies do not reach the host; the probe stopped it. Run the "
+            f"replies do not reach the host, so the probe stopped it. Run the "
             f"stage again, and check the board's USB cable if it fails the "
             f"same way.")
 
@@ -1353,12 +1353,15 @@ class Probe:
         return src
 
     def close_source(self):
-        """Stand the trigger board down once the stages are done; also
-        after an error or an interrupt."""
-        src, self._source = self._source, None
+        """Stand the trigger board down once the stages are done, and after
+        an error or an interrupt. The source is forgotten only once its
+        stand-down returns, so an interrupt during it leaves the next call
+        to try again."""
+        src = self._source
         if src is None:
             return
         closed = src.close()
+        self._source = None
         if src.kind == "board" and closed is not None:
             self.check("board", "trigger board stood down",
                        "PASS" if closed else "FAIL",
@@ -2380,7 +2383,7 @@ def _gil_probe(p: Probe, raw: _Raw, h) -> dict:
                         continue
                     except Exception as e:
                         # The pause keeps the meter from measuring a loop
-                        # that spins on the error; the count says the wait
+                        # that spins on the error. The count says the wait
                         # was not the one measured.
                         seen["errors"] += 1
                         seen["last_error"] = _err(e)
@@ -2872,7 +2875,7 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
                 p.check(stage, f"{src.describe()} starts at {fps:g} Hz",
                         "WARN", "the board confirmed only after a reset and "
                         "a second start. No camera had counted a trigger "
-                        "before the reset, so the run is kept; the reset "
+                        "before the reset, so the run is kept. The reset "
                         "floated the board's pins for about a second.")
             elif record_pass:
                 p.check(stage, f"{src.describe()} starts at {fps:g} Hz",
@@ -3388,7 +3391,7 @@ def _counter_checks(p: Probe, cams, src) -> dict:
 def _counter_start(p: Probe, src, key: str, label: str, active) -> bool:
     """Start the board for one counter run, with no reset and resend under
     the armed cameras (_never_reset). The start's outcome goes into each
-    camera's `key` record; a start without its ack fails the run."""
+    camera's `key` record. A start without its ack fails the run."""
     started = bool(src.start(COUNTER_HZ, may_retry=_never_reset))
     note = {"confirmed": started, "retried": src.last_start_retried,
             "retry_refused": src.retry_refused}
@@ -3562,7 +3565,7 @@ def _run_b(p: Probe, rigs, src):
         b = rec["run_b"] = {"frames": [], "samples": [], "read_errors": 0}
         b["buffers_before"] = raw.read("StreamBufferCountManual", "tlstream")
         # The pause answer needs the small pool, and the latency and count
-        # answers need counters reset to 0; a failed write drops only the
+        # answers need counters reset to 0. A failed write drops only the
         # answers that depend on it.
         pool = _Writes(raw)
         if pool.write("StreamBufferCountManual", RUN_B_BUFFERS, "tlstream"):
