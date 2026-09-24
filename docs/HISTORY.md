@@ -2,7 +2,7 @@
 
 This is the engineering ledger: dated decisions, measurements and dead ends that
 explain why the code and the profiles hold the values they do. The code states
-each rule in the present tense and does not retell the story behind it; the
+each rule in the present tense and does not retell the story behind it. The
 story is here.
 
 Each entry is one bullet: the date, what changed or what was measured, and the
@@ -12,7 +12,7 @@ section that closed dead ends lists them at its end, so nobody runs them
 again, and the last section indexes them all.
 
 Live measurements and the current performance picture are in
-[docs/INTERNALS.md](INTERNALS.md); this file is the chronology.
+[docs/INTERNALS.md](INTERNALS.md). This file is the chronology.
 
 ---
 
@@ -79,9 +79,9 @@ Dead ends, do not retry:
   rode `max_lag`.
 - 2026-07-27: A 6.8 kΩ pulldown on the laser MOD line measured ineffective. The
   CNI PSU-III's MOD input has an internal pullup far stiffer than 6.8 kΩ, and a
-  resistor low enough to beat it would exceed the Arduino's 20 mA per-pin
-  limit. The hardware fix was abandoned; the long-lived connection is what
-  solved it. Dead end.
+  resistor low enough to beat it would exceed the Arduino's 20 mA per-pin limit.
+  The hardware fix was abandoned, and the long-lived connection solved the flash
+  instead. Dead end.
 - 2026-07-27: Stall recovery and `retire()`. `grab_thread` re-arms after 25
   consecutive timeouts, up to 5 times. `_resync_offset()` recovers the true
   ordinal from the device timestamp and refuses when the gap is not within 0.25
@@ -90,8 +90,8 @@ Dead ends, do not retry:
 
 Dead ends, do not retry:
 - `dtr=False` or `rts=False` to suppress the reset (zero triggers).
-- A pulldown on the PSU-III MOD line (the internal pullup is too stiff; use the
-  interlock).
+- A pulldown on the PSU-III MOD line (the internal pullup is too stiff, so use
+  the interlock).
 
 ---
 
@@ -102,14 +102,14 @@ Dead ends, do not retry:
   with 21.5% clipped at 0, destroyed at the ADC. Modelled, about 7x total would
   clip 12.7%. Prefer IR illumination, then exposure, then gain.
 - 2026-08-11: `trigger_rate_limit: 0` tried and reverted the same day. It
-  removes the exposure floor but costs 8-15% of frames in transmission
-  (delivery 85-92% against 99.98%, released rate 87.7 down to 76.9 fps),
-  because every camera bursts onto its link at once after the shared trigger.
+  removes the exposure floor but costs 8-15% of frames in transmission, because
+  every camera bursts onto its link at once after the shared trigger. Delivery
+  was 85-92% against 99.98%, and the released rate fell from 87.7 to 76.9 fps.
   Dead end.
 - 2026-08-11: `kick_max_lag` A/B over 100,968 frames (17 minutes, identical
-  camera settings): 240 lost 12.34% and released 87.68 fps; 480 lost 0.88% and
-  released 99.14 fps. 480 adopted on 3dpose. The laggard drifts to whatever the
-  cap is, so raising it further buys little.
+  camera settings). At 240 the rig lost 12.34% and released 87.68 fps. At 480 it
+  lost 0.88% and released 99.14 fps. 480 adopted on 3dpose. The laggard drifts
+  to whatever the cap is, so raising it further buys little.
 - 2026-08-11: The rotating laggard traced across sessions: cam1 (07-27), cam5
   (08-11 13:55), then cam2 (08-11 14:32). cam5 and cam2 are in the light-resend
   group, so the July hypothesis blaming packet loss on cams 1, 4 and 6 was
@@ -129,27 +129,27 @@ Dead ends, do not retry:
 
 - 2026-09-03: First cause of the rotating laggard found. `img = result.Array` in
   the grab loop is a GIL-held 2.3 MB memcpy (0.837 ms per frame per camera)
-  against a 10 ms budget every grab thread shares, and whichever thread lost
-  the GIL lottery became the laggard. `GetArrayZeroCopy` costs 0.157 ms (5.33x
-  less). Rig result at six cameras: cycle 12.0 down to 10.00 ms, avg_proc
-  5.2-5.5 down to 0.79-0.84 ms, and underruns 245-882 down to 0. Cross-camera
-  lag went from a median of 235-479 to median 0, p95 1, max 2, and forced drops
-  from 12.34% to 0. `np.frombuffer(GetBuffer())` measured 0.902 ms, no better than
-  `.Array`. The laggard came back at nine cameras (section 6); its main cause
-  is in section 8.
+  against a 10 ms budget every grab thread shares. Whichever thread lost the GIL
+  lottery became the laggard. `GetArrayZeroCopy` costs 0.157 ms (5.33x less).
+  Rig result at six cameras: cycle 12.0 down to 10.00 ms, avg_proc 5.2-5.5 down
+  to 0.79-0.84 ms, and underruns 245-882 down to 0. Cross-camera lag went from a
+  median of 235-479 to median 0, p95 1, max 2, and forced drops from 12.34% to
+  0%. `np.frombuffer(GetBuffer())` measured 0.902 ms, no better than `.Array`.
+  The laggard came back at nine cameras (section 6), and section 8 finds its
+  main cause.
 - 2026-09-03: GIL-wait budget measured with `QueryThreadCycleTime`, not a
-  wall-clock bracket: 300 µs or less of GIL-held work per thread per frame is
-  safe even at 17 threads, and about 1000 µs breaks the 10 ms budget at 11.
-  This is the acceptance criterion for any hot-path change. A wall-clock timer
-  around a GIL-releasing call reports the re-acquisition wait as work (a
-  0.08 ms copy read as 2.7 ms), the mistake that misled the project twice.
+  wall-clock bracket. Up to 300 µs of GIL-held work per thread per frame is safe
+  even at 17 threads, and about 1000 µs breaks the 10 ms budget at 11. This is
+  the acceptance criterion for any hot-path change. A wall-clock timer around a
+  GIL-releasing call reports the re-acquisition wait as work (a 0.08 ms copy
+  read as 2.7 ms), the mistake that misled the project twice.
 - 2026-09-03: Transport CPU measured. Both camera ports report
   `NumberOfReceiveQueues = 1`, so each port's 78,000 packets per second go
   through one core's DPC (about 46% on cores 0 and 1 at six cameras). Resend
   count is not loss: the discards are recovered.
 - 2026-09-03: Physical network triage cancelled. After the zero-copy fix a 60 s
   six-camera run had `Failed_Buffer_Count = 0` on all six at 100.00% capture.
-  Resends were never the binding constraint; a grab loop too slow to drain the
+  Resends were never the binding constraint. A grab loop too slow to drain the
   pool was.
 - 2026-09-03: 20-minute validation: 120,106 frames identical on all six, 99.95%
   kept, crossing the 16-bit block-ID wrap without incident. RSS at 4 queues
@@ -196,7 +196,7 @@ Dead ends, do not retry:
 - 2026-09-10: `max_num_buffer` 1000, then 250, then 600 in one day. The
   nine-camera RAM preflight refused 1000 (19.3 GiB of pool), and 250 was raised
   to 600 after cam9 held 2.4 s of delivery lag for a whole recording. The value
-  became a profile field, so the preflight's advice can be followed; the pool
+  became a profile field, so the preflight's advice can be followed. The pool
   must be at least `kick_max_lag`.
 - 2026-09-10: `kick_max_lag` 480, then 240, then 480 in one day. At 240, cam9
   sat 240 frames (2.4 s) behind, and 4,682 triggers that all nine cameras
@@ -204,15 +204,15 @@ Dead ends, do not retry:
 - 2026-09-10: A nine-camera calibration solved only 4 cameras while every
   per-camera figure (`paired 260/250`, `grid 4/3`) read satisfied. The
   co-visibility graph was three separate components, and the solve keeps the
-  largest. Two groups sat at 46 shared detections; they would have merged at
+  largest. Two groups sat at 46 shared detections. They would have merged at
   `min_edge` 40 but not at 80.
 - 2026-09-10: HUD thresholds `min_per_cam_shared` and `min_edge` from 250 and
   80 to 120 and 40. 250 and 80 were about 4x and 2.7x the solver's caps, which
   made a nine-camera calibration take far longer than the data could be used
   for.
-- 2026-09-10: `probe_network.py` located cam5 and cam6 in ten seconds after
-  they had been plugged into each other's switches. The camera-to-port mapping
-  changes, so never trust a written one; derive it off the wire.
+- 2026-09-10: `probe_network.py` located cam5 and cam6 in ten seconds after they
+  had been plugged into each other's switches. The camera-to-port mapping
+  changes, so never trust a written one. Derive it off the wire.
 - 2026-09-10: Camera temperatures recorded in session metadata for the first
   time. Temperature did not order the laggards: the hottest camera (cam6,
   75 C) had the least lag.
@@ -234,7 +234,7 @@ Dead ends, do not retry:
   (an E-core) at 66%, the rest under 3%. RSS queue count 1 to 4 changed nothing
   measurable.
 - 2026-09-11: `pin_capture_threads` enabled. A grab thread on an E-core runs a
-  few percent slow, and two grab threads on one core carrying NIC DPC gave one
+  few percent slow. Two grab threads on one core carrying NIC DPC gave one
   camera a monotonic lag (67 to 173 frames) with zero underruns: pure CPU
   contention.
 - 2026-09-11: Thread-placement flags moved into the shared `rig_setup` path.
@@ -257,7 +257,7 @@ Dead ends, do not retry:
   allocated late began 124 frames behind, rode `kick_max_lag` the whole session
   and force-dropped 2,036 frames.
 - 2026-09-14: `calibration_min_edge` 40 to 20. Waving the board still demanded
-  too many pairings; a 9 of 9 solve had succeeded at 40, so 20 keeps a margin.
+  too many pairings. A 9 of 9 solve had succeeded at 40, so 20 keeps a margin.
   The per-pair HUD prompt was removed: it repainted every tick and named a pair
   the operator was often not working on.
 - 2026-09-14: Stim guard added after a recording was 59.9% mislabelled.
@@ -323,9 +323,9 @@ Dead ends, do not retry:
   from the profile's `metadata_defaults` instead of one operator's values. A
   date the operator did not type refreshes when it is read, so a GUI left open
   past midnight files the session under the right day (`b80f79c`).
-- 2026-09-18: The legacy campy acquisition path and its submodule removed;
-  nothing imported them (`71a10db`). The package metadata declares the license,
-  and the vendor SDKs moved into a dependency group (`d81564b`).
+- 2026-09-18: The legacy campy acquisition path and its submodule removed,
+  because nothing imported them (`71a10db`). The package metadata declares the
+  license, and the vendor SDKs moved into a dependency group (`d81564b`).
 - 2026-09-18: The trigger sketch prints an 8-hex sketch identity in its RDY ack,
   so the host compares what the board runs with what it wants (`8fc65eb`). A
   stop is confirmed by `RDY n 0` on RDY firmware (`4a43133`).
@@ -336,18 +336,18 @@ Dead ends, do not retry:
 - 2026-09-19: First rig session of the audited code, nine cameras, 20 s at
   100 fps. Every camera had one keyframe per second, and seek time was flat at
   55-87 ms against 2.5-9.0 s on an older file. Block IDs were identical on all
-  nine, and forced was 0. cam6 alone degraded (lag 129, 244, then 278 of 480; cycle 12.7 ms) and was
-  also the hottest camera (77.6 C, peak 80.6 C). Measured on the rig; no code
-  change.
-- 2026-09-19: Later the same day a 5-minute calibration and a 5-minute
-  recording peaked at a lag of 1 of 480 with cam6 at the same temperature (77.8
-  C, peak 79.7 C), so heat alone did not predict the laggard. Frame loss was per
-  switch: the three cameras on one switch lost 12 buffers each and the other six
-  none. Measured on the rig; no code change.
+  nine, and forced was 0. cam6 alone degraded (lag 129, 244, then 278 of 480,
+  with a 12.7 ms cycle) and was also the hottest camera (77.6 C, peak 80.6 C).
+  Measured on the rig; no code change.
+- 2026-09-19: Later the same day a 5-minute calibration and a 5-minute recording
+  peaked at a lag of 1 of 480. cam6 was at the same temperature (77.8 C, peak
+  79.7 C), so heat alone did not predict the laggard. Frame loss was per switch:
+  the three cameras on one switch lost 12 buffers each and the other six none.
+  Measured on the rig; no code change.
 - 2026-09-20: GPL-3.0 license text added (`b10f992`). The repository was made
   public, with the audit branch as its first pull request.
-- 2026-09-21: The overwrite prompt deletes the earlier session and records
-  fresh under the same name, instead of moving it aside; repeat takes had left
+- 2026-09-21: The overwrite prompt deletes the earlier session and records fresh
+  under the same name, instead of moving it aside. Repeat takes had left
   `.previous-HHMMSS` folders to prune by hand. The prompt defaults to Cancel,
   and the delete runs after the serial port opens (`31fff80`).
 - 2026-09-21: A kick-mode session no longer runs a post-hoc alignment re-encode
@@ -363,12 +363,12 @@ Dead ends, do not retry:
   Critical, and six peaked at 81.0-81.1 C, the shutdown point, where a camera
   stops delivering. The fault rotated from cam4 to cam6 to cam5 across switches,
   and the coordinator force-dropped whole sessions (20,560 forced in one run).
-  After a cool-down (camera power unplugged, lights off) the recording was clean:
-  worst lag 54 of 480, forced 0. Measured on the rig; no code change.
+  After a cool-down (camera power unplugged, lights off) the recording was
+  clean: worst lag 54 of 480, forced 0. Measured on the rig; no code change.
 - 2026-09-21: The audit merged into master (`302d943`). This ledger replaced the
-  dated narrative in CLAUDE.md (`ade997b`). The public tree was slimmed: the test
-  suites, dev probes, tools and doc generators became local-only and gitignored
-  (`2cf12e1`).
+  dated narrative in CLAUDE.md (`ade997b`). The public tree was slimmed: the
+  test suites, dev probes, tools and doc generators became local-only and
+  gitignored (`2cf12e1`).
 
 ---
 
@@ -376,7 +376,7 @@ Dead ends, do not retry:
 
 - 2026-09-22: The first rig baseline was blocked on heat. At idle four cameras
   sat at 78.3-79.6 C, flat for ten minutes, and cam6's over-temperature error
-  count read 3. The maintainer fitted heatsinks; after a cool-down all nine read
+  count read 3. The maintainer fitted heatsinks. After a cool-down all nine read
   34.5-35.4 C. Measured on the rig; no code change.
 - 2026-09-22: The excursion caught live on the heatsinked array, in three
   150-165 s runs of the capture probe. It was a drift, not a gap: cam2, whose
@@ -399,10 +399,11 @@ Dead ends, do not retry:
   blank). Read elevated, the ports had been at 1 queue on processors 0-23
   throughout, so no baseline changed. `configure_nic.ps1 -Check` now refuses the
   RSS verdict when it is not elevated (`c0a1e39`).
-- 2026-09-22: Temperature reads do not starve the grab threads. Across 39
-  archived nine-camera runs that read every camera's temperature every 5 s, the
-  slowest camera fell below 90 fps in 1.4% of the intervals containing a read
-  (n = 793) against 2.9% of the others (n = 3,211). Closed; no code change.
+- 2026-09-22: Temperature reads do not starve the grab threads. The check used
+  39 archived nine-camera runs that read every camera's temperature every 5 s.
+  In them the slowest camera fell below 90 fps in 1.4% of the intervals
+  containing a read (n = 793), against 2.9% of the others (n = 3,211). Closed.
+  No code change.
 - 2026-09-22: The morning's "cam6 158 of 480" run was loss plus drift, not one
   slow camera. cam6 retrieved 8 frames in 1.4 s while every other camera
   retrieved about 145, and then skipped 88 block IDs within one second. cam2 to
@@ -416,8 +417,8 @@ Dead ends, do not retry:
   driver DMA it. The GIL held per `Encode()` fell from 0.44-0.72 ms to about
   0.07-0.09 ms, and the encoders' GIL occupancy at 9 x 100 fps from about 42% to
   10-15%, with byte-identical bitstreams. A host synchronize of the encoder
-  stream drained NVENC's pipeline and spun a core (2.7 ms of CPU per frame);
-  per-buffer CUDA events replaced it. No code change.
+  stream drained NVENC's pipeline and spun a core (2.7 ms of CPU per frame).
+  Per-buffer CUDA events replaced it. No code change.
 - 2026-09-22: Rig A/B of that prototype, seven 150 s runs, against the
   maintainer's bar (after the first 2 s no camera more than 5 frames behind, and
   forced 0). The production path passed 0 of 3 (worst 267, 155 and 45 frames)
@@ -437,13 +438,13 @@ Dead ends, do not retry:
 - 2026-09-22: Thermal policy. A fan is not an option on this rig, and the
   cameras' thresholds cannot be raised, so Panopticon's reaction changed. It
   warns at the camera's reported shutdown point minus `thermal_warn_margin_c`,
-  and no longer on Critical alone (`86e18a7`; the live watch in `f4ad2da`). The
-  program default is 3.0 C; the 3dpose profile sets 2.0, so it warns at 79 C.
-  `BsliDeviceTemperatureOverwrite*` fakes the reading and defeats the camera's
-  shutdown, so Panopticon never writes it.
+  and no longer on Critical alone (`86e18a7`, and the live watch in `f4ad2da`).
+  The program default is 3.0 C. The 3dpose profile sets 2.0, so it warns at
+  79 C. `BsliDeviceTemperatureOverwrite*` fakes the reading and defeats the
+  camera's shutdown, so Panopticon never writes it.
 - 2026-09-22: FLIR support is a `ctypes` binding to the Spinnaker C API
   (`224eccf`) with a simulated SDK behind the same methods (`71992c1`), not
-  PySpin. The C calls release the GIL, give zero-copy frames and need no wheel;
+  PySpin. The C calls release the GIL, give zero-copy frames and need no wheel.
   PySpin's GIL behaviour and copying are undocumented, and its Python 3.10 wheel
   is built for NumPy 1.x while Panopticon needs NumPy 2. Merged as `769bbd7`.
 - 2026-09-22: Free-threaded CPython (3.14t) checked and set aside: only numpy
@@ -463,8 +464,8 @@ Dead ends, do not retry:
 
 ## 9. The drop fix, FLIR and the review fixes (22-24 September 2026)
 
-- 2026-09-22: Backend contract: optional members are read with `getattr`, the
-  Basler exposure-ceiling formula lives in the backend (`1ec1db0`), and each
+- 2026-09-22: Backend contract: optional members are read with `getattr`, and
+  the Basler exposure-ceiling formula lives in the backend (`1ec1db0`). Each
   camera's timestamp tick rate is logged, with a warning when it is not 1 GHz
   (`8b5261f`). Merged as `31c830d`.
 - 2026-09-22: Profile schema. The `camera:` block serves backends without a
@@ -492,9 +493,10 @@ Dead ends, do not retry:
   frame is never overwritten (`a25c897`). A retirement's backlog is released at
   a pace the encoder queues can take (`f964746`), after rig logs from 09-21
   showed 2,221-2,227 queue-full drops (277-279 per surviving camera) blamed on a
-  wedged encoder. A `stop()` that lands before `run()` is honoured; it had left
-  a preview thread retrieving beside the recording thread (`172f6ea`). Failing
-  grabs and dead starts retire the camera (`ceb4b7b`). Merged as `f3597c1`.
+  wedged encoder. A `stop()` that lands before `run()` is honoured (`172f6ea`).
+  When it was ignored, it left a preview thread retrieving beside the recording
+  thread. Failing grabs and dead starts retire the camera (`ceb4b7b`). Merged as
+  `f3597c1`.
 - 2026-09-22: Groundwork for multi-process capture: shared-memory primitives
   (`7068696`), a cross-process kick-out ledger (`06e8e86`) and a worker-side
   NV12 ring guard (`e68b89d`). Merged as `f4fcd7d`.
@@ -537,7 +539,7 @@ Dead ends, do not retry:
   needed, 18.1 GiB available"). The ring, the router's sink and the encoder's
   recycle hook formed a reference cycle that only a full collection frees, which
   a quiet GUI never runs. Each acquisition now frees its rings when it stops
-  (`f8566ee`). Every probe run and suite had passed; only the second Record in
+  (`f8566ee`). Every probe run and suite had passed. Only the second Record in
   the real GUI showed it. In the maintainer's GUI session after the fix (two
   recordings and a calibration), memory went back to about 13 GiB after each
   stop, the worst lag was 1 frame and forced was 0.
@@ -557,9 +559,9 @@ Dead ends, do not retry:
   period (`d3a3e64`, `2cf8690`).
 - 2026-09-23: Camera-manager seam for other backends: `backend.open` receives
   the frame size and rate, and a backend's rate refusal refuses the start before
-  any exposure is written (`144f568`). A pinned encoder counts itself closed only
-  after its resources are freed, which removed a false teardown leak warning the
-  rig check had printed (`66c875b`). Merged as `133c001`.
+  any exposure is written (`144f568`). A pinned encoder counts itself closed
+  only after its resources are freed, which removed a false teardown leak
+  warning the rig check had printed (`66c875b`). Merged as `133c001`.
 - 2026-09-23: Session logging, verbose for the volunteer phase at the
   maintainer's request, with the rule that logging must cost the acquisition
   nothing. Every line is stamped with milliseconds and its thread and written
@@ -588,9 +590,9 @@ Dead ends, do not retry:
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
-  them all; drive the real GUI through repeated acquisitions).
-- Patching the FLIR witness one edge case at a time (each round found another;
-  the conservative rule replaced it).
+  them all, so drive the real GUI through repeated acquisitions).
+- Patching the FLIR witness one edge case at a time (each round found another,
+  and the conservative rule replaced it).
 
 ---
 
@@ -611,7 +613,8 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
 - One encoder per E-core (321 frames behind).
 - Widening the block-rate tolerance to 1% (lands on the 1-in-100 skip).
 - A separate `_board_has_paradigm` flag (derive it from `_sketch_for` and
-  `_session_stim_ino`; a parallel flag drifts from the sketch on the board).
+  `_session_stim_ino`, because a parallel flag drifts from the sketch on the
+  board).
 - Unanchoring `/_*.py` in `.gitignore` (a bare `_*.py` also matches
   `__init__.py`).
 - Chasing the laggard by camera temperature (the hottest camera had the least
