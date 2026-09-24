@@ -3,10 +3,13 @@ message: "If you use this software, please cite it using the metadata from this 
 type: software
 title: Panopticon
 abstract: >-
-  Multi-camera hardware-synchronised video acquisition for 3D animal pose
-  estimation. Cameras expose on one trigger board's edge, frames are encoded
-  to H.264 on the GPU during recording, and every camera's video is aligned
-  trigger for trigger by GigE block ID before it is written.
+  Hardware-triggered multi-camera video acquisition for 3D animal pose
+  estimation. One TTL trigger fires every camera, the frames are encoded to
+  H.264 on the GPU during the recording, and each camera's video keeps only
+  the triggers every camera captured, matched by the frame's block ID, so the
+  videos are aligned trigger for trigger. The same application records and
+  solves a ChArUco calibration and runs optogenetic stimulation from the
+  trigger board.
 authors:
   - family-names: Tang
     given-names: Isaac
@@ -26,5 +29,11 @@ keywords:
   - video acquisition
   - hardware synchronisation
   - 3D pose estimation
+  - animal behavior
+  - camera calibration
+  - ChArUco
+  - optogenetics
   - GigE Vision
+  - Basler
+  - FLIR
   - NVENC
