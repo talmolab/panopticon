@@ -43,6 +43,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
+from gui_app import logging_setup
 from gui_app import sync_encode
 from gui_app.backends import load_backend
 from gui_app.camera_manager import (FPS_DECAY_S, STOP_FORCED_EXIT_S,
@@ -466,6 +467,10 @@ class ProcessCameraManager(QObject):
     pinning_report = CameraManager.pinning_report
     _source_silence_warnings = CameraManager._source_silence_warnings
     _rate_hints = CameraManager._rate_hints
+    _log_stop_summary = CameraManager._log_stop_summary
+    sdk_report = CameraManager.sdk_report
+    #: sync_encode.kick_counts() of the last recording, or None.
+    last_kick_counts = None
 
     def __init__(self, profile, backend: str | None = None,
                  log_dir: Path | None = None):
@@ -843,10 +848,9 @@ class ProcessCameraManager(QObject):
                         pass
                     w.log_conn = None
                     continue
-                # One write per line: another thread's print cannot land
-                # inside it.
-                sys.stdout.write(line.decode("utf-8", "replace") + "\n")
-                sys.stdout.flush()
+                # The worker stamped the line; it is logged with the
+                # worker's time and thread, under the worker's name.
+                logging_setup.forward_packed(line, prefix=f"w{w.wid}")
 
     def _attach_status(self, w: _Worker, spec) -> None:
         if not spec:
@@ -1252,6 +1256,9 @@ class ProcessCameraManager(QObject):
                 affinity=self._affinity())
             w.armed = True
             self._grants[w.wid] = len(w.cams)
+        logging_setup.transition(
+            f"arm: {n} camera(s) in {len(self._workers)} capture "
+            f"process(es) at {fps} fps (kick_max_lag {kick_max_lag})")
         replies = _await(calls, ARM_TIMEOUT_S)
         _log_phase("arm", calls)
         refused = [(w, r) for w, (ok, r) in replies.items() if not ok]
@@ -1436,7 +1443,11 @@ class ProcessCameraManager(QObject):
             self.last_results = []
             return []
         self._triggers_running = False
+        self.last_kick_counts = None
+        t_stop = time.monotonic()
         armed = [w for w in self._workers if w.armed]
+        logging_setup.transition(
+            f"stop: {len(armed)} capture process(es) told to stop")
         calls = {w: w.call("stop") for w in armed}
         deadline = time.monotonic() + STOP_EOS_S
         while time.monotonic() < deadline:
@@ -1510,6 +1521,15 @@ class ProcessCameraManager(QObject):
             print(f"[sync] released={core.released} dropped={core.dropped} "
                   f"forced={core.forced} queue_full_drops={dropped_full}",
                   flush=True)
+            try:
+                self.last_kick_counts = sync_encode.kick_counts(core,
+                                                                self._fps)
+                if logging_setup.verbose():
+                    print(f"[sync] kick-out counts: {self.last_kick_counts}",
+                          flush=True)
+            except Exception as e:
+                print(f"[mp] kick-out counts unavailable: "
+                      f"{type(e).__name__}: {e}", flush=True)
             for cam, reason in core.retired_reasons:
                 retired.setdefault(f"cam{cam + 1}", reason)
             # RULE: the results are the caller's before any cross-camera
@@ -1533,6 +1553,14 @@ class ProcessCameraManager(QObject):
                 "The trigger-source check",
                 "a trigger source that fell silent",
                 lambda: self._source_silence_warnings(self._grab_threads)))
+            try:
+                self._log_stop_summary(self._grab_threads, retired)
+            except Exception as e:
+                print(f"[mp] stop summary unavailable: {type(e).__name__}: "
+                      f"{e}", flush=True)
+            logging_setup.transition(
+                f"stop done in {time.monotonic() - t_stop:.2f} s: "
+                f"{len(retired)} camera(s) retired")
             if self._router is not None:
                 self._router.dropped_full = dropped_full
                 self._router.backlog_peak = backlog_peak
