@@ -524,9 +524,9 @@ and no Qt.
   returns False. Every caller that starts the board under armed cameras (the
   GUI, `probe_lag.py`, `probe_flir.py`) passes a veto that refuses once any
   camera counted frames, on any firmware. The exception is the local-only
-  `probe_lag.py --no-ready-barrier`, which exists only to compare with
-  recordings made before the barrier and passes none. The reset restarts the
-  board's trigger count but not the cameras' block IDs.
+  `probe_lag.py --no-ready-barrier`, which passes none (see Measurement
+  discipline). The reset restarts the board's trigger count but not the
+  cameras' block IDs.
 - Closing the GUI never leaves the board triggering, a paradigm running or the
   laser on. Quitting always calls `stop_and_close()`. Under the controller's
   lock and after any start in flight, it stops the board if the link is open,
@@ -617,9 +617,9 @@ and no Qt.
   `probe_guard` refuses to start beside another instance, and `gui.py`'s
   single-instance check calls `probe_guard.other_panopticons()`, so both use the
   same matching rule.
-- `probe_lag.py` starts the board only after every camera is armed and exits 4
-  otherwise. `--no-ready-barrier` exists only to compare with runs recorded
-  before the barrier.
+- The local-only `probe_lag.py` starts the board only after every camera is
+  armed and exits 4 otherwise. `--no-ready-barrier` exists only to compare with
+  runs recorded before the barrier.
 - Run no suite, analysis or second probe beside a rig measurement. Their CPU
   load changes the numbers, and their child processes make a guarded probe
   refuse.
