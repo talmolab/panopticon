@@ -853,9 +853,9 @@ loop or an encoder thread. The session header, the read-backs and the copy of
 each acquisition's slice of the log into `session.log` run before the cameras
 are armed or after capture has stopped.
 
-The log is flushed at shutdown, from the excepthook (which waits up to a
-second for the writer) and before `session.log` is copied; `flush()` finishes
-only the calling thread's unfinished line. The writer writes the file before
+The log is flushed at shutdown, from the excepthook (which, on the main
+thread only, waits up to a second for the writer) and before `session.log` is
+copied; `flush()` finishes only the calling thread's unfinished line. The writer writes the file before
 it forwards a line anywhere else. Lines still on the queue at a native crash
 are lost; faulthandler writes its traceback straight to the file.
 `rig_setup.apply_profile_to_manager()` puts the profile's level in force, so
