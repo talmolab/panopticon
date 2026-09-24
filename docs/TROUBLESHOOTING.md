@@ -39,7 +39,7 @@ Contents:
 |---|---|
 | `The term 'uv' is not recognized` | PowerShell was open before uv was installed. Open a new window. If it persists, sign out of Windows and back in. |
 | `The term 'git' is not recognized` | Install Git for Windows, then open PowerShell again. |
-| `uv sync` fails to download | No internet, or a proxy in the way. After a full `uv sync`, Panopticon and its tools run offline. On a machine installed with `uv sync --no-group rig`, a plain `uv run` downloads the camera and GPU packages again, so pass `--no-group rig` to every `uv run` there ([INSTALLATION.md step 4](INSTALLATION.md#step-4--install-the-python-dependencies)). |
+| `uv sync` fails to download | No internet, or a proxy. After one full `uv sync`, everything runs offline. On a machine synced with `--no-group rig`, a plain `uv run` downloads the camera and GPU packages again, so pass `--no-group rig` to every `uv run` there ([INSTALLATION.md step 4](INSTALLATION.md#step-4--install-the-python-dependencies)). |
 | `cannot be loaded because running scripts is disabled` | Run the script as `powershell -ExecutionPolicy Bypass -File <script>.ps1`. |
 | `No venv at <path>` | From `make_shortcut.ps1`: `uv sync` has not run in this copy of the repository. |
 | `Panopticon failed to start` | The window never opened. The dialog gives the error and the log file. Common first-run causes: the camera SDK missing, a profile that will not load, or an incomplete `uv sync`. |
@@ -65,7 +65,7 @@ Contents:
 | `camera.flir.sdk_dir is not a folder:` | Point it at the Spinnaker install folder, or remove it to search the default places. |
 | `The profile sets capture_processes: <n>.` | Capturing in several processes is experimental, and the window captures in one. Set `capture_processes: 0`. |
 | `A solve is running` | The profile switch was refused, and the list shows the old profile again. Choose the profile again once the calibration solve has finished. |
-| `Firmware upload in progress` | The profile switch or the close was refused while the board is flashed, about 30 s. Choose the profile, or close the window, again once the upload reports that it is done. Interrupting a flash leaves the board without its laser-safety boot guard. |
+| `Firmware upload in progress` | The profile switch or the close was refused during a flash, which takes about 30 s. Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
 | `The hardware check is running` | The profile switch or the start was refused. Choose the profile, or start, again once the status bar says the check is done. |
 
 ## Opening the cameras
@@ -149,7 +149,7 @@ before you connect a laser or LED driver to the board.
 | Message or symptom | Cause and fix |
 |---|---|
 | The laser flashes briefly at launch | The board resets when its port opens and when it is flashed, and its pins float during the reset ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). The laser's own interlock is the only hard gate. |
-| `Could not clear stim firmware` | The board could not be flashed, so it may still carry a paradigm from a previous session, one that loops included. Fix the cause the message gives, then open Stimulation and press **Apply** with an empty canvas, or switch the laser off. |
+| `Could not clear stim firmware` | The board could not be flashed, so it may still carry an earlier paradigm, a looping one included. Fix the cause the message gives, then press **Apply** on an empty Stimulation canvas, or switch the laser off. |
 | `arduino-cli was not found` | Install the Arduino IDE or `arduino-cli`, or set `PANOPTICON_ARDUINO_CLI` to its path. The message lists every place searched. Only flashing, Apply and Test need it. |
 | `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next start opens the port, which resets the board: switch the laser off first. |
 | `trigger board reports sketch <id>, not the recording-only <id>; flashing` | The board ran another sketch, and Panopticon flashes the recording-only one. |
@@ -179,7 +179,8 @@ preview.
 | `Disk may be short:` | A warning: a 10-minute recording would not fit. A shorter one is fine. |
 | `Disk is tight:` | A warning: a 10-minute recording would use more than 80% of the free space. Clear space before the next session. |
 | `Raw capture will write <n> GiB/s.` | Use a drive rated for that sustained rate, or split the cameras across drives. |
-| `Overwrite the existing data?` | The session folder holds an earlier acquisition. **Yes** deletes it, except `calibration.toml`, once the board's port is claimed. A start refused after that does not bring it back. With `trigger_source: external` it waits aside until the first trigger, and comes back if the start ends before then. To keep both, choose **Cancel** and change the metadata. |
+| `Overwrite the existing data?` | The folder holds an earlier acquisition. **Yes** deletes it, except `calibration.toml`, once the board's port is claimed, even if the start is then refused. To keep it, choose **Cancel** and change the metadata. |
+| `Overwrite the existing data?`, with an external trigger source | **Yes** sets the earlier acquisition aside until the first trigger, and puts it back if the start ends before then. |
 | `Serial port <port> could not be opened, so no triggers would be sent.` | Something holds the port (the Arduino Serial Monitor, another program), or `serial_port` names the wrong port. Close it and start again. That start opens the port, which resets the board: switch the laser off first. |
 | `Could not create the session directories` | The output folder cannot be written. Check it and start again. |
 | `Stop the stimulation test first` | A stimulation test drives the board. Stop it in the editor. |
@@ -190,11 +191,11 @@ preview.
 | `Stimulation needs the trigger board` | The profile uses `trigger_source: external`, which has no board to run a paradigm. Use a profile with `trigger_source: board`. |
 | `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which takes about 30 s and resets the board. Switch the laser off before that start. |
 | `The trigger board could not be flashed with the <kind> firmware` | Nothing started. Switch the laser off, check the board and the port, and retry. |
-| `had not armed after <n> s, so the trigger board was not started` | A camera did not arm in time. A camera that arms after the board starts would record every frame against the wrong trigger. Arming fills each camera's frame ring first, so the usual cause is memory pressure: close other programs, or lower `kick_max_lag` or `max_num_buffer`. |
+| `had not armed after <n> s, so the trigger board was not started` | A camera that arms after the board starts would pair every frame with the wrong trigger. Arming fills each camera's frame ring, so memory pressure is the usual cause: close other programs, or lower `kick_max_lag` or `max_num_buffer`. |
 | `had not armed after <n> s, so you were not asked to start your trigger source.` | The same, with `trigger_source: external`. |
 | `Frames arrived before the trigger board was started:` | Something already triggers these cameras: the board still running from an earlier start, another source on their trigger line, or a camera not in trigger mode. Check the wiring and the camera settings. |
 | `The trigger board did not acknowledge the start command, so no triggers would be sent.` | The board did not confirm, even after a reset. Check the USB cable, and that the board runs Panopticon's sketch. |
-| `The trigger board did not confirm the start, but the cameras had already counted <n> frames, so the board did start.` | A retry would shift every camera's block IDs against the board's trigger count, so the start was rolled back. Start again. If the message says the board never confirms a command, it runs other firmware: Apply an empty canvas to flash it. |
+| `The trigger board did not confirm the start, but the cameras had already counted <n> frames, so the board did start.` | A retry would shift every camera's block IDs against the board's trigger count, so the start was rolled back. Start again. If the message says the board never confirms a command, it runs other firmware: Apply an empty canvas. |
 | `Could not put every camera into trigger mode:` | Power-cycle the camera the message names and retry. |
 | `These cameras cannot record at <fps> fps:` | A camera cannot reach the frame rate at its settings. On FLIR cameras see [FLIR.md](FLIR.md#when-something-refuses). |
 | `Real-time kick-out was requested but its encoders could not be created:` | Often the NVENC session cap. Close other programs that encode on the GPU, or restart Panopticon. |
@@ -215,7 +216,7 @@ Most of these appear in the status bar.
 | `s BEHIND REAL TIME (<cam>). Frames will be lost when the buffer pool fills. Stop and investigate.` | The same, by more than a second. Stop and check that camera. |
 | `EVERY CAMERA IS RETIRED: nothing is being recorded. Stop the recording.` | Stop, and read the retirement reasons in the log. |
 | `NO FRAMES from <cams> for <n> s` | Those cameras have delivered nothing for that long. Check their trigger cables and network links. |
-| `NO FRAMES FROM ANY CAMERA for <n> s: the trigger board may have stopped.` | Every camera stopped receiving frames at once, so the trigger source or the network to all cameras stopped. A `No frames from any camera` dialog opens and says whether the board's serial link still answers. On a profile with `stim_safe_pins` the dialog says to check the laser: do so. |
+| `NO FRAMES FROM ANY CAMERA for <n> s: the trigger board may have stopped.` | The trigger source stopped, or the network to every camera. A `No frames from any camera` dialog says whether the board's serial link still answers. On a profile with `stim_safe_pins` it also says to check the laser: do so. |
 | `CAMERA TEMPERATURE: <cam> <t> C` | The camera is near its shutdown temperature, or in its over-temperature state. Check its airflow and mount ([INSTALLATION.md](INSTALLATION.md#camera-temperature)). |
 | One camera's pane shows about half the trigger rate | Exposure over the ceiling, or a 2.5 Gbit/s link ([The network](#the-network)). The camera ignores every second trigger. See [the out-of-sync section](#the-recording-looks-fine-but-the-views-are-out-of-sync). |
 | `Waiting for the first trigger: start your trigger source now` | `trigger_source: external`: start your source. |
@@ -356,12 +357,24 @@ at the stop Panopticon
 compares the trigger edges each camera counted with the exposures it started,
 and writes what it finds to `WARNINGS.txt`.
 
+With `camera.flir.block_id_source: trigger_counter` the block IDs count the
+trigger edges, so an ignored trigger is a gap, which alignment drops from every
+camera. Otherwise the block IDs count the frames the camera acquired, and an
+ignored trigger shifts every later block ID of that camera. A camera that
+latches its trigger count before the edge has every block ID one trigger early,
+and its first image may not show which way it latches.
+
+The trigger counters wrap. On a camera with narrow counters the witness counts
+ignored triggers only in recordings shorter than the frame count its message
+names. The block-ID rate check still runs on a longer recording, but a few
+ignored triggers stay under its tolerance.
+
 | Message | Cause and fix |
 |---|---|
 | `so it ignored <n> trigger(s).` | The camera missed that many triggers. When the message goes on to say its frames are paired with the wrong instants, do not use the recording for 3D reconstruction. Lower `camera.exposure_us`, or set `camera.flir.block_id_source: trigger_counter`. |
-| `each ignored trigger is a gap` | With `block_id_source: trigger_counter` an ignored trigger is a gap in the block IDs, and alignment drops that trigger from every camera. If the message says the next warning questions that, read the latch row below first. Lower `camera.exposure_us` to keep those triggers. |
-| `its first image did not show whether it latches the CounterValue chunk` | Two causes fit the counts: the last triggers delivered no frame, or the camera latches its count before the edge, which makes every block ID of this camera one trigger early. Send the output of `uv run probe_flir.py`, and do not use the recording for 3D reconstruction until it shows which. |
-| `its trigger witness is limited:` | The counters wrap, so ignored triggers are counted only in recordings shorter than the frame count the message names. The block-ID rate check still runs, but a few ignored triggers in a long recording stay under its tolerance, so this recording has no count of them. Set `camera.flir.block_id_source: trigger_counter` if the message offers it, or keep recordings under that length. |
+| `each ignored trigger is a gap` | Alignment drops each of those triggers from every camera. If the message says the next warning questions that, read the latch row below first. Lower `camera.exposure_us` to keep those triggers. |
+| `its first image did not show whether it latches the CounterValue chunk` | The last triggers delivered no frame, or the camera latches its count before the edge. Send the output of `uv run probe_flir.py`, and do not use the recording for 3D reconstruction until it shows which. |
+| `its trigger witness is limited:` | The recording is longer than the counters can follow, so it has no count of ignored triggers. Set `camera.flir.block_id_source: trigger_counter` if the message offers it, or keep recordings under the length it names. |
 | `so this recording has no trigger witness for this camera` | The counters could not be read or do not count what Panopticon set. The block-ID rate check is then the only check. Send the output of `uv run probe_flir.py`. |
 | `So this camera's frames are not proven aligned.` | The witness cannot show whether the ignored triggers shifted this camera's block IDs, for example around a stall re-arm. Do not use the recording for 3D reconstruction. Lower `camera.exposure_us`, or set `camera.flir.block_id_source: trigger_counter`. |
 | `no counters; the trigger witness is off for this camera` | Log line. This model has no counters, so the block-ID rate check is the only check. |
