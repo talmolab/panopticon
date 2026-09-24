@@ -377,8 +377,11 @@ a longer run. Its counter checks add about half a minute. `--no-counter-check`
 skips them.
 
 The probe uses the profile Panopticon opened last, if that is a FLIR profile, or
-else the only FLIR profile in `profiles/`. To choose one, add `--profile` with
-the profile's name or the path to its file, for example `--profile my_lab`.
+else the only FLIR profile in `profiles/`. Otherwise it prints
+`no FLIR profile given or found`. `--list` and `--selftest` then run without a
+profile, and `--find-line`, `--triggered` and `--exposure-sweep` fail with
+`needs a FLIR profile`. To choose one, add `--profile` with the profile's name
+or the path to its file, for example `--profile my_lab`.
 
 The probe writes nothing but its JSON file, its log and the `--collect` zip. It
 never saves a user set, so the settings the camera keeps across a power cycle are
