@@ -201,11 +201,12 @@ the frame size and the frame rate to its camera.
     coverage thresholds at their defaults for the first calibration.
 11. Leave the four CPU placement fields off unless the CPU is a hybrid Intel part
     and a test recording shows a camera falling behind.
-12. Open the profile with `uv run gui.py --profile NAME`. Opening it resets the
-    device on `serial_port` and, unless the device already carries it, programs
-    it with the recording-only sketch, so read [serial_port](#serial_port) first.
-    A profile with a mistake is left out of the dropdown, and a dialog names the
-    file and the field.
+12. Switch the laser off or block the beam, then open the profile with
+    `uv run gui.py --profile NAME`. Opening it resets the board on
+    [serial_port](#serial_port), and every pin floats during the reset
+    ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
+    A profile that fails the [loader's checks](#what-the-loader-checks-and-what-it-does-not)
+    is not in the dropdown.
 13. Record a one-minute test. Check that every camera's video has the same number
     of frames, that the recording folder has no `WARNINGS.txt`, and that no
     `[camN] exposure=` line in the log says `CLAMPED`. On a computer that has
@@ -625,11 +626,14 @@ Text. Default `""`. Reference rig: `COM3`.
 - Does: The trigger board's serial port, `COMn` on Windows (Device Manager, under
   Ports (COM & LPT)). `sim` selects the simulated board. Opening the profile
   resets the device on this port and, unless it already carries it, programs it
-  with the recording-only sketch: camera triggers and no stimulation.
+  with the recording-only sketch: camera triggers and no stimulation. Switch the
+  laser off or block the beam before you open the profile
+  ([stim_safe_pins](#stim_safe_pins)).
 - Change when: For every new computer or board.
 - Goes wrong: A wrong port resets whatever device is on it, and can reprogram
-  it, so check the port before you open the profile. Left empty, nothing is programmed at
-  launch, and Calibrate and Record are refused because the board does not open.
+  it, so check the port before you open the profile. Left empty, nothing is
+  programmed at launch, and Calibrate and Record are refused because the board
+  does not open.
   A port another program holds, such as the Arduino Serial Monitor, fails the same
   way. An external-source profile refuses the field.
 
@@ -1303,10 +1307,8 @@ covers installing `arduino-cli` and flashing, and
 [INSTALLATION.md](INSTALLATION.md#wiring-the-trigger-line) covers wiring.
 
 Panopticon starts the board only once every camera is armed, and the board
-acknowledges each start. When you open a profile, Panopticon resets the board
-and, unless it already carries it, programs it with the recording-only sketch:
-camera triggers and no stimulation. A stimulation paradigm reaches the board
-only through Apply in the Stimulation editor, and calibration always runs on the
+acknowledges each start. A stimulation paradigm reaches the board only through
+Apply in the Stimulation editor, and calibration always runs on the
 recording-only sketch.
 
 ### Your own TTL source
@@ -1509,8 +1511,8 @@ These mistakes load without a message. Check them yourself.
   thresholds.
 - A `capture_core_exclude` that leaves no performance core (it falls back to all
   of them).
-- A `serial_port` that names another device: opening the profile resets it, and
-  can reprogram it.
+- A `serial_port` that names another device, which opening the profile resets
+  ([serial_port](#serial_port)).
 - `output_dir` and `board_config` paths. Panopticon creates a missing output
   folder when it records. A missing board config hides the coverage display and
   refuses Solve.
