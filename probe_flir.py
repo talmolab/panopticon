@@ -1952,6 +1952,12 @@ def stage_find_line(p: Probe):
             p.check("find_line", f"{src.describe()} starts at {rate:g} Hz",
                     "FAIL", _start_failure(src))
             return
+        if src.host_started and src.last_start_retried:
+            p.check("find_line", f"{src.describe()} starts at {rate:g} Hz",
+                    "WARN", "the board confirmed only after a reset and a "
+                    "second start. The cameras only read their line levels, "
+                    "so the stage is kept. The reset floated the board's "
+                    "pins for about a second.")
         if not src.host_started:
             from gui_app.trigger_source import FIRST_TRIGGER_TIMEOUT_S
             deadline = time.perf_counter() + FIRST_TRIGGER_TIMEOUT_S
@@ -1975,7 +1981,7 @@ def stage_find_line(p: Probe):
                                                      FIND_LINE_S)
     finally:
         if src.host_started and src.teensy is not None:
-            src.stop()
+            _checked_stop(p, src, "find_line", "--find-line")
         elif not src.host_started:
             src.stop("find-line")
         rep["raw_errors"] = {serial: raw.errors
@@ -3416,6 +3422,21 @@ def _counter_checks(p: Probe, cams, src) -> dict:
     return out
 
 
+def _checked_stop(p: Probe, src, stage: str, label: str) -> bool:
+    """Stop the board after `label`, and FAIL "the board confirms the stop"
+    when it does not ack. RULE: every stop of the board is checked, not only
+    the final stand-down. REASON: the board stays open until the run ends,
+    so an unconfirmed stop would otherwise show only in the controller's
+    log line while the next stage runs beside a board that may still be
+    triggering."""
+    ok = bool(src.stop())
+    if not ok:
+        p.check(stage, f"{label}: the board confirms the stop", "FAIL",
+                "no RDY ack for the stop. The board may still be "
+                "triggering. Power-cycle the board.")
+    return ok
+
+
 def _counter_start(p: Probe, src, key: str, label: str, active) -> bool:
     """Start the board for one counter run, with no reset and resend under
     the armed cameras (_never_reset). The start's outcome goes into each
@@ -3498,7 +3519,7 @@ def _run_a(p: Probe, rigs, src):
         started = _counter_start(p, src, "run_a", "counter run A", active)
         if started:
             time.sleep(RUN_A_S)
-        src.stop()
+        _checked_stop(p, src, "triggered", "counter run A")
         started_ok, started = started, False
         time.sleep(0.3)
     finally:
@@ -3661,7 +3682,7 @@ def _run_b(p: Probe, rigs, src):
                 rec["run_b"]["stats_after_pause"] = p.backend.stream_stats(c)
             pause.clear()
             time.sleep(RUN_B_RESUME_S)
-        src.stop()
+        _checked_stop(p, src, "triggered", "counter run B")
         started_ok, started = started, False
         time.sleep(0.3)
     finally:
@@ -3876,7 +3897,7 @@ def _run_c(p: Probe, rigs, src):
         if started:
             time.sleep(RUN_C_S)
         t1 = time.perf_counter()
-        src.stop()
+        _checked_stop(p, src, "triggered", "counter run C")
         started_ok, started = started, False
         time.sleep(0.3)
     finally:
@@ -4022,7 +4043,7 @@ def _run_delay(p: Probe, rigs, src):
                        for _c, _raw, r in active) * 1e-6 + 0.03)
         for c, raw, rec in active:
             rec["delay_test"]["exposures_after"] = _counter_read(raw, "Counter1")
-        src.stop()
+        _checked_stop(p, src, "triggered", "the delay test")
         started_ok, started = started, False
         time.sleep(0.2)
     finally:
