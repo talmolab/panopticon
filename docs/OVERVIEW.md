@@ -426,7 +426,9 @@ Disabled while they would do the wrong thing:
 - Record and Calibrate while the hardware check runs, while videos are
   encoded or aligned, during a solve, during an editor upload, and until a
   profile is open.
-- Solve during a solve, an acquisition or an encode.
+- Solve during a solve and until a profile is open. During an acquisition,
+  an encode or an alignment it stays live, and a press shows
+  `Solve unavailable while acquiring/encoding` in the status bar.
 - During a blocking operation (the second table under 16): the dropdown, the
   output directory, the toggles, Solve, Snapshot and the session fields. The
   Stimulation button and the two sliders stay live.
