@@ -113,8 +113,9 @@ block the beam first: the board's pins float while it resets
 | [`output_dir`](docs/CONFIGURATION.md#output_dir) | Where sessions go. Use your largest, fastest drive. |
 | [`metadata_defaults`](docs/CONFIGURATION.md#metadata_defaults) | Your lab's defaults for the sidebar, saved with every session. A copied profile carries another lab's names. |
 
-Without `camera_serials`, cameras are named in the order they enumerate, so one missing
-camera renames every camera after it and puts the calibration on the wrong cameras.
+Without `camera_serials`, cameras are named in serial-number order. If `n_cameras` is 0,
+or another camera on the computer fills the count, one missing camera then renames every
+camera after it and puts the calibration on the wrong cameras.
 [CONFIGURATION.md](docs/CONFIGURATION.md) explains every field.
 
 ## What a session writes
