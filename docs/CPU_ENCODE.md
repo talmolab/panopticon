@@ -5,11 +5,11 @@ other real-time encoder: `gui_app/cpu_encode.py`, which encodes with libx264 in
 one `ffmpeg` child process per camera. It is the fallback for a machine whose
 GPU cannot give every camera an NVENC session.
 
-Panopticon still expects an NVIDIA GPU. The driver caps how many NVENC sessions
-run at once, and that cap, which the launch check probes, is often what limits
-how many cameras one machine records; more cameras need a more capable GPU.
-libx264 covers a shortfall only while the CPU has cores to spare, and those are
-the cores the capture threads need.
+Panopticon still expects an NVIDIA GPU. The driver's cap on NVENC sessions is
+often what limits how many cameras one machine records
+([NVENC sessions](INTERNALS.md#nvenc-sessions)). libx264 covers a shortfall
+only while the CPU has cores to spare, and those are the cores the capture
+threads need.
 
 ## Choosing the encoder
 
@@ -203,11 +203,3 @@ calls it and the profile has no field for it, so every recording runs
 `ultrafast` with one thread per camera. `veryfast` is about 3 times slower here
 for a modest saving in size at the same qp; the bench above is where an
 evaluation of such a field would start.
-
-## NVENC and monochrome
-
-`nvenc.probe_monochrome_support()` reads NVENC's `support_monochrome`
-capability. On the reference rig's GPU it returns 0: the encoder does not take
-a monochrome surface, so the NV12 frame keeps its constant-128 chroma plane. It
-returns -1 when NVENC is unavailable or the query fails, which means unknown,
-never yes.

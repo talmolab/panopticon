@@ -324,9 +324,8 @@ exposure_max = 1/frame_rate - 1/AcquisitionFrameRate
 formula above, and `CameraManager.apply_exposure_gain()` enforces 90% of it at
 every acquisition start instead of trusting the profile. An exposure above
 that is lowered and logged as `CLAMPED from ...` on the camera's `[camN]
-exposure=` line. At 100 fps with a limiter of 165 the ceiling is 3.94 ms and
-the enforced value 3.55 ms. The worked values for other rates are in
-[CONFIGURATION.md](CONFIGURATION.md).
+exposure=` line. [CONFIGURATION.md](CONFIGURATION.md#exposure-ceiling) gives
+the ceiling and the enforced value at the recording and calibration rates.
 
 A recording passes `exposure_us=None`, which restores the exposure and gain
 each camera held when it opened (the `.pfs` on Basler, the `camera:` block on
@@ -1084,14 +1083,16 @@ constant 128. The conversion is therefore one memcpy into the top `height` rows
 of a buffer whose lower `height/2` rows were filled with 128 once. The loader
 refuses an odd frame size for the same reason.
 
+`nvenc.probe_monochrome_support()` reads NVENC's `support_monochrome`
+capability. On the reference GPU it returns 0: the encoder takes no monochrome
+surface, so the constant chroma plane stays. It returns -1 when NVENC is
+unavailable or the query fails, which the caller must read as unknown.
+
 This is also why the pixel format is read back from each camera at open. A
 Mono12 `.pfs` makes every frame 16-bit, and `buf[:height, :] = img` then keeps
 only the low 8 bits and reports nothing: a full-length, aligned recording whose
 images are noise. `CameraManager.open_all()` refuses anything but Mono8, and a
 frame size that differs from the profile's or from camera 1's.
-`nvenc.probe_monochrome_support()` reads whether the GPU's encoder takes a
-monochrome surface; on the reference GPU it does not (it returns 0), so the
-chroma plane stays.
 
 ### Choosing the encoder
 
@@ -1099,11 +1100,9 @@ The profile's [`encoder`](CONFIGURATION.md#encoder) is resolved by
 `hardware_check.select_encoder()`, which installs the factory the grab threads
 and the router use (`encoders.set_default_factory()`). It runs at launch, again
 after every profile switch, and again at every start against the cameras that
-are open. `auto` takes NVENC when the session probe grants one session per
-camera, else libx264 when the launch bench shows the CPU can carry every
-camera, and otherwise refuses the start. [CPU_ENCODE.md](CPU_ENCODE.md) covers
-the libx264 path and the four values. Record and Calibrate stay disabled until
-the launch check reports, because it installs the encoder and the NVENC upload
+are open. [CPU_ENCODE.md](CPU_ENCODE.md#choosing-the-encoder) gives the rule
+for each value, and covers the libx264 path. Record and Calibrate stay
+disabled until the launch check reports, because it installs the encoder and the NVENC upload
 setting, and its session probe holds every session the driver grants while it
 counts.
 
@@ -1115,10 +1114,9 @@ exist at once. The cap is undocumented and has moved across driver versions (2,
 hardcoded. `nvenc.probe_max_sessions_isolated()` creates encoders in a child
 process until the driver refuses or the count asked for is reached, and the
 child's exit frees them all. The encoder selection and the capacity check ask
-for `n_cameras + 2`. With fewer than `n_cameras` granted, `encoder: auto`
-moves every camera to libx264 when the CPU can carry them. Otherwise the start
-is refused, because a camera without a session would fall back to `raw.bin`,
-which writes every frame whole. The cap is often what limits how many cameras
+for `n_cameras + 2`. When the probe grants fewer than `n_cameras`, no start
+proceeds on NVENC, because a camera without a session would fall back to
+`raw.bin`, which writes every frame whole. The cap is often what limits how many cameras
 one GPU can encode, so more cameras need a GPU whose driver grants more
 sessions. The remux after a real-time recording is a stream copy and uses no
 session. The raw-mode encode, the tail merge and the alignment re-encode run
