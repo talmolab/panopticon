@@ -360,7 +360,8 @@ until someone analyses it.
 - Keep `trigger_rate_limit` at 165 on the reference rig, never 0. The limiter
   paces each camera's readout across 6.06 ms. Without it every camera bursts
   after the shared trigger, and marginal links lose 8-15% of frames in
-  transmission.
+  transmission. The exposure ceiling therefore stays, and is not worth buying
+  out until the network has margin to spare.
 
 ## Thermals
 
@@ -441,7 +442,8 @@ and no Qt.
   pulse width to integer microseconds (`block_timing()`), because an AVR float
   divide (about 30 µs) inside the trigger busy-wait blurs the ±0.35 µs edge
   timing. Every train-or-constant decision, `stim_trace` included, goes through
-  `stim_compiler.drive_mode()` on those integers.
+  `stim_compiler.drive_mode()` on those integers. `test_stim_compiler.py`
+  asserts that no float reaches the sketch.
 - A pulse width at or above the period means constant ON. A rule that calls it
   invalid holds the laser LOW for the whole recording.
 - `_extract_chains` stays cycle-safe: a revisit closes the loop through
@@ -456,8 +458,9 @@ and no Qt.
   such a sketch is never generated.
 - Every recording writes `stim_paradigm.json` and `stim_paradigm.ino` into its
   folder. `matches_uploaded_firmware: null` means nothing was uploaded that
-  session. `stim_trace.csv` is derived: it uses `t = (unwrapped_blockid - 1) / fps`,
-  never the frame index, and cannot know whether the laser fired.
+  session, so the match is unknown. `stim_trace.csv` is derived: it uses
+  `t = (unwrapped_blockid - 1) / fps`, never the frame index, and cannot know
+  whether the laser fired.
 
 ## Serial and laser safety
 
@@ -492,10 +495,11 @@ and no Qt.
   GUI, `probe_lag.py`, `probe_flir.py`) passes a veto that refuses once any
   camera counted frames, on any firmware. The reset restarts the board's trigger
   count but not the cameras' block IDs.
-- Quitting always calls `stop_and_close()`. Under the controller's lock and
-  after any start in flight, it stops the board if the link is open, closes the
-  link and retires the controller, so `open()` refuses afterwards. It warns when
-  a start went out and no stop was confirmed. `stop_triggers` and
+- Closing the GUI never leaves the board triggering, a paradigm running or the
+  laser on. Quitting always calls `stop_and_close()`. Under the controller's
+  lock and after any start in flight, it stops the board if the link is open,
+  closes the link and retires the controller, so `open()` refuses afterwards.
+  It warns when a start went out and no stop was confirmed. `stop_triggers` and
   `_rollback_acquisition` never infer success from port state: `is_open` stays
   True after an unplug. `_rollback_acquisition` returns a dict for the dialog.
 - A profile switch to another serial port, or to `trigger_source: external`,
