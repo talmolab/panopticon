@@ -56,10 +56,12 @@ checked by hand that no other one holds the hardware.
   suite takes an NVENC session. `test_sim_gui.py` reaches the GPU only with
   `PANOPTICON_TEST_GPU=1`. Never run the local-only `test_nvgil.py --gpu` and a
   GPU run of `test_sim_gui.py` at the same time.
-- A test that validates a fix drives the real GUI the way an operator does:
-  launch, let the preview run, Record, stop, then Record again (and Calibrate)
-  in the same process, and watch the process's memory between acquisitions.
-  Headless probes and `CameraManager` scripts diagnose; they do not validate.
+- A test that validates a fix drives the real GUI the way an operator does,
+  in the app launched with `gui.py` or a shortcut to it: let the preview run,
+  Record, stop, then Record again (and Calibrate) in the same process, and
+  watch the process's memory between acquisitions. Headless probes,
+  `CameraManager` scripts and scripts that build `MainWindow` themselves
+  diagnose; they do not validate.
   Some defects show only that way: NV12 rings that outlive a recording pass
   every probe and suite, and then refuse the second Record for lack of RAM.
 - `.gitignore` anchors `/_*.py` to the repository root. Keep the anchor. An
@@ -572,7 +574,8 @@ and no Qt.
 ## CPU placement
 
 - Pin each grab thread to its own P-core (`pin_capture_threads`). A grab thread
-  on an E-core runs a few percent slow, which the 10 ms loop cannot absorb.
+  on an E-core runs a few percent slow, which the grab loop's per-frame budget
+  cannot absorb.
 - Keep capture threads off the cores that carry NIC DPC
   (`capture_core_exclude`; `[0, 1]` on the reference rig, where those cores
   spend about half their time in NIC DPC). A grab thread there is descheduled by
