@@ -41,11 +41,12 @@ that loaded. A file with a mistake is left out, and a dialog after the window
 opens names the file and the field.
 
 This computer also remembers the last profile you opened, outside the repository,
-and opens it at the next launch. On a computer where no profile has been opened
-yet, or where the remembered profile no longer loads, the window opens no camera
-and no serial port, and programs no board, until you choose one. Choose it in the
-profile dropdown, or start Panopticon with `uv run gui.py --profile NAME`, where
-`NAME` is the profile's `name`. The choice is remembered.
+and opens it at the next launch. `uv run gui.py --profile NAME` opens the profile
+whose `name` is `NAME` instead, and remembers it. When no profile has been opened
+on this computer yet, or the one remembered or named with `--profile` does not
+load, the window waits for you to choose one in the profile dropdown. Until then
+it opens no camera and no serial port, programs no board and runs no hardware
+check. The choice is remembered.
 
 ## A complete annotated profile
 
@@ -426,7 +427,9 @@ Text. Default `auto`. Reference rig: `auto`.
   camera, else libx264 on the CPU when the launch benchmark says the CPU keeps
   up, and otherwise refuses the start. `nvenc` and `x264` force one path; `x264`
   also moves the post-session re-encodes to the CPU. `raw` is accepted only with
-  `realtime_encode: false`.
+  `realtime_encode: false`. When the session limit cannot be measured, `auto` and
+  `nvenc` keep NVENC, and the start asks whether to proceed
+  (`The NVENC session cap could not be probed`).
 - Change when: `x264` on a computer without a usable NVIDIA GPU. `nvenc` when a
   refusal suits you better than encoding on the CPU.
 - Goes wrong: `raw` with `realtime_encode: true` is refused at Record. On libx264
@@ -563,8 +566,10 @@ Integer. Default `0`. Reference rig: not set.
 - Change when: Keep `0`. The Panopticon window cannot capture in several
   processes yet.
 - Goes wrong: For a profile above `0`, the window opens no camera and a dialog
-  says why. The loader refuses a negative value, more processes than cameras, and
-  a nonzero value without `realtime_encode: true` and `realtime_kick: true`.
+  says why. The loader refuses a negative value, and a nonzero value without
+  `realtime_encode: true` and `realtime_kick: true`. It also refuses more
+  processes than cameras when the profile states the count, through `n_cameras`
+  or `camera_serials`.
 
 ### GigE network
 
@@ -834,7 +839,9 @@ Text. Default `verbose`. Reference rig: not set.
   and a per-camera summary at Stop. `debug` adds more detail on the same cold
   paths, such as every `.pfs` feature read back. One log per launch goes to
   `logs\` in the repository folder, and each recording and calibration folder
-  gets its part as `session.log`.
+  gets its part as `session.log`. Capture worker processes log at the same
+  level. `uv run probe_flir.py` logs at `debug` when the profile sets it, and
+  at `verbose` otherwise.
 - Change when: Leave `verbose` while you bring a rig up: its read-backs are what a
   bug report needs. `normal` gives a shorter log.
 - Goes wrong: Any other value is refused when the profile loads. No level logs
@@ -1011,8 +1018,9 @@ Text, `Line0`, `Line1` and so on. Required.
 - Change when: Leave `ReadOut`.
 - Goes wrong: With `Off`, a trigger that arrives during readout is ignored and
   uses no frame ID, so that camera's block IDs fall behind the trigger count. The
-  trigger witness and the block-ID rate check report it after the recording. A
-  camera without the setting logs that at open.
+  trigger witness and the block-ID rate check report it after the recording. An
+  entry the camera does not offer refuses the open. A camera without the setting
+  logs that at open.
 
 #### `camera.trigger.delay_us`
 
@@ -1142,15 +1150,15 @@ True or false. Default `true`.
 
 - Does: What each frame's block ID comes from. `frame_id` is the camera's frame
   counter, used when the self-test at open proves that it restarts at each
-  acquisition. `trigger_counter` is the camera's count of edges on its trigger
-  line, carried in the `CounterValue` chunk, so a trigger the camera ignored is a
-  gap in the IDs. `auto` uses the frame ID when the self-test proves it, and the
-  trigger counter otherwise.
+  acquisition and counts frames by 1. `trigger_counter` is the camera's count of
+  edges on its trigger line, carried in the `CounterValue` chunk, so a trigger
+  the camera ignored is a gap in the IDs. `auto` uses the frame ID when the
+  self-test proves it, and the trigger counter otherwise.
 - Change when: Set `trigger_counter` when `WARNINGS.txt` says a camera's trigger
   witness is limited and the camera offers the `CounterValue` chunk.
-- Goes wrong: `trigger_counter` on a camera without the chunk refuses the open. A
-  camera whose frame ID does not restart and that has no `CounterValue` chunk
-  cannot record yet.
+- Goes wrong: `trigger_counter` on a camera without the chunk refuses the open,
+  and so does `frame_id` on a camera whose frame ID fails the self-test. A camera
+  whose frame ID fails and that has no `CounterValue` chunk cannot record yet.
 
 #### `camera.flir.timestamp_source`
 
@@ -1408,7 +1416,7 @@ Single fields:
 | `camera_serials` | A serial listed twice | `lists a serial twice` |
 | `camera_serials` | Not in ascending text order | `is not in ascending order` |
 | `capture_processes` | Negative | `must be 0 (capture in this process)` |
-| `capture_processes` | More than the cameras | `each worker needs a camera` |
+| `capture_processes` | More than `n_cameras` or `camera_serials` gives | `each worker needs a camera` |
 | `gev_bandwidth_reserve_pct` | Outside 0 to 100 | `must be within 0..100` |
 | `gev_bandwidth_reserve_accum` | Negative | `must be non-negative` |
 | `metadata_defaults` | Has another key | `are not session metadata fields` |
@@ -1494,7 +1502,7 @@ The `camera:` block. Messages start with the key, such as `camera.trigger.line`:
 | The open cameras' frame size differs from the profile's | `The profile records` |
 | `encoder: raw` with `realtime_encode: true` | `encoder: raw` |
 | `encoder: auto`, and neither NVENC nor the CPU keeps up | `No encoder on this machine can keep up` |
-| `encoder: nvenc`, and too few NVENC sessions | `NVENC granted only` or `NVENC is unavailable` |
+| `encoder: nvenc`, and too few NVENC sessions | `NVENC granted only`, `NVENC granted no encode sessions` or `NVENC is unavailable` |
 | `encoder: x264`, and the CPU does not keep up | `The profile selects libx264` |
 | The pool and ring need more RAM than is available | `Not enough RAM for` |
 | A FLIR camera cannot record at this rate | `These cameras cannot record at` |
