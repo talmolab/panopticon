@@ -2625,7 +2625,13 @@ def _selftest_checks(p: Probe, s: str, rec: dict):
             status, ans = "PASS", f"released (held {frac:.0%} of the wait)"
         p.check("selftest", "GIL released while waiting for an image",
                 status, ans)
-        p.answer("gil_capi_wait", "host", ans, measured_on=s, **g)
+        # A WARN measured nothing, so the unknown stays open: its text is
+        # the why_not, never an answer (finish_unknowns settles an unknown
+        # whose every answer is not None).
+        evidence = dict(g, measured_on=s)
+        if status == "WARN":
+            evidence["why_not"], ans = ans, None
+        p.answer("gil_capi_wait", "host", ans, **evidence)
 
 
 # ============================================================ --triggered
