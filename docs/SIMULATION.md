@@ -198,7 +198,7 @@ board `reset_board()` returns:
 |---|---|
 | `miss_pulses` | Trigger numbers the board never fires. No camera acquires them, so the recording stays aligned, one trigger shorter |
 | `fps_misparse` | The sketch reading a rate it was not sent; it runs at that rate and reports it, which the RDY check catches |
-| `silent` | A wedged sketch that answers nothing; the host resets it, then refuses to record |
+| `silent` | A sketch that fires the triggers but never answers. The window rolls the start back without resetting the board ([The RDY handshake](INTERNALS.md#the-rdy-handshake)) |
 | `ack_delay_s` | The time the sketch takes to answer, about 1.5 s on the real board |
 | `sketch_id`, `accept_upload(ino)` | The firmware identity; None models firmware without the identity |
 
