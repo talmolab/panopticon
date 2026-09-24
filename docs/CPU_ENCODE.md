@@ -197,7 +197,7 @@ call the estimate a lower bound whenever the CPU encoder is installed.
   The encoders compete with the grab threads for cores. A camera whose encoder
   falls behind loses frames from its own video only, and its `WARNINGS.txt`
   says so. In kick-out mode the line reads "released frames were dropped from
-  this camera's video", with "no free NV12 ring slot" as the reason; in the
+  this camera's video", with "no free NV12 ring slot" as the reason. In the
   decoupled mode it reads "frames were dropped because its encoder queue
   stayed full".
 - `raw`, only when chosen in the profile, with `realtime_encode: false` and the

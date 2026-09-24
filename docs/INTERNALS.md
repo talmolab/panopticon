@@ -357,10 +357,12 @@ frames get paired with other cameras' frames from other instants.
 [The failure that leaves no gap](#the-failure-that-leaves-no-gap) covers the
 check that catches it.
 
-The symptoms, in the order people notice them: a live frame rate near half
-the trigger rate; a `frametimes.npy` spanning the right duration with half
-the rows; and a block-ID span over the device-clock duration near 50 per
-second instead of 100.
+The symptoms, in the order people notice them:
+
+- a live frame rate near half the trigger rate;
+- a `frametimes.npy` spanning the right duration with half the rows;
+- a block-ID span over the device-clock duration near 50 per second instead
+  of 100.
 
 That last ratio separates an acquisition failure from a delivery failure. A
 frame lost in transmission still consumed its block ID, so a delivery loss
@@ -494,7 +496,7 @@ Frames leave the pool oldest first.
 
 A deep pool absorbs network jitter, and it also hides a per-frame deficit. A
 grab loop a fraction of a millisecond over budget loses nothing at first,
-because the pool fills; each frame it retrieves is staler than the last, and
+because the pool fills. Each frame it retrieves is staler than the last, and
 when the pool runs dry frames are lost. The delivery lag and the trigger lag
 ([Instrumentation](#instrumentation)) show that while it happens. Pool size is
 not better the bigger it is, so change it only after measuring on the rig.
@@ -723,7 +725,7 @@ Each figure is milliseconds per frame, averaged over those 1000 frames:
 `cycle` closes the budget, because `wait + proc` leaves out `Release()`, the
 preview copy and the loop's own bookkeeping. A `cycle` above the trigger period
 means the loop is losing to the clock even when `proc` looks fine. The
-GIL-releasing calls are the other gauge: `rel` is mostly the wait to take the
+GIL-releasing calls are the other gauge. `rel` is mostly the wait to take the
 GIL back after `Release()`, so a `rel` of 0.4-1 ms instead of 0.02-0.04 ms
 means other threads hold the GIL
 ([The upload held the GIL](#the-upload-held-the-gil)).
@@ -1231,9 +1233,9 @@ Every CUDA call is bracketed by a push and a pop of the encoder's context.
 An encoder is created on one thread, fed on another and closed on a third,
 and a context left current on any of them would outlive the encoder.
 [`nvenc_context`](CONFIGURATION.md#nvenc_context) `shared` runs every encoder
-in the device's primary context, retained once per process; `own` gives each
-encoder a context of its own and needs free GPU memory for one per camera,
-measured at launch, or falls back to `shared`. `cuda_driver.py` calls the CUDA
+in the device's primary context, retained once per process. `own` gives each
+encoder a context of its own. It needs free GPU memory for one context per
+camera, measured at launch, or falls back to `shared`. `cuda_driver.py` calls the CUDA
 driver through ctypes (never `PyDLL`), because ctypes releases the GIL for the
 length of each call.
 
@@ -1687,10 +1689,10 @@ Each warning names the camera and the probable cause. For a camera running
 slow, that is an exposure over the ceiling. A backend that declares
 `BLOCK_RATE_HINTS` supplies the advice (on FLIR, the camera block and the
 trigger overlap). Without them the check gives its default advice, which is
-Basler's: the `.pfs` and the limiter. Block IDs running faster than the trigger get a
-different message, because a camera cannot acquire more frames than it was
-triggered for; that pattern means the reference rate or the clock unit is
-wrong, or a re-arm resynced to the wrong number.
+Basler's: the `.pfs` and the limiter. Block IDs running faster than the
+trigger get a different message, because a camera cannot acquire more frames
+than it was triggered for. That pattern means the reference rate or the clock
+unit is wrong, or a re-arm resynced to the wrong number.
 
 If every camera is off by the same amount, the cameras are not the problem.
 Cameras do not fail identically, so a uniform offset means the reference is
@@ -1821,8 +1823,8 @@ Details the contract spells out, and the pipeline depends on:
 - `open()` may also take `frame_size` and `frame_rate` by keyword. The camera
   manager passes each only when the backend's signature names it. A backend
   that takes them programs the ROI from the profile and raises its
-  `RefusalException` at open for a rate its camera cannot record; one that
-  does not (Basler, whose ROI is in the `.pfs`) is called as before.
+  `RefusalException` at open for a rate its camera cannot record. A backend
+  that does not (Basler, whose ROI is in the `.pfs`) is called without them.
 - `describe()` may add `model`, `firmware`, `interface` and `link_speed`. They
   go into every session header, and `model` also into `session_metadata.json`.
 - `stream_stats()` reports the `CANONICAL_STREAM_STATS` keys under their
@@ -1869,10 +1871,12 @@ The pipeline depends on these guarantees:
 6. A camera takes a trigger that arrives while the previous frame is still
    being read out. A trigger it disregards consumes no block ID.
 
-Bring-up order for a new backend: run the capture path on the simulated rig
-first, which needs no SDK; then confirm each GigE camera's network path with
-`probe_network.py`; then run the real cameras through the window, and check
-that the grab threads' `cycle=` equals your frame period.
+Bring up a new backend in this order:
+
+1. Run the capture path on the simulated rig, which needs no SDK.
+2. Confirm each GigE camera's network path with `probe_network.py`.
+3. Run the real cameras through the window, and check that the grab threads'
+   `cycle=` equals your frame period.
 
 ### The FLIR backend
 
@@ -1904,7 +1908,7 @@ the contract. None of it has run on FLIR hardware yet.
   value read back.
 - The self-test. At open the backend runs three short free-run acquisitions
   and records each one's first frame ID. All 1 means the ID restarts 1-based
-  and passes through; all 0 means it restarts 0-based and gets 1 added; any
+  and passes through. All 0 means it restarts 0-based and gets 1 added. Any
   other result means it does not restart, and the backend uses the camera's
   own count of trigger edges (the `CounterValue` chunk) as the block ID. The
   same frames prove that the device clock runs, is in nanoseconds (or a tick
@@ -1942,7 +1946,7 @@ the contract. None of it has run on FLIR hardware yet.
   disagree, give a sentence saying the recording has no witness. Silence is
   not proof in a few cases the `flir.py` docstring lists, among them a trigger
   ignored inside the arming call and counters that count the wrong events but
-  agree; the block-ID rate check still runs for every camera.
+  agree. The block-ID rate check still runs for every camera.
 - The simulated rig. `fake_spinc.FakeSpinC` implements every `SpinC` method
   over simulated cameras paced by the same virtual trigger clock as the sim
   backend, with a virtual device clock, and `load_backend("flir_sim")` puts
