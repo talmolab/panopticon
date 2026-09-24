@@ -361,8 +361,10 @@ Test or closing the editor ends it.
 
 Test runs whatever the board carries, so when the canvas differs from the last
 upload it offers to upload first, and after a failed Apply it refuses. It uses
-the main window's serial link and does not reset the board. If the board does
-not confirm the stop, the status line reads
+the main window's serial link, so it does not reset the board while Panopticon
+holds the port. [WORKFLOW.md](WORKFLOW.md#when-the-board-resets) lists when a
+Test does reset it. If the board does not confirm the stop, the status line
+reads
 `STOP NOT CONFIRMED — stim may still be running.` and a dialog appears.
 Power-cycle the board and switch the laser off.
 

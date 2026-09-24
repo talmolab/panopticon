@@ -558,11 +558,11 @@ whenever the serial port is opened or the board is flashed:
   sketch (`Flashing recording-only firmware…`). The next recording flashes the
   paradigm back (`Flashing recording + stimulation firmware…`). Each flash
   takes about 30 s;
-- at the first Calibrate or Record after the port could not be opened. At
-  launch the log then says `will retry on first use`. After an Apply the
+- at the first Calibrate, Record or Test after the port could not be opened.
+  At launch the log then says `will retry on first use`. After an Apply the
   editor's status line says that Record reopens the port;
-- at a start the board does not acknowledge at first. Panopticon reopens the
-  port once to reset the board, and the log says
+- at a Calibrate, Record or Test start that the board does not acknowledge at
+  first. Panopticon reopens the port once to reset the board, and the log says
   `[teensy] no ack — reopening port to force a board reset`.
 
 A failed flash refuses the acquisition, because the board's contents are then
