@@ -375,9 +375,9 @@ Panopticon with `gui.py --profile <name>`. Templates to copy are in
 
 ### Session
 
-The folder for one pair of subjects on one day,
-`<output_dir>/<date>/<mouse1>_<mouse2>/`. It holds a `calibration/` folder and a
-`recording/` folder, one per acquisition type.
+The folder that holds one day's calibration and recording of one pair of subjects, one
+subfolder per acquisition type. [WORKFLOW.md](WORKFLOW.md#paths-and-names) gives its
+path and every file in it.
 
 ### Session header
 
@@ -410,9 +410,9 @@ had nothing to report.
 
 ### Multi-process capture
 
-Capturing the cameras in several worker processes (`capture_processes` above 0)
-instead of in one. It is experimental, and the window refuses a profile that asks for
-it.
+Capturing the cameras in several worker processes instead of in Panopticon's own
+process. [`capture_processes`](CONFIGURATION.md#capture_processes) sets it and gives its
+status.
 
 ### LUC3D
 
