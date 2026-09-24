@@ -314,9 +314,8 @@ class _Nodes:
         self._cache: dict = {}
         #: While a list, each write appends (node, requested, read back) to
         #: it; None outside a configuration phase (FlirBackend._phase_begin
-        #: and _phase_end). A
-        #: write from a grab thread (the counter reset at StartGrabbing) is
-        #: never inside one, so it reads nothing back.
+        #: and _phase_end). A write from a grab thread (the counter reset at
+        #: StartGrabbing) is never inside one, so it reads nothing back.
         self.writes = None
 
     def _map(self, which: str):
