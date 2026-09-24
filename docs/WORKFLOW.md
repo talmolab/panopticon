@@ -358,9 +358,9 @@ With the state at `IDLE`, press Solve. Solve runs `1_calibrate.py` with
 Panopticon's own Python on the calibration of the session the fields name,
 using the profile's `board_config`. It takes a few minutes. The state label
 reads `CALIBRATING...` in purple, although no camera captures, and progress
-goes to the status bar and the log. Solve gives up after 30 minutes. A second
-press during a solve shows `A solve is already running`. The session fields
-and the dropdown stay locked until the solve ends.
+goes to the status bar and the log. Solve gives up after 30 minutes.
+[OVERVIEW.md](OVERVIEW.md#controls-that-hide-and-controls-that-disable) lists
+the controls that stay disabled until it ends.
 
 `codet_frames.json` lists the triggers at which two or more cameras saw the
 board. When it matches the videos, the solve decodes only those frames.

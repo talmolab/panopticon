@@ -432,8 +432,8 @@ Disabled while they would do the wrong thing:
 - During a blocking operation (the second table under 16): the dropdown, the
   output directory, the toggles, Solve, Snapshot and the session fields. The
   Stimulation button and the two sliders stay live.
-- The session fields, the output directory and the dropdown during an
-  acquisition or a solve.
+- The session fields, the output directory and the dropdown from the start
+  of an acquisition until its videos are finalised, and during a solve.
 - In the editor: Starting and Ending unless exactly one block is selected,
   Apply and Test during an upload, and Apply during a Test.
 
