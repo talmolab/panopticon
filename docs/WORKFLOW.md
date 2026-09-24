@@ -254,19 +254,19 @@ On a *repeat* calibration into the same session, the existing data is
 overwritten only after you agree. A dialog headed *Overwrite the existing
 data?* warns that the `calibration/` folder will be permanently deleted and
 waits. Its two buttons read **Yes** and **Cancel**, and Cancel is the default.
-On Yes the whole `calibration/` folder is deleted and the new capture starts
-fresh under the same name. Cancel leaves everything as it was and the
-acquisition does not start.
+On Yes the `calibration/` folder is deleted, all of it except
+`calibration.toml`, and the new capture starts fresh under the same name.
+Cancel leaves everything as it was and the acquisition does not start.
 
-The whole folder is removed rather than individual files overwritten, so the
-previous attempt's solve output — `calibration.toml`,
-`reprojection_error_histogram.png` and `codet_frames.json` — cannot be left
-stale beside the new videos, and the next Solve cannot silently reuse the last
-attempt's frame hints. If you want to keep an earlier calibration, change the
+The folder is removed whole, so the previous attempt's
+`reprojection_error_histogram.png` and `codet_frames.json` cannot be left
+beside the new videos. The previous solve's `calibration.toml` stays until the
+next Solve replaces it. If you want to keep an earlier calibration, change the
 metadata fields so the two attempts land in separate sessions before you start,
-or copy the folder aside yourself first. The delete happens only once the
-serial port has opened, so a start the port refuses leaves the old data in
-place.
+or copy the folder aside yourself first. The delete happens once the serial
+port has opened, so a start the port refuses leaves the old data in place. A
+start refused after that point has already deleted it; see
+[Record](#8-record).
 
 Flip the **Calibrate** toggle to begin. Three things change at once: the cameras
 switch to hardware-triggered mode at the profile's `calibration_frame_rate` (30
@@ -799,20 +799,16 @@ good.
 **Test warns you when the canvas has drifted from the board** and offers to
 upload first.
 
-**Record does not make that comparison. Only Test does.** This is where a
-session goes quietly wrong. Record checks the graph for the faults that would
-break the rig (a forbidden pin, a pin driven by two chains, a loop with no
-start) and does not check whether the graph in front of you is the graph on the
-board. Change 20 Hz to 40 Hz and press Record without pressing Apply, and the
-animal receives the 20 Hz paradigm while `stim_paradigm.json`,
-`stim_paradigm.ino` and `stim_trace.csv` are all generated from the canvas and
-describe 40 Hz. The automatic stop, if you flagged one, is armed from the
-canvas's durations too. The session then carries a confident, detailed and wrong
-account of what happened. **Any edit after an Apply must be followed by another
-Apply.** Afterwards the only tell is `matches_uploaded_firmware` in
-`stim_paradigm.json`, which reads `false` in exactly this situation;
+**Record refuses a canvas the board does not carry.** A canvas that was never
+Applied in this launch is refused with `Apply the stimulation paradigm first`,
+and one edited since the last Apply with `Apply the edited paradigm first`. An
+empty canvas while a paradigm Applied earlier is still held is refused with
+`Apply the empty canvas first`, because that paradigm would run through a
+recording that carries no `stim_paradigm.json`. Any edit after an Apply needs
+another Apply before Record. A failed Apply refuses Record, Calibrate and Test
+until an Apply succeeds.
 [Checking a stimulation session afterwards](#checking-a-stimulation-session-afterwards)
-sets out all three of its values.
+sets out what `matches_uploaded_firmware` records.
 
 **Firmware outlives the application.** A flashed paradigm survives quitting, a
 power cycle and an unplugged cable, which is why the board is reflashed to a
@@ -962,8 +958,8 @@ sequence.
 Then the order of operations. Click the middle block and read the preview
 caption to confirm it says what you expect. Press **Test** with the beam blocked
 to watch the paradigm run once without recording. Press **Apply** and wait out
-the ~30 seconds. Only then press **Record**, remembering that Record will not
-tell you if you edited anything after that Apply.
+the ~30 seconds. Only then press **Record**. Record refuses to start if you
+edited anything after that Apply.
 
 ### Checking a stimulation session afterwards
 
@@ -1009,9 +1005,8 @@ can never start stops the recording with
 `Cannot record with this stim workflow`. The canvas can block a recording even
 though Record only runs whatever is already on the board, because the canvas is
 what `stim_paradigm.json` and `stim_trace.csv` will claim about this session
-afterwards. The check looks for those three structural faults and nothing else.
-It does **not** compare the canvas against the firmware on the board, so it will
-not catch an edit you forgot to Apply; see
+afterwards. It also compares the canvas with the paradigm Applied in this
+launch, and refuses a canvas the board would not run; see
 [the paradigm is compiled, not streamed](#the-paradigm-is-compiled-into-firmware-not-streamed)
 above.
 
@@ -1037,30 +1032,32 @@ fit.
 
 **An existing recording in the target folder** is checked last, and it is never
 overwritten without a prompt. If the folder holds a non-empty `.mp4`,
-`raw.bin`, `stream.h264`, `blockids.npy`, `frametimes.npy` or `alignment.npz`,
-a dialog headed *Overwrite the existing data?* warns that the folder will be
-permanently deleted and waits. Its two buttons read **Yes** and **Cancel**, and
-Cancel is the default, so an accidental Enter does not wipe a session. On Yes
-the whole folder is deleted and this acquisition records fresh under the same
-name; on Cancel nothing changes and the acquisition does not start. The folder
-is deleted whole rather than file by file, which matters because overwriting
-individual files would only replace the ones this run writes: a camera that
-captured nothing would keep the previous session's mp4 and metadata under
-identical names, and the alignment would then intersect two different sessions.
+`raw.bin`, `stream.h264`, `blockids.npy`, `frametimes.npy`, `alignment.npz` or
+`stim_paradigm.json`, a dialog headed *Overwrite the existing data?* warns that
+the folder will be permanently deleted and waits. Its two buttons read **Yes**
+and **Cancel**, and Cancel is the default, so an accidental Enter does not wipe
+a session. On Yes the folder is deleted, all of it except `calibration.toml`,
+and this acquisition records fresh under the same name; on Cancel nothing
+changes and the acquisition does not start. The folder is deleted whole rather
+than file by file, which matters because overwriting individual files would
+only replace the ones this run writes: a camera that captured nothing would
+keep the previous session's mp4 and metadata under identical names, and the
+alignment would then intersect two different sessions.
 
-The delete is deferred until the serial port has opened, the one refusal common
-enough to matter, so a start the port turns down leaves the data you agreed to
-overwrite still in place. Once the port is held the overwrite is committed.
+The delete waits until the serial port has opened, so a start the port turns
+down leaves the data you agreed to overwrite still in place. Once the port is
+held the overwrite is committed: a start refused after that point (a camera
+that will not enter trigger mode or arm, a board that does not acknowledge)
+has already deleted the old data, and nothing brings it back.
 
 Metadata counts as data here: a folder whose videos have been moved away for
 labelling still holds the small files that make those videos interpretable.
 Zero-length files do not, so an earlier start that was refused after opening its
 streams is not mistaken for a session worth prompting about.
 
-If the start is refused *after* the move — a serial port another program holds,
-a camera that will not enter trigger mode, a board that never acks — the rename
-is undone and the previous acquisition is back under its own name before the
-refusal reaches you.
+With `trigger_source: external` the old folder is moved aside into a hidden
+folder beside it and deleted only when the first trigger arrives; a start that
+ends before then puts it back.
 
 With the checks passed, the cameras go to triggered mode at the profile's
 `frame_rate` with the `.pfs` exposure and gain *restored*: the original values

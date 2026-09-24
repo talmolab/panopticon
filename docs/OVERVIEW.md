@@ -207,15 +207,15 @@ and refuses outright in four cases:
 A tight disk is a warning, not a refusal, and every warning becomes a "Start
 anyway?" prompt. Existing data in the target folder is never overwritten
 silently: a dialog headed *Overwrite the existing data?* warns that the folder
-will be permanently deleted, and only on **Yes** is it removed and the
-acquisition recorded fresh under the same name. Cancel leaves everything where
-it is and the acquisition does not start. The delete happens only once the
-serial port has opened, so a start refused because the port is busy leaves the
-old data untouched. The check
-counts `blockids.npy`, `frametimes.npy` and `alignment.npz` as well as videos,
+will be permanently deleted, and only on **Yes** is it removed (all of it
+except `calibration.toml`) and the acquisition recorded fresh under the same
+name. Cancel leaves everything where it is and the acquisition does not start.
+The delete happens once the serial port has opened, so a start refused because
+the port is busy leaves the old data untouched; a start refused after that
+point has already deleted it. The check counts `blockids.npy`,
+`frametimes.npy`, `alignment.npz` and `stim_paradigm.json` as well as videos,
 so a folder whose mp4s were moved away for labelling is still recognised as
-holding data; zero-length files are not counted, so a start refused after
-opening its streams leaves nothing to move.
+holding data; zero-length files are not counted.
 
 Past the preflight, the next thing may be a wait. A recording runs under
 whichever firmware matches the session: the recording-only sketch if no
