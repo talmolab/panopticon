@@ -56,7 +56,7 @@ max_num_buffer: 300
 # comes from the camera's Default user set (factory settings).
 camera:
   pixel_format: Mono8
-  exposure_us: 3000                # SITE; must fit the trigger period (10000 us at 100 fps)
+  exposure_us: 3000                # SITE; under 90% of the camera's exposure ceiling at frame_rate
   gain_db: 6.0                     # SITE
   trigger:
     line: Line3                    # SITE: the input your source's output is wired to

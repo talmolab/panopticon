@@ -1866,9 +1866,11 @@ class FlirBackend:
             n.sete("LineSelector", line)
             if n.readable("LineMode") and n.gete("LineMode") != "Input":
                 n.refuse(f"camera.trigger.line {line} is set as an output on "
-                         f"this camera (LineMode {n.gete('LineMode')}). Set it "
-                         f"to Input in SpinView, or wire the trigger to "
-                         f"another input line.")
+                         f"this camera (LineMode {n.gete('LineMode')}). Wire "
+                         f"the trigger to another input line, or save the "
+                         f"line as Input in a SpinView user set and name that "
+                         f"user set in camera.flir.user_set. Every open loads "
+                         f"that user set first.")
         if n.has("TriggerActivation"):
             if t.activation not in n.entries("TriggerActivation"):
                 n.refuse(f"camera.trigger.activation {t.activation} is not "

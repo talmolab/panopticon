@@ -14,7 +14,7 @@ a PASS/FAIL table at the end and exits 1 when any check fails.
     uv run probe_flir.py --triggered 60           # 60 s of triggered capture through the FLIR backend
     uv run probe_flir.py --all                    # the four stages above
     uv run probe_flir.py --collect <session dir>  # zip a session's logs and metadata, no video
-    uv run probe_flir.py --fake                   # rehearse every stage on simulated cameras
+    uv run probe_flir.py --fake                   # rehearse the four stages above on simulated cameras
 
 Optional stages: --exposure-sweep (the real exposure ceiling at frame_rate),
 --wrap-test (the 16-bit frame-ID wrap, about 65,600 frames) and --pyspin
@@ -54,9 +54,11 @@ Panopticon's board, are skipped with a note saying so.
 The probe refuses to start beside a running Panopticon (gui_app/probe_guard.py),
 except for a --collect-only run, which opens nothing.
 
---fake runs every stage against simulated cameras (gui_app/backends/
+--fake runs the stages against simulated cameras (gui_app/backends/
 fake_spinc.py) and the simulated trigger board, with the default profile
-profiles/templates/flir_sim.yaml. It opens no serial port and loads no SDK.
+profiles/templates/flir_sim.yaml. With no stage flag it runs --list,
+--find-line, --selftest and a 20 s --triggered. It opens no serial port and
+loads no SDK.
 """
 from __future__ import annotations
 
@@ -101,7 +103,7 @@ DEFAULT_LOG_DIR = REPO / "logs"
 FAKE_PROFILE = REPO / "profiles" / "templates" / "flir_sim.yaml"
 
 #: --triggered's duration when the flag is given without one, in seconds,
-#: and the duration --fake uses when it runs every stage by itself.
+#: and the duration --fake uses when it runs the four stages by itself.
 TRIGGERED_DEFAULT_S = 60.0
 FAKE_TRIGGERED_S = 20.0
 
