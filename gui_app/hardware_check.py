@@ -1467,7 +1467,11 @@ class HardwareCheckThread(QThread):
         backend = str(getattr(p, "camera_backend", "") or "")
         if backend:
             from gui_app import backends
-            report.camera_sdk = backends.sdk_report(backend)
+            # With the camera: block, so a backend whose SDK folder the
+            # block names (camera.flir.sdk_dir) loads it from there when
+            # this report is the first to load it.
+            report.camera_sdk = backends.sdk_report(
+                backend, camera_spec=getattr(p, "camera", None))
         usbfs = usbfs_warning(p, self._geometry()[0])
         if usbfs:
             report.warnings.append(usbfs)
