@@ -91,11 +91,10 @@ Panopticon at launch:
 
 1. Opens the profile's cameras and starts the preview.
 2. Checks the hardware in the background. The status bar reads
-   `Checking hardware: Record and Calibrate are available once it reports`,
-   and those two toggles stay disabled until it reports. The check measures
-   the output drive, probes how many NVENC sessions the GPU driver grants,
-   times a libx264 encode and picks the encoder. A `Hardware Check` dialog
-   lists any problem it finds, for example:
+   `Checking hardware: Record and Calibrate are available once it reports`.
+   The check measures the output drive, probes how many NVENC sessions the
+   GPU driver grants, times a libx264 encode and picks the encoder. A
+   `Hardware Check` dialog lists any problem it finds, for example:
    - fewer than 4 CPU cores, under 16 GB of RAM, under 500 GB free or under
      500 MB/s of writing on the output drive;
    - an NVENC path that does not work, or an encoder that ignores the
