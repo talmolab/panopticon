@@ -9,8 +9,9 @@ labels: flir
 Thank you for testing Panopticon on FLIR cameras. The steps are in
 https://github.com/talmolab/panopticon/blob/master/docs/FLIR.md
 
-Fill in what you know and leave the rest blank. Use one issue for every
-round: add a comment with each round's files instead of opening a new issue.
+Fill in what you know and leave the rest blank. Keep all three rounds in
+this one issue: post each later round's files as a comment instead of
+opening a new issue.
 
 The files below hold your computer's name, its network adapters and IP
 addresses, your camera serial numbers and folder paths on your computer.
