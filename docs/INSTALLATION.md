@@ -384,8 +384,9 @@ how many sessions run at once, and the cap differs between GPUs and has changed
 between driver generations (2, then 3, 5, 8 and 12). More cameras need a more
 capable GPU, and the session cap is often the limit that binds first.
 Panopticon never assumes the cap. When it checks the hardware it asks the driver
-for two more sessions than there are cameras, and before each recording it
-refuses the start if the driver grants fewer than one per camera. On the
+for two more sessions than there are cameras. Before each recording it refuses
+the start if the driver grants fewer than one per camera, unless `encoder: auto`
+can record on the CPU instead. On the
 reference rig an RTX 5080 grants 12 sessions, enough for its nine cameras.
 
 Ask a candidate GPU the same question before you buy cameras for it. This needs
@@ -396,8 +397,10 @@ uv run python -c "from gui_app import nvenc; print(nvenc.probe_max_sessions())"
 ```
 
 It prints how many sessions the driver granted, up to 24. Anything at or above
-your camera count is enough. `0` means PyNvVideoCodec could not load on this
-machine.
+your camera count is enough. `0` means PyNvVideoCodec did not load, or the
+driver granted no session: close other programs that encode on the GPU and ask
+again. An error instead of a number means the GPU or its driver refused to
+create an encoder.
 
 With the default `encoder: auto`, a machine whose GPU cannot give every camera a
 session encodes on the CPU with libx264 instead, when the launch benchmark
