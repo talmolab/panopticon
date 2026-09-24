@@ -199,8 +199,8 @@ the frame size and the frame rate to its camera.
 10. Describe your printed board in `configs/boards/<board>.yaml`
     ([Board config](#board-config)), point `board_config` at it, and keep the
     coverage thresholds at their defaults for the first calibration.
-11. Leave the four CPU placement fields off unless the CPU is a hybrid Intel part
-    and a test recording shows a camera falling behind.
+11. Leave the four CPU placement fields at their defaults unless the CPU is a
+    hybrid Intel part and a test recording shows a camera falling behind.
 12. Switch the laser off or block the beam, then open the profile with
     `uv run gui.py --profile NAME`. Opening it resets the board on
     [serial_port](#serial_port), and every pin floats during the reset
@@ -323,9 +323,9 @@ Integer. Default `0`. Reference rig: `9`.
 - Change when: When you add or remove a camera. Read
   [camera_serials](#camera_serials) first.
 - Goes wrong: At `0` a rig with one camera missing opens the others. Without
-  `camera_serials`, every camera after the missing one then takes the next one's
-  name, and the calibration attaches to the wrong cameras. A count that differs
-  refuses the open (`Expected 9 cameras but 8 are available to open`).
+  `camera_serials`, a missing camera then renames every camera after it, and the
+  calibration attaches to the wrong cameras. A count that differs refuses the
+  open (`Expected 9 cameras but 8 are available to open`).
 
 #### `camera_serials`
 
@@ -486,8 +486,9 @@ Text. Default `pinned`. Reference rig: not set.
   page-locked memory per camera. At launch Panopticon checks that PyNvVideoCodec
   copies on the encoder's stream; if the check fails, the session uses `host` and
   the log says why. An encoder that cannot get page-locked memory uses `host` by
-  itself, and `WARNINGS.txt` says so (`real-time encode uses the host upload`). `session_metadata.json` records what each
-  acquisition used (`nvenc_upload_used`). The setting does nothing on libx264.
+  itself, and `WARNINGS.txt` says so (`real-time encode uses the host upload`).
+  `session_metadata.json` records what each acquisition used
+  (`nvenc_upload_used`). The setting does nothing on libx264.
 
 #### `nvenc_context`
 
@@ -806,7 +807,7 @@ Number, seconds. Default `20`. Reference rig: `20`.
 
 #### `thermal_warn_margin_c`
 
-Number, °C. Default `3`. Reference rig: `2.0`.
+Number, °C. Default `3.0`. Reference rig: `2.0`.
 
 - Does: The live warning starts this many degrees below the shutdown temperature
   each camera reports. The reference rig's cameras report 81 °C, so it warns at
@@ -1378,7 +1379,7 @@ Types. Each message names the field:
 | Is a list or mapping where text is needed | `expected text` |
 | Is not a list where one is needed | `expected a list` |
 | Is not a mapping where one is needed | `expected a mapping` |
-| Is empty (`key:` with nothing after it) | `value is empty` |
+| Is empty (`key:` with nothing after it), for a true/false, number or text field that cannot be null | `value is empty` |
 | Is an unquoted camera serial | `camera serials must be quoted strings` |
 
 Single fields:
@@ -1538,6 +1539,6 @@ already recorded or measured.
   [Configure a new rig](#configure-a-new-rig-step-by-step)).
 - `metadata_defaults`, `output_dir`, `quality`, `log_level`,
   `thermal_warn_margin_c` and the coverage thresholds change nothing already
-  recorded, and need no test.
+  recorded.
 - Renaming a profile: this computer remembers profiles by name, so the next launch
   asks you to choose one.
