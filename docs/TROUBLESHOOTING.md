@@ -383,7 +383,7 @@ ignored triggers stay under its tolerance.
 
 | Message or symptom | Cause and fix |
 |---|---|
-| No camera ever brightens in the coverage HUD | Nothing detects the board. Either it is too dark (raise `calibration_exposure_us`), or `board_config` does not describe the printed board. A board printed with the pre-4.6 OpenCV layout needs `board_legacy: true`. With the flag wrong in either direction every marker is found and no board corner comes back. |
+| No camera ever brightens in the coverage HUD | No camera finds the board's markers. Either the board is too dark (raise `calibration_exposure_us`), or `board_config` does not describe the printed board. |
 | The coverage HUD never appears | OpenCV is missing, or `board_config` names a file that does not exist. The rest of the window still works. |
 | The caption's `grid <n>/<n>` count stops short of its target | The board is waved in one part of the view. Carry it into each camera's corners. |
 | One line stays thin while the rest are bright | That pair rarely sees the board together. Hold the board where both can see it. |
@@ -393,7 +393,7 @@ ignored triggers stay under its tolerance.
 | `No calibration videos found in:` | The calibration folder holds no videos yet. Wait for the encode to finish, or check the metadata fields. |
 | `Board config not found:` | `board_config` names a file that does not exist. Point it at a file in `configs/boards/`. |
 | `The board config cannot be used with this OpenCV build.` | Check `marker_bits`, `dict_size` and `board_legacy` in the board config. |
-| `No ChArUco board detections found.` | The board was not visible, or the board config does not match the printed board. |
+| `No ChArUco board detections found.` | The board was not visible, or the board config does not match the printed board. A board printed with the pre-4.6 OpenCV layout needs `board_legacy: true`. With the flag wrong either way, every marker is found and no corner comes back. |
 | `Fewer than two cameras produced valid intrinsics.` | Each camera needs at least 20 frames with 6 or more corners. Record longer, with the board filling more of each view. |
 | `No camera pair saw the board together.` | Hold the board where several cameras see it at once. |
 | `The coverage graph is disconnected.` | Too few cameras share board sightings. Hold the board where neighbouring cameras see it together. |
