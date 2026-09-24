@@ -267,9 +267,14 @@ class CameraBackend(Protocol):
         Raise on any problem; the caller refuses to start a partial set rather
         than shifting camera names.
 
-        `pfs_path` is the profile's `pfs_path`. It must be ACCEPTED even by a
-        backend with no such concept (ignore it): the caller has one code path
-        and passes the profile's value whatever backend is loaded.
+        `pfs_path` is the profile's `pfs_path`. The parameter must exist on
+        every backend, because the caller has one code path and passes the
+        profile's value whatever backend is loaded. A backend with no such
+        concept ignores an empty value. One whose settings come from
+        somewhere else refuses a non-empty value, naming that source (FLIR:
+        the profile's camera: block), because a camera configured from two
+        places drifts between them. `RigProfile.validate` refuses that
+        pairing first.
 
         `max_num_buffer` is the driver-side pool depth, the profile's
         `max_num_buffer`, and must be honoured: the capacity preflight budgets
@@ -281,7 +286,17 @@ class CameraBackend(Protocol):
         settings come from somewhere else refuses a non-None value, naming
         that source (Basler: the .pfs). The caller passes the keyword only
         when the profile has a block, so a backend written before the block
-        existed keeps working unchanged."""
+        existed keeps working unchanged.
+
+        A backend MAY also take the keyword-only arguments `frame_size` (the
+        profile's `(frame_width, frame_height)`) and `frame_rate` (the
+        profile's `frame_rate`). The caller passes each only when it is set
+        and the backend's `open` names it (or takes `**kwargs`), read with
+        `inspect.signature`. A backend that takes them programs the ROI from
+        the profile and refuses at open a rate its camera cannot record,
+        raising its `RefusalException`. One that does not (Basler: the .pfs
+        holds the ROI) is called as before, and the caller then refuses a
+        camera whose size differs from the profile."""
 
     def describe(self, cam) -> dict:
         """`{"width", "height", "pixel_format", "serial"}` read back FROM THE
@@ -422,6 +437,28 @@ class OptionalBackendMembers(Protocol):
     #: reset there and would record zeros.
     TRANSPORT_NODES: tuple
 
+    #: The exception class a backend raises when a camera cannot record at
+    #: the frame rate asked: from `open` for the profile's frame_rate, or
+    #: from `exposure_ceiling_us` for an acquisition's. `CameraManager`
+    #: refuses the start on it, because a recording made anyway skips
+    #: triggers or drops frames. Any other exception from
+    #: `exposure_ceiling_us` leaves the trigger period as the bound, with a
+    #: warning.
+    RefusalException: type
+
+    #: What bounds the exposure on this backend, in the words of the
+    #: `[camN] exposure=... (ceiling ... at N fps, <this>)` log line.
+    #: Without it the line names the AcquisitionFrameRate limiter, which is
+    #: what `rate_limit` sets on a Basler camera.
+    CEILING_BASIS: str
+
+    #: The `ceiling_hint` and `timestamp_hint` clauses of the block-ID rate
+    #: warning (`frame_sync.check_block_id_rate`) for this backend. The
+    #: camera manager merges them with the trigger source's name and passes
+    #: the dict to the kick-out router as `rate_hints`. Without it the
+    #: warning gives the Basler advice.
+    BLOCK_RATE_HINTS: dict
+
     def set_bandwidth_reserve(self, cam, percent=None,
                               accumulation=None) -> dict:
         """Write the GigE bandwidth reserve (Basler GevSCBWR/GevSCBWRA) and
@@ -490,7 +527,8 @@ class OptionalBackendMembers(Protocol):
 
 
 #: The names `OptionalBackendMembers` declares, in declaration order.
-OPTIONAL_MEMBERS = ("TRANSPORT_NODES", "set_bandwidth_reserve",
+OPTIONAL_MEMBERS = ("TRANSPORT_NODES", "RefusalException", "CEILING_BASIS",
+                    "BLOCK_RATE_HINTS", "set_bandwidth_reserve",
                     "set_transmission_delay", "thermals", "gain_unit",
                     "exposure_ceiling_us", "set_packet_size", "device_address",
                     "acquisition_warnings", "sdk_report")
