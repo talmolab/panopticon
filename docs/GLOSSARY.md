@@ -39,16 +39,19 @@ supply the block ID of their GigE Vision or USB3 Vision stream. The FLIR backend
 the camera's frame ID or its count of trigger edges (`camera.flir.block_id_source`).
 `blockids.npy` holds one block ID per recorded frame.
 
-A camera that ignores a trigger does not advance its block ID. Its later frames then
-carry the wrong trigger number, with no gap in `blockids.npy`. The
-[block-ID rate check](#block-id-rate-check) exists for that case.
+A camera that ignores a trigger acquires no frame for it. With frame-ID block IDs
+(every Basler camera, and a FLIR camera that uses its frame ID), its block ID does not
+advance either. Its later frames then carry the wrong trigger number, with no gap in
+`blockids.npy`, and the [block-ID rate check](#block-id-rate-check) is what finds it.
+On a FLIR camera with counters, the [trigger witness](#trigger-witness) also counts
+ignored triggers. With `trigger_counter` block IDs, each ignored trigger is a gap.
 
 ### Block-ID rate check
 
 After every recording, Panopticon compares how fast each camera's block IDs advanced
-with that camera's own hardware clock. A camera that ignored triggers falls behind the
-trigger rate, and the check reports it in `WARNINGS.txt`. The two rates may differ by
-0.3% before the check reports a camera.
+with that camera's own hardware clock. When the block IDs count frames, a camera that
+ignored triggers falls behind the trigger rate, and the check reports it in
+`WARNINGS.txt`. The two rates may differ by 0.3% before the check reports a camera.
 
 ### Trigger witness
 
@@ -106,9 +109,9 @@ name it during a recording.
 ### Exposure ceiling
 
 The longest exposure a camera can use at a given frame rate and still take every
-trigger. A camera over the ceiling ignores some triggers, and its block IDs keep
-counting without a gap, so only the [block-ID rate check](#block-id-rate-check) finds
-it. Check an exposure change on a recording: the preview is free-run, where an
+trigger. A camera over the ceiling ignores some triggers, and [Block ID](#block-id)
+says which checks find them on each kind of camera. Check an exposure change on a
+recording: the preview is free-run, where an
 over-long exposure looks fine. The Basler rule is under
 [`trigger_rate_limit`](CONFIGURATION.md#trigger_rate_limit), and the FLIR rule is in
 [FLIR.md](FLIR.md#the-exposure-ceiling).
