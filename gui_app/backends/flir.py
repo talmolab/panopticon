@@ -68,16 +68,17 @@ unresolved, and a count with unresolved edges is reported as a range. A
 trigger ignored at a re-arm after BeginAcquisition arms the camera and before
 the first read after it returns is counted as down time
 (`_note_restart_counters`). A counter narrower than 2**31 counts modulo its
-period, so the witness compares it with the frames modulo the period, and its
-count is right while the triggers it cannot account for number fewer than
-half the period (`_ignored_sentences`, `_edge_only_sentences`).
+period. Its reads prove a count only while the frames and the edges of stall
+re-arm down time stay under half the period, so past that the witness says it
+has no count for the recording (`_wrap_reach`).
 
 UNKNOWNS
 Several behaviours are unknown until a volunteer's probe measures them on
 real cameras; each is marked where the code depends on it: whether the
 ExposureTime maximum follows AcquisitionFrameRate, the spelling of chunk
 names, the CounterValue chunk's timing, which counter the chunk carries on a
-model without ChunkCounterSelector (`_select_edge_counter`), whether a
+model without ChunkCounterSelector (`_select_edge_counter`), how wide a
+model's counters are (the CounterValue maximum, `_wrap_reach`), whether a
 model's counters can be read while it streams, how long after its edge and
 its TriggerDelay a camera counts the exposure (the witness assumes less than
 one register read), whether a trigger whose delayed exposure has not started
@@ -2751,9 +2752,11 @@ class FlirBackend:
         (`_latch_sentences`). With the edge counter alone the count mixes
         ignored triggers with frames lost in transport, and the sentence
         says so and makes no claim about alignment
-        (`_edge_only_sentences`). A witness whose counters failed, or whose
-        sentences could not be built, gets a sentence saying this recording
-        has none."""
+        (`_edge_only_sentences`). A counter narrower than 2**31 in a
+        recording past what its reads can prove gets a sentence saying the
+        recording has no count (`_wrap_reach`). A witness whose counters
+        failed, or whose sentences could not be built, gets a sentence
+        saying this recording has none."""
         try:
             return self._witness_sentences(cam, int(frames_acquired))
         except Exception as e:
@@ -2796,7 +2799,7 @@ class FlirBackend:
               flush=True)
         dead = self._implausible_counts(cam, w, frames)
         if dead is not None:
-            why, edge_counter = dead
+            why, edge_counter, alt = dead
             print(f"[flir] {cam.serial}: {why}; no trigger witness for this "
                   f"acquisition", flush=True)
             ids = (f" Its block IDs come from that counter's CounterValue "
@@ -2804,11 +2807,28 @@ class FlirBackend:
                    f"check that they advance before using this camera's "
                    f"video." if edge_counter
                    and cam.block_id_source == "trigger_counter" else "")
-            return [f"{why}, so its trigger-witness counters do not count "
-                    f"what Panopticon set them to count on this model, and "
-                    f"this recording has no trigger witness for this camera."
-                    f"{ids} Send the output of 'uv run probe_flir.py'."]
-        latch = self._latch_sentences(cam, w)
+            if alt is None:
+                verdict = (f"{why}, so its trigger-witness counters do not "
+                           f"count what Panopticon set them to count on this "
+                           f"model, and this recording has no trigger "
+                           f"witness for this camera.")
+            else:
+                verdict = (f"{why}. So either its trigger-witness counters do "
+                           f"not count what Panopticon set them to count on "
+                           f"this model, or {alt}. Either way this recording "
+                           f"has no trigger witness for this camera.")
+            return [f"{verdict}{ids} Send the output of 'uv run "
+                    f"probe_flir.py'."]
+        reach = self._wrap_reach(cam, w, frames)
+        latch = self._latch_sentences(cam, w, exact=reach is None)
+        if reach is not None:
+            print(f"[flir] {cam.serial}: the trigger counters wrap at "
+                  f"{cam._ctr_period}, and the frames and down-time edges "
+                  f"came to {reach}, past the {self._wrap_half(cam)} under "
+                  f"which their reads prove a count; no ignored-trigger "
+                  f"count for this acquisition", flush=True)
+            return (self._limited_sentences(cam, w, frames, reach,
+                                            bool(latch)) + latch)
         return (self._ignored_sentences(cam, w, edges, frames, bool(latch))
                 + latch)
 
@@ -2853,16 +2873,13 @@ class FlirBackend:
         In trigger_counter mode an ignored trigger is a gap, so only a
         proven count is reported.
 
-        A counter narrower than 2**31 reads each count modulo its period.
-        The down-time edges are subtracted before the difference nearest 0
-        is taken, so the count is right while the camera ignored fewer
-        triggers than half the period, however many edges the re-arms left
-        out. The exposures the sentence states are then the fewest that fit
-        the frames that reached the host (every one of them was exposed),
-        which is the true count while fewer exposed frames than the period
-        failed to reach it, and the edges it states are those exposures
-        plus the difference. The sentence says when these figures differ
-        from the counters' reads (`_wrap_clause`)."""
+        A counter narrower than 2**31 reaches this method only while its
+        reads prove a count (`_wrap_reach`). The down-time edges are
+        subtracted before the difference nearest 0 is taken, and the
+        exposures stated are the fewest that fit the frames that reached the
+        host (every one of them was exposed). Both equal the reads unless a
+        count passed the period, and the sentence says when they differ
+        (`_wrap_clause`)."""
         exposures = w["exposures"]
         line = cam.trigger_line
         if exposures is None:
@@ -2970,10 +2987,11 @@ class FlirBackend:
                 f"camera exposed {them}.")
 
     @staticmethod
-    def _latch_sentences(cam, w) -> list:
+    def _latch_sentences(cam, w, exact: bool = True) -> list:
         """In trigger_counter mode, when the first image did not prove how
         CounterValue is latched: the check of the count taken to include
-        the edge.
+        the edge. `exact` is False when the counters' reads prove no count
+        (`_wrap_reach`), and then the ignored count settles nothing.
 
         With such a count, a last image on the last trigger reads the edge
         count at stop. A latch before the edge reads at least one below it,
@@ -2999,8 +3017,9 @@ class FlirBackend:
         last = cam._last_counter + cam._ctr_acc
         excess = cam._ctr_first_excess
         exposures = w["exposures"]
-        if (excess is not None and exposures is not None and not w["rearms"]
-                and not w["late_reads"] and not w["stop_unresolved"]
+        if (exact and excess is not None and exposures is not None
+                and not w["rearms"] and not w["late_reads"]
+                and not w["stop_unresolved"]
                 and cam._ctr_signed(w["edges"], exposures) == excess):
             return []
         return [f"its first image did not show whether it latches the "
@@ -3012,40 +3031,136 @@ class FlirBackend:
                 f"camera one trigger early. Send the output of 'uv run "
                 f"probe_flir.py'."]
 
-    @staticmethod
-    def _implausible_counts(cam, w, frames: int):
-        """`(why, edge counter at fault)` when the counters cannot have
-        counted what they were set to, or None.
+    @classmethod
+    def _implausible_counts(cls, cam, w, frames: int):
+        """`(why, edge counter at fault, other cause)` when the counters'
+        reads cannot come from counters that counted what they were set to,
+        or None. `other cause` is None when nothing else explains the reads.
+        Otherwise it names the other explanation, which a counter narrower
+        than 2**31 always leaves.
 
         Every frame that reached the host was exposed on a trigger edge, so
         a working edge counter and a working exposure counter each reach at
         least the frames delivered. Exposures read before the edges never
         pass them (`exposures_check`); the exposures read after
-        EndAcquisition may, by the edges that arrived between the reads.
+        EndAcquisition may, by the edges that arrived between the reads,
+        which `_stop_unresolved` counts.
 
         A counter narrower than 2**31 reads its counts modulo its period, so
-        a count below the frames may be a counter that wrapped. It is
-        checked only while the frames delivered and the down-time edges
-        come to at most half the period. The edges, the largest count, then
-        stay below the period while the triggers the camera ignored and the
-        frames it lost together number fewer than half the period, so no
-        count can have wrapped."""
-        period = cam._ctr_period
-        if period and frames + w["gap_edges"] > period - period // 2:
-            return None
+        a count below the frames is a counter that does not count or one
+        that wrapped. Those checks run only while its reads prove a count
+        (`_wrap_reach`). Past that, a pair of counters is still checked with
+        the difference nearest 0 modulo the period: edges minus exposures,
+        less the down-time edges, plus the unresolved edges, is never below
+        0 for a camera that ignored fewer than half the period, and both
+        counters read 0 only when both counts are whole multiples of it."""
         edges, exposures = w["edges"], w["exposures"]
         check = w["exposures_check"]
         line = cam.trigger_line
-        if edges < frames:
-            return (f"its trigger-line counter counted {edges} edges on "
-                    f"{line} for {frames} frames that reached the host", True)
-        if exposures is not None and exposures < frames:
-            return (f"its exposure counter counted {exposures} exposures for "
-                    f"{frames} frames that reached the host", False)
-        if check is not None and check > edges:
-            return (f"its exposure counter counted {check} exposures, more "
-                    f"than the {edges} edges on {line}", True)
-        return None
+        period = cam._ctr_period
+        half = period // 2
+        slack = w["unresolved"] + w["stop_unresolved"]
+        gap = w["gap_edges"]
+        if cls._wrap_reach(cam, w, frames) is None:
+            wrapped = (f"its counters wrapped at {period} because the camera "
+                       f"ignored or lost at least {half} triggers"
+                       if period else None)
+            if edges < frames:
+                return (f"its trigger-line counter counted {edges} edges on "
+                        f"{line} for {frames} frames that reached the host",
+                        True, wrapped)
+            if exposures is not None and exposures < frames:
+                return (f"its exposure counter counted {exposures} exposures "
+                        f"for {frames} frames that reached the host", False,
+                        wrapped)
+            if check is not None and check > edges:
+                return (f"its exposure counter counted {check} exposures, "
+                        f"more than the {edges} edges on {line}", True,
+                        wrapped)
+            return None
+        if exposures is None:
+            return None
+        within = f", {gap} of them while re-arming," if gap else ""
+        even = (f" even with the {slack} edge(s) its reads could not place"
+                if slack else "")
+        if frames and not edges and not exposures:
+            return (f"its trigger counters both read 0 after {frames} frames "
+                    f"reached the host", True,
+                    f"both counts are whole multiples of {period}, the "
+                    f"period its counters wrap at")
+        if cam._ctr_signed(edges - gap, exposures) + slack >= 0:
+            return None
+        return (f"its trigger counters read {edges} edges on {line}{within} "
+                f"and {exposures} exposures, which taken modulo {period} "
+                f"leave more exposures than edges{even}", True,
+                f"the camera ignored at least {half} triggers")
+
+    @staticmethod
+    def _wrap_half(cam) -> int:
+        """The frames and down-time edges at which a counter narrower than
+        2**31 stops proving a count: half its period, rounded up."""
+        period = cam._ctr_period
+        return period - period // 2
+
+    @classmethod
+    def _wrap_reach(cls, cam, w, frames: int):
+        """The frames and down-time edges the witness had to count, when a
+        counter narrower than 2**31 cannot prove a count over them, or None.
+
+        Such a counter reads each count modulo its period. The frames a
+        camera acquired and the edges of stall re-arm down time are the
+        part of the edge count the witness knows. While they stay under
+        half the period, the edges stay under the period for any camera that
+        ignored and lost fewer than half the period, so a read below the
+        frames proves a counter that does not count, and the differences
+        are the true ones. A camera that ignored more than that reads as
+        counters that do not count, as a count below 0 (no sentence), or,
+        when it ignored a whole period or more, as a count too low. That
+        camera ignored more triggers than it delivered frames, which
+        `frame_sync.check_block_id_rate` reports. Past half the period a
+        counter that does not count can read like one that does, so the
+        witness gives no count (`_limited_sentences`)."""
+        period = cam._ctr_period
+        if not period:
+            return None
+        reach = max(frames, w["id_frames"]) + w["gap_edges"]
+        return reach if reach >= cls._wrap_half(cam) else None
+
+    @classmethod
+    def _limited_sentences(cls, cam, w, frames: int, reach: int,
+                           latch_doubt: bool = False) -> list:
+        """The sentence for a counter narrower than 2**31 in a recording
+        past what its reads prove (`_wrap_reach`): the limit, that this
+        recording has no count, and what an ignored trigger does to the
+        block IDs. `latch_doubt` is as in `_ignored_sentences`."""
+        half = cls._wrap_half(cam)
+        gap = w["gap_edges"]
+        acquired = max(frames, w["id_frames"])
+        if gap:
+            span = (f"while the frames and the edges of stall re-arm down "
+                    f"time number fewer than {half}, and here they number "
+                    f"{reach} ({acquired} frames, {gap} edges)")
+        else:
+            span = (f"in a recording of fewer than {half} frames, and this "
+                    f"one has {acquired}")
+        lead = (f"its trigger witness is limited: its trigger counters wrap "
+                f"at {cam._ctr_period}, so it counts ignored triggers only "
+                f"{span}. So this recording has no trigger witness for this "
+                f"camera.")
+        if cam.block_id_source == "trigger_counter":
+            return [f"{lead} Its block IDs count the edges, so each ignored "
+                    f"trigger is a gap"
+                    + (f". {cls._GAP_IN_DOUBT}" if latch_doubt
+                       else f", {cls._GAP_DROPPED}")]
+        advice = (" Set camera.flir.block_id_source: trigger_counter, which "
+                  "this camera offers, so an ignored trigger becomes a gap."
+                  if cam.counter_chunk_ok else
+                  f" Keep recordings under {half} frames to keep its count.")
+        return [f"{lead} Each ignored trigger moves its later block IDs one "
+                f"trigger away from the other cameras'. The block-ID rate "
+                f"check still runs, but it reports only a drift above its "
+                f"tolerance, which a few ignored triggers in a long recording "
+                f"do not reach." + advice]
 
     @classmethod
     def _edge_only_sentences(cls, cam, w, edges: int, frames: int,
@@ -3066,11 +3181,11 @@ class FlirBackend:
         edges make the count a range. In trigger_counter mode each ignored
         trigger is a gap, so only a proven count is reported.
 
-        A counter narrower than 2**31 reads the edges modulo its period,
-        and the frames are a true count, so the edges left over are the
-        difference nearest 0 of the two modulo the period. That is right
-        while fewer than half the period are left over, and the edges the
-        sentence states are the frames plus it."""
+        A counter narrower than 2**31 reaches this method only while its
+        reads prove a count (`_wrap_reach`). The edges left over are the
+        difference nearest 0 of the edges and the frames modulo the period,
+        which equals the reads' difference unless the edges passed the
+        period, and the edges the sentence states are the frames plus it."""
         line = cam.trigger_line
         outside = " outside stall re-arms" if w["rearms"] else ""
         unresolved = w["unresolved"]
