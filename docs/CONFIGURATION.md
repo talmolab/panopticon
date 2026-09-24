@@ -385,11 +385,11 @@ Number, frames per second. Default `165`. Reference rig: `165`.
   its data sheet or the resulting frame rate pylon Viewer shows. The default is
   the a2A1920-165g5m's maximum.
 - Goes wrong: `0` turns the limiter off. Every camera then sends its frame the
-  moment the trigger arrives, and on the reference rig 8 to 15% of frames were
-  lost on the network ([HISTORY.md](HISTORY.md)). A value above the camera's real
-  maximum makes the computed ceiling too long. An exposure Panopticon accepts can
-  then make the camera skip triggers, which leaves no gap in `blockids.npy`; only
-  the block-ID rate check after the recording reports it. A FLIR profile refuses
+  moment the trigger arrives, and with six of the reference rig's cameras 8 to
+  15% of frames were lost on the network ([HISTORY.md](HISTORY.md)). A value
+  above the camera's real maximum makes the computed ceiling too long. An
+  exposure Panopticon accepts can then make the camera skip triggers
+  ([exposure ceiling](#exposure-ceiling)). A FLIR profile refuses
   the field; FLIR pacing is [camera.flir.link_throughput_limit](#cameraflirlink_throughput_limit).
 
 #### `calibration_exposure_us`
@@ -529,9 +529,9 @@ Integer, frames. Default `240`. Reference rig: `480`.
 - Change when: Only after a test on your rig. Lower it to save RAM if no camera
   ever falls behind.
 - Goes wrong: Too low, and a camera that falls behind reaches the limit and forces
-  drops: on the reference rig 240 lost 12.3% of frames where 480 lost 0.9%. Too
-  high, and the rings outgrow RAM; 1000 starved capture there and lost 24%. A value
-  above `max_num_buffer` is refused in kick-out mode.
+  drops. Too high, and the rings outgrow the free RAM, so Record refuses to
+  start. A value above `max_num_buffer` is refused in kick-out mode.
+  [HISTORY.md](HISTORY.md) has the tests behind the reference rig's value.
 
 #### `max_num_buffer`
 
@@ -577,9 +577,9 @@ Text. Default `socket`. Reference rig: `socket`.
   resend settings it discards a frame that lost a packet. `auto` keeps pylon's
   default. USB3 cameras ignore it.
 - Change when: Keep `socket` unless a test on your rig favours another driver.
-- Goes wrong: `filter` lost about 23% of frames at six cameras and 100 fps on the
-  reference rig. Any other value is refused when the profile loads. A FLIR profile
-  refuses any value but `auto`; its equivalent is
+- Goes wrong: `filter` lost about 23% of frames with six of the reference rig's
+  cameras at 100 fps. Any other value is refused when the profile loads. A FLIR
+  profile refuses any value but `auto`; its equivalent is
   [camera.flir.stream_mode](#cameraflirstream_mode).
 
 #### `gev_bandwidth_reserve_pct`
@@ -763,8 +763,8 @@ List of integers. Default `[0]`. Reference rig: `[0, 1]`.
   handle the network card's interrupts. It applies only with
   `pin_capture_threads: true`.
 - Change when: Set it to the cores your network card's receive work lands on,
-  measured with a DPC trace. On the reference rig CPUs 0 and 1 carry about 46% of
-  that work.
+  measured with a DPC trace. With six of the reference rig's cameras, CPUs 0 and
+  1 carried about 46% of that work.
 - Goes wrong: A list that excludes every performance core falls back to all of
   them. The log line `[rig] capture core pool` shows the pool in use.
 

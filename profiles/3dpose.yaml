@@ -34,11 +34,11 @@ max_num_buffer: 600
 kick_max_lag: 480            # Frames the coordinator waits for a lagging camera before
                              # force-dropping a trigger every other camera caught. Sizes the
                              # NV12 ring (kick_max_lag + 264 buffers per camera, 2.39 GiB each
-                             # at 480). Must not exceed max_num_buffer. Measured on this rig:
-                             # 240 lets a camera that cannot hold 100 fps reach the limit and
-                             # force drops (12.3% of frames lost, against 0.9% at 480), and
-                             # 1000 starves capture (24% lost). Change it only after an A/B
-                             # test on the rig; docs/HISTORY.md has the measurements.
+                             # at 480). Must not exceed max_num_buffer. Too low, and a camera
+                             # that falls behind reaches the limit and forces drops; too high,
+                             # and the rings outgrow the free RAM, so Record refuses to start.
+                             # Change it only after an A/B test on the rig; docs/HISTORY.md
+                             # has the measurements.
 
 # Number of cameras that must enumerate before the cameras open. Without
 # camera_serials the names follow serial-number order, so a camera that fails
@@ -128,7 +128,7 @@ stim_safe_pins: [53]
 # 100 fps. Keep it at 165, the camera's maximum, and never 0: the limiter also
 # spaces each camera's readout over 6.06 ms, and without it every camera sends
 # its frame at once after the shared trigger, which lost 8-15% of frames on the
-# network here (docs/HISTORY.md).
+# network with six of these cameras (docs/HISTORY.md).
 trigger_rate_limit: 165
 
 # --- Hybrid-CPU thread placement -------------------------------------------
@@ -148,9 +148,9 @@ pin_capture_threads: true
 # a field for a rig with more cameras than P-cores. See docs/HISTORY.md.
 encoder_pcores: false
 
-# Keep capture threads off CPU 0 and CPU 1, which carry about 46% of the NIC's
-# DPC time on this machine: a grab thread pinned there is descheduled by the
-# traffic it receives (lag behind the leader, median/p95/max, 0/6/12 frames on
+# Keep capture threads off CPU 0 and CPU 1, which carried about 46% of the
+# NIC's DPC time here with six cameras: a grab thread pinned there is
+# descheduled by the traffic it receives (lag behind the leader, median/p95/max, 0/6/12 frames on
 # CPU 0 against 0/1/1 excluded, and it diverges under the GUI's load). That
 # leaves 6 cores for 9 cameras, so three grab threads share the pool, a far
 # better trade than a camera on the busiest core.
