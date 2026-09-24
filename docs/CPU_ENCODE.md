@@ -127,8 +127,8 @@ under a deadline of its own passes its remaining time.
 
 The command line keeps these properties:
 
-- `-g <fps>`, one IDR a second. The LUC3D labeler seeks by IDR, and a stream
-  with a single IDR cannot be seeked.
+- `-g <fps>`, one IDR a second
+  ([why](INTERNALS.md#the-stream-and-the-remux)).
 - `-bf 0`, no B-frames, so decode order is display order.
 - A reader thread drains stdout for the child's whole life. The pipe holds a
   few tens of kilobytes, so an encoder nobody reads blocks in its own write,
