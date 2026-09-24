@@ -945,9 +945,11 @@ laser driver can read a floating input as on. The default, `[53]`, is the
 reference rig's laser pin and protects nothing on other wiring.
 [CONFIGURATION.md](CONFIGURATION.md#stim_safe_pins) describes the field.
 
-`camera_serials` keeps each camera's name. Without it, the cameras are named in
-the order they enumerate, so a camera that fails to appear renames every camera
-after it, and a calibration then describes the wrong cameras.
+`camera_serials` names each camera by its place in the list. Without it, the
+cameras are named in serial-number order. A camera that fails to appear then
+renames every camera after it, and a calibration describes the wrong cameras,
+unless `n_cameras` refuses the open. With the list, the refusal names the
+missing camera, and a device the list does not name stays closed.
 [CONFIGURATION.md](CONFIGURATION.md#camera_serials) describes the field.
 
 A profile with a mistake does not load. Panopticon leaves it out of the list and
