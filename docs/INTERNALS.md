@@ -1103,15 +1103,12 @@ frame size that differs from the profile's or from camera 1's.
 
 ### Choosing the encoder
 
-The profile's [`encoder`](CONFIGURATION.md#encoder) is resolved by
-`hardware_check.select_encoder()`, which installs the factory the grab threads
-and the router use (`encoders.set_default_factory()`). It runs at launch, again
-after every profile switch, and again at every start against the cameras that
-are open. [CPU_ENCODE.md](CPU_ENCODE.md#choosing-the-encoder) gives the rule
-for each value, and covers the libx264 path. Record and Calibrate stay
-disabled until the launch check reports, because it installs the encoder and
-the NVENC upload setting, and its session probe holds every session the driver
-grants while it counts.
+[CPU_ENCODE.md](CPU_ENCODE.md#choosing-the-encoder) says when the profile's
+[`encoder`](CONFIGURATION.md#encoder) is resolved and gives the rule for each
+value, and it covers the libx264 path. Record and Calibrate stay disabled until
+the launch check reports, because it installs the encoder and the NVENC upload
+setting, and its session probe holds every session the driver grants while it
+counts.
 
 ### NVENC sessions
 
