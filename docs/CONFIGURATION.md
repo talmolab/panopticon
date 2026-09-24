@@ -779,10 +779,12 @@ True or false. Default `false`. Reference rig: `false`.
 
 True or false. Default `false`. Reference rig: not set.
 
-- Does: Pins each encoder thread to an efficiency core of its own.
-- Change when: Leave it off.
-- Goes wrong: On the reference rig one efficiency core could not keep up with one
-  1920×1200 stream at 100 fps, and a camera fell 321 frames behind.
+- Does: Confines the encoder threads to the efficiency cores. Windows moves them
+  among those cores as it likes.
+- Change when: Leave it off, unless the rig has more cameras than performance
+  cores and a test shows a gain.
+- Goes wrong: On the reference rig it measured worse than unpinned encoders: each
+  grab thread's processing time per frame rose from 2.19 to 2.53 ms.
 
 ### Monitoring and logging
 
