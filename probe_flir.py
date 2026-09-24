@@ -145,6 +145,24 @@ GRAB_TIMEOUT_MS = 200
 STOP_GRACE_S = 3.0
 MAX_FRAME_ERRORS = 10
 HOT_PATH_BUDGET_US = 300.0
+#: A grab thread waits GRAB_TIMEOUT_MS, or this many trigger periods at a
+#: rate slow enough for them to be longer, so a wait that times out while
+#: the triggers run is a silence of several triggers.
+GRAB_TIMEOUT_PERIODS = 3
+#: The trigger train must reach every camera from the run's first frame to
+#: the stop. A camera may acquire fewer triggers than fps times that span by
+#: TRAIN_SHORT_MIN or by TRAIN_SHORT_SHARE of them, whichever is more, for
+#: the edges of the train. Frames arriving up to TRAIN_ARRIVAL_S after the
+#: stop count, because they were triggered before it, and a silence that
+#: begins within one trigger period and TRAIN_ARRIVAL_S of the stop is the
+#: stop's own edge.
+TRAIN_SHORT_MIN = 3
+TRAIN_SHORT_SHARE = 0.005
+TRAIN_ARRIVAL_S = 0.05
+#: A silence is transport loss when the frame IDs moved over it by at least
+#: this share of the triggers due during it: the camera acquired them and
+#: the link lost them. Otherwise the pulses did not reach the camera.
+SILENCE_ACQUIRED_SHARE = 0.5
 
 #: Counter checks: the board rate, and the phases of each run. Run A reads
 #: the CounterValue chunk; run B polls the counters while frames are taken,
@@ -2472,15 +2490,23 @@ def _selftest_checks(p: Probe, s: str, rec: dict):
 class _Grabber(threading.Thread):
     """One camera's grab thread for the probe: retrieve, read the result's
     fields, look at the zero-copy view, release. It records every frame's
-    block ID, device time and the thread CPU the per-frame work took."""
+    block ID, device time, host arrival time and the thread CPU the
+    per-frame work took, and every silence after the first frame: a run of
+    waits that timed out, with the block IDs on either side of it."""
 
-    def __init__(self, backend, cam, clock: _CycleClock):
+    def __init__(self, backend, cam, clock: _CycleClock,
+                 timeout_ms: int = GRAB_TIMEOUT_MS):
         super().__init__(daemon=True, name=f"probe-grab-{cam.serial}")
         self.be = backend
         self.cam = cam
         self.clock = clock
+        self.timeout_ms = int(timeout_ms)
         self.ids: list = []
         self.ts: list = []
+        self.host: list = []
+        self.silences: list = []
+        self._quiet = None
+        self._last_bid = None
         self.failed_ids: list = []
         self.hot_us: list = []
         self.frames_retrieved = 0
@@ -2495,19 +2521,42 @@ class _Grabber(threading.Thread):
         self.padding = 0
 
     def run(self):
+        try:
+            self._loop()
+        finally:
+            self._end_silence(time.perf_counter(), None)
+
+    def _end_silence(self, now: float, next_id) -> None:
+        """Close the silence in progress: it ended at `now`, with the frame
+        whose block ID is `next_id` (None when no frame ended it)."""
+        q, self._quiet = self._quiet, None
+        if q is None:
+            return
+        q["end"] = now
+        q["next_id"] = None if next_id is None else int(next_id)
+        if len(self.silences) < 1000:
+            self.silences.append(q)
+
+    def _loop(self):
         from gui_app.backends.flir import FlirFrameError
         be, cam = self.be, self.cam
         timeout_exc = be.TimeoutException
+        wait_s = self.timeout_ms / 1000.0
         consecutive = 0
         while not self.abort:
             try:
-                res = be.retrieve(cam, GRAB_TIMEOUT_MS)
+                res = be.retrieve(cam, self.timeout_ms)
             except timeout_exc:
                 now = time.perf_counter()
                 if self.stop_at is not None and now >= self.stop_at:
                     self.first_timeout_after_stop = now - self.stop_at
                     return
                 self.timeouts += 1
+                if self.first_frame_at is not None:
+                    if self._quiet is None:
+                        self._quiet = {"start": now - wait_s, "timeouts": 0,
+                                       "prev_id": self._last_bid}
+                    self._quiet["timeouts"] += 1
                 continue
             except FlirFrameError as e:
                 self.frame_errors += 1
@@ -2556,9 +2605,12 @@ class _Grabber(threading.Thread):
                 if consecutive >= MAX_FRAME_ERRORS:
                     return
                 continue
+            self._end_silence(now, bid)
+            self._last_bid = int(bid)
             if ok:
                 self.ids.append(int(bid))
                 self.ts.append(int(ts))
+                self.host.append(now)
             else:
                 self.failed_ids.append(int(bid))
 
@@ -2636,7 +2688,7 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
     src.before_arm(fps)
     grabbers = []
     attempted = started = stopped = False
-    run = {"source": src.kind, "fps": fps}
+    run = {"source": src.kind, "fps": fps, "host_started": src.host_started}
     counted = {}
 
     def may_retry() -> bool:
@@ -2646,11 +2698,14 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
         counted.update({g.cam.serial: g.frames_retrieved for g in grabbers})
         return not any(counted.values())
 
+    timeout_ms = max(GRAB_TIMEOUT_MS,
+                     math.ceil(GRAB_TIMEOUT_PERIODS * 1000.0 / fps))
+    run["grab_timeout_ms"] = timeout_ms
     try:
         for cam in cams:
             be.start_grabbing(cam)
         for cam in cams:
-            g = _Grabber(be, cam, p.clock)
+            g = _Grabber(be, cam, p.clock, timeout_ms)
             grabbers.append(g)
             g.start()
         if not src.host_started:
@@ -2720,7 +2775,7 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
                         "may still be triggering")
             for g in grabbers:
                 g.stop_at = t_stop
-            limit = t_stop + STOP_GRACE_S
+            limit = t_stop + STOP_GRACE_S + timeout_ms / 1000.0
         else:
             silent = ExternalTriggerSource.stop_silence_s(fps)
             limit_wait = time.perf_counter() + STOP_WAIT_S
@@ -2737,7 +2792,7 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
             now = time.perf_counter()
             for g in grabbers:
                 g.stop_at = now
-            limit = now + STOP_GRACE_S
+            limit = now + STOP_GRACE_S + timeout_ms / 1000.0
         for g in grabbers:
             g.join(max(0.0, limit - time.perf_counter()))
         run["still_receiving"] = [g.cam.serial for g in grabbers
@@ -2780,6 +2835,86 @@ def _stop_cams(p: Probe, cams, grabbers) -> dict:
     return out
 
 
+def _train_start(run: dict):
+    """Host time of the run's first frame on any camera: the first pulse
+    that reached the rig, whenever the source began."""
+    firsts = [g.first_frame_at for g in run["grabbers"]
+              if g.first_frame_at is not None]
+    return min(firsts) if firsts else None
+
+
+def _train_check(g, run: dict, fps: float, first_any) -> dict:
+    """Whether the trigger train reached camera `g` from the run's first
+    frame to the stop.
+
+    The source runs until the probe stops it (or asks the operator to), so
+    over that span the camera acquires fps x span triggers. Its block IDs
+    count what it acquired, so the ID span of the frames that arrived by
+    the stop measures it, whatever the link lost on the way. A silence
+    counts against the train when the IDs did not move over it: pulses that
+    stop reaching every camera leave each one's IDs and clock consistent,
+    so only the host's timeline shows them."""
+    t_stop = run["t_stop"]
+    out = {"ok": False, "train_s": None, "expected": None,
+           "acquired_by_stop": 0, "frames_by_stop": 0, "margin": None,
+           "silent_in_run": [], "timeouts_in_run": 0}
+    if first_any is None:
+        return out
+    train_s = max(0.0, t_stop - first_any)
+    expected = int(round(fps * train_s))
+    ids = [i for i, h in zip(g.ids, g.host) if h <= t_stop + TRAIN_ARRIVAL_S]
+    acquired = (max(ids) - min(ids) + 1) if ids else 0
+    margin = max(TRAIN_SHORT_MIN, math.ceil(TRAIN_SHORT_SHARE * expected))
+    silent, timeouts = [], 0
+    edge = 1.0 / fps + TRAIN_ARRIVAL_S
+    for q in g.silences:
+        if t_stop - q["start"] <= edge:
+            continue
+        timeouts += q["timeouts"]
+        span = max(0.0, min(q["end"], t_stop) - q["start"])
+        due = fps * span
+        moved = (None if q["next_id"] is None or q["prev_id"] is None
+                 else q["next_id"] - q["prev_id"] - 1)
+        if moved is None or moved < SILENCE_ACQUIRED_SHARE * due:
+            silent.append({"from_s": round(q["start"] - first_any, 3),
+                           "seconds": round(span, 3), "due": round(due),
+                           "moved": moved})
+    out.update({"train_s": round(train_s, 3), "expected": expected,
+                "acquired_by_stop": acquired, "frames_by_stop": len(ids),
+                "margin": margin, "silent_in_run": silent,
+                "timeouts_in_run": timeouts,
+                "ok": acquired >= expected - margin and not silent})
+    return out
+
+
+def _train_text(tr: dict, fps: float, external: bool) -> str:
+    """The train check's detail for the table."""
+    if tr["expected"] is None:
+        return "no frame arrived"
+    parts = []
+    short = tr["expected"] - tr["acquired_by_stop"]
+    if short > tr["margin"]:
+        parts.append(f"{tr['acquired_by_stop']} triggers acquired by the stop "
+                     f"where {fps:g} Hz over the {tr['train_s']:.1f} s from the "
+                     f"first frame to the stop gives {tr['expected']}, so "
+                     f"{short} did not reach the camera or were ignored")
+    for q in tr["silent_in_run"][:3]:
+        parts.append(f"no frame for {q['seconds']:.2f} s from "
+                     f"{q['from_s']:.2f} s into the run, "
+                     + ("with none after it before the stop"
+                        if q["moved"] is None else
+                        f"while the frame ID moved by {q['moved']} over about "
+                        f"{q['due']} triggers"))
+    if not parts:
+        return (f"{tr['acquired_by_stop']} triggers acquired in "
+                f"{tr['train_s']:.1f} s ({tr['expected']} at {fps:g} Hz)")
+    hint = (" Keep your trigger source running until the probe asks you to "
+            "stop it, and check" if external else " Check")
+    return ("; ".join(parts) + "." + hint + " the trigger and ground wires "
+            "of this camera, and the block-ID rate check for triggers the "
+            "camera ignored.")
+
+
 def _analyse(p: Probe, stage: str, run: dict, stops: dict, fps: float) -> dict:
     from gui_app.backends import block_rate_hints
     from gui_app.frame_sync import check_block_id_rate, source_name
@@ -2788,10 +2923,12 @@ def _analyse(p: Probe, stage: str, run: dict, stops: dict, fps: float) -> dict:
     per = {}
     grabbers = run["grabbers"]
     seen = max((max(g.ids) for g in grabbers if g.ids), default=0)
-    expected_time = fps * run.get("seconds", 0.0)
+    first_any = _train_start(run)
+    external = not run.get("host_started", True)
     for g in grabbers:
         s = g.cam.serial
         ids = g.ids
+        train = _train_check(g, run, fps, first_any)
         uniq = sorted(set(ids))
         gaps = 0
         max_gap = 0
@@ -2803,14 +2940,16 @@ def _analyse(p: Probe, stage: str, run: dict, stops: dict, fps: float) -> dict:
                                        name=s, **hints) if ids else None
         hot = sorted(g.hot_us)
         rec = {"frames": len(ids), "frames_retrieved": g.frames_retrieved,
-               "triggers_seen": seen, "expected_from_time": round(expected_time),
+               "triggers_seen": seen, "expected_from_time": train["expected"],
+               "train": train,
                "first_id": ids[0] if ids else None,
                "last_id": ids[-1] if ids else None,
                "gaps": gaps, "max_gap": max_gap,
                "duplicates": len(ids) - len(uniq),
                "incomplete": len(g.failed_ids), "padding": g.padding,
                "frame_errors": g.frame_errors, "errors": g.errors,
-               "timeouts_before_stop": g.timeouts,
+               "timeouts_before_stop": train["timeouts_in_run"],
+               "timeouts_total": g.timeouts,
                "block_rate": {"message": rate_msg},
                "first_timeout_after_stop_ms":
                    None if g.first_timeout_after_stop is None
@@ -2835,6 +2974,9 @@ def _analyse(p: Probe, stage: str, run: dict, stops: dict, fps: float) -> dict:
         if len(ids) > seen:
             p.check(stage, f"{s} frames do not outnumber the triggers", "FAIL",
                     f"{len(ids)} frames for {seen} triggers")
+        p.check(stage, f"{s} the triggers reach it until the stop",
+                "PASS" if train["ok"] else "FAIL",
+                _train_text(train, fps, external))
         p.check(stage, f"{s} block IDs advance at the trigger rate",
                 "PASS" if rate_msg is None else "FAIL", rate_msg or "")
         sentences = rec.get("acquisition_warnings") or []
@@ -3627,6 +3769,8 @@ def _sweep_step(p: Probe, cams, src, fps: float, e: float, tol: float):
         return row, None
     stops = _stop_cams(p, cams, run["grabbers"])
     all_ok = True
+    first_any = _train_start(run)
+    silent = []
     for g in run["grabbers"]:
         r = row["per_camera"][g.cam.serial]
         ids, ts = g.ids, g.ts
@@ -3637,9 +3781,23 @@ def _sweep_step(p: Probe, cams, src, fps: float, e: float, tol: float):
             r["ignored_share"] = round(max(0.0, 1 - rate / fps), 5)
         w = stops[g.cam.serial].get("witness") or {}
         r["edges"], r["exposures"] = w.get("edges"), w.get("exposures")
+        # A camera over its ceiling acquires fewer triggers than the train
+        # carries, which is what the step measures, so only the silences
+        # say whether the train itself reached the camera until the stop.
+        train = _train_check(g, run, fps, first_any)
+        r["train"] = {k: train[k] for k in ("train_s", "expected",
+                                            "acquired_by_stop",
+                                            "silent_in_run")}
+        if first_any is None or train["silent_in_run"]:
+            silent.append(f"{g.cam.serial}: " + _train_text(
+                dict(train, margin=math.inf), fps, False))
         r["ok"] = r.get("ignored_share") is not None and \
             r["ignored_share"] <= tol
         all_ok = all_ok and r["ok"]
+    if silent:
+        p.check("exposure_sweep", f"the triggers reach every camera for the "
+                f"whole step at {e:.0f} us", "FAIL", " ".join(silent))
+        return row, None
     return row, all_ok
 
 
