@@ -684,19 +684,50 @@ def _pose_diverse_sample(poses, k, reproj_percentile=90):
     return sorted(filtered[s][0] for s in sel)
 
 
+def _homography_ok(obj, img) -> bool:
+    """Whether one view's corners determine a board-to-image homography.
+
+    RULE: a view goes to cv2.calibrateCamera only if this holds. REASON:
+    calibrateCamera starts from one homography per view
+    (initIntrinsicParams2D) and asserts on the first view that cannot give
+    one, which kills the whole solve; a partial view whose corners all lie
+    on one board row or column is such a view, and a detector that finds
+    more partial views finds more of them. This is the same computation on
+    the same points, so it rejects exactly the views OpenCV would.
+    """
+    try:
+        H, _mask = cv2.findHomography(
+            np.asarray(obj, np.float64).reshape(-1, 3)[:, :2],
+            np.asarray(img, np.float64).reshape(-1, 2), 0)
+    except cv2.error:
+        return False
+    return H is not None and H.shape == (3, 3) and bool(np.isfinite(H).all())
+
+
 def calibrate_intrinsics(corners_list, ids_list, corner_obj, image_size,
                          min_corners=MIN_CORNERS,
                          max_frames=INTRINSICS_MAX_FRAMES,
-                         min_frames=INTRINSICS_MIN_FRAMES):
+                         min_frames=INTRINSICS_MIN_FRAMES, stats=None):
+    """Fit one camera's intrinsics; None when too few usable views remain.
+
+    `stats`, if given, is a dict that receives ``degenerate``: the views
+    dropped because no homography fits their corners (see _homography_ok).
+    """
     obj_all, img_all = [], []
+    degenerate = 0
     for corners, ids in zip(corners_list, ids_list):
         if len(ids) < min_corners:
             continue
         obj, img = _build_pts(corners, ids, corner_obj)
         if obj is None:
             continue
+        if not _homography_ok(obj, img):
+            degenerate += 1
+            continue
         obj_all.append(obj)
         img_all.append(img)
+    if stats is not None:
+        stats["degenerate"] = degenerate
 
     if len(obj_all) < min_frames:
         return None
@@ -1298,21 +1329,42 @@ def main():
     # --- Intrinsics (parallel — cv2 releases the GIL) ---
     print("\nIntrinsics...")
 
+    job_stats = {}
+
     def _intrinsic_job(cam):
+        # RULE: one camera's OpenCV failure is that camera's failure. REASON:
+        # an exception here would end the solve for every camera, when the
+        # others can still be calibrated and the report can name this one.
         _keys, corners, ids = all_dets[cam]
-        return cam, calibrate_intrinsics(corners, ids, corner_obj,
-                                         all_sizes[cam])
+        st = job_stats.setdefault(cam, {})
+        try:
+            return cam, calibrate_intrinsics(corners, ids, corner_obj,
+                                             all_sizes[cam], stats=st)
+        except cv2.error as e:
+            st["error"] = str(e).strip().splitlines()[-1]
+            return cam, None
 
     intrinsics = {}
     intrinsic_stats = {}
     with ThreadPoolExecutor(max_workers=len(active)) as pool:
         for cam, result in pool.map(_intrinsic_job, active):
+            st = job_stats.get(cam, {})
+            if st.get("degenerate"):
+                print("  {}: skipped {} view(s) whose corners fit no "
+                      "homography (a single row or column of the board)"
+                      .format(cam, st["degenerate"]))
             if result is None:
                 dropped["failed_intrinsics"].append(cam)
-                warn("{}: intrinsics FAILED ({} detection frames, {} needed "
-                     "with >= {} corners)".format(
-                         cam, len(all_dets[cam][0]), INTRINSICS_MIN_FRAMES,
-                         MIN_CORNERS), warnings)
+                if st.get("error"):
+                    warn("{}: intrinsics FAILED: OpenCV could not fit this "
+                         "camera's views ({})".format(cam, st["error"]),
+                         warnings)
+                else:
+                    warn("{}: intrinsics FAILED ({} detection frames, {} "
+                         "needed with >= {} corners and a fitting "
+                         "homography)".format(
+                             cam, len(all_dets[cam][0]),
+                             INTRINSICS_MIN_FRAMES, MIN_CORNERS), warnings)
                 continue
             rms, K, dist, n = result
             intrinsics[cam] = (K, dist)
