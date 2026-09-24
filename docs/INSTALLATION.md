@@ -264,8 +264,12 @@ switch's web interface.
 
 The reference camera settings send 9000-byte packets
 ([jumbo frames](GLOSSARY.md#jumbo-frames)). Every device in the path has to
-accept them, the network adapter and every switch port, the uplink included
-([Configure the switches](#configure-the-switches)).
+accept them:
+
+- the host adapter, with its Jumbo Packet at 9014 bytes
+  ([Configure the host adapters](#configure-the-host-adapters))
+- every switch port, the uplink included, at 9216 bytes
+  ([Configure the switches](#configure-the-switches))
 
 A 10GBASE-T copper run needs Cat6a cable or better. A marginal cable shows up as
 packet loss while the link stays up.
@@ -962,8 +966,9 @@ too, and skips USB3 cameras. It does not open the trigger board.
 
 - A healthy path shows `complete=10/10` at every size up to 9000.
 - Every size passing up to 1500 and failing from 2000 means a device in that
-  camera's path is still at 1500 bytes
-  ([Configure the switches](#configure-the-switches)).
+  camera's path is still at 1500 bytes: a switch port
+  ([Configure the switches](#configure-the-switches)) or the adapter
+  ([Configure the host adapters](#configure-the-host-adapters)).
 
 Do not test jumbo frames with `ping`. The reference rig's cameras answer only
 small echo requests, so `ping -f -l 8972` fails on a path that carries 9000-byte
