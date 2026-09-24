@@ -45,7 +45,9 @@ def _setup_logging():
 
 
 def _flush_log(timeout_s: float = 1.0) -> None:
-    """Let the log writer catch up, on the Qt main thread only.
+    """Let the log writer catch up, on the Qt main thread only. The
+    excepthook calls it after printing the traceback, and the startup
+    failure path before its dialog.
 
     RULE: only the main thread waits. REASON: sys.excepthook also runs on
     the thread whose Python code raised, a grab thread included, and no
@@ -83,6 +85,10 @@ def _install_excepthook():
     def hook(exc_type, exc, tb):
         msg = "".join(traceback.format_exception(exc_type, exc, tb))
         print(f"[UNHANDLED]\n{msg}", flush=True)
+        # Before the dialog: a native crash can follow an exception that
+        # escaped a Qt slot, and the traceback must be in the file by then.
+        # Off the main thread this returns at once.
+        _flush_log()
         try:
             app = QApplication.instance()
             # QMessageBox is only safe on the GUI thread.
