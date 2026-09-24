@@ -45,6 +45,7 @@ from pathlib import Path
 import numpy as np
 
 from gui_app import encoders
+from gui_app import logging_setup
 from gui_app import sync_encode
 from gui_app.frame_sync import UnwrapState, unwrap_one
 from gui_app.mp import shm
@@ -545,84 +546,57 @@ class WorkerRouter:
 # -- logging --------------------------------------------------------------------
 
 class PipeLog:
-    """sys.stdout / sys.stderr of a worker: lines up the log pipe, and a
-    copy in the worker's own log file.
+    """sys.stdout / sys.stderr of a worker: each line stamped with its time
+    and thread in the main log's format (gui_app.logging_setup), written to
+    the worker's own log file and sent up the log pipe, where the parent
+    logs it under the worker's time and thread.
 
-    A print never waits on the pipe: lines go on a queue and a sender
-    thread writes them, so a parent that is slow to read cannot stall a
-    grab thread that prints. The file keeps every line when the parent is
-    gone; a line still queued when the process dies is lost from both.
+    A print never waits on the pipe or the disk: lines go onto the bounded
+    queue of a logging_setup.AsyncLogSink, and its writer thread does both
+    writes. A full queue drops the line and counts it, as in the parent.
+    The file keeps every line when the parent is gone; a line still queued
+    when the process dies is lost from both.
     """
+
+    encoding = "utf-8"
+    errors = "replace"
 
     def __init__(self, conn, path: Path | None):
         self._conn = conn
-        self._lock = threading.Lock()
-        self._partial = ""
-        self._lines: deque = deque()
-        self._wake = threading.Event()
-        self._file = None
-        self.encoding = "utf-8"
-        self.errors = "replace"
+        file = None
         if path is not None:
             try:
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
-                self._file = open(path, "a", encoding="utf-8",
-                                  errors="replace", buffering=1)
+                file = open(path, "ab", buffering=0)
             except OSError:
-                self._file = None
-        self._thread = threading.Thread(target=self._send_loop, daemon=True,
-                                        name="worker-log")
-        self._thread.start()
+                file = None
+        self._sink = logging_setup.AsyncLogSink(
+            file=file, forward=self._send if conn is not None else None,
+            name="worker-log", path=path if file is not None else None)
+        self._stream = logging_setup.StampedStream(self._sink, 0)
 
     @property
     def file(self):
-        return self._file
+        return self._sink.file
 
     def write(self, s) -> int:
-        s = str(s)
-        with self._lock:
-            text = self._partial + s
-            parts = text.split("\n")
-            self._partial = parts.pop()
-            if parts:
-                self._lines.extend(parts)
-                self._wake.set()
-        return len(s)
+        return self._stream.write(s)
 
     def flush(self) -> None:
-        self._wake.set()
+        return None
 
     def isatty(self) -> bool:
         return False
 
     def drain(self, timeout_s: float = 2.0) -> None:
         """Send what is queued, the unfinished line included."""
-        with self._lock:
-            if self._partial:
-                self._lines.append(self._partial)
-                self._partial = ""
-        self._wake.set()
-        end = time.monotonic() + timeout_s
-        while self._lines and time.monotonic() < end:
-            time.sleep(0.01)
+        self._stream.finish_pending()
+        self._sink.flush(timeout_s)
 
-    def _send_loop(self) -> None:
-        conn = self._conn
-        while True:
-            self._wake.wait(0.5)
-            self._wake.clear()
-            while self._lines:
-                line = self._lines.popleft()
-                if self._file is not None:
-                    try:
-                        self._file.write(line + "\n")
-                    except (OSError, ValueError):
-                        self._file = None
-                if conn is not None:
-                    try:
-                        conn.send_bytes(line.encode("utf-8", "replace"))
-                    except (OSError, EOFError, ValueError):
-                        conn = None
+    def _send(self, t, thread, stream, text) -> None:
+        """The writer thread's copy of one line up the log pipe. A pipe
+        that fails stops the sending; the file keeps the lines."""
+        self._conn.send_bytes(logging_setup.pack(t, thread, stream, text))
 
 
 # -- status -----------------------------------------------------------------------
@@ -754,7 +728,11 @@ class Worker:
         self.conn = conn
         self.gate = gate
         self.state = shm.WorkerState.SPAWNED
-        backend = load_backend(args["backend"])
+        # With the profile's camera: block, so a backend whose SDK folder
+        # the block names (camera.flir.sdk_dir) loads it from there in this
+        # process too.
+        backend = load_backend(args["backend"], camera_spec=getattr(
+            args["profile"], "camera", None))
         restore = getattr(backend, "restore_spawn_state", None)
         if args.get("backend_state") is not None:
             if restore is None:
@@ -1162,6 +1140,8 @@ def worker_main(args: dict, conn, log_conn, gate) -> None:
     log = PipeLog(log_conn, args.get("log_path"))
     sys.stdout = log
     sys.stderr = log
+    logging_setup.set_level(getattr(args.get("profile"), "log_level",
+                                    logging_setup.DEFAULT_LOG_LEVEL))
     if log.file is not None:
         try:
             faulthandler.enable(file=log.file, all_threads=True)

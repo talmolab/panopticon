@@ -267,9 +267,14 @@ class CameraBackend(Protocol):
         Raise on any problem; the caller refuses to start a partial set rather
         than shifting camera names.
 
-        `pfs_path` is the profile's `pfs_path`. It must be ACCEPTED even by a
-        backend with no such concept (ignore it): the caller has one code path
-        and passes the profile's value whatever backend is loaded.
+        `pfs_path` is the profile's `pfs_path`. The parameter must exist on
+        every backend, because the caller has one code path and passes the
+        profile's value whatever backend is loaded. A backend with no such
+        concept ignores an empty value. One whose settings come from
+        somewhere else refuses a non-empty value, naming that source (FLIR:
+        the profile's camera: block), because a camera configured from two
+        places drifts between them. `RigProfile.validate` refuses that
+        pairing first.
 
         `max_num_buffer` is the driver-side pool depth, the profile's
         `max_num_buffer`, and must be honoured: the capacity preflight budgets
@@ -281,7 +286,17 @@ class CameraBackend(Protocol):
         settings come from somewhere else refuses a non-None value, naming
         that source (Basler: the .pfs). The caller passes the keyword only
         when the profile has a block, so a backend written before the block
-        existed keeps working unchanged."""
+        existed keeps working unchanged.
+
+        A backend MAY also take the keyword-only arguments `frame_size` (the
+        profile's `(frame_width, frame_height)`) and `frame_rate` (the
+        profile's `frame_rate`). The caller passes each only when it is set
+        and the backend's `open` names it (or takes `**kwargs`), read with
+        `inspect.signature`. A backend that takes them programs the ROI from
+        the profile and refuses at open a rate its camera cannot record,
+        raising its `RefusalException`. One that does not (Basler: the .pfs
+        holds the ROI) is called as before, and the caller then refuses a
+        camera whose size differs from the profile."""
 
     def describe(self, cam) -> dict:
         """`{"width", "height", "pixel_format", "serial"}` read back FROM THE
@@ -295,7 +310,18 @@ class CameraBackend(Protocol):
         wider format raises nothing anywhere: a Mono12 frame is uint16 and the
         NV12 copy truncates it mod 256, yielding a full-length, aligned
         recording whose images are noise. `width`/`height` are ints and
-        `serial` a str."""
+        `serial` a str.
+
+        Optional keys, each text as the backend words it: `model` (used when
+        the enumerated device does not answer GetModelName), `firmware`,
+        `interface` (GigE or USB3, for example) and `link_speed`. The
+        manager keeps them in camera_info (`firmware`, `interface` and
+        `link_speed` are camera_manager.DEVICE_FACT_KEYS) and prints them
+        in every session header, so a log says which camera, firmware and
+        link each recording came from; `model` also goes to
+        session_metadata.json as camera_models. A key a backend leaves out
+        reads "unavailable" in the header ("not reported" for link_speed).
+        None of them is checked against the profile."""
 
     def set_freerun(self, cam, fps: float) -> None:
         """Untriggered preview mode at `fps` (the app uses 30).
@@ -422,6 +448,28 @@ class OptionalBackendMembers(Protocol):
     #: reset there and would record zeros.
     TRANSPORT_NODES: tuple
 
+    #: The exception class a backend raises when a camera cannot record at
+    #: the frame rate asked: from `open` for the profile's frame_rate, or
+    #: from `exposure_ceiling_us` for an acquisition's. `CameraManager`
+    #: refuses the start on it, because a recording made anyway skips
+    #: triggers or drops frames. Any other exception from
+    #: `exposure_ceiling_us` leaves the trigger period as the bound, with a
+    #: warning.
+    RefusalException: type
+
+    #: What bounds the exposure on this backend, in the words of the
+    #: `[camN] exposure=... (ceiling ... at N fps, <this>)` log line.
+    #: Without it the line names the AcquisitionFrameRate limiter, which is
+    #: what `rate_limit` sets on a Basler camera.
+    CEILING_BASIS: str
+
+    #: The `ceiling_hint` and `timestamp_hint` clauses of the block-ID rate
+    #: warning (`frame_sync.check_block_id_rate`) for this backend. The
+    #: camera manager merges them with the trigger source's name and passes
+    #: the dict to the kick-out router as `rate_hints`. Without it the
+    #: warning gives the Basler advice.
+    BLOCK_RATE_HINTS: dict
+
     def set_bandwidth_reserve(self, cam, percent=None,
                               accumulation=None) -> dict:
         """Write the GigE bandwidth reserve (Basler GevSCBWR/GevSCBWRA) and
@@ -490,7 +538,8 @@ class OptionalBackendMembers(Protocol):
 
 
 #: The names `OptionalBackendMembers` declares, in declaration order.
-OPTIONAL_MEMBERS = ("TRANSPORT_NODES", "set_bandwidth_reserve",
+OPTIONAL_MEMBERS = ("TRANSPORT_NODES", "RefusalException", "CEILING_BASIS",
+                    "BLOCK_RATE_HINTS", "set_bandwidth_reserve",
                     "set_transmission_delay", "thermals", "gain_unit",
                     "exposure_ceiling_us", "set_packet_size", "device_address",
                     "acquisition_warnings", "sdk_report")
@@ -544,13 +593,35 @@ def _import_backend_attr(backend: str, module: str, attr: str):
     return getattr(mod, attr)
 
 
-def load_backend(name: str = "basler") -> CameraBackend:
+def backend_options(name: str, camera_spec=None) -> dict:
+    """The constructor keywords backend `name` takes from the profile's
+    parsed `camera:` block, or {} when it takes none.
+
+    The flir backend takes `sdk_dir` from `camera.flir.sdk_dir`: the folder
+    the Spinnaker library is loaded from. The library loads once per
+    process, when the first FLIR backend is built, so the folder has to
+    reach that first construction; a later one cannot move the library.
+    `camera_spec` is duck-typed, because this module never imports the
+    profile code.
+    """
+    if name == "flir" and camera_spec is not None:
+        sdk_dir = getattr(getattr(camera_spec, "flir", None), "sdk_dir", None)
+        if sdk_dir:
+            return {"sdk_dir": str(sdk_dir)}
+    return {}
+
+
+def load_backend(name: str = "basler", camera_spec=None) -> CameraBackend:
     """Return a backend by name.
 
     The import is lazy, so a missing SDK breaks only the backend that needs
     it, never the application or the other backends. An unknown name raises
     ValueError listing `KNOWN_BACKENDS`. A missing SDK or backend module
     raises an ImportError whose message says what to install.
+
+    `camera_spec` is the profile's parsed `camera:` block, or None. A backend
+    that reads a setting from it before any camera exists gets it here (see
+    `backend_options`); every other backend ignores it.
     """
     if name == "basler":
         from gui_app.backends.basler import BaslerBackend
@@ -567,7 +638,7 @@ def load_backend(name: str = "basler") -> CameraBackend:
         # the searched paths when it is absent.
         flir_cls = _import_backend_attr(name, "gui_app.backends.flir",
                                         "FlirBackend")
-        return flir_cls()
+        return flir_cls(**backend_options(name, camera_spec))
     if name == "flir_sim":
         # The FLIR backend over a simulated Spinnaker library, paced by the
         # same virtual trigger clock as the sim backend (pairs with
@@ -586,13 +657,53 @@ def load_backend(name: str = "basler") -> CameraBackend:
     raise _unknown_backend(name)
 
 
-def sdk_report(name: str) -> str:
+#: Backends that declare no BLOCK_RATE_HINTS (test_backend_contract checks
+#: their classes), for which block_rate_hints imports nothing.
+_BACKENDS_WITHOUT_HINTS = ("basler", "sim")
+
+
+def block_rate_hints(name: str) -> dict:
+    """Backend `name`'s BLOCK_RATE_HINTS, read from its class without
+    building it, or {} when it declares none, is unknown or cannot be
+    imported here.
+
+    For the block-ID rate check that runs after a recording (post-hoc
+    alignment), where no backend exists: session_metadata.json records each
+    camera's backend name, and the check merges these clauses with the
+    trigger source's name as the live router does. {} gives the check's
+    default advice, which is Basler's, so a host that cannot import a
+    backend loses only the wording. Never raises.
+
+    Basler and sim declare no hints, so their modules are not imported:
+    importing basler loads pypylon and the pylon runtime, which an analysis
+    host aligning a Basler recording does not need. Importing the flir
+    module loads no SDK.
+    """
+    if name not in KNOWN_BACKENDS or name in _BACKENDS_WITHOUT_HINTS:
+        return {}
+    try:
+        cls = _import_backend_attr(name, "gui_app.backends.flir",
+                                   "FlirBackend")
+    except Exception:
+        return {}
+    hints = getattr(cls, "BLOCK_RATE_HINTS", None)
+    return dict(hints) if isinstance(hints, dict) else {}
+
+
+def sdk_report(name: str, camera_spec=None) -> str:
     """One line for the launch preflight: the camera SDK that backend `name`
     uses, its version and location, or why it cannot be loaded.
 
     Importing this package imports no SDK; this call imports the backend's
     module, and with it the SDK, only when asked. Never raises: the preflight
     prints the line whatever it says.
+
+    `camera_spec` is the profile's parsed `camera:` block, or None. When it
+    names where the SDK is loaded from (`backend_options`), the backend is
+    built with that first, so the report describes the library the profile
+    asks for. Without it, a report that runs before the cameras are opened
+    loads the SDK from its default location, and the open then refuses a
+    profile that names another folder.
     """
     if name not in KNOWN_BACKENDS:
         return str(_unknown_backend(name))
@@ -609,6 +720,12 @@ def sdk_report(name: str) -> str:
                                      "FakeSpinC")
                 return ("flir_sim: no camera SDK (simulated Spinnaker "
                         "library, gui_app/backends/fake_spinc.py)")
+        options = backend_options(name, camera_spec)
+        if options:
+            # Built once for its side effect: the SDK loads from the
+            # profile's folder. A failure is the report, because the class's
+            # own report would then load the SDK from its default location.
+            cls(**options)
     except ImportError as e:
         return f"{name}: cannot load ({e})"
     except Exception as e:

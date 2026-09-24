@@ -1,6 +1,7 @@
 """Panopticon Acquisition GUI — launch with: conda run -n 3dpose python gui.py"""
 import os
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -23,49 +24,44 @@ _LOG_PATH = None
 _OPEN_DIALOGS = []
 
 
-class _Tee:
-    """Write to several streams at once (e.g. the console and a log file).
-
-    Under the pythonw launcher sys.stdout/stderr are None, so the diagnostic
-    prints from the grab threads would otherwise be discarded — this captures
-    them to a file so a crash can be diagnosed after the fact."""
-    def __init__(self, *streams):
-        self._streams = [s for s in streams if s is not None]
-
-    def write(self, data):
-        for s in self._streams:
-            try:
-                s.write(data)
-                s.flush()
-            except Exception:
-                pass
-
-    def flush(self):
-        for s in self._streams:
-            try:
-                s.flush()
-            except Exception:
-                pass
-
-
 def _setup_logging():
-    """Tee stdout/stderr to a timestamped log file under logs/ (pythonw discards
-    them otherwise). Returns the log path, or None if logging couldn't be set up."""
+    """Send stdout and stderr to a timestamped log file under logs/, and to
+    the console when there is one (pythonw has none).
+
+    gui_app.logging_setup stamps every line with its time and thread and
+    writes it from one background thread, so a print never waits for the
+    disk or the console. Returns the log path, or None if logging couldn't be
+    set up."""
     try:
-        LOG_DIR.mkdir(exist_ok=True)
-        log_path = LOG_DIR / f"panopticon_{datetime.now():%Y%m%d_%H%M%S}.log"
-        f = open(log_path, "a", buffering=1, encoding="utf-8")
-        sys.stdout = _Tee(sys.__stdout__, f)
-        sys.stderr = _Tee(sys.__stderr__, f)
-        # Dump every thread's Python stack into the log on a NATIVE crash
-        # (access violation / abort — e.g. Qt's 0xc0000409 fail-fast), which
-        # sys.excepthook can't see. Needs the real file, not the _Tee.
-        import faulthandler
-        faulthandler.enable(file=f, all_threads=True)
+        from gui_app import logging_setup
+        log_path = logging_setup.install(
+            LOG_DIR / f"panopticon_{datetime.now():%Y%m%d_%H%M%S}.log")
+        if log_path is None:
+            return None
         print(f"[startup] logging to {log_path}", flush=True)
         return log_path
     except Exception:
         return None
+
+
+def _flush_log(timeout_s: float = 1.0) -> None:
+    """Let the log writer catch up, on the Qt main thread only. The
+    excepthook calls it after printing the traceback, and the startup
+    failure path before its dialog.
+
+    RULE: only the main thread waits. REASON: sys.excepthook also runs on
+    the thread whose Python code raised, a grab thread included, and no
+    thread that holds a camera may wait for the disk; the main thread's
+    wait is what puts a traceback in the file before a crash that may
+    follow it.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    try:
+        from gui_app import logging_setup
+        logging_setup.flush(timeout_s)
+    except Exception:
+        pass
 
 
 def _log_location() -> str:
@@ -89,6 +85,10 @@ def _install_excepthook():
     def hook(exc_type, exc, tb):
         msg = "".join(traceback.format_exception(exc_type, exc, tb))
         print(f"[UNHANDLED]\n{msg}", flush=True)
+        # Before the dialog: a native crash can follow an exception that
+        # escaped a Qt slot, and the traceback must be in the file by then.
+        # Off the main thread this returns at once.
+        _flush_log()
         try:
             app = QApplication.instance()
             # QMessageBox is only safe on the GUI thread.
@@ -266,11 +266,33 @@ def make_splash():
     return px
 
 
+def _take_profile_arg(argv: list) -> tuple:
+    """Split ``--profile NAME`` (or ``--profile=NAME``) out of argv.
+
+    Returns (name, the other arguments). The name is None when the flag is
+    absent, and "" when it has no value, which the window reports as a
+    profile that did not load.
+    """
+    name = None
+    rest = []
+    args = iter(argv)
+    for a in args:
+        if a == "--profile":
+            name = next(args, "")
+        elif a.startswith("--profile="):
+            name = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+    return name, rest
+
+
 def main():
     # --force starts a second copy anyway, for an operator who has checked
-    # the machine by hand. Qt never sees it.
+    # the machine by hand. --profile NAME opens that profile and remembers
+    # it for later launches. Qt sees neither.
     force = "--force" in sys.argv[1:]
-    qt_argv = [a for a in sys.argv if a != "--force"]
+    profile_name, qt_argv = _take_profile_arg(
+        [a for a in sys.argv if a != "--force"])
     # One grab thread and one encoder thread per camera, plus the UI, all
     # sharing the GIL during a recording. The default 5 ms switch interval
     # lets a GIL-holding thread stall the others for whole milliseconds; 1 ms
@@ -316,11 +338,22 @@ def main():
     app.processEvents()
 
     from gui_app.main_window import MainWindow
-    window = MainWindow()
+    window = MainWindow(profile_name=profile_name)
     window.show()
     splash.finish(window)
 
-    sys.exit(app.exec_())
+    code = app.exec_()
+    _shutdown_log()
+    sys.exit(code)
+
+
+def _shutdown_log() -> None:
+    """Write out what the log writer still holds and stop it."""
+    try:
+        from gui_app import logging_setup
+        logging_setup.shutdown()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
@@ -328,5 +361,7 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         traceback.print_exc()
+        _flush_log()
         _report_startup_failure(e)
+        _shutdown_log()
         sys.exit(1)

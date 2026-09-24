@@ -53,6 +53,17 @@ holds the DLL. If it holds no DLL, loading stops with an error naming it.
 Skipping it would load whichever other SDK the search finds next, and the log
 would name an SDK the operator did not choose.
 
+When each location applies:
+The DLL loads once per process, when the first `SpinC` is built, and stays
+loaded. `camera.flir.sdk_dir` reaches that first build through
+`backends.load_backend(name, camera_spec=...)`: the camera manager builds
+the flir backend with the profile's camera: block when it opens the cameras,
+before the first enumeration. A process that loaded the DLL before that (for
+another flir profile, or for a launch check given no camera: block) keeps
+it, and `FlirBackend.open` then refuses a profile whose `sdk_dir` names
+another folder. `PANOPTICON_SPINNAKER_DIR` applies to every load in every
+process, including the capture worker processes.
+
 The DLL loads inside a scoped `os.add_dll_directory` for its own folder, so
 its dependencies in that folder resolve. `PATH` is never edited: the SDK's
 `bin64\\vs2015` folder also holds Qt5 DLLs, and PyQt5's copies must stay the

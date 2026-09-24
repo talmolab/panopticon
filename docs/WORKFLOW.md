@@ -128,7 +128,10 @@ there and nowhere else; the application never writes them into the profile.
 
 Selecting a profile closes and reopens all the cameras, so the sidebar reads
 `Switching cameras…` and the controls grey out for a second or two. The choice
-is remembered per machine.
+is remembered per machine. On a machine where Panopticon has not opened a
+profile yet, the window asks you to choose one, and opens no camera and no
+serial port until you do. `uv run gui.py --profile <name>` opens the named
+profile and remembers it.
 
 One refusal is built in. If the profile sets `n_cameras` to a non-zero number
 and a different number of cameras enumerates, the open is refused outright, with
@@ -1028,9 +1031,9 @@ expectation. Three hard failures that cannot be overridden:
   KB a frame, so raw is roughly 500 times larger. Six cameras that fell back
   would want some 770 GiB for ten minutes against about 1.7 GB encoded.
 
-Two more, tight RAM and short disk space, are warnings you can override with
-**Start anyway?**, because the disk figure assumes a ten-minute recording and a
-shorter one may fit.
+Short disk space is a warning you can override with **Start anyway?**,
+because the disk figure assumes a ten-minute recording and a shorter one may
+fit.
 
 **An existing recording in the target folder** is checked last, and it is never
 overwritten without a prompt. If the folder holds a non-empty `.mp4`,

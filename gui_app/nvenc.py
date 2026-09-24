@@ -596,13 +596,25 @@ class PinnedUploadEncoder:
         return out
 
     def Close(self) -> None:
-        """Free the NVENC session, then every CUDA resource. Idempotent."""
+        """Free the NVENC session, then every CUDA resource. Idempotent.
+
+        RULE: the pinned-encoder count drops only after this encoder's own
+        buffers, stream and context are freed, and the teardown line reads
+        the snapshot that decrement returns. REASON: encoders close
+        concurrently on their own threads, and the closer that takes the
+        count to 0 reports what is still held. Counted down before its own
+        free, a closer can reach 0 while another encoder is still destroying
+        its context, and print a leak warning for a context that is about to
+        be freed. A warning printed at every such teardown hides the one that
+        reports a real leak.
+        """
         with self._close_lock:
             if self._closed:
                 return
             self._closed = True
         session, self._session = self._session, None
-        if session is not None:
+        attached = session is not None
+        if attached:
             pushed = False
             try:
                 self._drv.ctx_push(self._ctx)
@@ -622,12 +634,11 @@ class PinnedUploadEncoder:
                         self._drv.ctx_pop()
                     except Exception:
                         pass
-            left = _stat("pinned_encoders", -1)
-        else:
-            left = None
-        self._free_resources()
-        if left is not None and left["pinned_encoders"] == 0 and not self._quiet:
-            now = upload_stats()
+        try:
+            self._free_resources()
+        finally:
+            now = _stat("pinned_encoders", -1) if attached else None
+        if now is not None and now["pinned_encoders"] == 0 and not self._quiet:
             if now["pinned_bytes"] or now["own_contexts"]:
                 print(f"[nvenc] WARNING: every pinned encoder is closed but "
                       f"{_mib(now['pinned_bytes'])} of staging memory and "

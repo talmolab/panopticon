@@ -147,6 +147,23 @@ def trigger_source(rec_dir) -> str | None:
     return None
 
 
+def camera_backend(rec_dir) -> str | None:
+    """The camera_backend an acquisition's session_metadata.json records.
+
+    The acquisition's own file is read first and the session-level copy
+    second, as trigger_source reads them; None when neither records it (a
+    recording made before the field existed, which was Basler).
+    """
+    rec_dir = Path(rec_dir)
+    ignored: list[str] = []
+    for path in (rec_dir / METADATA_FILENAME,
+                 rec_dir.parent / METADATA_FILENAME):
+        data = _read_json(path, ignored)
+        if data is not None and isinstance(data.get("camera_backend"), str):
+            return data["camera_backend"]
+    return None
+
+
 def rate_key(rec_dir) -> str:
     """The session-level key that holds this acquisition type's trigger rate."""
     return ("calibration_frame_rate" if Path(rec_dir).name == "calibration"

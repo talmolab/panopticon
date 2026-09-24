@@ -1700,8 +1700,9 @@ disk_per_s   = n_cams * fps * (4600 if realtime else frame_bytes)
 ```
 
 Blocking conditions: no cameras open; RAM demand above available; NVENC granting
-fewer sessions than cameras. Warnings: RAM above 75% of available, disk short of
-an assumed worst-case duration, or raw capture above 1.5 GiB/s. Disk is a warning
+fewer sessions than cameras. Warnings: disk short of an assumed worst-case
+duration, or raw capture above 1.5 GiB/s. RAM either refuses or raises no
+warning; its figures go to the log at every start. Disk is a warning
 and never a blocker, because the assumed duration is the most speculative number
 here.
 
