@@ -514,9 +514,18 @@ class AsyncLogSink:
                          f"not being read); no thread waited for it")])
 
     def _emit(self, items) -> None:
+        """Write one run of lines: the file, then the forward, then the
+        console queue.
+
+        RULE: the file is written before the forward is called. REASON: in
+        a capture worker the forward is the log pipe to the parent, and a
+        parent that is not reading it would otherwise hold the worker's own
+        log file too, and the lines would be dropped from both.
+        """
         if not items:
             return
         ordered = []
+        forwarded = []
         by_stream = ([], [])
         now = time.time()
         first_t = None
@@ -534,13 +543,16 @@ class AsyncLogSink:
             line = format_line(t, thread, text) + "\n"
             ordered.append(line)
             by_stream[1 if stream else 0].append(line)
-            if self._forward is not None:
+            forwarded.append((t, thread, stream, text))
+        if self._file is not None:
+            self._write_file(ordered, first_t)
+        if self._forward is not None:
+            for t, thread, stream, text in forwarded:
                 try:
                     self._forward(t, thread, stream, text)
                 except Exception:
                     self._forward = None
-        if self._file is not None:
-            self._write_file(ordered, first_t)
+                    break
         if self._console is not None:
             for k in (0, 1):
                 if by_stream[k]:
