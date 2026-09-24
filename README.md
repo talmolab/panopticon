@@ -75,8 +75,8 @@ uv run --no-group rig gui.py --profile sim
 ```
 
 `--no-group rig` leaves out pypylon and the NVENC bindings, and a plain `uv run` would
-install them again. Without an NVIDIA GPU the simulated rig encodes on the CPU with
-libx264. Panopticon says so in a dialog at launch, asks you to confirm before each
+install them again. With the rig group left out, the simulated rig encodes on the CPU
+with libx264. Panopticon says so in a dialog at launch, asks you to confirm before each
 acquisition, and repeats the note when the acquisition ends.
 [SIMULATION.md](docs/SIMULATION.md) describes the simulated rig.
 
