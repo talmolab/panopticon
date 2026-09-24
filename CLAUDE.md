@@ -12,7 +12,8 @@ This file states the rules the code relies on, in the present tense. The
 reasons behind the numbers, and what was tried, are in
 [docs/HISTORY.md](docs/HISTORY.md). Live measurements are in
 [docs/INTERNALS.md](docs/INTERNALS.md). A number marked "reference rig" comes
-from the nine-camera 3dpose rig and lives in its profile, never in code.
+from the nine-camera 3dpose rig (its profile, its `.pfs`, its cameras'
+firmware or a measurement on it), never from code.
 
 Launch with `uv run gui.py`. `gui.py --profile NAME` opens that profile and
 remembers it. `gui.py --force` starts a second instance, for an operator who has
