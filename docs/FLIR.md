@@ -582,7 +582,7 @@ A refusal about one camera starts with that camera's name and serial number.
 | `The Spinnaker SDK is not installed` | Install the Spinnaker SDK 4.x, or set `camera.flir.sdk_dir` to its install folder. |
 | `is open in another program` | Close SpinView or any other camera software, then choose the profile again. |
 | `is not an input on this camera` | Run `--find-line` and write the line it prints into `camera.trigger.line`. |
-| `is set as an output on this camera` | Set the line to Input in SpinView, or wire the trigger to another input line. |
+| `is set as an output on this camera` | Wire the trigger to an input line, or save the line as Input in a SpinView user set and name it in `camera.flir.user_set`. |
 | `not the recording-only sketch` | Open your profile in Panopticon ([section 4](#4-open-your-profile-in-panopticon)), quit, and run the probe again. |
 | `cannot be aligned by frame ID, and it offers no CounterValue chunk` | This model cannot record yet. Send the probe's output. |
 | `DeviceLinkThroughputLimit can go no higher` | The link cannot carry the frames. Lower `frame_rate` or the frame size, or check the cable and port. |
