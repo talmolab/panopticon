@@ -218,8 +218,7 @@ The frame rate moves the number most: 1280x1024 at 100 fps still needs
 The link speed also decides how long one frame takes to send. The camera leaves
 a gap between its packets, the [inter-packet delay](GLOSSARY.md#inter-packet-delay)
 (`GevSCPD` on a Basler camera), so that cameras sharing a port do not burst
-into each other. A delay of 0 sends each frame as one burst, and the bursts of
-cameras sharing a port collide at the switch. One frame then takes
+into each other. One frame then takes
 (packets per frame) x (packet time on the wire + delay). That time has to fit
 inside the trigger period. A camera still sending when the next trigger
 arrives ignores that trigger.
@@ -227,7 +226,8 @@ arrives ignores that trigger.
 Keep the frame time at least a millisecond inside the period. On the reference
 rig at 5 Gbit/s and 100 fps, `GevSCPD` 20000 (about 8.9 ms per frame) kept the
 full frame rate. At 22000 (about 9.5 ms) every camera recorded half the
-trigger rate.
+trigger rate. Do not set the delay to 0 either. At 0 each frame goes out as one
+burst, and the bursts of cameras sharing a port collide at the switch.
 
 With the reference camera settings (9000-byte packets, `GevSCPD` 10000, which is
 10 µs) a 1920x1200 frame is about 260 packets:
