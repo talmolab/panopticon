@@ -6,10 +6,10 @@ each rule in the present tense and does not retell the story behind it; the
 story is here.
 
 Each entry is one bullet: the date, what changed or what was measured, and the
-number that decided it. From September 2026 on, an entry names the commit it
-landed in, in backticks, and a measurement that changed no code says so. Each
-section ends with the dead ends it closed, so nobody runs them again, and the
-last section indexes them all.
+number that decided it. From 2026-09-15 on, an entry names the commit it
+landed in, in backticks, and a measurement that changed no code says so. A
+section that closed dead ends lists them at its end, so nobody runs them
+again, and the last section indexes them all.
 
 Live measurements and the current performance picture are in
 [docs/INTERNALS.md](INTERNALS.md); this file is the chronology.
@@ -243,8 +243,9 @@ Dead ends, do not retry:
   reached only the recording threads.
 - 2026-09-11: Live thermal watch added (`thermal_poll_s`). Four of nine cameras
   sat above the 76 C Critical threshold by installation over a 600 s run (cam6
-  peaked at 80 C against an 81 C shutdown), so the 3dpose profile kept the watch
-  off (`thermal_poll_s: 0`) until heatsinks. Temperatures still went into
+  peaked at 80 C against an 81 C shutdown), so its warnings fired all the time.
+  The 3dpose profile turned the watch off the same day (`thermal_poll_s: 0`),
+  to come back once heatsinks cooled the cameras. Temperatures still went into
   session metadata.
 - 2026-09-11: 3dface HUD thresholds pinned in its profile, so a change to the
   3dpose-tuned code defaults cannot lower that rig's bar without a measurement
@@ -315,7 +316,13 @@ Dead ends, do not retry:
   (`160aaa9`, `7c5a984`).
 - 2026-09-18: Cameras are named by the profile's `camera_serials`: cam(i+1) is
   entry i, an unlisted device is ignored, and a listed serial that did not
-  enumerate is refused by name (`e1b7963`).
+  enumerate is refused by name (`e1b7963`). The profile's
+  `gev_bandwidth_reserve_pct` and `gev_bandwidth_reserve_accum` reach each
+  camera at open, and nothing sets them by default (`097e5bd`, `e1b7963`).
+- 2026-09-18: The sidebar prefills experimenter, assay, cohort, cage and notes
+  from the profile's `metadata_defaults` instead of one operator's values. A
+  date the operator did not type refreshes when it is read, so a GUI left open
+  past midnight files the session under the right day (`b80f79c`).
 - 2026-09-18: The legacy campy acquisition path and its submodule removed;
   nothing imported them (`71a10db`). The package metadata declares the license,
   and the vendor SDKs moved into a dependency group (`d81564b`).
@@ -347,8 +354,11 @@ Dead ends, do not retry:
   by itself. It says when the videos are unequal and points at `2_align.py`.
   Heat is reported after a recording only when frames were lost (`52bae8d`).
 - 2026-09-21: Calibration exposure 15 ms to 5 ms after the lighting was
-  improved, and the live thermal watch back on (`thermal_poll_s` 0 to 20)
-  (`78721e0`).
+  improved (`78721e0`). The same commit turned the live thermal watch back on
+  (`thermal_poll_s` 0 to 20) before any heatsink, because it is the only alert
+  that catches a hot camera before it shuts down. It had been off because it
+  nagged. It stopped nagging once the report after a recording mentioned heat
+  only when frames were lost (`52bae8d`).
 - 2026-09-21: The new lighting heated the array. Seven of nine cameras sat above
   Critical, and six peaked at 81.0-81.1 C, the shutdown point, where a camera
   stops delivering. The fault rotated from cam4 to cam6 to cam5 across switches,
@@ -395,8 +405,9 @@ Dead ends, do not retry:
   (n = 793) against 2.9% of the others (n = 3,211). Closed; no code change.
 - 2026-09-22: The morning's "cam6 158 of 480" run was loss plus drift, not one
   slow camera. cam6 retrieved 8 frames in 1.4 s while every other camera
-  retrieved about 145, then cam2 to cam6 drifted together for about 10 s. No
-  code change.
+  retrieved about 145, and then skipped 88 block IDs within one second. cam2 to
+  cam6 then drifted together for about 10 s. The run lost 2.15% of triggers,
+  with forced 0. No code change.
 - 2026-09-22: Simultaneity measured with an IR LED on the stim pin pulsed at
   2 Hz for 45 s: all 92 rising edges landed on the same trigger in all nine
   cameras. Measured on the rig; no code change.
@@ -434,7 +445,7 @@ Dead ends, do not retry:
   (`224eccf`) with a simulated SDK behind the same methods (`71992c1`), not
   PySpin. The C calls release the GIL, give zero-copy frames and need no wheel;
   PySpin's GIL behaviour and copying are undocumented, and its Python 3.10 wheel
-  is built for NumPy 1.x while Panopticon needs NumPy 2.
+  is built for NumPy 1.x while Panopticon needs NumPy 2. Merged as `769bbd7`.
 - 2026-09-22: Free-threaded CPython (3.14t) checked and set aside: only numpy
   ships cp314t wheels, and pypylon, PyNvVideoCodec, PyQt5 and OpenCV do not. No
   code change.
@@ -484,6 +495,9 @@ Dead ends, do not retry:
   wedged encoder. A `stop()` that lands before `run()` is honoured; it had left
   a preview thread retrieving beside the recording thread (`172f6ea`). Failing
   grabs and dead starts retire the camera (`ceb4b7b`). Merged as `f3597c1`.
+- 2026-09-22: Groundwork for multi-process capture: shared-memory primitives
+  (`7068696`), a cross-process kick-out ledger (`06e8e86`) and a worker-side
+  NV12 ring guard (`e68b89d`). Merged as `f4fcd7d`.
 - 2026-09-23: Calibration hints and pairing use trigger ordinals, not frame
   indices (`9b2208f`). In a rig session with drops, 56% of near-coincident
   hints between two cameras were one frame apart, against 2-3% in sessions
