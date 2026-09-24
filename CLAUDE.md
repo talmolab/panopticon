@@ -119,10 +119,12 @@ checked by hand that no other one holds the hardware.
   line. In a capture worker the writer writes the worker's log file before it
   sends the line up the pipe to the parent, so a parent that stops reading
   cannot hold the worker's own log.
-- `log_level` (normal, verbose or debug; default verbose) adds cold-path detail
-  only: the session header, requested and read-back camera settings, `[state]`
-  transitions and the stop summary. Nothing logs per frame at any level, and
-  the grab loop's stats line stays periodic.
+- The session header prints at every level. `log_level` (normal, verbose or
+  debug; default verbose) adds cold-path detail only. `verbose` adds the
+  requested and read-back camera settings, `[state]` transitions and the stop
+  summary, and `debug` adds more, such as every `.pfs` feature the camera read
+  back. Nothing logs per frame at any level, and the grab loop's stats line
+  stays periodic.
 - Regression runs compare the `[camN] exposure=` line verbatim, so read-backs go
   on lines of their own. Before comparing a log line with older output, strip
   the stamp `^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} \[[^\]]+\] `.
