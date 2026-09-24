@@ -1,70 +1,115 @@
 # Contributing to Panopticon
 
-Panopticon is a lab acquisition tool that runs against real cameras, a real
-trigger board and a real GPU. Most of its defects are silent: a wrong change
-records a perfect-looking session whose frames are misaligned. The rules below
-exist so that a contribution cannot introduce that class of failure unnoticed.
+Panopticon records from real cameras, a trigger board and a GPU. A wrong change in the
+capture path can record a session that plays normally while its views are out of step.
+Follow the rules below so that such a change is found before it merges.
 
 ## Setting up
 
-The project is managed with [uv](https://docs.astral.sh/uv/). A plain
-`uv sync` installs everything, including the vendor SDKs (pypylon, the NVENC
-bindings and the CUDA runtime). On a machine without Basler cameras or an
-NVIDIA GPU, install without them:
+The project uses [uv](https://docs.astral.sh/uv/). `uv sync` installs everything,
+including the `rig` dependency group: pypylon, the NVENC bindings (PyNvVideoCodec) and
+the CUDA runtime. On a computer without Basler cameras or an NVIDIA GPU, leave the group
+out of the sync and out of every run:
 
 ```powershell
 uv sync --no-group rig
+uv run --no-group rig gui.py --profile sim
 ```
 
-The offline test suites and the post-hoc tools run in that environment. The
-GUI itself needs the `rig` group.
+A plain `uv run` installs the `rig` group again.
 
-## Running the tests
+The `sim` profile runs the whole application on simulated cameras and a simulated
+trigger board ([SIMULATION.md](docs/SIMULATION.md)). For FLIR work, `probe_flir.py`
+can rehearse against simulated cameras
+([FLIR.md](docs/FLIR.md#rehearse-without-cameras)).
 
-The offline test suite is maintained by the project but is not shipped in the
-lean public tree. It remains in git history: recover it with
-`git log --all --diff-filter=D -- "test_*.py"` and check out the commit that last
-held those files, or request it from the maintainers. A change that alters
-behaviour comes with a test that exercises it offline.
+## Tests
 
-## Changes to the hot path need rig validation
+The offline test suites are kept out of the public tree by the maintainer's choice.
+The maintainer runs them on every change before it merges. In a pull request:
 
-The grab loop (`gui_app/grab_thread.py`), the encoder threads
-(`gui_app/sync_encode.py`, `gui_app/nvenc.py`), the frame-sync coordinator
-(`gui_app/frame_sync.py`) and the camera backend (`gui_app/backends/`) run
-under a 10 ms per-frame budget shared by every camera. A change there can pass
-every offline suite and still lose frames, because the failure is a scheduling
-effect that only appears with real cameras streaming. Any pull request that
-touches those modules states how it was validated on a rig: the number of
-cameras, the frame rate, the duration, and the frame-loss figure from the
-recording's alignment report. Without that, the change waits.
+- say what the change does and which modules it touches;
+- say how you checked it: on the simulated rig, on your own rig, or both, with what you
+  ran and what you saw.
 
-`CLAUDE.md` holds the invariants those modules rely on (zero-copy grab view,
-pre-faulted ring, NVENC session accounting, block IDs recorded for persisted
-frames only, `-g <fps>` and `+faststart` on every mp4). Read it before editing
-the hot path. A fix that conflicts with an invariant is wrong; the invariant
-wins.
+The maintainer then runs the suites that cover those modules, and adds a test for the
+change where one is missing.
 
-## Editing `CLAUDE.md` and comments
+## Changes to the capture path need a rig run
 
-`CLAUDE.md` is the working-rules file for anyone, human or agent, changing the
-code. It states rules and their reasons in the present tense. It does not carry
-dates, names, commit hashes or narrative of what was tried when; that history
-belongs in the project's history ledger under `docs/`. A pull request that
-changes a rule updates the rule's text in place and moves any superseded
-narrative out. Comments and docstrings follow the same convention: state the
-rule and its reason, not the story.
+These modules run while the cameras stream:
+
+- `gui_app/grab_thread.py`, the per-camera grab loop;
+- `gui_app/frame_sync.py`, the kick-out coordinator;
+- `gui_app/sync_encode.py`, `gui_app/encoders.py`, `gui_app/nvenc.py`,
+  `gui_app/cpu_encode.py` and `gui_app/cuda_driver.py`, the encoder threads, the NVENC
+  and libx264 encoders, and the GPU upload;
+- `gui_app/cpu_affinity.py`, which places the capture threads on CPU cores and sets
+  their priority;
+- `gui_app/camera_manager.py`, which starts and stops every acquisition;
+- `gui_app/trigger_source.py`, which arms every camera before the first trigger;
+- `gui_app/logging_setup.py`, which takes every print from a capture thread and must
+  never make that thread wait;
+- `gui_app/mp/`, the multi-process capture workers;
+- `gui_app/backends/`, the camera backends.
+
+Each grab thread has one trigger period per frame (10 ms at 100 fps), and every camera's
+threads share one [GIL](docs/GLOSSARY.md#gil). A change to one of these modules can pass
+every offline suite and still lose frames, because the failure is a scheduling effect
+that appears only with real cameras streaming. A pull request that touches them states
+how it was tested on a rig:
+
+- the camera count and model, the frame rate and the duration;
+- from the recording's `session_metadata.json`, the `kickout` counts (kept, kicked and
+  forced triggers);
+- every `WARNINGS.txt` the recording wrote, or that it wrote none.
+
+A capture-path change merges only with that rig run.
+
+[CLAUDE.md](CLAUDE.md) holds the rules these modules rely on. Among them: the grab loop
+reads each frame through a zero-copy view, the NV12 ring is pre-faulted, NVENC sessions
+are counted, and `blockids.npy` lists only frames that were persisted. Every mp4 gets
+`-g <fps>` and `+faststart`. Read it before you edit the capture path. A change that
+breaks one of those rules does not merge, even when every test passes.
+
+## Adding a camera backend
+
+A camera vendor is one module in `gui_app/backends/`, written against the
+`CameraBackend` contract in `gui_app/backends/__init__.py`. Add the backend's name to
+`KNOWN_BACKENDS` and a branch to `load_backend()`. The module imports its SDK itself, so
+a computer without that SDK fails in one place with a message that says what to
+install. [INTERNALS.md](docs/INTERNALS.md) describes the contract.
+
+## Comments, docstrings and CLAUDE.md
+
+`CLAUDE.md` is the working-rules file for anyone who changes the code, a person or an
+agent. It states each rule and its reason in the present tense. Dates, names, commit
+hashes and accounts of what was tried belong in [HISTORY.md](docs/HISTORY.md). A pull
+request that changes a rule edits the rule's text in place and moves any old narrative
+to HISTORY.md. Comments and docstrings follow the same convention: state the rule and
+its reason.
 
 ## Style
 
-- Camera vendor code stays inside `gui_app/backends/`; nothing else imports
-  `pypylon`.
-- Every mp4 writer passes `-g <fps>` and `-movflags +faststart`, so the
-  recordings load in the browser labeler.
-- Commit messages say what changed and why in plain words, with the tests that
+- Camera SDK imports stay in `gui_app/backends/`. `probe_flir.py` is an exception: its
+  optional `--pyspin` stage imports PySpin.
+- No rig-specific number lives in code. Numbers that belong to a rig go in its profile,
+  because `gui_app/` also runs rigs other than the reference one.
+- Every mp4 writer passes `-g <fps>` and `-movflags +faststart`, so the recordings seek
+  and open quickly in the browser labeller.
+- Commit messages say what changed and why in plain words, and name the checks that
   verified it.
+- Documentation states each fact once, in the page where a reader acts on it, and links
+  to it from anywhere else.
 
-## License
+## Reporting a problem
+
+Use the
+[bug report template](https://github.com/talmolab/panopticon/issues/new?template=bug_report.md).
+It asks for the files that show what happened: the launch log, the acquisition's
+`session.log` and `WARNINGS.txt`, and the rig profile.
+
+## Licence
 
 Panopticon is licensed under GPL-3.0-only. By contributing you agree that your
 contribution is licensed under the same terms.

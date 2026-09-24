@@ -3,352 +3,171 @@
   Panopticon
 </h1>
 
-<p align="center"><b>Multi-camera hardware-synchronised video acquisition for 3D animal pose estimation.</b></p>
+<p align="center">Hardware-triggered multi-camera video for 3D animal pose estimation.</p>
 
-[![The Panopticon interface](docs/images/ui_annotated.png)](docs/OVERVIEW.md)
+Panopticon records many cameras at once from one hardware trigger, and encodes their
+video on the GPU as it records. Every camera's video holds the same triggers, so frame N
+is the same instant in every view. It runs on Windows with Basler cameras, and FLIR
+support is in testing.
 
-Panopticon records synchronised multi-camera video for 3D pose estimation.
+![The main window with nine cameras in live preview](docs/images/main_idle.png)
 
-To reconstruct pose in 3D you combine several views of one instant, so frame 5000 has to
-be the same moment in every camera. Panopticon gives you that from sensor to disk.
+## What it does
 
-Your cameras run off one trigger board, so they all expose on the same electrical edge.
-Frames encode to H.264 on the GPU while you record, so there is no giant intermediate
-file and no wait after you stop. The videos land already aligned.
+- Fires every camera from one TTL [trigger](docs/GLOSSARY.md#trigger).
+- Records each frame's [block ID](docs/GLOSSARY.md#block-id) and keeps only the triggers
+  every camera captured ([kick-out](docs/GLOSSARY.md#kick-out)), so the videos come out
+  aligned.
+- Encodes H.264 on the GPU with [NVENC](docs/GLOSSARY.md#nvenc) during the recording.
+- Checks each recording for a camera that ignored triggers, and writes what it finds to
+  `WARNINGS.txt`.
+- Records and solves a ChArUco calibration, and writes `calibration.toml` in
+  aniposelib's format.
+- Compiles an optogenetic stimulation paradigm into the trigger board's firmware, and
+  writes `stim_trace.csv`: for every frame, the stimulus the paradigm was set to
+  deliver. The file is modelled from the firmware and cannot show that the laser fired.
 
-Cameras on a network drop frames independently, so you cannot assume frame 5000 is the
-same trigger everywhere. Panopticon tags each frame with its GigE block ID, the counter a
-camera advances per acquired frame, and holds every trigger until all cameras report it.
-Anything one camera missed is dropped before encoding. You get equal-length videos,
-aligned trigger for trigger.
+The videos and the calibration open in [LUC3D](https://talmolab.github.io/luc3d/), a
+browser-based tool for multi-view pose annotation
+([repository](https://github.com/talmolab/luc3d), [docs](https://talmolab.github.io/luc3d-docs/)).
 
-You calibrate here too, and you can compile an optogenetic paradigm into the same board
-that triggers the cameras.
+## Requirements
 
-The output loads directly in **[LUC3D](https://talmolab.github.io/luc3d/)**, a
-browser-based multi-view pose annotation tool by Eric Leonardis (Salk Institute), hosted
-by the Talmo Lab
-([repo](https://github.com/talmolab/luc3d) ·
-[docs](https://talmolab.github.io/luc3d-docs/)).
-It wants browser-playable video plus TOML or JSON calibration, which is what a session
-directory holds. Two mp4 details are for its benefit: the moov atom, the index a player
-needs to seek, sits at the front of the file instead of the end, and one IDR keyframe per
-second means scrubbing to frame N does not decode the N frames before it.
-`calibration.toml` sits alongside, read as-is.
+| Part | What Panopticon needs |
+|---|---|
+| Computer | 64-bit Windows. CPU, RAM and disk scale with camera count and frame rate. |
+| GPU | An NVIDIA GPU with NVENC. Each camera takes one encode session. |
+| Basler cameras | Supported, GigE and USB3, through Basler's pylon SDK. |
+| FLIR cameras | In testing, GigE and USB3, through Teledyne's Spinnaker SDK: [docs/FLIR.md](docs/FLIR.md). |
+| Camera settings | Mono8, the same frame size on every camera, and a hardware trigger input on each. |
+| Trigger | A hardware TTL signal. By default, an Arduino Mega 2560 that Panopticon programs. |
+| Network (GigE) | Links sized to the pixel rate, and jumbo frames on every adapter and switch port. |
 
-Built on **[campy](https://github.com/ksseverson57/campy)** by Kyle Severson (MIT
-licensed). The trigger firmware lineage and the raw-capture approach come from campy;
-Panopticon carries no campy code and has no submodule.
+More cameras need a more capable GPU. The driver caps how many NVENC sessions run at
+once, and that cap often limits the camera count, so Panopticon measures it before it
+records. When the GPU grants too few sessions, `encoder: auto` encodes on the CPU with
+libx264 if a benchmark at launch shows the CPU keeps up, and refuses to record if not.
+[INSTALLATION.md](docs/INSTALLATION.md) sizes the GPU, network, RAM and disk.
 
-**Credits:** Isaac Tang (author and maintainer), Kay Tye, Talmo Pereira. Tye Lab and
-Talmo Lab, Salk Institute.
+The trigger board also runs stimulation. A pulse generator or DAQ of your own can
+trigger the cameras instead (`trigger_source: external`), without stimulation.
 
----
+## Status
 
-## Quick start
+Panopticon is beta software. The performance figures in these docs come from one
+reference rig, which runs nine Basler 5GigE cameras at 1920x1200 and 100 fps.
+[HISTORY.md](docs/HISTORY.md) records the measurements and the decisions behind them.
+The FLIR backend has run only against a simulated Spinnaker library. Capture in
+several worker processes (`capture_processes`) is experimental, and the window refuses
+any value above 0.
 
-Windows, in PowerShell, with [uv](https://docs.astral.sh/uv/) installed. The
-Basler pylon SDK has to be installed first for the GUI itself; the tests do not
-need it.
+## Try it without hardware
+
+The `sim` profile runs three simulated cameras and a simulated trigger board, so
+preview, Calibrate, Record and the stimulation editor's Apply all work with no hardware
+and no camera SDK. In PowerShell, with [uv](https://docs.astral.sh/uv/) and Git:
 
 ```powershell
 git clone https://github.com/talmolab/panopticon.git
 cd panopticon
-uv sync                      # no cameras or NVIDIA GPU here? uv sync --no-group rig
-uv run gui.py
+uv sync --no-group rig
+uv run --no-group rig gui.py --profile sim
 ```
 
-There are no submodules, so a plain clone is complete.
-[docs/INSTALLATION.md](docs/INSTALLATION.md) takes it from there: the hardware
-arithmetic, the network, and the two files that describe your rig.
+`--no-group rig` leaves out pypylon and the NVENC bindings, and a plain `uv run` would
+install them again. With the rig group left out, the simulated rig encodes on the CPU
+with libx264. Panopticon says so in a dialog at launch, asks you to confirm before each
+acquisition, and repeats the note when the acquisition ends.
+[SIMULATION.md](docs/SIMULATION.md) describes the simulated rig.
 
-## Verify without hardware
+## Quick start on a real rig
 
-The offline test suite is maintained by the project but is not shipped in the
-lean public tree; it stays in git history (recover it with
-`git log --all --diff-filter=D -- "test_*.py"` and check out that commit, or ask
-the maintainers). To exercise the application itself with nothing plugged in, run
-it on the simulated rig: `uv run gui.py`, then pick `sim` from the profile
-dropdown ([docs/SIMULATION.md](docs/SIMULATION.md)).
+1. Install uv, Git, your cameras' SDK and `arduino-cli`
+   ([INSTALLATION.md](docs/INSTALLATION.md#2-install-the-software); FLIR cameras:
+   [FLIR.md](docs/FLIR.md#1-install)).
+2. Clone the repository and run `uv sync`.
+3. Copy the closest template from `profiles/templates/` into `profiles/`, set its
+   `name`, and edit it ([CONFIGURATION.md](docs/CONFIGURATION.md)).
+4. Run `uv run gui.py --profile <name>`. Panopticon remembers the profile, so later
+   launches need only `uv run gui.py`. A launch with no profile chosen opens no camera
+   and no serial port until you choose one in the sidebar.
 
-The application itself also runs with nothing plugged in: `profiles/sim.yaml`
-selects a simulated camera backend and a simulated trigger board, so preview,
-Calibrate, Record, Stop and the stimulation editor's Apply all work end to end.
-Pick `sim` from the profile dropdown.
-[docs/INSTALLATION.md](docs/INSTALLATION.md#3-verify-it-works) has both paths.
+Before step 4, check that the profile's `serial_port` names the trigger board. Opening
+the profile resets the device on that port, and reprograms it unless Panopticon last
+programmed it with the same firmware
+([INSTALLATION.md, step 8](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware)).
 
-## Contributing
+> [!WARNING]
+> Flashing resets the trigger board, and the laser driver input floats during
+> the reset. Switch the laser off or block the beam before you launch
+> Panopticon, and before Apply, Calibrate, or the first Record after an Apply.
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the rules that matter here: which test
-suite guards which module, why a change to the capture hot path needs a
-frame-loss figure from a real rig before it can merge, and the comment
-convention. Most defects in this program are silent — a wrong change records a
-perfect-looking session whose frames are misaligned — which is what those rules
-exist to catch.
+### Settings to change first
 
-## Where to go next
-
-| Page | What is in it |
+| Profile field | What to set |
 |---|---|
-| **[docs/INSTALLATION.md](docs/INSTALLATION.md)** | What to install, how to size hardware for the rig you want, and what a working first launch looks like. |
-| **[docs/OVERVIEW.md](docs/OVERVIEW.md)** | Every control, screen by screen, including the calibration coverage HUD and the stimulation editor. |
-| **[docs/WORKFLOW.md](docs/WORKFLOW.md)** | A session start to finish: calibrate, solve, record, check the result. |
-| **[docs/INTERNALS.md](docs/INTERNALS.md)** | How it works underneath: the grab loop, GPU encoding, frame alignment, tuning and porting. |
-| **[docs/CPU_ENCODE.md](docs/CPU_ENCODE.md)** | The libx264 encode path for a machine whose GPU cannot serve every camera, and exactly how much of it is wired up. |
-| **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to set up, which suite to run after touching which module, and what a hot-path change has to prove. |
-| **[docs/HISTORY.md](docs/HISTORY.md)** | The engineering ledger: the dated decisions, measurements and dead ends behind every number in these pages and the code. |
+| [`name`](docs/CONFIGURATION.md#name) | The name shown in the profile dropdown and given to `--profile`. |
+| [`camera_backend`](docs/CONFIGURATION.md#camera_backend) | `basler` or `flir` (`sim` and `flir_sim` are simulated rigs). |
+| [`camera_serials`](docs/CONFIGURATION.md#camera_serials) | Every camera's serial number, quoted, in ascending order. |
+| [`n_cameras`](docs/CONFIGURATION.md#n_cameras) | How many cameras must be present. Any other count refuses to open. |
+| [`pfs_path`](docs/CONFIGURATION.md#pfs_path) or [`camera`](docs/CONFIGURATION.md#camera) | Camera settings: a Basler `.pfs` file, or the FLIR `camera:` block. |
+| [`frame_rate`](docs/CONFIGURATION.md#frame_rate) | The recording trigger rate. Keep exposure under the [exposure ceiling](docs/GLOSSARY.md#exposure-ceiling). |
+| [`serial_port`](docs/CONFIGURATION.md#serial_port), [`trigger_pins`](docs/CONFIGURATION.md#trigger_pins) | The trigger board's port, and every pin wired to a camera. A camera on an unlisted pin gets no triggers. |
+| [`stim_safe_pins`](docs/CONFIGURATION.md#stim_safe_pins) | Every pin wired to a laser or LED driver, held low from boot. |
+| [`output_dir`](docs/CONFIGURATION.md#output_dir) | Where sessions go. Use your largest, fastest drive. |
+| [`metadata_defaults`](docs/CONFIGURATION.md#metadata_defaults) | Your lab's defaults for the sidebar, saved with every session. A copied profile carries another lab's names. |
 
----
+Without `camera_serials`, cameras are named in serial-number order. If `n_cameras` is 0,
+or another camera on the computer fills the count, one missing camera then renames every
+camera after it and puts the calibration on the wrong cameras.
+[CONFIGURATION.md](docs/CONFIGURATION.md) explains every field.
 
-## At a glance
+## What a session writes
 
-**What it does.** Calibration lives in the same application. Panopticon records a ChArUco
-calibration and solves it here with `1_calibrate.py`, on OpenCV: ArUco/ChArUco detection
-for the board corners, `cv2.calibrateCamera` per camera for intrinsics,
-`cv2.stereoCalibrate` per pair, then the pairs chained into one coordinate frame. The
-result is `calibration.toml` in aniposelib's layout, which LUC3D and downstream
-triangulation (aniposelib, or [sleap-anipose](https://github.com/talmolab/sleap-anipose))
-read without conversion.
+A session is a folder, `<output_dir>/<date>/<mouse1>_<mouse2>/`, holding a
+`calibration/` and a `recording/` folder. Each of those holds one folder per camera
+(`cam1/` to `camN/`, with the mp4, `blockids.npy` and `frametimes.npy`), plus
+`session_metadata.json`, `session.log`, and `WARNINGS.txt` when something went wrong.
+The solve writes `calibration.toml` into `calibration/` and copies it into `recording/`.
+[WORKFLOW.md](docs/WORKFLOW.md#paths-and-names) lists every file.
 
-Optionally, Panopticon also compiles an optogenetic paradigm into the trigger board's
-firmware and writes a per-frame record of what that paradigm delivered.
+## Documentation
 
-**What it needs.** Four things are non-negotiable: Basler cameras (driven through
-pypylon), an NVIDIA GPU that can grant one concurrent NVENC encode session per camera,
-Windows, and an Arduino- or Teensy-class board on a serial port.
-
-Everything else scales with pixel rate, not part numbers. One 1920x1200 mono8 camera at
-100 fps produces about 1.84 Gbit/s, so three cameras on one port already need 10 GbE,
-while a lower frame rate or resolution fits on 1 GbE. `docs/INSTALLATION.md` gives the
-arithmetic for CPU, RAM, disk and network. Panopticon screens the machine at launch,
-re-checks capacity against the actual number of cameras before each acquisition, and
-refuses to start rather than half-record a session.
-
-With no usable NVENC encoder it falls back to writing raw frames to disk and encoding
-after the session. Budget for it: raw means the full 1920x1200 bytes of every frame from
-every camera. One camera at 100 fps writes about **129 GiB of raw per ten minutes**, so
-six cameras for ten minutes is about **830 GB (773 GiB)**, against roughly 1.7 GB in
-H.264. Raw is about **500x** larger. Size the drives on that.
-
-**What it outputs.** Each camera gets an mp4 (H.264, `yuv420p`, `+faststart`, one IDR per
-second) named `<date>-<session>-<cam>-<recording|calibration>.mp4`, with `frametimes.npy`
-and `blockids.npy` beside it. `blockids.npy` holds each frame's trigger ordinal, so any
-frame traces back to the trigger that produced it.
-
-The session level holds `session_metadata.json`, plus `calibration.toml` and
-`reprojection_error_histogram.png` from the solve. The `calibration.toml` is also copied
-next to the recording, so a recording carries the calibration it was shot with. The
-`.png`, despite its name, is a bar chart: one bar per camera pair, showing that pair's
-stereo RMS error in pixels. It is how you judge the solve, and `docs/WORKFLOW.md` explains
-how to read it. The board's physical geometry is an *input*, not an output. It lives in
-the board config the profile points at (`configs/boards/*.yaml`), and the solve reads its
-square and marker sizes from there.
-
-A session that used stimulation adds three more files: `stim_paradigm.json`,
-`stim_paradigm.ino` (the exact firmware that ran) and `stim_trace.csv` (one row per
-recorded frame).
-
----
-
-## Definitions and hyperparameters
-
-**Where a setting lives matters as much as its value.** There are four homes, and editing
-the wrong one does nothing:
-
-1. **The camera settings file** (`configs/*.pfs`) is a *pylon persistence file*: a dump of
-   the camera's own internal registers, saved from Basler's pylon Viewer rather than
-   written by hand. Panopticon applies it to every camera at open. **The exposure and gain
-   a recording uses come only from here**, so changing exposure means editing the `.pfs`
-   (or re-saving it from pylon Viewer), not the profile. Panopticon re-applies that
-   baseline at each acquisition start, so a calibration exposure cannot leak into a
-   recording, and it *clamps* the value down if the `.pfs` asks for more exposure than the
-   frame rate allows. The `.pfs` is the only source of the number, but the number applied
-   may be lower; the log line at acquisition start says which.
-2. **The rig profile** (`profiles/*.yaml`) holds Panopticon's own settings: how many
-   cameras, what frame rate, which serial port, which pins. A new site edits this file,
-   and it is the one place "this rig" is described.
-3. **The board config** (`configs/boards/*.yaml`) describes the physical printed
-   calibration board.
-4. **Code constants** are compiled in and change only by editing the source.
-
-Values below are from the reference 3dpose rig. Program-wide defaults say so.
-
-### Terms
-
-| Term | What it means |
+| Page | What it covers |
 |---|---|
-| **Trigger** | One electrical pulse that makes every camera expose at once. The unit of synchronisation here: "trigger 500" names one instant across all cameras. |
-| **Trigger board** | The Arduino- or Teensy-class microcontroller that generates those pulses. It also runs the stimulation paradigm, so stimulus and frames share one clock. |
-| **Block ID** | A counter a GigE Vision camera increments once per frame **it acquires**, carried with every frame. Panopticon treats it as the trigger ordinal, so cameras can be aligned against one another. |
-| **Trigger ordinal** | Which trigger a frame belongs to, counting from the start of the acquisition. Stored per frame in `blockids.npy`. |
-| **Free-run vs triggered** | In free-run the camera paces itself from an internal timer; when triggered it exposes only on an external edge. The preview is free-run; recording and calibration are triggered. Several settings behave differently between the two. |
-| **Frame kick-out** | Discarding a trigger that not every camera captured, *before* it reaches the encoders, so the videos are aligned as written rather than repaired afterwards. |
-| **The coordinator** | The component that does the kicking (`gui_app/frame_sync.py`). It holds each camera's frames briefly and releases a trigger once every camera has it. |
-| **Forced drop** | What happens when a camera falls further behind than `kick_max_lag` allows: the coordinator stops waiting and discards that trigger, including the frames other cameras captured cleanly, so everyone stays aligned. The `forced=` figure in the log counts *frames* discarded this way, not triggers. A healthy session has none. |
-| **Retirement** | Dropping a camera from the alignment set entirely, so the survivors keep recording in alignment and the retired camera's video just ends early. Without it, one dead camera would force-drop every trigger for everyone. Triggered by an unrecoverable stall, a failure to start the stream, no memory for the frame ring, or a camera reporting row padding. |
-| **Laggard** | Whichever camera is furthest behind in submitting frames. Reported in the log, so a persistent one can be identified. |
-| **Exposure ceiling** | The longest exposure usable at a given frame rate. In triggered mode the camera's rate timer starts *after* exposure ends, so the minimum interval is `exposure + 1/AcquisitionFrameRate`. Exceed it and the camera ignores alternate triggers. See the `.pfs` table. |
-| **NVENC** | The dedicated hardware video encoder built into NVIDIA GPUs. It encodes without using the CPU or the shader cores. |
-| **NVENC session** | One concurrent encode stream on that hardware. Panopticon needs one per camera. The driver caps how many exist at once, so the cap limits camera count. |
-| **NV12** | The pixel layout NVENC wants: a full-resolution brightness plane followed by a half-resolution colour plane. A mono8 frame becomes NV12 by using it as the brightness plane and filling colour with a constant. |
-| **IDR frame / GOP** | An IDR is a keyframe a decoder can start from cold; the GOP is the interval between them. Panopticon writes one IDR per second, so seeking to frame *N* does not require decoding the *N* frames before it. |
-| **moov atom / faststart** | The moov atom is an mp4's index. By default it is written at the end, forcing a player to read the whole file before it can start; `+faststart` moves it to the front. |
-| **Remux** | Rewriting a video's container without re-encoding the pictures (`ffmpeg -c copy`). Lossless and fast. Panopticon captures to a raw H.264 stream and remuxes to mp4 at stop. |
-| **GVSP** | GigE Vision Streaming Protocol, the UDP protocol cameras use to send frames. One frame is split across many packets. |
-| **Jumbo frames** | Ethernet packets larger than the usual 1500 bytes. Panopticon uses 9000, which cuts per-packet overhead substantially, but **every device in the path must be configured for it** or frames are silently lost. |
-| **Inter-packet delay** | A deliberate pause the camera inserts between packets, spreading one frame's burst over time so switch buffers do not overflow. `GevSCPD` in the `.pfs`. |
-| **Resend** | GVSP is UDP, so there is no automatic retransmission; the driver explicitly asks for packets that did not arrive. Resends are normal and recovered ones cost nothing but latency. |
-| **Buffer underrun** | The camera had a frame ready but no free buffer to put it in, so the frame was lost at the camera. Means the host is not draining fast enough. |
-| **Failed buffer** | A frame that arrived incomplete, its packets lost and not recovered in time. Means the network path is lossy. |
-| **ChArUco** | A chessboard with a unique ArUco marker printed inside each white square, so a partial or rotated view is still unambiguously identifiable. Used for calibration. |
-| **Intrinsics** | One camera's own optical properties: focal length, optical centre, lens distortion. Independent of where the camera is. |
-| **Extrinsics** | Where a camera sits and points relative to a chosen reference camera. Rotation and translation. |
-| **Reprojection error** | How far, in pixels, a known 3D board point lands from the detected corner when projected through a camera's solved intrinsics and extrinsics. The basic measure of whether a calibration is right. |
-| **Stereo RMS** | The root-mean-square reprojection error for one *pair* of cameras. What the bars in `reprojection_error_histogram.png` show. |
-| **Reference camera** | The camera whose coordinate frame becomes the world frame. `--ref-camera`, default `cam1`. |
-| **Spanning tree** | Pairwise calibrations are chained into one coordinate frame by walking a tree of camera pairs, preferring low-error pairs. There is **no global bundle adjustment**, so a poor pair on the chosen path propagates. |
-| **Paradigm** | A stimulation protocol built in the node editor: which pins fire, at what frequency and pulse width, in what order. |
-| **Chain** | One connected sequence of stimulation blocks. Independent chains run concurrently, so two chains driving one pin conflict and are refused. |
-| **Safe pin** | A pin forced LOW at boot before the serial handshake, so a powered laser driver never reads a floating pin as ON. `stim_safe_pins`. |
-| **The raw fallback** | Writing full uncompressed frames to disk during capture and encoding after the session, used when real-time GPU encoding is unavailable. Needs roughly 500x the disk. |
-| **LUC3D** | The browser-based multi-view annotation tool Panopticon's output loads into without conversion. |
+| [INSTALLATION.md](docs/INSTALLATION.md) | Sizing the hardware, building the network, installing, the first launch |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | Every profile field, the templates, and setting up a new rig step by step |
+| [FLIR.md](docs/FLIR.md) | FLIR cameras: install, wiring, profile, the diagnostic probe, what to send back |
+| [WORKFLOW.md](docs/WORKFLOW.md) | A session from start to finish: calibrate, solve, record, check the result |
+| [OVERVIEW.md](docs/OVERVIEW.md) | Every control in the window, the calibration coverage display, the stimulation editor |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | The messages Panopticon shows, with their causes and fixes |
+| [SIMULATION.md](docs/SIMULATION.md) | The simulated rig and its fault settings |
+| [CPU_ENCODE.md](docs/CPU_ENCODE.md) | The libx264 encoder |
+| [INTERNALS.md](docs/INTERNALS.md) | How capture, alignment, encoding and calibration work, and adding a camera backend |
+| [GLOSSARY.md](docs/GLOSSARY.md) | The terms these pages use |
+| [HISTORY.md](docs/HISTORY.md) | Dated decisions, measurements and dead ends |
 
-### Rig profile — `profiles/3dpose.yaml`
+## Contributing, bug reports and citing
 
-Panopticon's own settings. This is the file to copy and edit for a new rig.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, testing and the rig run that a change
+to the capture path needs. Report a problem with the
+[bug report template](https://github.com/talmolab/panopticon/issues/new?template=bug_report.md),
+and FLIR results with the
+[FLIR bring-up template](https://github.com/talmolab/panopticon/issues/new?template=flir_bringup.md).
+To cite Panopticon, use [CITATION.cff](CITATION.cff) or GitHub's "Cite this repository"
+button.
 
-| Field | This rig | What it controls | If you get it wrong |
-|---|---|---|---|
-| `name` | `3dpose` | Label in the profile dropdown | Cosmetic |
-| `camera_backend` | `basler` | Which `gui_app/backends/<name>.py` drives the cameras | `basler` is the only backend for real hardware; `sim` (see `profiles/sim.yaml`) runs the whole application against simulated cameras and a simulated trigger board. An unknown name is refused when the profile loads |
-| `encoder` | `auto` | Which H.264 encoder a recording asks for: `auto`, `nvenc`, `x264` or `raw` | Validated when the profile loads, but the selection is not wired into a recording yet, so today every camera encodes on NVENC whatever this says. [docs/CPU_ENCODE.md](docs/CPU_ENCODE.md) tracks what is and is not live |
-| `metadata_defaults` | `experimenter: IT`<br>`assay: open_field` | Sidebar pre-fill for a new session | The reference rig's operator and assay, written into every `session_metadata.json` on the rig that ships them. **Set your own**, or every session an operator starts without noticing the prefilled field is attributed to someone else. Only session-metadata keys are accepted: `experimenter`, `assay`, `cohort`, `cage`, `notes` |
-| `frame_width` / `frame_height` | 1920 / 1200 | Expected frame geometry | Must match the `.pfs`; every buffer size downstream is computed from it. Not checked at open, but compared with what the cameras report before every Calibrate and Record, which refuses with *The profile records WxH but the cameras are configured for WxH*. Cameras are also checked against *each other* at open, so a mixed-resolution rig never opens |
-| `frame_rate` | 100 | Trigger rate for recordings, Hz | Sets the exposure ceiling. Raising it without shortening exposure makes cameras ignore alternate triggers |
-| `calibration_frame_rate` | 30 | Trigger rate while calibrating | A slowly-waved board gains nothing from 100 fps, and 30 buys roughly 7x the light budget |
-| `quality` | 21 | H.264 constant quantiser (`qp`) | Lower is better quality and larger files. Not a bitrate: file size varies with scene content |
-| `encode_parallel` | 3 | Concurrent NVENC encode jobs in raw mode; concurrent remux jobs in real-time mode | Too low makes the post-session pass slow. Too high matters mainly in raw mode, where the jobs really do consume NVENC sessions. Real-time remuxes are stream copies and use none, so they compete only if one recording's encode is still running when the next recording starts |
-| `realtime_encode` | `true` | GPU-encode during capture rather than writing raw | `false` selects the raw fallback: no GPU encoder needed, ~500x the disk |
-| `realtime_kick` | `true` | Align by discarding unanimous-miss triggers during capture | `false` falls back to aligning after the fact, which costs a full re-encode |
-| `kick_max_lag` | 480 | How many frames the coordinator will wait for a lagging camera | Sets RAM directly: the frame ring is `kick_max_lag + 200 + 64` buffers per camera, so 744 at 480 against 504 at 240. Too high starves capture outright: **1000 cost 24% of frames.** The value this rig runs, and the measurements behind it, live in the comment on this field in `profiles/3dpose.yaml`; that comment is the single source, and this column is a copy of it |
-| `max_num_buffer` | 600 | Driver-side buffers queued per camera | The other half of the RAM budget, and usually the larger: `n_cameras × max_num_buffer × width × height`, so 600 buffers is 11.6 GiB at nine 1920×1200 cameras and 1000 would be 19.3 GiB. **Keep it at or above `kick_max_lag`**: the pool has to outlast the coordinator's willingness to wait, or the driver overwrites frames a laggard is still owed and a recoverable lag becomes lost frames (the rule is stated on `ENCODE_QUEUE_DEPTH` in `gui_app/grab_thread.py`). Deep slack absorbs GigE jitter and it also hides a per-frame deficit, so lower it for RAM, then check `Buffer_Underrun_Count` is still 0; nonzero means the pool ran dry |
-| `n_cameras` | 9 | Cameras that **must** enumerate before a session will start | A safety interlock, not a convenience. Camera names are assigned positionally by serial number, so one camera failing to appear renames every camera after it and silently attaches the calibration to the wrong physical cameras. Set it to the real count. Raising it when you add cameras is a deliberate step: check first that the new serials sort *after* the existing ones, or every later camera is renamed |
-| `camera_serials` | not set | The serial numbers this rig is made of, ascending quoted strings; unset opens every enumerated camera and names them by enumeration order | This is the cure for the hazard in the row above: set it and a camera that fails to enumerate refuses the session instead of renaming the ones after it. A list that is out of order, repeats a serial, or disagrees with `n_cameras` is refused when the profile loads |
-| `gev_bandwidth_reserve_pct` | not set | `GevSCBWR`: the percentage of link bandwidth held back for packet resends, written at open; unset keeps the `.pfs` value | Reserving bandwidth lowers what every camera is assigned, so this trades throughput for resend headroom. A value outside 0..100 is refused when the profile loads |
-| `gev_bandwidth_reserve_accum` | not set | `GevSCBWRA`: how many reserve slots may pool, so a burst of resends can draw on more than one interval's reserve | Useful only alongside the percentage above. A negative value is refused when the profile loads |
-| `calibration_exposure_us` | 15000 | Exposure during calibration only; `0` leaves the `.pfs` value alone | Restored after calibration, so a long calibration exposure cannot leak into a 100 fps recording. Clamped in code if it would breach the ceiling. The practical limit is **motion blur**, not the ceiling: a briskly waved board smears and its corners stop resolving |
-| `calibration_gain_db` | -1 | Gain during calibration only; `-1` leaves the `.pfs` value alone | Prefer more light, then exposure, then gain. Each +6 dB doubles noise along with signal |
-| `calibration_min_per_cam_shared` | 120 | Co-detection ticks every camera needs before the coverage HUD reports READY (program-wide default 120) | This and the two below decide how long someone stands in the arena waving a board, so set them against what the solve consumes: it caps intrinsics at 60 pose-diverse frames per camera and stereo at 30 shared frames per pair, and discards the rest. Too high wastes rig time; too low yields a marginal solve, and `reprojection_error_histogram.png` is the evidence |
-| `calibration_min_edge` | 20 | Co-detections that make a camera *pair* count as connected (program-wide default 40) | READY needs the resulting graph to be **one connected component**, not every pair connected: the board is one-sided, so cameras facing each other can never co-detect and a complete graph could never fill. This is the threshold that decides whether two groups of cameras merge, and connectivity is what dominates the waving time |
-| `calibration_min_grid_cells` | 3 | Quadrants of its own field of view each camera must see the board in, out of 4 (program-wide default 3) | The criterion that actually stops the board being waved in one spot, which yields confident, badly conditioned intrinsics. It is cheap to satisfy, so relax it last |
-| `pfs_path` | `configs/mono8_1920x1200.pfs` | Which camera settings file to apply | |
-| `output_dir` | `data` | Where sessions are written | |
-| `board_config` | `configs/boards/charuco_8x8_15mm.yaml` | Which physical board is in use | Wrong board geometry produces a confident, wrongly-scaled calibration |
-| `serial_port` | `COM3` | The trigger board's port | Wrong port means no triggers and a refused start |
-| `trigger_pins` | `[2,4,6,8,10,12]` | Board pins driven as camera triggers | A camera whose `Line1` sits on an unlisted pin never fires, and in the default kick-out mode one camera that never delivers stalls every other camera until it is retired. **Not necessarily one pin per camera** — this rig fans some pins out to more than one camera, which is why nine cameras need only six pins. Fan-out is limited by current, not by logic: an ATmega2560 output is rated ~20 mA and each opto-isolated input draws its share. The order is irrelevant — all pins are written in one `noInterrupts()` block. A pin on the serial link (0 or 1), a pin also listed in `stim_safe_pins`, or the same pin twice, is refused when the profile loads, naming the field and the offending pins |
-| `gige_driver` | `socket` | Which pylon transport to use | `socket` is user-space with reliable resends and is the proven choice. `filter` is in-kernel and uses less CPU but **silently dropped ~23% of frames** with default resend settings |
-| `stim_safe_pins` | `[53]` | Pins driven LOW at boot before the serial handshake | Pin 53 is the laser. Omitting it leaves the pin floating through boot, which a powered driver reads as ON. Workflow pins are added automatically; this list is the floor |
-| `pin_capture_threads` | `true` | Pin each grab thread to its own performance core and raise its priority (default `false`) | Windows and a hybrid CPU only; a no-op anywhere else. Left off, the scheduler places most of the ~19 busy threads at nine cameras differently every launch, and a grab thread on an efficiency core runs a few percent slow — which the loop can never recover, because it retrieves at exactly the rate frames arrive. That is the rotating laggard |
-| `capture_core_exclude` | `[0, 1]` | Logical CPUs the pinned capture threads are kept off (default `[0]`) | CPU 0 is the boot processor and the default target for timer and deferred-procedure-call work, so a grab thread pinned there is descheduled by the very network traffic it is trying to receive. Exclude whichever cores carry your NIC's receive work |
-| `encoder_pcores` | `false` | Confine encoder threads to the performance-core set (default `false`) | On the reference rig this measured a regression: nine encoders sharing eight performance cores with nine pinned grab threads raised the grab threads' copy time several-fold. Kept as a knob for a rig with more cameras than performance cores |
-| `pin_encoder_threads` | not set, so `false` | Pin one encoder thread per efficiency core (default `false`) | Measured far worse than leaving encoders unpinned: a single efficiency core cannot sustain encode submission for one 1920×1200 stream at 100 fps, so that camera backs up and drags its grab thread with it |
-| `thermal_poll_s` | 0 | Seconds between camera temperature polls while acquiring; `0` disables (default 20.0) | Every threshold is read from the camera itself, never from this file, so it works on any model. With polling off, a camera that reaches its shutdown temperature stops delivering mid-session and nothing says so until the recording ends |
-| `trigger_rate_limit` | 165 | Value written to `AcquisitionFrameRate` in triggered mode | **Do not set 0.** Disabling the limiter removes the exposure ceiling but costs 8–15% of frames in transmission (delivery 85–92% instead of 99.98%): the limiter paces each frame's readout across 6.06 ms, and without it every camera bursts at once after the shared trigger and marginal links drop packets |
+## Credits and licence
 
-### Camera registers — `configs/mono8_1920x1200.pfs`
+Isaac Tang (author and maintainer), Kay Tye and Talmo Pereira, of the Tye Lab and the
+Talmo Lab at the Salk Institute.
 
-**These live in the `.pfs` and nowhere else.** No Panopticon config overrides them.
-Re-save the file from pylon Viewer, or edit it directly; it is a plain tab-separated list.
-Exposure and gain are re-applied from this baseline at every acquisition start, and
-clamped if they exceed the ceiling for the frame rate in use, so check the
-`[cam1] exposure=… gain=…` line in the log for what was really set.
-
-| Register | This rig | Notes |
-|---|---|---|
-| `Width` / `Height` | 1920 / 1200 | Region of the sensor read out. Must agree with the profile |
-| `OffsetX` / `OffsetY` | 8 / 8 | Where that region starts |
-| `PixelFormat` | `Mono8` | 8-bit greyscale, one byte per pixel. Anything else is refused at open |
-| `ExposureTime` | 3000.0 µs | **Subject to the exposure ceiling below.** Raised from 2000 µs: the old value left 65% of pixels in levels 0–15 with 21.5% clipped at exactly 0, destroyed at the sensor and unrecoverable by brightening later |
-| `Gain` | 6.000 dB | About 2x. Raised from 0 dB at the same time |
-| `GainAuto` | `Off` | Must stay off. Per-camera automatic gain destroys photometric consistency between views |
-| `AcquisitionFrameRate` | 165.0 | The internal rate limiter. Written from `trigger_rate_limit` |
-| `AcquisitionFrameRateEnable` | 1 | Limiter active |
-| `TriggerMode` (FrameStart) | `On` | Each frame waits for an external edge |
-| `TriggerSource` (FrameStart) | `Line1` | That edge arrives on hardware line 1, from the trigger board |
-| `GevSCPSPacketSize` | 9000 | Jumbo frames. **The NIC and every switch in the path must also be set to 9000** |
-| `GevSCPD` | 10000 | Inter-packet delay in device ticks. Paces packets so switch buffers do not overflow |
-| `BandwidthReserveMode` | `Standard` | Headroom the camera keeps in reserve for resends |
-
-**The exposure ceiling.** The rate timer starts after exposure ends, so the usable
-exposure is `1/frame_rate − 1/trigger_rate_limit`:
-
-| Frame rate | Trigger period | Theoretical ceiling | Enforced clamp (90%) |
-|---|---|---|---|
-| 100 fps (recording) | 10.0 ms | 3.94 ms | 3.55 ms |
-| 30 fps (calibration) | 33.3 ms | 27.3 ms | 24.5 ms |
-
-At the 3000 µs in use there is 0.94 ms of margin against the theoretical ceiling and
-0.55 ms against the clamp, so the `.pfs` value is applied as written. Exceed the ceiling
-and the camera is still busy when the next trigger arrives and **ignores** it, halving its
-effective rate. An ignored trigger produces no frame, so it consumes no block ID and shows
-up as neither a gap nor a packet error. Panopticon catches it by comparing each camera's
-block-ID rate against its own hardware clock; `docs/INTERNALS.md` covers why that check is
-necessary. **Verify any exposure change against a real recording, never the preview.** The
-preview is free-run at 30 fps, where an over-long exposure looks fine.
-
-### Board config — `configs/boards/charuco_8x8_15mm.yaml`
-
-| Field | This board | Notes |
-|---|---|---|
-| `board_x` / `board_y` | 8 / 8 | Squares across and down |
-| `square_length` | 15.0 mm | **Sets the world scale of the entire reconstruction.** Measure the printed board and use the real value; printers scale. Every 3D coordinate downstream is in these units |
-| `marker_length` | 10.0 mm | Side of the ArUco marker inside each white square |
-| `marker_bits` | 4 | ArUco dictionary bit size (4x4) |
-| `dict_size` | 1000 | Dictionary size, i.e. `DICT_4X4_1000` |
-| `board_legacy` | `true` | This board was printed with the pre-OpenCV-4.6 ChArUco layout. Without this flag, OpenCV 4.7+ detects **zero corners, silently**. Defaults to false for boards printed since |
-| `max_frames` | 500 | Present in the file but **not read** by the current solve, which caps intrinsics frames at its own built-in 60 |
-
-### Code constants
-
-Compiled in; listed so they can be found and so log messages make sense.
-
-| Constant | Value | File | Meaning |
-|---|---|---|---|
-| `MAX_NUM_BUFFER` | 1000 | `gui_app/camera_manager.py` | Default only. Driver buffers queued per camera, overridden by the profile's `max_num_buffer`; together with `kick_max_lag` it dominates RAM |
-| `ENCODE_QUEUE_DEPTH` | 200 | `gui_app/grab_thread.py` | Frames that may queue to one encoder thread |
-| `PUT_TIMEOUT_S` | 2.0 | `gui_app/grab_thread.py` | How long a grab thread waits on a full encoder queue before dropping the frame and logging encoder backpressure. Only reached in the decoupled real-time path, not in kick-out mode |
-| `BLOCKID_WRAP` | 65535 | `gui_app/frame_sync.py` | 16-bit block IDs wrap here, about 11 minutes at 100 fps. Unwrapped in software; cameras also try to negotiate 64-bit IDs at open |
-| `BLOCK_RATE_TOL` | 0.003 | `gui_app/frame_sync.py` | Allowed disagreement between a camera's block-ID rate and its device clock. Set from measurement: real sessions sit within 250 ppm |
-| `BLOCK_RATE_MIN_FRAMES` / `_SECONDS` | 300 / 2.0 | `gui_app/frame_sync.py` | Below this the rate check abstains rather than guess |
-| `optimal_shared` | 200 | `gui_app/board_detector.py` | Where a coverage-graph edge reads as "full". The three READY thresholds are **not** constants: they are the profile fields `calibration_min_per_cam_shared`, `calibration_min_edge` and `calibration_min_grid_cells` above, so editing `board_detector.py` changes nothing |
-| `glow_threshold` / `edge_threshold` | 4 / 5 | `gui_app/board_detector.py` | Markers needed to light a node, and to count an edge |
-| `RESERVED_SERIAL_PINS` | 0, 1 | `gui_app/stim_compiler.py` | The board's serial TX/RX. Using them for stimulation is refused, since it would break the link that starts the recording |
-| `FQBN` | `arduino:avr:mega` | `gui_app/stim_compiler.py` | The arduino-cli board target |
-| NVENC session cap | 12 measured here | GPU driver | Not a constant in this code. It is probed, because the cap has moved across driver versions (2, 3, 5, 8, 12). Budget one per camera, plus `encode_parallel`, plus the warm-up session; the preflight probes for `n_cameras + 2` |
-
-### Solve parameters — `1_calibrate.py`
-
-| Parameter | Default | Meaning |
-|---|---|---|
-| `--board-config` | required | The board config to use |
-| `--ref-camera` | `cam1` | Camera whose frame becomes the world frame |
-| `--skip` | 3 | Use every Nth frame. Lower finds more detections and runs slower; 3 is the tested value and 10 visibly degrades the result |
-| `--excluded-views` | none | Cameras to leave out of the solve |
-
-Internally a frame is usable if it shows at least 2 markers and 6 ChArUco corners.
-Intrinsics use up to 60 pose-diverse frames and need at least 20; with more than 60 to
-choose from, frames above the 90th percentile of reprojection error against a rough
-pinhole guess are dropped before selecting. That is a coarse outlier filter, not a quality
-metric. Each stereo pair needs at least 3 shared frames and runs with intrinsics fixed.
-The pairs are chained from the reference camera along a lowest-error spanning tree, **with
-no global bundle adjustment**, so read the pairwise chart rather than one overall number.
-
----
-
-## License
+Panopticon grew out of [campy](https://github.com/ksseverson57/campy) by Kyle Severson
+(MIT licence). The trigger firmware and the raw-capture approach descend from campy, and
+no campy code remains. The Spinnaker C prototype table in `gui_app/backends/_spinc.py`
+extends one from [octacam](https://github.com/NeLy-EPFL/octacam) (Ramdya Lab, EPFL, MIT
+licence), whose notice that file keeps. LUC3D is by Eric Leonardis, Salk Institute.
 
 Panopticon is licensed under the GNU General Public License, version 3 only
-(`GPL-3.0-only`); the full text is in [LICENSE](LICENSE). The GPL is the license
-that the PyQt5 dependency requires of a program built on it, and PyQt5 is kept, so
-the application carries the same terms. campy, the MIT-licensed lineage credited
-above, is compatible with them.
+(`GPL-3.0-only`), the terms PyQt5 requires of a program built on it. The full text is in
+[LICENSE](LICENSE). The MIT licence of the octacam table is compatible with it.
