@@ -2957,9 +2957,23 @@ def _run_triggered(p: Probe, stage: str, cams, src, fps: float,
             # A run that ends early still stops the triggers it started, and
             # a start without its ack may have started them too.
             try:
-                run["stop_after_early_end"] = src.stop("probe run")
+                early_stop = src.stop("probe run")
             except Exception as e:
-                run["stop_after_early_end"] = _err(e)
+                early_stop = _err(e)
+            run["stop_after_early_end"] = early_stop
+            if src.host_started and early_stop is not True:
+                p.check(stage, "the board confirms the stop", "FAIL",
+                        "the run ended early and the board did not confirm "
+                        "the stop"
+                        + (f" ({early_stop})" if isinstance(early_stop, str)
+                           else "")
+                        + ". It may still be triggering. Power-cycle the "
+                        "board.")
+        # `run` is dropped when the run fails, so what the JSON must keep
+        # of it goes into the caller's note as well.
+        if note is not None:
+            note.update({k: run[k] for k in (
+                "grab_timeout_ms", "stop_after_early_end") if k in run})
 
 
 def _stop_cams(p: Probe, cams, grabbers) -> dict:
