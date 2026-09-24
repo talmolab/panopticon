@@ -548,6 +548,13 @@ class CameraManager(QObject):
         if backend is not None and backend != self._backend_name:
             self._backend_name = backend
             self._backend_obj = None
+        if self._backend_obj is None and camera_spec is not None:
+            # RULE: a backend first built here is built with the camera:
+            # block. REASON: a backend can load its SDK from a folder the
+            # block names (flir: camera.flir.sdk_dir), the SDK loads once per
+            # process, and the enumerate below is that load.
+            self._backend_obj = load_backend(self._backend_name,
+                                             camera_spec=camera_spec)
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
             return self._open_failed("No cameras found")

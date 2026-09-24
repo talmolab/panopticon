@@ -1043,6 +1043,11 @@ class ProcessCameraManager(QObject):
         if backend is not None and backend != self._backend_name:
             self._backend_name = backend
             self._backend_obj = None
+        if self._backend_obj is None and camera_spec is not None:
+            # As in CameraManager.open_all: a backend can load its SDK from a
+            # folder the camera: block names, once per process.
+            self._backend_obj = load_backend(self._backend_name,
+                                             camera_spec=camera_spec)
         devices = self._backend.enumerate_devices()
         if len(devices) == 0:
             return self._open_failed("No cameras found")

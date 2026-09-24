@@ -582,13 +582,35 @@ def _import_backend_attr(backend: str, module: str, attr: str):
     return getattr(mod, attr)
 
 
-def load_backend(name: str = "basler") -> CameraBackend:
+def backend_options(name: str, camera_spec=None) -> dict:
+    """The constructor keywords backend `name` takes from the profile's
+    parsed `camera:` block, or {} when it takes none.
+
+    The flir backend takes `sdk_dir` from `camera.flir.sdk_dir`: the folder
+    the Spinnaker library is loaded from. The library loads once per
+    process, when the first FLIR backend is built, so the folder has to
+    reach that first construction; a later one cannot move the library.
+    `camera_spec` is duck-typed, because this module never imports the
+    profile code.
+    """
+    if name == "flir" and camera_spec is not None:
+        sdk_dir = getattr(getattr(camera_spec, "flir", None), "sdk_dir", None)
+        if sdk_dir:
+            return {"sdk_dir": str(sdk_dir)}
+    return {}
+
+
+def load_backend(name: str = "basler", camera_spec=None) -> CameraBackend:
     """Return a backend by name.
 
     The import is lazy, so a missing SDK breaks only the backend that needs
     it, never the application or the other backends. An unknown name raises
     ValueError listing `KNOWN_BACKENDS`. A missing SDK or backend module
     raises an ImportError whose message says what to install.
+
+    `camera_spec` is the profile's parsed `camera:` block, or None. A backend
+    that reads a setting from it before any camera exists gets it here (see
+    `backend_options`); every other backend ignores it.
     """
     if name == "basler":
         from gui_app.backends.basler import BaslerBackend
@@ -605,7 +627,7 @@ def load_backend(name: str = "basler") -> CameraBackend:
         # the searched paths when it is absent.
         flir_cls = _import_backend_attr(name, "gui_app.backends.flir",
                                         "FlirBackend")
-        return flir_cls()
+        return flir_cls(**backend_options(name, camera_spec))
     if name == "flir_sim":
         # The FLIR backend over a simulated Spinnaker library, paced by the
         # same virtual trigger clock as the sim backend (pairs with
@@ -624,13 +646,20 @@ def load_backend(name: str = "basler") -> CameraBackend:
     raise _unknown_backend(name)
 
 
-def sdk_report(name: str) -> str:
+def sdk_report(name: str, camera_spec=None) -> str:
     """One line for the launch preflight: the camera SDK that backend `name`
     uses, its version and location, or why it cannot be loaded.
 
     Importing this package imports no SDK; this call imports the backend's
     module, and with it the SDK, only when asked. Never raises: the preflight
     prints the line whatever it says.
+
+    `camera_spec` is the profile's parsed `camera:` block, or None. When it
+    names where the SDK is loaded from (`backend_options`), the backend is
+    built with that first, so the report describes the library the profile
+    asks for. Without it, a report that runs before the cameras are opened
+    loads the SDK from its default location, and the open then refuses a
+    profile that names another folder.
     """
     if name not in KNOWN_BACKENDS:
         return str(_unknown_backend(name))
@@ -647,6 +676,12 @@ def sdk_report(name: str) -> str:
                                      "FakeSpinC")
                 return ("flir_sim: no camera SDK (simulated Spinnaker "
                         "library, gui_app/backends/fake_spinc.py)")
+        options = backend_options(name, camera_spec)
+        if options:
+            # Built once for its side effect: the SDK loads from the
+            # profile's folder. A failure is the report, because the class's
+            # own report would then load the SDK from its default location.
+            cls(**options)
     except ImportError as e:
         return f"{name}: cannot load ({e})"
     except Exception as e:
