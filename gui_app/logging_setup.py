@@ -122,13 +122,18 @@ _stamp_cache = [-1, ""]
 
 
 def stamp(t: float) -> str:
-    """`t` (time.time()) as local wall-clock time with milliseconds."""
-    sec = int(t)
-    if sec != _stamp_cache[0]:
-        _stamp_cache[1] = datetime.fromtimestamp(sec).strftime(
-            "%Y-%m-%d %H:%M:%S")
-        _stamp_cache[0] = sec
-    ms = int((t - sec) * 1000)
+    """`t` (time.time()) as local wall-clock time with milliseconds. A time
+    the platform cannot convert is written as the raw number, so no line is
+    lost for its stamp."""
+    try:
+        sec = int(t)
+        if sec != _stamp_cache[0]:
+            _stamp_cache[1] = datetime.fromtimestamp(sec).strftime(
+                "%Y-%m-%d %H:%M:%S")
+            _stamp_cache[0] = sec
+        ms = int((t - sec) * 1000)
+    except (OverflowError, OSError, ValueError, TypeError):
+        return f"t={t!r}"
     return f"{_stamp_cache[1]}.{min(ms, 999):03d}"
 
 
@@ -305,6 +310,10 @@ class AsyncLogSink:
 
     # -- the writer thread
     def _run(self) -> None:
+        """RULE: the writer never exits before a stop, whatever a line holds.
+        REASON: with it gone every later print is dropped and no flush
+        returns, so a batch that fails is reported as one line and the loop
+        goes on; its markers are still released."""
         q = self._q
         while True:
             item = q.get()
@@ -314,22 +323,45 @@ class AsyncLogSink:
                     batch.append(q.get_nowait())
                 except queue.Empty:
                     break
-            lines: list = []
-            for it in batch:
-                if type(it) is tuple:
-                    lines.append(it)
-                    continue
-                self._emit(lines)
-                lines = []
-                if isinstance(it, _Mark):
-                    it.offset = self._pos
-                    it.event.set()
-                elif isinstance(it, _Stop):
-                    self._report_drops()
-                    it.event.set()
+            try:
+                if self._write_batch(batch):
                     return
+            except Exception as e:
+                for it in batch:
+                    if isinstance(it, (_Mark, _Stop)) and not it.event.is_set():
+                        if isinstance(it, _Mark):
+                            it.offset = self._pos
+                        it.event.set()
+                try:
+                    self._emit([(time.time(), self.name, 1,
+                                 f"[log] the log writer lost a batch of "
+                                 f"{len(batch)} lines: {type(e).__name__}: "
+                                 f"{e}")])
+                except Exception:
+                    pass
+                if any(isinstance(it, _Stop) for it in batch):
+                    return
+
+    def _write_batch(self, batch) -> bool:
+        """Write one batch, releasing its markers in order. True when the
+        batch held the stop."""
+        lines: list = []
+        for it in batch:
+            if type(it) is tuple:
+                lines.append(it)
+                continue
             self._emit(lines)
-            self._report_drops()
+            lines = []
+            if isinstance(it, _Mark):
+                it.offset = self._pos
+                it.event.set()
+            elif isinstance(it, _Stop):
+                self._report_drops()
+                it.event.set()
+                return True
+        self._emit(lines)
+        self._report_drops()
+        return False
 
     def _report_drops(self) -> None:
         total = self.dropped
@@ -346,8 +378,14 @@ class AsyncLogSink:
             return
         ordered = []
         by_stream = ([], [])
+        now = time.time()
         for t, thread, stream, text in items:
-            if t is None or t < self._last_t:
+            # A time that is not a number, or is ahead of the clock (a
+            # corrupt forwarded line), is replaced by the writer's own, so
+            # it cannot hold every later line at its value.
+            if t is None or not (t <= now + 60.0):
+                t = now
+            if t < self._last_t:
                 t = self._last_t
             self._last_t = t
             line = format_line(t, thread, text) + "\n"
