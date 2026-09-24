@@ -2,14 +2,15 @@
 
 A session is one visit to the rig. You launch Panopticon, choose the rig's
 profile and the output folder, describe the animals, calibrate, solve the
-calibration, optionally load a stimulation paradigm, and record.
+calibration, optionally load a stimulation
+[paradigm](GLOSSARY.md#paradigm), and record.
 
 [OVERVIEW.md](OVERVIEW.md) describes each control of the window.
 [INSTALLATION.md](INSTALLATION.md) covers building and wiring a rig, and
 [CONFIGURATION.md](CONFIGURATION.md) every setting of a profile.
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists the messages Panopticon shows,
 with their causes and fixes, and [GLOSSARY.md](GLOSSARY.md) defines terms such
-as block ID and kick-out.
+as [block ID](GLOSSARY.md#block-id) and [kick-out](GLOSSARY.md#kick-out).
 
 The page is written for a rig of N cameras. A value marked "on the reference
 rig" comes from `profiles/3dpose.yaml`, which describes one nine-camera Basler
@@ -48,8 +49,8 @@ remembers it for later launches. `--force` starts a second copy of Panopticon.
 
 Only one copy runs at a time. A second launch, or a launch while one of
 Panopticon's probes runs, shows `Panopticon is already running` and exits with
-status 3. Two copies would compete for the cameras, the trigger board and the
-GPU encoder. Use `--force` only once you know what the other copy is doing.
+status 3. Two copies would compete for the cameras, the
+[trigger board](GLOSSARY.md#trigger-board) and the GPU encoder. Use `--force` only once you know what the other copy is doing.
 
 A splash screen reads `Loading cameras...` while the window builds.
 
@@ -65,7 +66,8 @@ millisecond, and the name of the thread that printed it:
 
 Near the top, the log holds a header of `[header]` lines. It describes the
 computer: the Panopticon version and git commit, Python, Windows, the CPU,
-RAM, the GPU and NVIDIA driver, the NVENC session cap, package versions and
+RAM, the GPU and NVIDIA driver, the
+[NVENC session](GLOSSARY.md#nvenc-session) cap, package versions and
 the network links. It then lists every field of the profile and each open
 camera. The header is written again at every profile switch and at the start
 of every acquisition.
@@ -103,7 +105,8 @@ Panopticon at launch:
 
    Read the dialog. It stops nothing. The status bar then reads
    `Hardware check done: encoding with <encoder>`.
-3. Puts the trigger board back to the recording-only sketch, which
+3. Puts the trigger board back to the
+   [recording-only sketch](GLOSSARY.md#recording-only-sketch), which
    triggers the cameras and drives no stimulation pin. A paradigm lives in
    the board's flash memory and survives quitting, a power cycle and an
    unplugged cable. So Panopticon reflashes the board at every launch, unless
@@ -257,7 +260,8 @@ Press Snapshot to save one full-resolution PNG per camera into
 
 ## 5. Calibrate
 
-A calibration records a ChArUco board carried through the arena. The solve
+A calibration records a [ChArUco board](GLOSSARY.md#charuco-board) carried
+through the arena. The solve
 ([section 6](#6-solve)) turns it into each camera's lens model and the
 cameras' positions relative to each other.
 
@@ -434,7 +438,7 @@ The `Calibration Warnings` dialog also warns about:
 
 `reprojection_error_histogram.png` is a bar chart titled
 `Pairwise calibration quality`, with one bar per camera pair. Each bar is the
-pair's stereo RMS in pixels. It measures how far the corners seen by the two
+pair's [stereo RMS](GLOSSARY.md#stereo-rms) in pixels. It measures how far the corners seen by the two
 cameras land from where that pair's geometry puts them. The fit uses up to 30
 shared views chosen to span different poses. The number belongs to the pair,
 before the pairs are chained into one coordinate frame.
@@ -1050,7 +1054,7 @@ Each acquisition writes its own copy when it stops. It holds:
 - settings the videos cannot show, among them `trigger_source`, `log_level`,
   `nvenc_upload`, `thermal_warn_margin_c` and `capture_processes`;
 - `kickout`: the triggers decided, kept, kicked out and force-dropped, and the
-  effective frame rate;
+  [effective frame rate](GLOSSARY.md#effective-frame-rate);
 - `log`: the log's level and file, and the lines this acquisition lost;
 - `camera_stream_stats` and `nvenc_upload_used`.
 

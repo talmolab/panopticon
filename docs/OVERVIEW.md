@@ -2,7 +2,8 @@
 
 Panopticon has two windows. The main window is where you preview the cameras,
 calibrate and record. The stimulation editor opens from it and builds the
-optogenetic paradigms the trigger board runs. This page describes each
+optogenetic [paradigms](GLOSSARY.md#paradigm) the
+[trigger board](GLOSSARY.md#trigger-board) runs. This page describes each
 control. [WORKFLOW.md](WORKFLOW.md) walks through a session in order, and
 [GLOSSARY.md](GLOSSARY.md) defines the terms both pages use.
 
@@ -101,7 +102,7 @@ Solve, Record.
 
 Starts and stops a calibration. The cameras are triggered at
 `calibration_frame_rate` with the calibration exposure and gain, and the board
-always runs the recording-only sketch. The coverage display (12) appears. See
+always runs the [recording-only sketch](GLOSSARY.md#recording-only-sketch). The coverage display (12) appears. See
 [WORKFLOW.md](WORKFLOW.md#5-calibrate).
 
 #### 8. Record
@@ -235,8 +236,8 @@ arena. The log line
 
 READY appears once all of these hold at the same time:
 
-1. Every camera has at least `calibration_min_per_cam_shared` co-detection
-   ticks, in which it and at least one other camera saw the board. That is
+1. Every camera has at least `calibration_min_per_cam_shared`
+   [co-detection](GLOSSARY.md#co-detection) ticks, in which it and at least one other camera saw the board. That is
    120 on the reference rig.
 2. Every camera has seen the board in at least `calibration_min_grid_cells` of
    its four quadrants, 3 on the reference rig.
