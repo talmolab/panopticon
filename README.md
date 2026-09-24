@@ -94,9 +94,13 @@ acquisition, and repeats the note when the acquisition ends.
 
 Before step 4, check that the profile's `serial_port` names the trigger board. Opening
 the profile resets the device on that port, and reprograms it unless Panopticon last
-programmed it with the same firmware. On a rig with a laser, switch the laser off or
-block the beam first: the board's pins float while it resets
-([details](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware)).
+programmed it with the same firmware
+([INSTALLATION.md, step 8](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware)).
+
+> [!WARNING]
+> Flashing resets the trigger board, and the laser driver input floats during
+> the reset. Switch the laser off or block the beam before you launch
+> Panopticon, and before Apply, Calibrate, or the first Record after an Apply.
 
 ### Settings to change first
 
