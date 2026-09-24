@@ -502,7 +502,8 @@ and no Qt.
   (`_warm_serial()`) and reclaimed eagerly after every Apply, failed or not
   (`_on_upload_done` after `release_serial_port()`). A lazy open moves the reset
   flash into the first recording. The board resets at launch, on Apply and at a
-  switch to a profile on another port, never at Record.
+  switch to a profile on another port. At Record it resets only when the first
+  start gets no ack (branch 2 below).
 - Every exchange with the board holds the controller's lock. `board_id` is
   cleared on every open and at the start of every ack wait.
 - Every start is confirmed by an `RDY <n_cams> <fps> <id>` ack, because a start
@@ -521,8 +522,10 @@ and no Qt.
   the first attempt or the reopen, and when the caller's `may_retry` veto
   returns False. Every caller that starts the board under armed cameras (the
   GUI, `probe_lag.py`, `probe_flir.py`) passes a veto that refuses once any
-  camera counted frames, on any firmware. The reset restarts the board's trigger
-  count but not the cameras' block IDs.
+  camera counted frames, on any firmware. The exception is the local-only
+  `probe_lag.py --no-ready-barrier`, which exists only to compare with
+  recordings made before the barrier and passes none. The reset restarts the
+  board's trigger count but not the cameras' block IDs.
 - Closing the GUI never leaves the board triggering, a paradigm running or the
   laser on. Quitting always calls `stop_and_close()`. Under the controller's
   lock and after any start in flight, it stops the board if the link is open,
@@ -544,7 +547,7 @@ and no Qt.
   open by a dedicated pin. Stay on the TTL toggle; analog mode maps 0-5 V onto
   laser power.
 - Flash only sketches that `stim_compiler` generates. A sketch without the
-  `stim_safe_pins` boot guard, such as campy's trigger sketch, leaves the laser
+  `stim_safe_pins` boot guard, such as a stock trigger sketch, leaves the laser
   pin floating at every reset.
 
 ## Network
