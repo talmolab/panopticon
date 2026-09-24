@@ -148,7 +148,9 @@ until someone analyses it.
   `with result.GetArrayZeroCopy() as img:`. `np.frombuffer(GetBuffer())` copies
   too.
 - `img` is a view over the driver buffer. It must not leave the `with` block or
-  outlive `result.Release()`, and every consumer copies out of it.
+  outlive `result.Release()`, and every consumer copies out of it. After the
+  release the driver refills or frees that buffer, so a consumer that keeps
+  `img` reads another frame's pixels or freed memory.
 - `result.PaddingX` and `result.PaddingY` are checked on every frame, before the
   `with`. A nonzero value retires the camera, because row padding shears every
   frame. They are grab-result fields and always present; the `PaddingX`
