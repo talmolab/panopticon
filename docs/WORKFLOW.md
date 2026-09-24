@@ -256,12 +256,20 @@ the profile's `board_config` names. On the reference rig that is
 `configs/boards/charuco_8x8_15mm.yaml`: 8 × 8 squares of 15.0 mm, 10.0 mm
 markers from the 4×4 dictionary of 1000, printed in the layout OpenCV used
 before 4.6 (`board_legacy: true`). Count the squares on your board and
-measure one.
+measure one before you calibrate.
 
-A wrong square count, dictionary or layout gives no detections. The coverage
-display never lights up and the solve finds no board. A wrong `square_length`
-gives a solve that looks good and a 3D reconstruction at the wrong scale,
-because every reprojection error is the same at any scale.
+The coverage display counts board markers only, so it catches only some
+mismatches:
+
+- A board printed from another dictionary than `marker_bits` and `dict_size`
+  name can give no detections at all. The coverage display then stays dark.
+- A wrong square count or layout (`board_x`, `board_y`, `board_legacy`) still
+  finds every marker. The display lights up and can reach READY, and the solve
+  then finds few or no board corners.
+- A wrong `square_length` gives a solve that looks good and a 3D
+  reconstruction at the wrong scale, because every reprojection error is the
+  same at any scale.
+
 [CONFIGURATION.md](CONFIGURATION.md#board_config) describes the board file.
 
 ### Start
