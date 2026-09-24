@@ -452,24 +452,37 @@ class MainWindow(QMainWindow):
         thread of its own, for a caller on the UI thread. Nothing happens
         when logging is not installed (the offline tests) or no acquisition
         was armed.
-        """
-        mark, video_dir = self._log_mark, self._video_dir
-        if mark is None or video_dir is None or not logging_setup.installed():
-            return
-        dest = Path(video_dir) / logging_setup.SESSION_LOG_NAME
 
-        def write():
-            if not Path(video_dir).is_dir():
+        RULE: never raises. REASON: the finalize calls it after the session
+        is saved and before the preview restore, and an exception there
+        would report a saved session as a failed finalize and abandon the
+        cameras; a session.log that cannot be written costs a line.
+        """
+        def write(mark, dest):
+            try:
+                if not dest.parent.is_dir():
+                    return
+                path = logging_setup.write_session_log(mark, dest, note=note)
+                if path is not None:
+                    print(f"[log] {path.name} written ({note}): {path}",
+                          flush=True)
+            except Exception as e:
+                print(f"[log] session.log could not be written ({note}): "
+                      f"{type(e).__name__}: {e}", flush=True)
+        try:
+            mark, video_dir = self._log_mark, self._video_dir
+            if (mark is None or video_dir is None
+                    or not logging_setup.installed()):
                 return
-            path = logging_setup.write_session_log(mark, dest, note=note)
-            if path is not None:
-                print(f"[log] {path.name} written ({note}): {path}",
-                      flush=True)
-        if wait:
-            write()
-        else:
-            threading.Thread(target=write, daemon=True,
-                             name="session-log").start()
+            dest = Path(video_dir) / logging_setup.SESSION_LOG_NAME
+            if wait:
+                write(mark, dest)
+            else:
+                threading.Thread(target=write, args=(mark, dest), daemon=True,
+                                 name="session-log").start()
+        except Exception as e:
+            print(f"[log] session.log could not be written ({note}): "
+                  f"{type(e).__name__}: {e}", flush=True)
 
     def _open_cameras(self):
         """Open cameras for the current profile (synchronous — startup only).
