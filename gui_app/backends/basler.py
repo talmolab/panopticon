@@ -11,6 +11,9 @@ about these cameras; the comments are the point, not decoration.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+from gui_app import logging_setup
 
 try:
     import pypylon.genicam as genicam
@@ -80,7 +83,13 @@ class BaslerBackend:
         # checks the result.
         pylon.FeaturePersistence.Load(pfs_path, cam.GetNodeMap(), False)
         cam.MaxNumBuffer.SetValue(max_num_buffer)
-        self._log_timestamp_clock(cam, device.GetSerialNumber())
+        serial = device.GetSerialNumber()
+        self._log_timestamp_clock(cam, serial)
+        if logging_setup.verbose():
+            self._log_pfs_readback(cam, pfs_path, serial)
+            self._log_readback(cam, serial, "open", (
+                ("MaxNumBuffer", max_num_buffer, self._read_attr(
+                    cam, "MaxNumBuffer")),))
         return cam
 
     def describe(self, cam) -> dict:
@@ -92,12 +101,198 @@ class BaslerBackend:
         **mod 256 with no error at all**, producing a full-length, perfectly
         aligned, visually shredded recording.
         """
-        return {
+        out = {
             "width": cam.Width.GetValue(),
             "height": cam.Height.GetValue(),
             "pixel_format": cam.PixelFormat.GetValue(),
             "serial": cam.GetDeviceInfo().GetSerialNumber(),
         }
+        out.update(self._device_facts(cam))
+        return out
+
+    #: Device classes pylon reports, as the session header words them.
+    INTERFACES = {"BaslerGigE": "GigE", "BaslerUsb": "USB3",
+                  "BaslerCamEmu": "emulated"}
+
+    @classmethod
+    def _device_facts(cls, cam) -> dict:
+        """Model, firmware, interface and link speed for the session header,
+        each only when the camera reports it. Never raises: a fact the
+        camera does not give is left out, and the header says so."""
+        out = {}
+        try:
+            info = cam.GetDeviceInfo()
+        except Exception:
+            info = None
+        for key, getter in (("model", "GetModelName"),
+                            ("interface", "GetDeviceClass")):
+            try:
+                value = str(getattr(info, getter)())
+            except Exception:
+                continue
+            if value:
+                out[key] = (cls.INTERFACES.get(value, value)
+                            if key == "interface" else value)
+        firmware = cls._read(cam, "DeviceFirmwareVersion")
+        if not cls._unread(firmware):
+            out["firmware"] = firmware
+        elif info is not None:
+            try:
+                version = str(info.GetDeviceVersion())
+                if version:
+                    out["firmware"] = f"device version {version}"
+            except Exception:
+                pass
+        for node, unit in cls.LINK_SPEED_NODES:
+            value = cls._read(cam, node)
+            if cls._unread(value):
+                continue
+            if unit == "B/s":
+                try:
+                    value = f"{float(value) * 8 / 1e6:g} Mb/s"
+                except ValueError:
+                    pass
+            elif unit:
+                value = f"{value} {unit}"
+            out["link_speed"] = f"{value} ({node})"
+            break
+        return out
+
+    #: Nodes that report a camera's link speed, in the order tried, with the
+    #: unit each is in: SFNC's DeviceLinkSpeed (bytes/s), the GigE Vision
+    #: GevLinkSpeed (Mb/s), and the USB3 speed mode (a word).
+    LINK_SPEED_NODES = (("DeviceLinkSpeed", "B/s"), ("GevLinkSpeed", "Mb/s"),
+                        ("BslUSBSpeedMode", ""))
+
+    # ------------------------------------------------------ read-back logging
+    # At verbose and above, every setting written at open and at each mode
+    # change is logged with the value requested and the value the camera
+    # reads back afterwards. These run on the thread configuring the camera
+    # (open, and the start and preview-restore paths), never in the grab
+    # loop.
+
+    @staticmethod
+    def _unread(text: str) -> bool:
+        return text in ("absent",) or text.startswith("unreadable")
+
+    @staticmethod
+    def _read(cam, name: str, grabber: bool = False) -> str:
+        """A node's current value as text, "absent" when the camera has no
+        such node, or "unreadable (...)"; never raises."""
+        try:
+            nodemap = (cam.GetStreamGrabberNodeMap() if grabber
+                       else cam.GetNodeMap())
+            node = nodemap.GetNode(name)
+            if node is None:
+                return "absent"
+            if hasattr(node, "ToString"):
+                return str(node.ToString())
+            return str(node.GetValue())
+        except Exception as e:
+            return f"unreadable ({type(e).__name__})"
+
+    @staticmethod
+    def _read_attr(cam, name: str) -> str:
+        """Like _read, for an InstantCamera parameter (MaxNumBuffer) that is
+        an attribute of the camera object rather than a node-map node."""
+        try:
+            return str(getattr(cam, name).GetValue())
+        except Exception as e:
+            return f"unreadable ({type(e).__name__})"
+
+    @staticmethod
+    def _same(want, got) -> bool:
+        """Whether a read-back matches the value written: as numbers when
+        both are numbers (3000.0 and 3000 match, and 1 and True), else as
+        text."""
+        words = {"true": 1.0, "false": 0.0}
+
+        def num(v):
+            if isinstance(v, bool):
+                return float(v)
+            text = str(v).strip().lower()
+            if text in words:
+                return words[text]
+            return float(text)
+        try:
+            a, b = num(want), num(got)
+            return abs(a - b) <= max(1e-6, 1e-4 * abs(a))
+        except (TypeError, ValueError):
+            return str(want).strip() == str(got).strip()
+
+    @classmethod
+    def _log_readback(cls, cam, serial, phase: str, rows) -> None:
+        """One line per phase: 'name requested -> read back' for each
+        (name, requested, read back) in `rows`, with the ones that differ
+        marked."""
+        parts = []
+        for name, want, got in rows:
+            mark = "" if cls._same(want, got) else " (differs)"
+            parts.append(f"{name} {want} -> {got}{mark}")
+        if parts:
+            print(f"[basler] {serial} {phase} read-back: " + ", ".join(parts),
+                  flush=True)
+
+    @staticmethod
+    def _serial(cam) -> str:
+        try:
+            return str(cam.GetDeviceInfo().GetSerialNumber())
+        except Exception:
+            return "?"
+
+    @staticmethod
+    def pfs_features(pfs_path) -> tuple:
+        """([(name, value)] of the .pfs lines that name a feature without a
+        selector, number of selector-qualified lines). A qualified line
+        (name, "{Selector=Value}" and value, tab-separated) applies under
+        one selector value,
+        and reading it back would mean writing the selector, so it is only
+        counted. Returns None for a file that cannot be read."""
+        try:
+            text = Path(pfs_path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            return None
+        plain, qualified = [], 0
+        for line in text.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if len(fields) >= 3 and fields[1].startswith("{"):
+                qualified += 1
+            elif len(fields) >= 2:
+                plain.append((fields[0].strip(), fields[1].strip()))
+        return plain, qualified
+
+    @classmethod
+    def _log_pfs_readback(cls, cam, pfs_path, serial) -> None:
+        """At verbose, the .pfs features read back after the load: a count,
+        and a line for each feature the camera holds at another value; at
+        debug, a line for every feature."""
+        features = cls.pfs_features(pfs_path)
+        if features is None:
+            print(f"[basler] {serial} .pfs read-back skipped: {pfs_path} "
+                  f"could not be read here", flush=True)
+            return
+        plain, qualified = features
+        differ = same = unread = 0
+        for name, want in plain:
+            got = cls._read(cam, name)
+            if cls._unread(got):
+                unread += 1
+                ok = None
+            else:
+                ok = cls._same(want, got)
+                same += bool(ok)
+                differ += not ok
+            if ok is False or logging_setup.debug():
+                verdict = ("" if ok else " (differs)" if ok is False
+                           else " (not read back)")
+                print(f"[basler] {serial} .pfs {name}: file {want}, camera "
+                      f"{got}{verdict}", flush=True)
+        print(f"[basler] {serial} .pfs read-back of {Path(pfs_path).name}: "
+              f"{same} features as written, {differ} differ, {unread} not "
+              f"readable, {qualified} selector-qualified lines not read "
+              f"back", flush=True)
 
     # ---------------------------------------------------------- timestamp clock
     #: The tick rate the capture path assumes: `GrabResultProtocol.TimeStamp`
@@ -219,6 +414,13 @@ class BaslerBackend:
                 grabber_ok = True
         except Exception as e:
             print(f"[cam{i+1}] UseExtendedIdIfAvailable unavailable: {e}", flush=True)
+        if logging_setup.verbose():
+            BaslerBackend._log_readback(
+                cam, BaslerBackend._serial(cam), "block IDs", (
+                    ("GevGVSPExtendedIDMode", "On", BaslerBackend._read(
+                        cam, "GevGVSPExtendedIDMode")),
+                    ("UseExtendedIdIfAvailable", True, BaslerBackend._read(
+                        cam, "UseExtendedIdIfAvailable", grabber=True))))
         ok = cam_ok and grabber_ok
         if ok:
             status = "enabled"
@@ -255,6 +457,9 @@ class BaslerBackend:
                 if avail is None or avail.GetValue():
                     t.FromString(sym)
             extra = ""
+            rows = []
+            if sym is not None:
+                rows.append(("Type", sym, t.ToString()))
             if t.ToString() == "SocketDriver":
                 # Max the per-stream socket receive buffer: more slack for the
                 # receive thread when the encoders contend for CPU.
@@ -262,11 +467,16 @@ class BaslerBackend:
                     sbs = sg.GetNode("SocketBufferSize")
                     sbs_max = sg.GetNode("SocketBufferSize_Max")
                     if sbs is not None and sbs_max is not None:
-                        sbs.SetValue(sbs_max.GetValue())
+                        want = sbs_max.GetValue()
+                        sbs.SetValue(want)
                         extra = f" (SocketBufferSize={sbs.GetValue()} KB)"
+                        rows.append(("SocketBufferSize", want, sbs.GetValue()))
                 except Exception:
                     pass
             print(f"[cam{i+1}] GigE stream driver: {t.ToString()}{extra}", flush=True)
+            if logging_setup.verbose():
+                BaslerBackend._log_readback(
+                    cam, BaslerBackend._serial(cam), "stream driver", rows)
         except Exception as e:
             print(f"[cam{i+1}] GigE driver selection skipped: {e}", flush=True)
 
@@ -317,18 +527,24 @@ class BaslerBackend:
         out = {}
         if percent is None and accumulation is None:
             return out
+        rows = []
         mode = cls._optional_node(cam, "BandwidthReserveMode")
         if mode is not None:
             mode.FromString("Manual")
             out["BandwidthReserveMode"] = mode.ToString()
+            rows.append(("BandwidthReserveMode", "Manual", mode.ToString()))
         if percent is not None:
             node = cls._require_node(cam, "GevSCBWR")
             node.SetValue(int(percent))
             out["GevSCBWR"] = int(node.GetValue())
+            rows.append(("GevSCBWR", int(percent), out["GevSCBWR"]))
         if accumulation is not None:
             node = cls._require_node(cam, "GevSCBWRA")
             node.SetValue(int(accumulation))
             out["GevSCBWRA"] = int(node.GetValue())
+            rows.append(("GevSCBWRA", int(accumulation), out["GevSCBWRA"]))
+        if logging_setup.verbose():
+            cls._log_readback(cam, cls._serial(cam), "bandwidth reserve", rows)
         bwa = cls._optional_node(cam, "GevSCBWA")
         if bwa is not None:
             try:
@@ -420,6 +636,20 @@ class BaslerBackend:
         cam.TriggerSelector.SetValue("FrameStart")
         cam.AcquisitionFrameRateEnable.SetValue(True)
         cam.AcquisitionFrameRate.SetValue(float(fps))
+        if logging_setup.verbose():
+            self._log_mode_readback(cam, "free-run", (
+                ("TriggerSelector", "FrameStart"), ("TriggerMode", "Off"),
+                ("AcquisitionFrameRateEnable", True),
+                ("AcquisitionFrameRate", float(fps))))
+
+    @classmethod
+    def _log_mode_readback(cls, cam, phase: str, requested) -> None:
+        """Read back each (node, requested value) of a mode change. The
+        selector is FrameStart after both mode changes, so TriggerMode reads
+        FrameStart's."""
+        cls._log_readback(cam, cls._serial(cam), phase,
+                          [(name, want, cls._read(cam, name))
+                           for name, want in requested])
 
     @classmethod
     def _other_trigger_selectors(cls, cam) -> list:
@@ -467,14 +697,22 @@ class BaslerBackend:
         cam.TriggerMode.SetValue("On")
         cam.TriggerSource.SetValue("Line1")
         cam.TriggerActivation.SetValue("RisingEdge")
+        requested = [("TriggerSelector", "FrameStart"), ("TriggerMode", "On"),
+                     ("TriggerSource", "Line1"),
+                     ("TriggerActivation", "RisingEdge")]
         if rate_limit and rate_limit > 0:
             cam.AcquisitionFrameRateEnable.SetValue(True)
             cam.AcquisitionFrameRate.SetValue(float(rate_limit))
+            requested += [("AcquisitionFrameRateEnable", True),
+                          ("AcquisitionFrameRate", float(rate_limit))]
         else:
             cam.AcquisitionFrameRateEnable.SetValue(False)
+            requested.append(("AcquisitionFrameRateEnable", False))
             if announce:
                 print("[cam] trigger-rate limiter DISABLED "
                       "(exposure bounded by sensor readout only)", flush=True)
+        if logging_setup.verbose():
+            self._log_mode_readback(cam, "trigger mode", requested)
 
     # ------------------------------------------------------------ exposure/gain
     #: Candidate node names per control, newest SFNC spelling first. The
