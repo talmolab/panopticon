@@ -338,8 +338,9 @@ uv run probe_flir.py --fake
 
 `--fake` runs `--list`, `--find-line`, `--selftest` and a 20 s `--triggered` on
 three simulated cameras and a simulated trigger board, with the
-[`flir_sim`](../profiles/templates/flir_sim.yaml) template as its profile. It needs no camera, SDK or board, and takes about a minute. It prints
-the same table a real run prints, and on the simulation no check fails.
+[`flir_sim`](../profiles/templates/flir_sim.yaml) template as its profile. It
+needs no camera, SDK or board, and takes about a minute. It prints the same
+table a real run prints, and on the simulation no check fails.
 
 ### The stages
 
