@@ -173,8 +173,11 @@ class BaslerBackend:
     # loop.
 
     @staticmethod
-    def _unread(text: str) -> bool:
-        return text in ("absent",) or text.startswith("unreadable")
+    def _unread(text) -> bool:
+        """Whether `text` is _read's word for a node it could not read. A
+        value that is not text (a caller's own int read-back) never is."""
+        return isinstance(text, str) and (text == "absent"
+                                          or text.startswith("unreadable"))
 
     @staticmethod
     def _read(cam, name: str, grabber: bool = False) -> str:
@@ -225,18 +228,27 @@ class BaslerBackend:
     def _log_readback(cls, cam, serial, phase: str, rows) -> None:
         """One line per phase: 'name requested -> read back' for each
         (name, requested, read back) in `rows`, with the ones that differ
-        marked."""
-        parts = []
-        for name, want, got in rows:
-            if cls._unread(got):
-                # An absent node, or a read that failed: not a mismatch.
-                mark = " (not read back)"
-            else:
-                mark = "" if cls._same(want, got) else " (differs)"
-            parts.append(f"{name} {want} -> {got}{mark}")
-        if parts:
-            print(f"[basler] {serial} {phase} read-back: " + ", ".join(parts),
-                  flush=True)
+        marked.
+
+        RULE: never raises. REASON: it runs inside the open and mode-change
+        writes at the default level, and a line that cannot be formatted
+        must cost the line, not the camera's configuration.
+        """
+        try:
+            parts = []
+            for name, want, got in rows:
+                if cls._unread(got):
+                    # An absent node, or a read that failed: not a mismatch.
+                    mark = " (not read back)"
+                else:
+                    mark = "" if cls._same(want, got) else " (differs)"
+                parts.append(f"{name} {want} -> {got}{mark}")
+            if parts:
+                print(f"[basler] {serial} {phase} read-back: "
+                      + ", ".join(parts), flush=True)
+        except Exception as e:
+            print(f"[basler] {serial} {phase} read-back could not be logged: "
+                  f"{type(e).__name__}: {e}", flush=True)
 
     @staticmethod
     def _serial(cam) -> str:

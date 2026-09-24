@@ -1386,7 +1386,7 @@ class FlirBackend:
         parts = []
         for name, want, got in rows:
             want_txt = f"{want:g}" if isinstance(want, float) else str(want)
-            if got == "not readable" or got.startswith("unreadable"):
+            if got == "not readable" or str(got).startswith("unreadable"):
                 # A write-only node, or a read that failed: not a mismatch.
                 mark = " (not read back)"
             else:
