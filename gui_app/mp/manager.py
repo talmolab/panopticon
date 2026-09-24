@@ -1015,7 +1015,8 @@ class ProcessCameraManager(QObject):
                  max_num_buffer: int = 1000, only_serials=None,
                  backend: str | None = None, expect_geometry=None,
                  gev_bandwidth_reserve_pct=None,
-                 gev_bandwidth_reserve_accum=None, camera_spec=None):
+                 gev_bandwidth_reserve_accum=None, camera_spec=None,
+                 frame_rate=None):
         """CameraManager.open_all, with the cameras opened by the workers.
 
         The parent resolves cam1..camN and applies the camera-count
@@ -1024,6 +1025,11 @@ class ProcessCameraManager(QObject):
         its own share with the same keywords. The cameras must agree on
         their geometry, as they must in one process. Returns True, or a
         falsy CameraOpenError carrying the reason.
+
+        frame_rate is in the signature because rig_setup.open_kwargs passes
+        only the keywords a manager names: without it the workers' open
+        would never see the profile's frame_rate, and a backend that checks
+        the rate at open would check it only at the first acquisition.
         """
         if self._workers:
             self.close_all()
@@ -1059,7 +1065,7 @@ class ProcessCameraManager(QObject):
                   "expect_geometry": expect_geometry,
                   "gev_bandwidth_reserve_pct": gev_bandwidth_reserve_pct,
                   "gev_bandwidth_reserve_accum": gev_bandwidth_reserve_accum,
-                  "camera_spec": camera_spec}
+                  "camera_spec": camera_spec, "frame_rate": frame_rate}
         calls = {w: w.call("open", kwargs=kwargs, flags=self._flags(),
                            affinity=self._affinity())
                  for w in self._workers}

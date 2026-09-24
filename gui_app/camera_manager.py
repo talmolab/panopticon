@@ -444,7 +444,7 @@ class CameraManager(QObject):
                  expect_geometry=None,
                  gev_bandwidth_reserve_pct=None,
                  gev_bandwidth_reserve_accum=None,
-                 camera_spec=None):
+                 camera_spec=None, frame_rate=None):
         """trigger_rate_limit: AcquisitionFrameRate to apply in trigger mode, or
         0 to disable the limiter altogether — see _set_trigger_mode.
 
@@ -487,6 +487,14 @@ class CameraManager(QObject):
         backend.open as camera_spec only when not None, so a backend written
         before the block existed keeps working; a backend whose settings come
         from elsewhere refuses a non-None value (Basler: the .pfs).
+
+        frame_rate: the profile's frame_rate, or None. It reaches
+        backend.open as frame_rate, and expect_geometry reaches it as
+        frame_size, only when the backend's open takes that keyword by name
+        (_backend_open_kwargs). A backend that takes them programs the ROI
+        from the profile and refuses at open a rate its camera cannot
+        record. One that does not (Basler: the .pfs holds the ROI) is called
+        as before.
 
         Returns True when every camera opened, or a falsy CameraOpenError
         carrying the reason (which is also emitted on `error` and left on
@@ -536,6 +544,9 @@ class CameraManager(QObject):
         # The keyword is passed only for a profile that has a camera: block,
         # so a backend written before the block existed is called as before.
         spec_kw = {} if camera_spec is None else {"camera_spec": camera_spec}
+        spec_kw.update(self._backend_open_kwargs(
+            frame_size=tuple(expect_geometry) if expect_geometry else None,
+            frame_rate=frame_rate))
         infos = []
         fix = self._settings_source()
         for i, dev in enumerate(sorted_devs):
@@ -928,6 +939,24 @@ class CameraManager(QObject):
                                              exp, gain))
         if collect:
             self.last_warnings.extend(found)
+
+    def _backend_open_kwargs(self, **values) -> dict:
+        """The keywords of `values` that are not None and that the backend's
+        open() takes by name, read with inspect.signature. A backend that
+        takes **kwargs gets all of them. A backend written before a keyword
+        existed does not take it and is called without it, and one whose
+        signature cannot be read gets none of them."""
+        try:
+            params = inspect.signature(self._backend.open).parameters
+        except (TypeError, ValueError):
+            return {}
+        any_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                     for p in params.values())
+        return {k: v for k, v in values.items()
+                if v is not None and (any_kw or (
+                    k in params and params[k].kind in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY)))}
 
     @staticmethod
     def _call_binds(fn, *args, **kwargs) -> bool:
