@@ -4056,8 +4056,17 @@ def stage_exposure_sweep(p: Probe):
                 hi = mid
         for cam in cams:
             p.backend.set_exposure_gain(cam, exposure_us=e0)
-            mine = [(r["exposure_us"], r["per_camera"].get(cam.serial, {}))
-                    for r in rep["steps"]]
+            # The exposure each step ran at is what the camera read back:
+            # set_exposure_gain clamps a target into the node's range.
+            mine, clamped = [], []
+            for r in rep["steps"]:
+                pc = r["per_camera"].get(cam.serial, {})
+                got = pc.get("exposure_set")
+                ran = float(got) if got is not None else r["exposure_us"]
+                if abs(ran - r["exposure_us"]) > max(1.0,
+                                                     1e-3 * r["exposure_us"]):
+                    clamped.append([r["exposure_us"], round(ran, 1)])
+                mine.append((ran, pc))
             ok_steps = [e for e, r in mine if r.get("ok")]
             bad = [e for e, r in mine if r.get("ok") is False]
             longest = max(ok_steps) if ok_steps else None
@@ -4065,7 +4074,7 @@ def stage_exposure_sweep(p: Probe):
             ceiling = info[cam.serial].get("ceiling_us")
             rep["per_camera"][cam.serial] = {
                 "longest_ok_us": longest, "first_failing_us": first_bad,
-                "backend_ceiling_us": ceiling}
+                "backend_ceiling_us": ceiling, "clamped_steps": clamped}
             if longest is None:
                 ans = None
             else:
@@ -4074,6 +4083,11 @@ def stage_exposure_sweep(p: Probe):
                         if first_bad else " (the longest step tried)")
                 if ceiling is not None:
                     ans += f"; the backend's ceiling is {ceiling:.0f} us"
+            if clamped:
+                p.check("exposure_sweep", f"{cam.serial} exposure steps the "
+                        f"camera clamped", "INFO", ", ".join(
+                            f"{t:.0f} us ran at {g:.0f} us"
+                            for t, g in clamped))
             p.answer("exposure_ceiling_real", cam.serial, ans,
                      **rep["per_camera"][cam.serial])
             safe = ceiling is not None and longest is not None and (
