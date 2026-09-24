@@ -203,7 +203,9 @@ until someone analyses it.
   `2_align.py`) re-encodes to the common frames afterwards. A replace refuses
   while a camera ended early, started late or stopped for more than 1 s, unless
   that camera is excluded (`--exclude`, or `RETIRED.json`) or
-  `--truncate-to-shortest` is given. Anything that rewrites `blockids.npy`
+  `--truncate-to-shortest` is given. A replace decodes with
+  `-fps_mode passthrough` and refuses when a camera's decoded frame count is not
+  the length of its `blockids.npy`. Anything that rewrites `blockids.npy`
   rewrites `stim_trace.csv`.
 - A Basler 16-bit block ID wraps at 65535 (about 11 minutes at 100 fps). Every
   unwrap uses one rule, a drop of more than half a period is a wrap
