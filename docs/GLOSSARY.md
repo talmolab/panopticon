@@ -111,10 +111,8 @@ name it during a recording.
 The longest exposure a camera can use at a given frame rate and still take every
 trigger. A camera over the ceiling ignores some triggers, and [Block ID](#block-id)
 says which checks find them on each kind of camera. Check an exposure change on a
-recording: the preview is free-run, where an
-over-long exposure looks fine. The Basler rule is under
-[`trigger_rate_limit`](CONFIGURATION.md#trigger_rate_limit), and the FLIR rule is in
-[FLIR.md](FLIR.md#the-exposure-ceiling).
+recording: the preview is free-run, where an over-long exposure looks fine.
+[CONFIGURATION.md](CONFIGURATION.md#exposure-ceiling) gives each vendor's rule.
 
 ## Capture and encoding
 
