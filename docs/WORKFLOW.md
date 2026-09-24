@@ -50,7 +50,8 @@ remembers it for later launches. `--force` starts a second copy of Panopticon.
 Only one copy runs at a time. A second launch, or a launch while one of
 Panopticon's probes runs, shows `Panopticon is already running` and exits with
 status 3. Two copies would compete for the cameras, the
-[trigger board](GLOSSARY.md#trigger-board) and the GPU encoder. Use `--force` only once you know what the other copy is doing.
+[trigger board](GLOSSARY.md#trigger-board) and the GPU encoder. Use `--force`
+only once you know what the other copy is doing.
 
 A splash screen reads `Loading cameras...` while the window builds.
 
@@ -261,9 +262,8 @@ Press Snapshot to save one full-resolution PNG per camera into
 ## 5. Calibrate
 
 A calibration records a [ChArUco board](GLOSSARY.md#charuco-board) carried
-through the arena. The solve
-([section 6](#6-solve)) turns it into each camera's lens model and the
-cameras' positions relative to each other.
+through the arena. The solve ([section 6](#6-solve)) turns it into each
+camera's lens model and the cameras' positions relative to each other.
 
 ### Check the board first
 
@@ -438,10 +438,11 @@ The `Calibration Warnings` dialog also warns about:
 
 `reprojection_error_histogram.png` is a bar chart titled
 `Pairwise calibration quality`, with one bar per camera pair. Each bar is the
-pair's [stereo RMS](GLOSSARY.md#stereo-rms) in pixels. It measures how far the corners seen by the two
-cameras land from where that pair's geometry puts them. The fit uses up to 30
-shared views chosen to span different poses. The number belongs to the pair,
-before the pairs are chained into one coordinate frame.
+pair's [stereo RMS](GLOSSARY.md#stereo-rms) in pixels. It measures how far
+the corners seen by the two cameras land from where that pair's geometry puts
+them. The fit uses up to 30 shared views chosen to span different poses. The
+number belongs to the pair, before the pairs are chained into one coordinate
+frame.
 
 | Colour | Stereo RMS | Meaning |
 |---|---|---|
@@ -767,9 +768,8 @@ With real-time kick-out (`realtime_kick: true`, the default), Panopticon
 drops every trigger that some camera missed while it records, so every video
 holds the same triggers. The status bar reports capture health each time
 the [frame-rate labels](OVERVIEW.md#3-frame-rate) refresh. In kick-out it
-counts how many triggers the slowest camera is
-behind the fastest, against a cap of `kick_max_lag` (480 on the reference
-rig).
+counts how many triggers the slowest camera is behind the fastest, against a
+cap of `kick_max_lag` (480 on the reference rig).
 
 | Status bar | Meaning |
 |---|---|
@@ -798,14 +798,13 @@ the camera reports, minus the profile's `thermal_warn_margin_c`
 (2 C on the reference rig, so 79 C on cameras that shut down at 81 C). It also
 fires whenever a camera reports its own over-temperature state. On a camera
 that reports its shutdown temperature, the `Critical` status alone does not
-raise it. A camera that reports no
-shutdown temperature is judged by its own status instead: any status but `Ok`
-raises the alert, `Critical` included. A camera that reports neither cannot be
-watched. The log says once per camera which rule applies
+raise it. A camera that reports no shutdown temperature is judged by its own
+status instead: any status but `Ok` raises the alert, `Critical` included. A
+camera that reports neither cannot be watched. The log says once per camera
+which rule applies
 (`[acq] thermal watch: camN reports no shutdown temperature`). The warning
-reaches `WARNINGS.txt`
-when the recording lost frames, and always when a camera reached its shutdown
-point. `camera_thermals` in `session_metadata.json` records each camera's
+reaches `WARNINGS.txt` when the recording lost frames, and always when a
+camera reached its shutdown point. `camera_thermals` in `session_metadata.json` records each camera's
 temperatures. Read `temp_max_c` there, because the current temperature falls
 as soon as the load comes off.
 
@@ -837,8 +836,9 @@ order:
    nothing.
 4. To finish, stop the source. The recording ends once no camera has received
    a frame for 2 s. If you flip Record off before you stop the source, the
-   label reads `STOP YOUR TRIGGER SOURCE`. Panopticon waits up to 30 s for the source to
-   stop, then stops the cameras itself and notes it in `WARNINGS.txt`.
+   label reads `STOP YOUR TRIGGER SOURCE`. Panopticon waits up to 30 s for the
+   source to stop, then stops the cameras itself and notes it in
+   `WARNINGS.txt`.
 
 Panopticon cannot read the source's rate. After the recording, the block-ID
 rate check compares each camera against `frame_rate`.
