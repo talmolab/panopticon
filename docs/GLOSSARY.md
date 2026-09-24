@@ -396,8 +396,8 @@ logs anything per frame or makes a capture thread wait.
 
 ### session.log
 
-The part of the log from an acquisition's start to its finalize, copied into that
-acquisition's folder beside `session_metadata.json`. The full log of each launch is
+The part of the log that covers one acquisition, from its start until its files are
+written, copied into that acquisition's folder beside `session_metadata.json`. The full log of each launch is
 `logs/panopticon_<date>_<time>.log` in the Panopticon folder.
 
 ### WARNINGS.txt

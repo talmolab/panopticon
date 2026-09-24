@@ -2,7 +2,7 @@
 
 Panopticon records from real cameras, a trigger board and a GPU. A wrong change in the
 capture path can record a session that plays normally while its views are out of step.
-The rules below keep such a change from merging unnoticed.
+Follow the rules below so that such a change is found before it merges.
 
 ## Setting up
 
@@ -64,13 +64,13 @@ how it was tested on a rig:
   forced triggers);
 - every `WARNINGS.txt` the recording wrote, or that it wrote none.
 
-Without that, the change waits.
+A capture-path change merges only with that rig run.
 
 [CLAUDE.md](CLAUDE.md) holds the rules these modules rely on. Among them: the grab loop
 reads each frame through a zero-copy view, the NV12 ring is pre-faulted, NVENC sessions
 are counted, and `blockids.npy` lists only frames that were persisted. Every mp4 gets
 `-g <fps>` and `+faststart`. Read it before you edit the capture path. A change that
-breaks one of those rules is wrong, whatever the tests say.
+breaks one of those rules does not merge, even when every test passes.
 
 ## Adding a camera backend
 
@@ -91,8 +91,8 @@ its reason.
 
 ## Style
 
-- Camera SDK imports stay in `gui_app/backends/`. The one import outside it is the
-  optional `--pyspin` stage of `probe_flir.py`, which imports PySpin.
+- Camera SDK imports stay in `gui_app/backends/`. `probe_flir.py` is an exception: its
+  optional `--pyspin` stage imports PySpin.
 - No rig-specific number lives in code. Numbers that belong to a rig go in its profile,
   because `gui_app/` also runs rigs other than the reference one.
 - Every mp4 writer passes `-g <fps>` and `-movflags +faststart`, so the recordings seek
@@ -109,7 +109,7 @@ Use the
 It asks for the files that show what happened: the launch log, the acquisition's
 `session.log` and `WARNINGS.txt`, and the rig profile.
 
-## License
+## Licence
 
 Panopticon is licensed under GPL-3.0-only. By contributing you agree that your
 contribution is licensed under the same terms.

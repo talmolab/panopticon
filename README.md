@@ -55,9 +55,9 @@ trigger the cameras instead (`trigger_source: external`), without stimulation.
 ## Status
 
 Panopticon is beta software. The performance figures in these docs come from one
-reference rig, which now runs nine Basler 5GigE cameras at 1920x1200 and 100 fps.
+reference rig, which runs nine Basler 5GigE cameras at 1920x1200 and 100 fps.
 [HISTORY.md](docs/HISTORY.md) records the measurements and the decisions behind them.
-The FLIR backend has run only against a simulated Spinnaker library so far. Capture in
+The FLIR backend has run only against a simulated Spinnaker library. Capture in
 several worker processes (`capture_processes`) is experimental, and the window refuses
 any value above 0.
 
@@ -157,7 +157,7 @@ and FLIR results with the
 To cite Panopticon, use [CITATION.cff](CITATION.cff) or GitHub's "Cite this repository"
 button.
 
-## Credits and license
+## Credits and licence
 
 Isaac Tang (author and maintainer), Kay Tye and Talmo Pereira, of the Tye Lab and the
 Talmo Lab at the Salk Institute.
