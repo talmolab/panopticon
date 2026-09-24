@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -24,12 +25,14 @@ from gui_app.encode_worker import EncodeWorker
 from gui_app.align_worker import AlignWorker
 from gui_app.ui_workers import CallableWorker
 from gui_app import alignment
+from gui_app import logging_setup
 from gui_app import recording_meta
 from gui_app import stim_trace
 from gui_app.calibration_worker import CalibrationWorker
 from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
-                                    format_report, installed_encoder,
-                                    invalidate_nvenc_cache, select_encoder)
+                                    environment_facts, format_report,
+                                    installed_encoder, invalidate_nvenc_cache,
+                                    select_encoder)
 from gui_app.coverage_worker import CoverageWorker
 from gui_app import rig_setup
 from gui_app import settings
@@ -204,6 +207,30 @@ class MainWindow(QMainWindow):
     #: The trigger pins of the profile a switch left, for the stop a switch
     #: to an external trigger source sends that profile's board.
     _switch_from_pins: list | None = None
+    #: logging_setup.mark() taken when the current acquisition was armed:
+    #: where its session.log slice of the log starts. None before one.
+    _log_mark = None
+
+    @property
+    def _state(self) -> State:
+        """The window's acquisition state. Every assignment that changes it
+        is logged as a [state] line (at verbose and above), so the log
+        records each transition with its time without a call site of its
+        own. Assigned on the UI thread only.
+
+        Read through the instance dict: a window the offline tests build
+        with __new__ has no Qt object behind it, and a missing attribute on
+        one raises RuntimeError instead of AttributeError."""
+        return vars(self).get("_state_now", State.IDLE)
+
+    @_state.setter
+    def _state(self, new: State) -> None:
+        old = vars(self).get("_state_now")
+        vars(self)["_state_now"] = new
+        if old is not new:
+            logging_setup.transition(
+                f"window {old.value if old is not None else 'start'} -> "
+                f"{new.value}")
 
     def __init__(self):
         super().__init__()
@@ -351,8 +378,12 @@ class MainWindow(QMainWindow):
                     self._profile = prof
                     break
         print(f"[acq] profile: {self._profile.name}", flush=True)
+        self._apply_log_level()
 
         self._open_cameras()
+        # The launch header: off the UI thread, because the first gathering
+        # of the environment facts runs git and nvidia-smi.
+        self._log_header_async("launch")
         self._size_to_screen()
         self._sidebar.set_status("IDLE", "#888")
         self._run_hardware_check()
@@ -373,6 +404,68 @@ class MainWindow(QMainWindow):
         # After the window is up, so the warning is a dialog over a live
         # window rather than a message behind the splash screen.
         QTimer.singleShot(0, self._show_profile_warnings)
+
+    def _apply_log_level(self) -> None:
+        """Put the profile's log_level in force for the whole process."""
+        level = logging_setup.set_level(
+            getattr(self._profile, "log_level", logging_setup.DEFAULT_LOG_LEVEL))
+        print(f"[log] level {level} (profile {self._profile.name!r})",
+              flush=True)
+
+    def _log_header(self, title: str) -> None:
+        """Print the session header: the environment, every field of the
+        profile and the open cameras (logging_setup.print_header).
+
+        RULE: cold path only, and never on the UI thread for the launch
+        header. REASON: it runs at launch, after a profile switch and at the
+        start of each acquisition before the cameras are armed, and its first
+        gathering of the environment runs git and nvidia-smi. Never raises:
+        a header that cannot be written costs a line, not the start.
+        """
+        try:
+            report = getattr(self._camera_mgr, "sdk_report", None)
+            sdk = report() if report is not None else ""
+            cams = list(getattr(self._camera_mgr, "camera_info", []) or [])
+            logging_setup.print_header(title, environment_facts(sdk),
+                                       self._profile, cams)
+        except Exception as e:
+            print(f"[log] the session header could not be written: "
+                  f"{type(e).__name__}: {e}", flush=True)
+
+    def _log_header_async(self, title: str) -> None:
+        threading.Thread(target=self._log_header, args=(title,), daemon=True,
+                         name="session-header").start()
+
+    def _write_session_log(self, note: str, wait: bool = True) -> None:
+        """Copy this acquisition's slice of the log, from its arm to now,
+        into session.log beside session_metadata.json
+        (logging_setup.write_session_log), so a session folder describes
+        itself.
+
+        RULE: after the finalize only, never while the cameras capture.
+        REASON: the copy waits for the log writer and reads the log file,
+        which is work no capture may share. `wait` False runs it on a short
+        thread of its own, for a caller on the UI thread. Nothing happens
+        when logging is not installed (the offline tests) or no acquisition
+        was armed.
+        """
+        mark, video_dir = self._log_mark, self._video_dir
+        if mark is None or video_dir is None or not logging_setup.installed():
+            return
+        dest = Path(video_dir) / logging_setup.SESSION_LOG_NAME
+
+        def write():
+            if not Path(video_dir).is_dir():
+                return
+            path = logging_setup.write_session_log(mark, dest, note=note)
+            if path is not None:
+                print(f"[log] {path.name} written ({note}): {path}",
+                      flush=True)
+        if wait:
+            write()
+        else:
+            threading.Thread(target=write, daemon=True,
+                             name="session-log").start()
 
     def _open_cameras(self):
         """Open cameras for the current profile (synchronous — startup only).
@@ -763,6 +856,7 @@ class MainWindow(QMainWindow):
         # to an external trigger source sends it (_stand_down_switched_board).
         self._switch_from_pins = list(self._profile.trigger_pins)
         self._profile = profile
+        self._apply_log_level()
 
         def _switch():
             self._camera_mgr.close_all()
@@ -778,6 +872,7 @@ class MainWindow(QMainWindow):
         # comes up on it.
         self._sidebar.accept_profile(self._profile)
         self._apply_camera_open_result(ok)
+        self._log_header_async(f"profile switch to {self._profile.name}")
         self._size_to_screen()
         self._end_busy()
         self._sidebar.set_status("IDLE", "#888")
@@ -1770,6 +1865,9 @@ class MainWindow(QMainWindow):
         rig = self._session_rig(config)
         rt = rig.realtime_encode
         kick = rig.realtime_kick
+        # Where this acquisition's session.log starts: before its first
+        # line, the header included.
+        self._log_mark = logging_setup.mark()
         print(f"[acq] start_acquisition({acq_type}) fps={fps} realtime={rt} "
               f"kick={kick}: switching cameras to trigger mode", flush=True)
 
@@ -2139,6 +2237,8 @@ class MainWindow(QMainWindow):
         external = self._external_trigger()
         # The stop warnings name the source the operator has to check.
         self._camera_mgr.trigger_source = "external" if external else "board"
+        # Before anything is armed: the header is cold-path work.
+        self._log_header(f"{acq_type} start in {self._video_dir}")
         try:
             if external:
                 return self._start_body_external(acq_type, raw_paths,
@@ -3719,8 +3819,11 @@ class MainWindow(QMainWindow):
         # path where a swallowed failure matters most, not least. The board's
         # stop is TeensyController.stop_triggers, False with no link; an
         # external source has nothing to send and has fallen silent already.
-        self._warn_if_not_stood_down(
+        stopped = self._warn_if_not_stood_down(
             self._trigger_source().stop_triggers(self._profile.trigger_pins))
+        logging_setup.transition(
+            f"triggers stopped ({'confirmed' if stopped else 'NOT confirmed'}"
+            f"); the {self._acq_type} finalize follows")
 
         self._stop_coverage_hud()
         self._detector = None
@@ -3735,6 +3838,9 @@ class MainWindow(QMainWindow):
         self._begin_busy("Finishing…")
 
         def _finalize():
+            t0 = time.monotonic()
+            logging_setup.transition("finalize: stopping capture and saving "
+                                     "the capture record")
             # SAVE the captured data before restoring preview — restoring can
             # fail if a camera dropped off the bus mid-session, and saving first
             # guarantees the surviving cameras' recordings aren't lost.
@@ -3752,6 +3858,7 @@ class MainWindow(QMainWindow):
                 self._save_acquisition_metadata()
                 self._write_stim_trace()
                 self._finalized = True
+                self._write_session_log("an incomplete stop")
                 raise
             self._save_capture_record(cam_results)
             # Read thermals BEFORE resume_preview: DeviceTemperature starts
@@ -3767,6 +3874,12 @@ class MainWindow(QMainWindow):
             # can still fail: everything the session consists of is on disk by
             # now, so a quit racing the restore must not delete it.
             self._finalized = True
+            logging_setup.transition(
+                f"finalize: capture record saved {time.monotonic() - t0:.2f} "
+                f"s after the stop began; restoring the preview")
+            # Written now and again at the end of the encode, so a session
+            # whose encode never finishes still has the capture's log.
+            self._write_session_log("its finalize")
             self._camera_mgr.resume_preview()
 
         self._cam_op = CallableWorker(_finalize)
@@ -3802,6 +3915,17 @@ class MainWindow(QMainWindow):
         stats = list(getattr(self._camera_mgr, "last_stream_stats", []) or [])
         if stats:
             extra["camera_stream_stats"] = stats
+        # The kick-out counts behind the effective frame rate WARNINGS.txt
+        # reports (sync_encode.kick_counts).
+        kick = getattr(self._camera_mgr, "last_kick_counts", None)
+        if kick:
+            extra["kickout"] = dict(kick)
+        if logging_setup.installed():
+            extra["log"] = {
+                "level": logging_setup.level(),
+                "file": str(logging_setup.log_path()),
+                "session_log": logging_setup.SESSION_LOG_NAME,
+                "lines_dropped": logging_setup.dropped_lines()}
         upload = self._upload_record()
         if upload is not None:
             extra["nvenc_upload_used"] = upload
@@ -3896,6 +4020,7 @@ class MainWindow(QMainWindow):
                         + list(self._capture_warnings)
                         + self._thermal_shutdown_texts())
             written = self._write_warnings_file(problems)
+            self._write_session_log("the failed finalize", wait=False)
             where = (f"\n\nThis has also been written to:\n{written}"
                      if written else "")
             warn_text = ("\n\nCapture warnings:\n- "
@@ -3935,6 +4060,10 @@ class MainWindow(QMainWindow):
         )
         self._encode_worker.progress.connect(self._sidebar.show_progress)
         self._encode_worker.finished_all.connect(self._on_encoding_done)
+        logging_setup.transition(
+            f"encode: {len(self._camera_names)} camera(s) "
+            f"({'remux of stream.h264' if rig.realtime_encode else 'raw.bin encode'}"
+            f", up to {rig.encode_parallel} at once) in {self._video_dir}")
         self._encode_worker.start()
 
     def _save_codet_frames(self, codet_frames: list[dict[int, int]]):
@@ -4136,6 +4265,7 @@ class MainWindow(QMainWindow):
                   + (f"  —  {len(failed)} CAMERA(S) FAILED: {', '.join(failed)}"
                      if failed else ""))
         self.statusBar().showMessage(status)
+        logging_setup.transition(f"encode done: {status}")
 
         problems = list(self._capture_warnings)
         # The encoder's own warnings are the truncated-tail cases: the mp4 has
@@ -4386,6 +4516,10 @@ class MainWindow(QMainWindow):
             # to do, and nothing here may start a state or a worker.
             return
         self._sidebar.hide_progress()
+        logging_setup.transition(
+            f"alignment done: replaced={bool(summary.get('replaced'))}, "
+            f"{len(summary.get('replaced_cams') or [])} camera(s) replaced, "
+            f"{len(summary.get('failures') or [])} failure(s)")
         failures = list(summary.get("failures") or [])
         replaced_cams = list(summary.get("replaced_cams") or [])
         failed_cams = list(summary.get("failed_cams") or [])
@@ -4519,6 +4653,7 @@ class MainWindow(QMainWindow):
         self._state = State.IDLE
         self._reset_toggles()
         self._sidebar.set_status("IDLE", "#888")
+        self._write_session_log("the end of its encode", wait=False)
 
     def _on_run_calibration(self):
         if self._state != State.IDLE:
