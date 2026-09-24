@@ -1,20 +1,9 @@
 # Installation
 
-This page covers the hardware a rig needs, the camera network, and the
-software installation up to a first launch. Every command is written out in
-full, with the output to expect.
-
-Three other pages carry what this one leaves out:
-
-- [CONFIGURATION.md](CONFIGURATION.md) describes every setting, the profile
-  templates and the sizing formulas.
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists the messages Panopticon prints,
-  with their causes and fixes.
-- [FLIR.md](FLIR.md) takes a FLIR rig through its own install and first test.
-
-Mounting, lighting and power depend on what you film, so this page does not
-cover them. It does cover the trigger wiring, in
-[Wiring the trigger line](#wiring-the-trigger-line).
+Settings are in [CONFIGURATION.md](CONFIGURATION.md): every profile field, the
+templates and the sizing formulas. The messages Panopticon prints, with their
+causes and fixes, are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). A FLIR rig
+follows [FLIR.md](FLIR.md) for its install and first test.
 
 Contents:
 
@@ -28,8 +17,9 @@ Contents:
 
 Panopticon runs on Windows with an NVIDIA GPU, Basler or FLIR machine-vision
 cameras and a hardware TTL trigger, for any number of cameras. The load on
-each part of the rig follows from four numbers: frame size, frame rate, camera
-count and pixel format. The pixel format is always Mono8, one byte per pixel.
+each part of the rig follows from the frame size, the frame rate, the camera
+count and the pixel format. The pixel format is always Mono8, one byte per
+pixel.
 A part too small for its load loses frames while the recording carries on, so
 size each part before you buy it.
 
@@ -207,9 +197,9 @@ bits per second = width x height x 8 x frame rate
 
 These rates leave out the packet headers, so treat them as a floor.
 
-Two links carry each camera's rate. One is the camera's own link, and the other
-is the host port that carries every camera behind it. "GigE Vision" names the
-protocol, which runs over 1, 2.5, 5, 10 and 25 Gbit/s links.
+Each camera's rate crosses its own link and the host port it shares with the
+other cameras behind the same switch. GigE Vision is the protocol, and it runs
+over 1, 2.5, 5, 10 and 25 Gbit/s links.
 
 #### The camera's own link
 
@@ -234,9 +224,10 @@ With the reference camera settings (9000-byte packets, `GevSCPD` 10000, which is
 | 5 Gbit/s | 14.4 µs + 10 µs | about 6.3 ms | Fits |
 | 2.5 Gbit/s | 28.8 µs + 10 µs | about 10.1 ms | Too long. The camera ignores every second trigger and records 50 fps |
 
-A 2.5 Gbit/s link has the bandwidth for 1.84 Gbit/s. The inter-packet delay is
-what pushes the frame past the period. The recording looks normal, and the
-block-ID rate check after it reports that camera at half the trigger rate. Keep
+At 2.5 Gbit/s the inter-packet delay makes each frame take 10.1 ms, longer than
+the 10 ms period, although the link's bandwidth would carry the camera's
+1.84 Gbit/s. The recording looks normal, and the block-ID rate check after it
+reports that camera at half the trigger rate. Keep
 every camera on a port that negotiates 5 Gbit/s or more. On a 2.5 Gbit/s link,
 `GevSCPD` would have to drop to about 3000, and the rig would need testing again
 at that setting.
@@ -262,11 +253,9 @@ the uplink in the fast block, and read the negotiated speed of each port in the
 switch's web interface.
 
 The reference camera settings send 9000-byte packets
-([jumbo frames](GLOSSARY.md#jumbo-frames)). Every
-device in the path has to accept them: the network adapter and every switch
-port, the uplink included. A device left at the default 1500 bytes drops every
-image packet. The cameras still appear in pylon Viewer, and no frames arrive.
-[Step 5](#step-5--put-the-cameras-on-the-network-gige) sets it up.
+([jumbo frames](GLOSSARY.md#jumbo-frames)). Every device in the path has to
+accept them, the network adapter and every switch port, the uplink included
+([Configure the switches](#configure-the-switches)).
 
 A 10GBASE-T copper run needs Cat6a cable or better. A marginal cable shows up as
 packet loss while the link stays up.
@@ -464,9 +453,6 @@ point to check your own figures against.
 | Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins fanned out across nine cameras, laser on pin 53 |
 | OS | Windows 11 |
 
-Each figure in these pages names the camera count it was measured at, because
-nearly all of them scale with it.
-
 ---
 
 ## 2. Install the software
@@ -631,11 +617,10 @@ The reference rig, nine cameras behind three switches:
 | `192.168.4.0/24` | Ethernet 5 at `.2` | `.240` | `.3` `.4` `.5` |
 | `192.168.5.0/24` | Ethernet 3 at `.2` | `.250` | `.3` `.4` `.5` |
 
-Camera names do not come from addresses. Panopticon names the cameras `cam1` to
-`camN` in serial-number order, or in the order of the profile's
-`camera_serials` ([step 7](#step-7--write-the-rig-profile)). Matching each
-camera's name to the last number of its address still makes cabling faults
-easier to find.
+Panopticon names the cameras `cam1` to `camN` from their serial numbers
+([Adding cameras](#adding-cameras-to-a-rig-that-already-works) gives the
+order). Matching each camera's name to the last number of its address makes
+cabling faults easier to find.
 
 With a single switch, pylon can assign every address:
 
@@ -655,7 +640,7 @@ use, the uplink to the host included:
 
 | Setting | Value | Why |
 |---|---|---|
-| Maximum frame size | 9216 | Image packets are 9000 bytes. A port at 1500 drops every one. |
+| Maximum frame size | 9216 | Image packets are 9000 bytes. |
 | Flow control | Symmetric | Lets the switch pause a camera for microseconds instead of dropping its packets. Measured below. |
 | Energy Efficient Ethernet | Disabled | Off on the reference rig's switches. On the host adapters it caused a stall ([Configure the host adapters](#configure-the-host-adapters)). |
 | Storm control | Disabled | Off on the reference rig's switches, which is the setting its measurements were made with. |
@@ -975,8 +960,8 @@ uses it without `--profile`.
 
 Skip this step if the profile sets `trigger_source: external`.
 
-There is no `.ino` file to upload. `gui_app/stim_compiler.py` generates the
-board's sketch from the profile and the stimulation editor's canvas. The
+`gui_app/stim_compiler.py` generates the board's sketch from the profile and
+the stimulation editor's canvas, so you upload no `.ino` file yourself. The
 [recording-only sketch](GLOSSARY.md#recording-only-sketch) is that sketch with
 no stimulation in it: the camera
 triggers, plus the boot guard that drives every `stim_safe_pins` pin low.
@@ -1111,13 +1096,14 @@ Check in that output:
 The firmware check and the serial port open about a second and a half after the
 window, so the window can draw first.
 
-The hardware check runs next, in the background, and the status bar says
-`Checking hardware` until it reports. Record and Calibrate stay disabled
-meanwhile. It measures the disk and the CPU encoder, and asks the driver for two
-more NVENC sessions than there are cameras. Its report goes to the log:
+The hardware check runs in the background from the start, and the status bar
+says `Checking hardware` until it reports. Record and Calibrate stay disabled
+meanwhile. It measures the disk and the CPU encoder, and probes the NVENC
+session cap as [GPU](#gpu) describes. Its report goes to the log:
 
 - `[hw] NVENC sessions: 11 (at least — probe stopped at its limit), needed 11`
-  on a nine-camera rig means the driver granted every session asked for.
+  on a nine-camera rig means the driver granted every session the probe asked
+  for.
 - `upload: pinned, shared CUDA context` means the pinned GPU upload passed its
   launch check.
 - `Using: nvenc` names the encoder the recordings will use.
@@ -1195,9 +1181,8 @@ choose a profile at launch.
 
 ## 3. Verify it works
 
-The capture path is bound by time, and a frame that never arrived looks much
-like a frame that was never triggered. Check the software first with no
-hardware, and then check that this machine keeps up with its cameras.
+Check the software first on the simulated rig, then check on the rig that this
+machine keeps up with its cameras.
 
 ### Without any cameras
 
