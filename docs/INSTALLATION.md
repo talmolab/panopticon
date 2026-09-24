@@ -1030,7 +1030,11 @@ Panopticon looked.
 
 ### Step 9 — first launch
 
-Start Panopticon with your profile's `name`:
+Before you open the profile, check that its `serial_port` names Panopticon's
+trigger board. Opening the profile resets the device on that port, and the
+first time it also flashes the recording-only sketch onto it.
+
+Then start Panopticon with your profile's `name`:
 
 ```powershell
 uv run gui.py --profile my_rig
@@ -1042,10 +1046,6 @@ On a computer where Panopticon has not opened a profile yet, a launch without
 opens no camera and no serial port, runs no hardware check and flashes nothing.
 It does the same when the remembered profile, or the one `--profile` names,
 does not load.
-
-Before you open the profile, check that its `serial_port` names Panopticon's
-trigger board. Opening the profile resets the device on that port, and the
-first time it also flashes the recording-only sketch onto it.
 
 A splash panel reads *Panopticon / Loading cameras...*, and then the main window
 opens with one live preview pane per camera, free-running at about 30 fps.
