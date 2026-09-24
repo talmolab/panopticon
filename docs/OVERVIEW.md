@@ -233,7 +233,7 @@ arena. The log line
 - While `groups` reads more than `1/1`, an orange line above the caption lists
   the groups, for example `{1,2,3} {4,5}`.
 
-READY needs all three conditions at once:
+READY appears once all of these hold at the same time:
 
 1. Every camera has at least `calibration_min_per_cam_shared` co-detection
    ticks, in which it and at least one other camera saw the board. That is

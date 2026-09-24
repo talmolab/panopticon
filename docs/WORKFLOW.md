@@ -30,7 +30,7 @@ rig.
 
 ## 1. Launch
 
-Start Panopticon in one of three ways:
+Start Panopticon from the desktop shortcut, `_launch.bat` or a terminal:
 
 - Double-click the desktop shortcut, if `make_shortcut.ps1` has made one. It
   opens no console window.
@@ -81,10 +81,10 @@ Quote the launch log and the acquisition's `session.log`
 ### What happens at launch
 
 With a profile remembered on this computer, or named with `--profile`,
-Panopticon does four things:
+Panopticon at launch:
 
-1. It opens the profile's cameras and starts the preview.
-2. It checks the hardware in the background. The status bar reads
+1. Opens the profile's cameras and starts the preview.
+2. Checks the hardware in the background. The status bar reads
    `Checking hardware: Record and Calibrate are available once it reports`,
    and those two toggles stay disabled until it reports. The check measures
    the output drive, probes how many NVENC sessions the GPU driver grants,
@@ -100,7 +100,7 @@ Panopticon does four things:
 
    Read the dialog. It stops nothing. The status bar then reads
    `Hardware check done: encoding with <encoder>`.
-3. It puts the trigger board back to the recording-only sketch, which
+3. Puts the trigger board back to the recording-only sketch, which
    triggers the cameras and drives no stimulation pin. A paradigm lives in
    the board's flash memory and survives quitting, a power cycle and an
    unplugged cable. So Panopticon reflashes the board at every launch, unless
@@ -110,7 +110,7 @@ Panopticon does four things:
    may still carry a paradigm, possibly a looping one. Open Stimulation and
    press Apply with an empty canvas before you record, or switch the laser
    off.
-4. It opens the board's serial port and holds it until you quit. Opening the
+4. Opens the board's serial port and holds it until you quit. Opening the
    port resets the board. Panopticon then asks the board which sketch it
    runs, and reflashes it once if the answer is not the recording-only sketch.
 
@@ -174,8 +174,8 @@ Panopticon names the cameras `cam1` to `camN`. Every file name and the
 calibration use these names. With `camera_serials` in the profile, `cam1` is
 the first serial in that list. Without it the names follow the serial numbers
 in order, so a camera missing from the set renames every camera after it. The
-calibration then describes the wrong cameras, and nothing in the files shows
-it.
+files keep their usual names, and the calibration then describes the wrong
+cameras.
 
 Set `camera_serials`, or at least `n_cameras`, so the open is refused instead
 ([CONFIGURATION.md](CONFIGURATION.md#camera_serials)):
@@ -306,7 +306,7 @@ board, and a blurred board yields no corners.
 
 The coverage display in the sidebar shows what the cameras have seen.
 [OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
-the three conditions for READY. The figures were drawn for a six-camera
+what READY needs. The figures were drawn for a six-camera
 profile, before the caption gained its `groups` segment. Your caption reads
 `paired <worst>/<target>  grid <worst>/<cells>  groups <n>/1`, against your
 profile's thresholds.
@@ -361,7 +361,7 @@ Otherwise it scans the videos, looking at every third frame until it
 finds the board (`--skip 3`). A hint file it cannot use, for example one
 written for other videos, raises a warning.
 
-The solve writes three files into `calibration/`:
+The solve writes into `calibration/`:
 
 - `calibration.toml`: per camera a size, a camera matrix, distortion, a
   rotation and a translation, in aniposelib's layout. A `[metadata]` block
@@ -386,7 +386,7 @@ already there. The new solve then stays in `calibration/`.
 
 ### Which cameras made it into the solve
 
-The solve drops a camera in four cases:
+The solve drops a camera when:
 
 - it has no calibration video it can read;
 - it has fewer than 5 detection frames;
@@ -413,8 +413,8 @@ calibration again, holding the board where that camera and a neighbour both
 see it.
 
 The solve fails, with a `Calibration Failed` dialog, when too few cameras are
-left to place. That means fewer than two with detections or lens models, no
-pair that saw the board together, or fewer than two connected. It also fails
+left to place: fewer than two with detections or lens models, no pair that saw
+the board together, or fewer than two connected. It also fails
 without a calibration folder or videos, and with a board file it cannot use.
 
 The `Calibration Warnings` dialog also warns about:
@@ -481,8 +481,8 @@ aniposelib both read the `calibration.toml` this writes.
 A calibration describes the cameras as they were while the board was recorded.
 From the calibration to the last recording of the session, do not move,
 re-aim, refocus or re-mount any camera. If one is bumped, calibrate again
-before you record. Nothing in the data shows a moved camera: the frame counts,
-the plot and the warnings stay clean while the 3D output is wrong.
+before you record. A moved camera changes no frame count, plot or warning.
+Only the 3D output is wrong.
 
 ---
 
@@ -626,7 +626,7 @@ stop.
 
 ### After a stimulated recording
 
-A recording with blocks on the canvas writes three files beside the videos:
+A recording with blocks on the canvas also writes, beside the videos:
 
 - `stim_paradigm.json`: the paradigm as it stood when the recording started,
   the sketch's hash and `matches_uploaded_firmware`. Read that field first.
@@ -774,7 +774,7 @@ arrive. It reads `Capture healthy — keeping up with the trigger (max lag N ms)
 below 0.25 s, `CAPTURE FALLING BEHIND: camN is S s behind real time and growing.`
 below 1 s, and `CAPTURE S s BEHIND REAL TIME (camN).` beyond that.
 
-Two more messages mean a camera stopped delivering:
+When a camera stops delivering, the status bar reads:
 
 - `NO FRAMES from camN for S s`: one camera.
 - `NO FRAMES FROM ANY CAMERA for S s: the trigger board may have stopped.`,
