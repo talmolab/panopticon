@@ -1,8 +1,10 @@
-# 3DFace — 6x Basler acA1300-200um USB3, 1280x1024, 100 fps
+# 3DFace: six Basler acA1300-200um USB3 cameras, 1280x1024, 100 fps.
+# docs/CONFIGURATION.md describes every field.
 name: 3dface
-# Camera backend module (gui_app/backends/<name>.py); pylon covers USB3 too.
+# Camera backend module (gui_app/backends/<name>.py); pylon drives USB3 cameras too.
 camera_backend: basler
-# Video encoder: auto = NVENC when a session is free, else libx264.
+# Video encoder: auto = NVENC when the driver grants a session per camera, else
+# libx264.
 encoder: auto
 # Sidebar pre-fill for a new session; written into every session_metadata.json,
 # so the values are this rig's, not a code default.
@@ -19,10 +21,10 @@ realtime_encode: true
 realtime_kick: true
 kick_max_lag: 240
 
-# Cameras that MUST enumerate before a session starts. Camera names are
-# positional by serial-number order, so a camera that fails to enumerate renames
-# every camera after it and attaches the calibration extrinsics to the wrong
-# physical cameras; open_all refuses a count other than this.
+# Cameras that must enumerate before the cameras open. Camera names follow
+# serial-number order, so a camera that fails to enumerate renames every camera
+# after it and attaches the calibration to the wrong physical cameras; opening
+# refuses any other count.
 n_cameras: 6
 
 pfs_path: "configs/mono8_mono.pfs"
@@ -32,14 +34,15 @@ board_config: "configs/boards/charuco_5x5_3dface.yaml"
 serial_port: COM3
 trigger_pins: [2, 4, 6, 8, 10, 12]
 
-# No optostim hardware on this rig. Add the laser/LED pin here if that changes —
-# listed pins are driven LOW from boot so the driver never sees a floating pin.
+# No optostim hardware on this rig. Add the laser or LED pin here if that
+# changes: the board drives listed pins low from boot, so a driver never sees a
+# floating pin.
 stim_safe_pins: []
 
-# --- Calibration coverage HUD -----------------------------------------------
-# Pinned explicitly so a change to the code defaults (which are tuned on the
-# 3dpose rig) cannot lower this rig's bar without a measurement on its own
-# cameras, optics and lighting. Keep these until someone validates lower ones here.
+# --- Calibration coverage ---------------------------------------------------
+# Set here so a change to the code defaults (tuned on the 3dpose rig) cannot
+# lower this rig's bar without a measurement on its own cameras, optics and
+# lighting. Keep these until lower ones are validated here.
 calibration_min_per_cam_shared: 250
 calibration_min_edge: 80
 calibration_min_grid_cells: 3
@@ -47,7 +50,7 @@ calibration_min_grid_cells: 3
 # 3dface has not been characterised for hybrid-CPU thread placement; leave off.
 pin_capture_threads: false
 
-# Pinned explicitly rather than inherited: 3dface's cameras and mounts are not
-# the 3dpose rig's, so its thermal behaviour is uncharacterised. The poll is
-# cheap and the thresholds come from the cameras themselves, so leave it on.
+# Set here instead of inherited: 3dface's cameras and mounts are not the 3dpose
+# rig's, and its thermal behaviour has not been measured. The poll is cheap and
+# the thresholds come from the cameras themselves, so leave it on.
 thermal_poll_s: 20.0
