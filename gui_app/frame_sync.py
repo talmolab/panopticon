@@ -29,6 +29,19 @@ Design notes:
 """
 from collections import deque
 
+#: How messages name what drives the triggers, by the profile's
+#: trigger_source (session_config.TRIGGER_SOURCES). With an external source
+#: the block-ID rate check is the only test of the operator's rate, so its
+#: advice sends the operator to that source, not to a board the rig does not
+#: use. trigger_source.TriggerSource.describe() reads these too.
+SOURCE_NAMES = {"board": "the trigger board", "external": "your trigger source"}
+
+
+def source_name(kind) -> str:
+    """SOURCE_NAMES for ``kind``; the board for None or an unknown kind."""
+    return SOURCE_NAMES.get(kind or "board", SOURCE_NAMES["board"])
+
+
 #: The period of a 16-bit GigE Vision block-ID counter: it counts 1..65535 and
 #: skips 0, so ID 65535 is followed by ID 1. Every module that unwraps block
 #: IDs takes the period from here, because a live unwrap and a post-hoc one
@@ -364,7 +377,8 @@ BLOCK_RATE_MIN_SECONDS = 2.0
 
 
 def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera",
-                        ceiling_hint=None, timestamp_hint=None):
+                        ceiling_hint=None, timestamp_hint=None,
+                        source_hint=None):
     """Verify that a camera's block IDs really are trigger ordinals.
 
     Everything downstream takes "same block ID" to mean "same instant" —
@@ -394,7 +408,8 @@ def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera",
     exposure under the ceiling, and `timestamp_hint` the clause that says how
     to check the timestamp unit. Each defaults to the Basler wording (the
     .pfs, GevTimestampTickFrequency); a caller for another backend passes its
-    own.
+    own. `source_hint` names what drove the triggers (source_name), and
+    defaults to the trigger board.
     """
     if ceiling_hint is None:
         ceiling_hint = (f"ExposureTime + 1/trigger_rate_limit must stay under "
@@ -402,6 +417,8 @@ def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera",
     if timestamp_hint is None:
         timestamp_hint = ("check GevTimestampTickFrequency, which is 1e9 on "
                           "the Basler ace models this was built against")
+    if source_hint is None:
+        source_hint = source_name("board")
     if fps <= 0 or len(block_ids) < BLOCK_RATE_MIN_FRAMES:
         return None
     if len(timestamps) < len(block_ids):
@@ -420,9 +437,9 @@ def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera",
     missed = expected - span
     drift = abs(missed) / fps
 
-    head = (f"{name}: block IDs advanced at {measured:.2f}/s while the trigger "
-            f"board runs at {fps}/s, over {dur:.1f} s of this camera's own "
-            f"device clock.")
+    head = (f"{name}: block IDs advanced at {measured:.2f}/s while "
+            f"{source_hint} should run at {fps}/s, over {dur:.1f} s of this "
+            f"camera's own device clock.")
     if measured < fps:
         return (
             f"{head} That means it did NOT produce one frame per trigger — it "
@@ -435,10 +452,11 @@ def check_block_id_rate(block_ids, timestamps, fps: int, name: str = "camera",
             f"this recording for 3D reconstruction.")
     return (
         f"{head} Block IDs cannot outrun the trigger, so this is not a capture "
-        f"fault: either the recording fps ({fps}) is not what the board was "
-        f"actually driving, a stream re-arm mid-recording resynchronised this "
-        f"camera to the wrong ordinal, or this camera model does not report its "
-        f"device timestamp in nanoseconds (grab_thread assumes it does — "
+        f"fault: either the recording fps ({fps}) is not what {source_hint} "
+        f"was actually driving, a stream re-arm mid-recording resynchronised "
+        f"this camera to the wrong ordinal, or this camera model does not "
+        f"report its device timestamp in nanoseconds (grab_thread assumes it "
+        f"does — "
         f"{timestamp_hint}). Cross-camera alignment for {name} is unverified "
         f"until that is resolved.")
 
@@ -455,10 +473,13 @@ def block_rate_warnings(block_ids, timestamps, fps: int, names,
     in nanoseconds. Saying so costs one comparison and stops a fleet-wide
     misconfiguration from reading as nine separate exposure problems.
 
-    `hints` is None or a dict with `ceiling_hint` and/or `timestamp_hint`,
-    passed to every per-camera check (see `check_block_id_rate`).
+    `hints` is None or a dict with `ceiling_hint`, `timestamp_hint` and/or
+    `source_hint`, passed to every per-camera check (see
+    `check_block_id_rate`). `source_hint` also names the source in the
+    cross-camera read.
     """
     hints = dict(hints or {})
+    source = hints.get("source_hint") or source_name("board")
     msgs, rates = [], []
     for b, ts, nm in zip(block_ids, timestamps, names):
         msg = check_block_id_rate(b, ts, fps, nm, **hints)
@@ -478,7 +499,7 @@ def block_rate_warnings(block_ids, timestamps, fps: int, names,
                 f"({lo:.2f}/s), which is off the configured {fps}/s by the same "
                 f"amount. Cameras do not fail identically, so suspect the "
                 f"reference rather than the cameras: check that the profile's "
-                f"frame rate matches what the trigger board is driving, and "
+                f"frame rate matches what {source} is driving, and "
                 f"that these cameras report device timestamps in nanoseconds. "
                 f"The videos are probably aligned with each other; it is the "
                 f"absolute timebase that is in question.")

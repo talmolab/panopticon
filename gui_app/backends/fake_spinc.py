@@ -13,11 +13,10 @@ Nothing here loads a DLL, opens a device or imports a vendor SDK.
 to reach every branch of the backend without FLIR hardware.
 
 What the fake models, and what is a guess:
-The node names, entries and rules follow SFNC and the Blackfly S reference as
-FLIR_DESIGN.md sections 3 and 5 describe them. Real cameras differ per model
-and firmware, and several behaviours are unknown until a volunteer's probe
-reports them. The fake picks one answer for each and makes the others
-reachable through `FlirFaults`:
+The node names, entries and rules follow SFNC and the Blackfly S reference.
+Real cameras differ per model and firmware, and several behaviours are
+unknown until a volunteer's probe reports them. The fake picks one answer for
+each and makes the others reachable through `FlirFaults`:
 - whether the frame ID restarts on `begin`, and from 0 or 1
   (`id_restart_on_begin`, `id_base`);
 - the timestamp unit and whether it resets (`ts_unit`, `ts_reset_on_begin`);

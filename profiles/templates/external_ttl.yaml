@@ -1,0 +1,75 @@
+# Template: four FLIR Blackfly S USB3 cameras triggered by your own TTL
+# source (a pulse generator or a DAQ) instead of Panopticon's trigger board.
+#
+# Status: untested, community-validated. No rig has recorded with an
+# external trigger source yet; this file loads and validates, and every value
+# is a starting point.
+#
+# To use it, copy it into profiles/, give it a name of your own, and replace
+# every value marked SITE. Files in profiles/templates/ never appear in the
+# profile dropdown.
+#
+# With trigger_source: external a recording runs like this:
+#   1. Keep your trigger source stopped and press Record.
+#   2. Panopticon arms every camera and watches them for a moment. If any
+#      camera receives a frame, the source was already running, and the
+#      recording is refused: each camera would count its frames from a
+#      different pulse.
+#   3. When Panopticon asks, start your source at frame_rate. The recording
+#      begins with its first pulse. If no pulse arrives in time
+#      (FIRST_TRIGGER_TIMEOUT_S in gui_app/trigger_source.py), the start is
+#      cancelled and nothing is kept.
+#   4. To finish, stop your source, or press Record off and then stop it.
+#      The recording ends once every camera has stopped receiving frames.
+# Calibrate works the same way, with the source at calibration_frame_rate.
+#
+# Panopticon cannot read your source's rate, so frame_rate must be the rate
+# it runs at; the block-ID rate check after each recording compares the two.
+# Stimulation runs on Panopticon's trigger board, so it is unavailable here.
+# There is no serial_port, trigger_pins or stim_safe_pins: this mode opens no
+# board, and the profile refuses them.
+#
+# For Basler cameras, set camera_backend: basler, remove the camera: block,
+# and name your .pfs in pfs_path; trigger_source works the same way.
+name: external_ttl
+camera_backend: flir
+trigger_source: external
+encoder: auto
+n_cameras: 4                       # SITE
+# SITE: your cameras' serial numbers, quoted, in ascending order as text.
+# cam1 is the first entry.
+camera_serials: ["21039790", "21039791", "21039792", "21039793"]
+frame_width: 1440                  # the ROI each camera is set to; must be even
+frame_height: 1080
+frame_rate: 100                    # SITE: the rate your trigger source runs at
+calibration_frame_rate: 30         # SITE: the rate you run it at to calibrate
+quality: 21
+realtime_encode: true
+realtime_kick: true
+kick_max_lag: 240
+# Driver buffers per camera (StreamBufferCountManual). Must be at least
+# kick_max_lag. RAM = 4 x 300 x 1.56 MB = 1.7 GiB.
+max_num_buffer: 300
+
+# Camera settings. FLIR cameras have no .pfs, so this block is the only source
+# of the recording exposure, gain and trigger line. Anything it does not name
+# comes from the camera's Default user set (factory settings).
+camera:
+  pixel_format: Mono8
+  exposure_us: 3000                # SITE; must fit the trigger period (10000 us at 100 fps)
+  gain_db: 6.0                     # SITE
+  trigger:
+    line: Line3                    # SITE: the input your source's output is wired to
+    activation: RisingEdge         # SITE: the edge each of your source's pulses starts on
+    overlap: ReadOut
+  flir:
+    user_set: Default
+    gamma_enable: false
+    link_throughput_limit: auto    # payload x frame_rate / 0.6, clamped to the camera's range
+    block_id_source: auto
+
+calibration_exposure_us: 8000      # 0 keeps the recording exposure
+calibration_gain_db: -1            # -1 keeps the recording gain
+output_dir: data
+board_config: configs/boards/charuco_8x8_15mm.yaml
+thermal_poll_s: 20

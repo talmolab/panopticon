@@ -1065,7 +1065,7 @@ the table sort out where those two part company.
 | `quality` | 21 | NVENC constant quantiser. |
 | `encode_parallel` | 3 | Concurrent encode/remux jobs after a recording. Counts against the NVENC session budget. |
 | `realtime_encode` | `true` | GPU H.264 during capture. `false` writes raw frames and encodes afterwards, at the raw disk rate from section 1 (1.38 GB/s for six cameras at 100 fps, against 2.8 MB/s encoded). |
-| `realtime_kick` | `false`, selecting post-hoc alignment instead | Gate frames through the cross-camera coordinator during capture, so the videos are trigger-aligned with no post-hoc re-encode. With it off, alignment runs after encoding and re-encodes each video. The shipped `3dpose` profile sets `true`; kick-out is the mode the rest of this documentation describes. |
+| `realtime_kick` | `true` | Gate frames through the cross-camera coordinator during capture, so the videos are trigger-aligned with no post-hoc re-encode. `false` aligns after encoding instead and re-encodes each video. Kick-out is the mode the rest of this documentation describes. |
 | `kick_max_lag` | 240; the shipped `3dpose` profile sets 480 | How many frames one camera may lag the others before its missing triggers are force-dropped. Drives the NV12 ring size, so it is the main RAM lever; see *Choosing `kick_max_lag`* below. |
 | `max_num_buffer` | 1000; the shipped `3dpose` profile sets 600 | Driver-side buffers queued per camera, and usually the larger half of the RAM bill: `n_cams x max_num_buffer x frame_bytes`, so 1000 is 19.3 GiB at nine 1920x1200 cameras against 11.6 GiB at 600. Keep it at or above `kick_max_lag`. See *RAM* in section 1. |
 | `gige_driver` | `socket` | `socket` is user-space with reliable packet resends. `filter` is the in-kernel driver: less CPU, but with default resend settings it discards a frame rather than asking for the lost packet again, measured dropping about 23% of frames under six cameras at 100 fps. `auto` leaves pylon's default. |
@@ -1103,12 +1103,11 @@ in section 4.
 **What the shipped profiles deliberately override.** Copying
 `profiles/3dpose.yaml` gets all of this right without thinking. Writing a
 minimal profile from scratch does not, because several of the fallbacks above are
-not what the reference rig runs: the shipped profile sets `realtime_kick: true`,
-`kick_max_lag: 480`, `max_num_buffer: 600` and `n_cameras: 9`. Real-time kick-out, the mode the rest of
-this documentation describes and the one the RAM arithmetic in section 1
-assumes, is on because the profile says so, not because the field is optional.
-Leave it out and you silently get post-hoc alignment with a re-encode instead,
-and nothing will tell you.
+not what the reference rig runs: the shipped profile sets `kick_max_lag: 480`,
+`max_num_buffer: 600` and `n_cameras: 9`. Real-time kick-out, the mode the rest
+of this documentation describes and the one the RAM arithmetic in section 1
+assumes, is the default (`realtime_kick: true`). A profile that sets
+`realtime_kick: false` gets post-hoc alignment with a re-encode instead.
 
 **Choosing `kick_max_lag`.** This trades RAM against frames, and both directions
 have cost frames on a real rig, so it is not a free dial. The ring grows

@@ -54,6 +54,13 @@ NVENC_UPLOAD_MODES = ("host", "pinned")
 #: encoder a context of its own.
 NVENC_CONTEXT_MODES = ("shared", "own")
 
+#: Where the camera triggers come from (RigProfile.trigger_source). "board"
+#: is Panopticon's trigger board on serial_port, which the host starts,
+#: confirms and stops, and which also runs stimulation. "external" is a TTL
+#: source the operator runs, such as a pulse generator or a DAQ; the host
+#: opens no serial port for it. gui_app/trigger_source.py implements both.
+TRIGGER_SOURCES = ("board", "external")
+
 #: H.264 quantiser range. The encoders pass RigProfile.quality straight
 #: through as the QP, and libx264 clamps a value above the top of the range
 #: to it, so an out-of-range value would record at another quality.
@@ -592,7 +599,8 @@ class RigProfile:
     board_config: str = ""
     # Trigger-board serial port. No code default: the device name is per-host
     # (COMn on Windows, /dev/tty* elsewhere), so a profile must state it and an
-    # empty value fails at the first serial open instead of guessing.
+    # empty value fails at the first serial open instead of guessing. A
+    # profile with trigger_source: external uses no board and leaves it out.
     serial_port: str = ""
     trigger_pins: list = field(default_factory=lambda: [2, 4, 6, 8, 10, 12])
     # Expected camera count. 0 = don't check. Nonzero makes open_all refuse any
@@ -731,13 +739,26 @@ class RigProfile:
     # How the NVENC encoder receives each frame; one of NVENC_UPLOAD_MODES.
     # "host" hands PyNvVideoCodec the ring slot, and PyNvVideoCodec copies it
     # to the GPU with the GIL held. "pinned" copies the frame into page-locked
-    # memory without the GIL first. No effect when the frames are encoded on
-    # the CPU.
-    nvenc_upload: str = "host"
+    # memory without the GIL first. The default is "pinned" because the
+    # GIL-held copy in "host" is what starves a capture thread until its
+    # camera falls behind the others; "pinned" costs about 1 ms of CPU per
+    # frame per camera, outside the GIL. An encoder that cannot get
+    # page-locked memory or its CUDA context falls back to "host" on its own,
+    # with a warning. No effect when the frames are encoded on the CPU.
+    nvenc_upload: str = "pinned"
     # CUDA context the pinned upload path runs its encoders in; one of
     # NVENC_CONTEXT_MODES. "own" costs GPU memory per encoder. It applies to
     # nvenc_upload: pinned only, so validate() refuses "own" with "host".
     nvenc_context: str = "shared"
+    # Where the camera triggers come from; one of TRIGGER_SOURCES. "board" is
+    # Panopticon's trigger board on serial_port. "external" is a TTL source
+    # the operator runs: Panopticon opens no serial port, arms every camera,
+    # refuses the recording if a frame arrives before every camera is armed,
+    # and asks the operator to start the source and, at the end, to stop it.
+    # Stimulation runs on the board, so it is unavailable with "external",
+    # and validate() refuses serial_port, trigger_pins and a non-empty
+    # stim_safe_pins there: each names a board this mode never opens.
+    trigger_source: str = "board"
 
     #: The keys the profile file sets, recorded by ``load``. A dataclass
     #: default cannot tell a key the file left out from one it set to the
@@ -838,6 +859,7 @@ class RigProfile:
         the cameras open.
         """
         self._validate_backend()
+        self._validate_trigger_source()
         if self.gige_driver not in GIGE_DRIVERS:
             raise ValueError(
                 f"gige_driver {self.gige_driver!r} is not one of "
@@ -1036,6 +1058,45 @@ class RigProfile:
                 raise ValueError(
                     f"{name} is a Basler GigE node ({node}); FLIR cameras "
                     f"have no equivalent. Remove it.")
+
+    def _validate_trigger_source(self) -> None:
+        """The trigger source, and the board fields an external source leaves
+        unused.
+
+        With an external source Panopticon opens no serial port, so it can
+        neither clear a board's stimulation sketch at launch nor stand the
+        board down at quit. A profile that still names the board's port, its
+        trigger pins or its stimulation pins reads as if Panopticon did both,
+        so each is refused with what to do instead. A stim_safe_pins the file
+        leaves out is not refused: its code default names no board the
+        profile describes.
+        """
+        src = self.trigger_source
+        if src not in TRIGGER_SOURCES:
+            raise ValueError(
+                f"trigger_source {src!r} is not one of {list(TRIGGER_SOURCES)}")
+        if src != "external":
+            return
+        if self.serial_port:
+            raise ValueError(
+                f"serial_port {self.serial_port!r} names Panopticon's trigger "
+                f"board, but trigger_source is external, so Panopticon opens "
+                f"no serial port. It will not clear that board's stimulation "
+                f"sketch at launch or stop the board at quit. Remove "
+                f"serial_port and disconnect the board, or set "
+                f"trigger_source: board.")
+        if self._given("trigger_pins"):
+            raise ValueError(
+                "trigger_pins lists the trigger board's output pins, but "
+                "trigger_source is external: your own source drives the "
+                "cameras' trigger inputs. Remove trigger_pins.")
+        if self.stim_safe_pins and self._given("stim_safe_pins"):
+            raise ValueError(
+                f"stim_safe_pins {self.stim_safe_pins} are pins the trigger "
+                f"board holds low for a stimulator, but trigger_source is "
+                f"external and Panopticon never opens the board, so nothing "
+                f"holds them low. Stimulation needs trigger_source: board. "
+                f"Remove stim_safe_pins, or set it to [].")
 
     def _validate_capture_processes(self) -> None:
         n = self.capture_processes
@@ -1494,7 +1555,8 @@ class SessionConfig:
         return self.calibration_frame_rate if acq_type == "calibration" else self.frame_rate
 
     def metadata(self, acq_type: str | None = None, camera_info=None,
-                 encoder: str | None = None) -> dict:
+                 encoder: str | None = None,
+                 capture_processes_used: int | None = None) -> dict:
         """The session_metadata.json contents for ``acq_type``.
 
         ``camera_info`` is the opened cameras in cam1..camN order, one dict
@@ -1510,6 +1572,11 @@ class SessionConfig:
         (``nvenc``, ``x264`` or ``raw``), which can differ from the profile's
         ``encoder`` selection (``encoder_requested``): ``auto`` resolves at
         launch. None records that the caller did not say.
+
+        ``capture_processes_used`` is how many worker processes captured the
+        cameras (0: the calling process). The profile's ``capture_processes``
+        is only a request, and the entry point decides what runs. None
+        records that the caller did not say.
         """
         now = datetime.now()
         prof = self.profile
@@ -1549,9 +1616,14 @@ class SessionConfig:
             # file is the only place a session's setting can be read back.
             camera=(prof.camera.to_dict() if prof and prof.camera else None),
             capture_processes=prof.capture_processes if prof else None,
+            capture_processes_used=capture_processes_used,
             thermal_warn_margin_c=prof.thermal_warn_margin_c if prof else None,
             nvenc_upload=prof.nvenc_upload if prof else None,
             nvenc_context=prof.nvenc_context if prof else None,
+            # "external" means no board acked the rate: the profile's
+            # frame_rate is assumed, and the block-ID rate check is the only
+            # test of it.
+            trigger_source=prof.trigger_source if prof else None,
             **_environment_metadata(),
         )
         if acq_type is not None:
@@ -1562,10 +1634,12 @@ class SessionConfig:
         return meta
 
     def save_metadata(self, acq_type: str | None = None, camera_info=None,
-                      encoder: str | None = None) -> Path:
+                      encoder: str | None = None,
+                      capture_processes_used: int | None = None) -> Path:
         """Write session_metadata.json and return its path.
 
-        ``camera_info`` and ``encoder`` go to ``metadata``.
+        ``camera_info``, ``encoder`` and ``capture_processes_used`` go to
+        ``metadata``.
 
         With ``acq_type`` the file goes into ``video_dir(acq_type)``, beside
         the videos it describes, so a calibration and a recording in the same
@@ -1577,7 +1651,8 @@ class SessionConfig:
         which is the older layout.
         """
         meta = self.metadata(acq_type, camera_info=camera_info,
-                             encoder=encoder)
+                             encoder=encoder,
+                             capture_processes_used=capture_processes_used)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         session_copy = self.session_dir / METADATA_FILENAME
         if acq_type is None:

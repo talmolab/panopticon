@@ -141,3 +141,32 @@ def open_kwargs(mgr, profile: RigProfile) -> dict:
             f"camera_manager.py to a version whose open_all takes "
             f"{', '.join(lost)}.")
     return {k: v for k, v in candidates.items() if k in params}
+
+
+def make_manager(profile: RigProfile, **kwargs):
+    """The camera manager ``profile`` asks for.
+
+    ``capture_processes`` 0 (the default in every shipped profile) returns a
+    CameraManager. A positive value returns a
+    gui_app.mp.manager.ProcessCameraManager, which has the same surface and
+    captures the cameras in that many worker processes, dealt to them in
+    contiguous groups by camera index. ``kwargs`` go to
+    ProcessCameraManager (``log_dir``, ``backend``).
+
+    The main window does not call this. It builds a CameraManager and opens
+    no camera for a profile whose capture_processes is above 0
+    (MainWindow._capture_processes_refusal). probe_mp.py builds its
+    ProcessCameraManager directly.
+
+    Both are configured the same way afterwards:
+    ``apply_profile_to_manager(mgr, profile)`` and
+    ``mgr.open_all(**open_kwargs(mgr, profile))``.
+
+    The multi-process package is imported only for a positive value, so a
+    profile at 0 never loads it.
+    """
+    if int(getattr(profile, "capture_processes", 0) or 0) > 0:
+        from gui_app.mp.manager import ProcessCameraManager
+        return ProcessCameraManager(profile, **kwargs)
+    from gui_app.camera_manager import CameraManager
+    return CameraManager()
