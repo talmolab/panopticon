@@ -654,29 +654,28 @@ the loop never takes a first-touch page fault (about 0.4 ms). `np.empty` and
 allocation retires the camera instead of escaping `run()` and taking the
 window with it.
 
-In kick-out mode the ring's slots follow these rules:
-
-- A slot is written only while it is free. `SyncEncodeRouter.attach_ring()`
-  turns the ring into a free list, and the grab thread takes one slot per
-  frame. The slot goes back when the coordinator or the router drops the
-  frame, or when the encoder has finished reading it. A camera whose encoder
-  falls behind finds no free slot, and its frame is submitted without pixels.
-  The coordinator still sees the trigger, and the router drops the frame from
-  this camera's video alone, without a block ID. A ring that cycled in turn
-  would instead put a later trigger's pixels under a block ID already
-  recorded, which no count, gap or rate check could detect.
-- The ring is freed after every acquisition. The grab thread drops its ring
-  when its loop ends, each sink drops its references once its encoder thread
-  has exited, and `stop_acquisition()` runs a full garbage collection once
-  every grab thread has exited. The ring is the largest allocation in the
-  program, and the grab thread, the router and the encoder threads refer to
-  one another. Without these steps the ring stays allocated until the
-  collector's oldest generation runs, which an idle window may never do, and
-  the next acquisition then finds no RAM.
+In kick-out mode a slot is written only while it is free.
+`SyncEncodeRouter.attach_ring()` turns the ring into a free list, and the grab
+thread takes one slot per frame. The slot goes back when the coordinator or
+the router drops the frame, or when the encoder has finished reading it. A
+camera whose encoder falls behind finds no free slot, and its frame is
+submitted without pixels. The coordinator still sees the trigger, and the
+router drops the frame from this camera's video alone, without a block ID. A
+ring that cycled in turn would put a later trigger's pixels under a block ID
+already recorded, which no count, gap or rate check could detect.
 
 In the decoupled mode (`realtime_kick: false`) a slot is taken only by a
 frame the encoder queue accepted, so a dropped frame's slot is reused by the
 next frame.
+
+In either mode the ring is freed after every acquisition. The grab thread
+drops its ring when its loop ends, and `stop_acquisition()` runs a full
+garbage collection once every grab thread has exited. In kick-out mode each
+sink also drops its references once its encoder thread has exited. The ring
+is the largest allocation in the program, and the grab thread, the router and
+the encoder threads refer to one another. Without these steps the ring stays
+allocated until the collector's oldest generation runs, which an idle window
+may never do, and the next acquisition then finds no RAM.
 
 ### Thread placement
 
