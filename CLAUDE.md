@@ -330,10 +330,14 @@ until someone analyses it.
   `nvenc.pinned_upload_matches_host(width, height, context)` proves it: it
   stalls the stream, rewrites the staging buffer during the stall and compares
   the bitstream with the host path's. The launch preflight runs it at the
-  recording's frame size, and False means record with the host upload. A pinned
-  encoder whose first encode fails turns the pinned path off for the process
+  recording's frame size, and False means record with the host upload. The
+  process's one pinned warm-up encode (`nvenc._warm_pinned`) decides for the
+  whole process: if it fails, every later encoder gets the host upload
   (`upload_stats()["pinned_disabled"]`). A pinned setup failure falls back to the
-  host upload for that encoder, with a `WARNINGS.txt` line. After a
+  host upload for that encoder only, with a `WARNINGS.txt` line. A recording
+  encoder whose `Encode` fails takes the path of any encoder failure (flush,
+  then spill that camera's frames raw) and leaves the pinned path on for the
+  others. After a
   PyNvVideoCodec or driver update, run `test_nvgil.py --gpu`.
 - The profile reaches `nvenc` only through
   `hardware_check.configure_nvenc_upload`, at launch and after a profile switch,
