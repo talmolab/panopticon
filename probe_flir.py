@@ -44,9 +44,9 @@ every camera setting it writes appears with the value the camera reads back.
 The trigger board: the probe starts the profile's board only after the board
 reports the recording-only sketch, the one the GUI puts on the board at
 launch, so a board that may carry a stimulation paradigm is never started. It
-stands the board down when it finishes, also after an error. Opening the
-board's serial port resets the board, and its pins float for about a second
-during the reset, as they do when the GUI launches. With
+opens the board once per run and stands it down when the run ends, also after
+an error. Opening the board's serial port resets the board, and its pins float
+for about a second during the reset, as they do when the GUI launches. With
 trigger_source: external the probe asks you to start and stop your own trigger
 source instead, and the counter checks and the exposure sweep, which need
 Panopticon's board, are skipped with a note saying so.
@@ -763,7 +763,9 @@ class _BoardSource:
 
     open() refuses a board that does not report the recording-only sketch for
     this profile's pins, because any other sketch may run a stimulation
-    paradigm when the board starts."""
+    paradigm when the board starts. The port is opened once per probe run,
+    as the GUI holds one controller from launch to quit, because every open
+    resets the board and floats its pins."""
 
     kind = "board"
     host_started = True
@@ -781,12 +783,23 @@ class _BoardSource:
         self.stopped = None
         self.last_start_retried = False
         self.retry_refused = False
+        self.tried = False
+        self.refusal = None
+        #: The stand-down after a refusal, None when none was needed.
+        self.stood_down = None
 
     def describe(self) -> str:
         return f"the trigger board on {self.port}"
 
     def open(self):
-        """None when the board is ready, else why it cannot be used."""
+        """None when the board is ready, else why it cannot be used. Only
+        the first call opens the port; a later one returns its answer."""
+        if not self.tried:
+            self.tried = True
+            self.refusal = self._open()
+        return self.refusal
+
+    def _open(self):
         if not self.port:
             return ("the profile names no serial_port, so there is no trigger "
                     "board to start. Set serial_port to the board's COM port, "
@@ -813,6 +826,9 @@ class _BoardSource:
         if heard is None or heard != self.want_id:
             said = (f"reports sketch {heard}" if heard else
                     "did not report a sketch identity")
+            # identify() already sent a stop; the close confirms it, and the
+            # board stays closed for the rest of the run.
+            self.stood_down = self.close()
             return (f"the trigger board on {self.port} {said}, not the "
                     f"recording-only sketch {self.want_id} for this profile's "
                     f"trigger_pins and stim_safe_pins, so it may carry a "
@@ -906,6 +922,8 @@ class _ExternalSource:
     host_started = False
     last_start_retried = False
     retry_refused = False
+    tried = False
+    stood_down = None
 
     def __init__(self, profile, fake: bool):
         self.fps = profile.frame_rate
@@ -916,6 +934,7 @@ class _ExternalSource:
         return "your trigger source"
 
     def open(self):
+        self.tried = True
         return None
 
     def before_arm(self, fps) -> None:
@@ -1034,6 +1053,7 @@ class Probe:
         self.backend = None
         self.api = None
         self._devices = None
+        self._source = None
         self.clock = None
         self.report = {
             "schema": SCHEMA, "created": _now_iso(), "fake": self.fake,
@@ -1304,9 +1324,46 @@ class Probe:
         self._devices = None
 
     def source(self):
-        if self.profile.trigger_source == "external":
-            return _ExternalSource(self.profile, self.fake)
-        return _BoardSource(self.profile, self.fake)
+        """The run's one trigger source, built at first use and shared by
+        every stage (see _BoardSource)."""
+        if self._source is None:
+            kind = (_ExternalSource if self.profile.trigger_source == "external"
+                    else _BoardSource)
+            self._source = kind(self.profile, self.fake)
+        return self._source
+
+    def open_source(self, stage: str):
+        """The run's trigger source ready to start, or None after a FAIL in
+        `stage`. The first stage to open the board records its identity
+        check, and the stand-down of a board it refused."""
+        src = self.source()
+        first = not src.tried
+        why = src.open()
+        if why is not None:
+            self.check(stage, f"{src.describe()} is usable", "FAIL", why)
+            if first and src.stood_down is not None:
+                self.check(stage, "trigger board stood down",
+                           "PASS" if src.stood_down else "FAIL",
+                           "" if src.stood_down else
+                           "the stop was not confirmed; power-cycle the board")
+            return None
+        if first and src.kind == "board":
+            self.check(stage, "trigger board runs the recording-only sketch",
+                       "PASS", f"sketch {src.heard_id}")
+        return src
+
+    def close_source(self):
+        """Stand the trigger board down once the stages are done; also
+        after an error or an interrupt."""
+        src, self._source = self._source, None
+        if src is None:
+            return
+        closed = src.close()
+        if src.kind == "board" and closed is not None:
+            self.check("board", "trigger board stood down",
+                       "PASS" if closed else "FAIL",
+                       "" if closed else "the stop was not confirmed; "
+                       "power-cycle the board")
 
     def spec_for(self, serial: str):
         spec = getattr(self.profile, "camera", None)
@@ -1326,6 +1383,13 @@ class Probe:
         self.save()
 
     def run(self) -> int:
+        try:
+            return self._run()
+        finally:
+            # An error or an interrupt still stands the trigger board down.
+            self.close_source()
+
+    def _run(self) -> int:
         a = self.args
         self.clock = _CycleClock()
         self.load_profile()
@@ -1384,6 +1448,7 @@ class Probe:
                 self.error(name, e)
                 self.check(name, "stage runs", "FAIL", _err(e))
             self.stage_ran(name, t0)
+        self.close_source()
         if a.pyspin and not interrupted:
             t0 = time.perf_counter()
             print("[probe] ===== stage pyspin =====", flush=True)
@@ -1862,13 +1927,8 @@ def stage_find_line(p: Probe):
             continue
         raws[dev.serial] = (_Raw(p.api, dev.handle, dev.label), dev)
     try:
-        why = src.open()
-        if why is not None:
-            p.check("find_line", f"{src.describe()} is usable", "FAIL", why)
+        if p.open_source("find_line") is None:
             return
-        if src.kind == "board":
-            p.check("find_line", "trigger board runs the recording-only "
-                    "sketch", "PASS", f"sketch {src.heard_id}")
         # Lines that can be inputs, per camera.
         names = {}
         for serial, (raw, _dev) in raws.items():
@@ -1907,12 +1967,6 @@ def stage_find_line(p: Probe):
             src.stop()
         elif not src.host_started:
             src.stop("find-line")
-        closed = src.close()
-        if src.kind == "board" and closed is not None:
-            p.check("find_line", "trigger board stood down",
-                    "PASS" if closed else "FAIL",
-                    "" if closed else "the stop was not confirmed; "
-                    "power-cycle the board")
         rep["raw_errors"] = {serial: raw.errors
                              for serial, (raw, _dev) in raws.items()}
         for _raw, dev in raws.values():
@@ -3118,9 +3172,7 @@ def stage_triggered(p: Probe):
     rep["open"] = info
     src = p.source()
     try:
-        why = src.open()
-        if why is not None:
-            p.check("triggered", f"{src.describe()} is usable", "FAIL", why)
+        if p.open_source("triggered") is None:
             return
         rep["board"] = ({"port": src.port, "sketch_id": src.heard_id}
                         if src.kind == "board" else None)
@@ -3160,12 +3212,6 @@ def stage_triggered(p: Probe):
         else:
             rep["counter_checks"] = _counter_checks(p, cams, src)
     finally:
-        closed = src.close()
-        if src.kind == "board" and closed is not None:
-            p.check("triggered", "trigger board stood down",
-                    "PASS" if closed else "FAIL",
-                    "" if closed else "the stop was not confirmed; "
-                    "power-cycle the board")
         for cam in cams:
             with contextlib.suppress(Exception):
                 p.backend.close(cam)
@@ -4068,9 +4114,7 @@ def stage_exposure_sweep(p: Probe):
         return
     src = p.source()
     try:
-        why = src.open()
-        if why is not None:
-            p.check("exposure_sweep", f"{src.describe()} is usable", "FAIL", why)
+        if p.open_source("exposure_sweep") is None:
             return
         lo = hi = None
         for e in grid:
@@ -4137,10 +4181,6 @@ def stage_exposure_sweep(p: Probe):
                     f"keeps 10% below the first exposure that loses triggers",
                     "PASS" if safe else "FAIL", ans or "no step completed")
     finally:
-        closed = src.close()
-        if src.kind == "board" and closed is not None:
-            p.check("exposure_sweep", "trigger board stood down",
-                    "PASS" if closed else "FAIL")
         for cam in cams:
             with contextlib.suppress(Exception):
                 p.backend.close(cam)
