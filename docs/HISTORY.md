@@ -83,11 +83,10 @@ Dead ends, do not retry:
   limit. The hardware fix was abandoned; the long-lived connection is what
   solved it. Dead end.
 - 2026-07-27: Stall recovery and `retire()`. `grab_thread` re-arms after 25
-  consecutive timeouts (up to 5 times), `_resync_offset()` recovers the true
+  consecutive timeouts, up to 5 times. `_resync_offset()` recovers the true
   ordinal from the device timestamp and refuses when the gap is not within 0.25
-  of a period, and `retire()` drops a camera that cannot realign so the
-  survivors keep recording aligned. cam6 had stalled on 2026-06-10, cam1 on
-  2026-07-27.
+  of a period. `retire()` drops a camera that cannot realign, so the survivors
+  keep recording aligned. cam6 had stalled on 2026-06-10, cam1 on 2026-07-27.
 
 Dead ends, do not retry:
 - `dtr=False` or `rts=False` to suppress the reset (zero triggers).
@@ -133,9 +132,9 @@ Dead ends, do not retry:
   against a 10 ms budget every grab thread shares, and whichever thread lost
   the GIL lottery became the laggard. `GetArrayZeroCopy` costs 0.157 ms (5.33x
   less). Rig result at six cameras: cycle 12.0 down to 10.00 ms, avg_proc
-  5.2-5.5 down to 0.79-0.84 ms, underruns 245-882 down to 0, cross-camera lag
-  median 235-479 down to median 0, p95 1, max 2, and forced drops 12.34% down
-  to 0. `np.frombuffer(GetBuffer())` measured 0.902 ms, no better than
+  5.2-5.5 down to 0.79-0.84 ms, and underruns 245-882 down to 0. Cross-camera
+  lag went from a median of 235-479 to median 0, p95 1, max 2, and forced drops
+  from 12.34% to 0. `np.frombuffer(GetBuffer())` measured 0.902 ms, no better than
   `.Array`. The laggard came back at nine cameras (section 6); its main cause
   is in section 8.
 - 2026-09-03: GIL-wait budget measured with `QueryThreadCycleTime`, not a
@@ -328,9 +327,9 @@ Dead ends, do not retry:
   two-argument `QSettings(ORG, APP)`, so the next launch would have opened the
   simulated rig. `PANOPTICON_SETTINGS_FILE` now redirects the store (`486cbc9`).
 - 2026-09-19: First rig session of the audited code, nine cameras, 20 s at
-  100 fps: one keyframe per second on every camera, seek time flat at 55-87 ms
-  against 2.5-9.0 s on an older file, block IDs identical on all nine, forced 0.
-  cam6 alone degraded (lag 129, 244, then 278 of 480; cycle 12.7 ms) and was
+  100 fps. Every camera had one keyframe per second, and seek time was flat at
+  55-87 ms against 2.5-9.0 s on an older file. Block IDs were identical on all
+  nine, and forced was 0. cam6 alone degraded (lag 129, 244, then 278 of 480; cycle 12.7 ms) and was
   also the hottest camera (77.6 C, peak 80.6 C). Measured on the rig; no code
   change.
 - 2026-09-19: Later the same day a 5-minute calibration and a 5-minute
@@ -401,9 +400,9 @@ Dead ends, do not retry:
 - 2026-09-22: Simultaneity measured with an IR LED on the stim pin pulsed at
   2 Hz for 45 s: all 92 rising edges landed on the same trigger in all nine
   cameras. Measured on the rig; no code change.
-- 2026-09-22: GIL-free upload prototype, on the GPU alone. Copying each frame
-  into page-locked staging with numpy (which releases the GIL) and letting the
-  driver DMA it cut the GIL held per `Encode()` from 0.44-0.72 ms to about
+- 2026-09-22: GIL-free upload prototype, on the GPU alone. It copies each frame
+  into page-locked staging with numpy, which releases the GIL, and lets the
+  driver DMA it. The GIL held per `Encode()` fell from 0.44-0.72 ms to about
   0.07-0.09 ms, and the encoders' GIL occupancy at 9 x 100 fps from about 42% to
   10-15%, with byte-identical bitstreams. A host synchronize of the encoder
   stream drained NVENC's pipeline and spun a core (2.7 ms of CPU per frame);
@@ -418,10 +417,10 @@ Dead ends, do not retry:
   NIC DPC saturation on CPUs 0-2. Cost: about 0.8 more cores and 2.6 GiB more
   private memory. Measured on the rig; no code change.
 - 2026-09-22: Thermal policy. A fan is not an option on this rig, and the
-  cameras' thresholds cannot be raised, so Panopticon's reaction changed: it
-  warns at the camera's reported shutdown point minus `thermal_warn_margin_c`
-  (program default 3.0 C; the 3dpose profile sets 2.0, so 79 C) and no longer on
-  Critical alone (`86e18a7`; the live watch in `f4ad2da`).
+  cameras' thresholds cannot be raised, so Panopticon's reaction changed. It
+  warns at the camera's reported shutdown point minus `thermal_warn_margin_c`,
+  and no longer on Critical alone (`86e18a7`; the live watch in `f4ad2da`). The
+  program default is 3.0 C; the 3dpose profile sets 2.0, so it warns at 79 C.
   `BsliDeviceTemperatureOverwrite*` fakes the reading and defeats the camera's
   shutdown, so Panopticon never writes it.
 - 2026-09-22: FLIR support is a `ctypes` binding to the Spinnaker C API
@@ -450,21 +449,21 @@ Dead ends, do not retry:
   Basler exposure-ceiling formula lives in the backend (`1ec1db0`), and each
   camera's timestamp tick rate is logged, with a warning when it is not 1 GHz
   (`8b5261f`). Merged as `31c830d`.
-- 2026-09-22: Profile schema: the `camera:` block for backends without a
-  settings file, with the Basler-only fields refused on FLIR (`1b6e4f0`);
-  `realtime_kick` defaults to true (`1b6c2d8`); an unknown backend, a quality
+- 2026-09-22: Profile schema. The `camera:` block serves backends without a
+  settings file, and FLIR refuses the Basler-only fields (`1b6e4f0`).
+  `realtime_kick` defaults to true (`1b6c2d8`). An unknown backend, a quality
   outside 0-51 and a pool below `kick_max_lag` are refused at load (`16fef54`).
   Merged as `3839cc3`.
-- 2026-09-22: Offline pipeline: a replace never cuts surviving cameras to a
-  retired or short camera's length (`49c89bd`), the stim trace is rewritten
-  whenever alignment replaces videos (`8663079`), and a replace decodes every
-  coded frame once and refuses on a count mismatch (`2f0f53c`). Merged as
+- 2026-09-22: Offline pipeline. A replace never cuts surviving cameras to a
+  retired or short camera's length (`49c89bd`). The stim trace is rewritten
+  whenever alignment replaces videos (`8663079`). A replace decodes every coded
+  frame once and refuses on a count mismatch (`2f0f53c`). Merged as
   `c49545e`.
-- 2026-09-22: App safety: every exchange with the trigger board holds one lock,
-  and a start does not retry after a quit (`8657083`); a start retry is refused
+- 2026-09-22: App safety. Every exchange with the trigger board holds one lock,
+  and a start does not retry after a quit (`8657083`). A start retry is refused
   once armed cameras counted triggers (`7b29419`), on pre-RDY firmware too
-  (`527f47e`); the quit stands the board down even when the link reads as
-  closed, and the port cannot be reopened afterwards (`a1f71f3`, `15ec781`); a
+  (`527f47e`). The quit stands the board down even when the link reads as
+  closed, and the port cannot be reopened afterwards (`a1f71f3`, `15ec781`). A
   second launch is refused before it touches hardware (`0867351`). Merged as
   `8da2802`.
 - 2026-09-22: The GIL-free upload ported behind `nvenc.configure_upload`, host

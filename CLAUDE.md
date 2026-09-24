@@ -161,8 +161,8 @@ until someone analyses it.
   the router's references once that camera's encoder has exited, and
   `CameraManager.stop_acquisition` runs `gc.collect()` after every grab thread
   has exited. The ring, the router's sinks and the encoder threads refer to one
-  another, so without the release the rings wait for a full garbage collection
-  that a quiet GUI may never run, and the next Record is refused for lack of
+  another. Without the release the rings wait for a full garbage collection,
+  which a quiet GUI may never run, and the next Record is refused for lack of
   RAM.
 - The grab loop's critical path is retrieve, copy, queue, release, and nothing
   else. Encoders drain separately into `stream.h264` through PyNvVideoCodec
@@ -266,13 +266,16 @@ until someone analyses it.
 - A counter narrower than `2**31` is trusted only while the frames and the stall
   re-arm down-time edges stay under half its period. Past that, the witness
   writes the limited-witness sentence and gives no count.
-- A camera with no witness sentence is not proven aligned in these cases, which
-  the `flir.py` module docstring lists: a trigger ignored between the arming inside
-  `BeginAcquisition` and the first read after it; an exposure that starts later
-  than the `TriggerDelay` plus one register read at a re-arm; a narrow counter
-  that ignored a whole multiple of its period (the rate check reports it); two
-  counters that count the wrong events but agree; and a `frame_id` camera
-  without an edge counter.
+- A camera with no witness sentence is still not proven aligned in the cases
+  the `flir.py` module docstring lists:
+  - a trigger ignored between the arming inside `BeginAcquisition` and the
+    first read after it;
+  - an exposure that starts later than the `TriggerDelay` plus one register
+    read at a re-arm;
+  - a narrow counter that ignored a whole multiple of its period (the rate
+    check reports it);
+  - two counters that count the wrong events but agree;
+  - a `frame_id` camera without an edge counter.
 - A 16-bit wrap is decided from the device clock, never from the first raw ID
   after it. A re-arm's witness window ends after `BeginAcquisition` returns.
 
@@ -464,8 +467,8 @@ and no Qt.
 
 ## Serial and laser safety
 
-- With no profile chosen on the computer (nothing remembered, or a remembered
-  or `--profile` name that does not load), the window opens no camera and no
+- A computer may have no profile chosen: nothing remembered, or a remembered or
+  `--profile` name that does not load. The window then opens no camera and no
   serial port, runs no hardware check and flashes nothing until the operator
   chooses a profile in the dropdown or with `gui.py --profile NAME`. The choice
   is remembered. Never fall back to another profile: it names another rig's
@@ -483,12 +486,16 @@ and no Qt.
   cleared on every open and at the start of every ack wait.
 - Every start is confirmed by an `RDY <n_cams> <fps> <id>` ack, because a start
   can land in `loop()`'s reconfigure branch instead of a fresh `setup()`.
-  `start_triggers()` returns a bool over four branches: (1) ack, so proceed;
-  (2) no ack, so reset and retry; (3) still no ack from a board that has never
-  acked, so assume pre-RDY firmware and proceed; (4) no ack from a board that
-  has acked before, so return False and roll the cameras back. Telling branch 3
-  from branch 4 is what keeps an empty session from being recorded;
-  `test_serial_handshake.py` pins all four.
+  `start_triggers()` returns a bool over four branches:
+  1. ack: proceed;
+  2. no ack: reset and retry;
+  3. still no ack from a board that has never acked: assume pre-RDY firmware
+     and proceed;
+  4. no ack from a board that has acked before: return False and roll the
+     cameras back.
+
+  Telling branch 3 from branch 4 is what keeps an empty session from being
+  recorded. `test_serial_handshake.py` pins all four.
 - The retry (branch 2) is skipped when the owner stops or closes the link during
   the first attempt or the reopen, and when the caller's `may_retry` veto
   returns False. Every caller that starts the board under armed cameras (the
