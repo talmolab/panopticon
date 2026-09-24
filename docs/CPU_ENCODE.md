@@ -64,10 +64,10 @@ instead of the H.264 rate.
 ## Why it exists
 
 Without it, a machine whose GPU cannot serve every camera has one option left:
-`raw.bin`, the whole Mono8 frame every frame. At 1920x1200 and 100 fps that is
-230 MB/s per camera, 129 GiB per camera per 10 minutes, about 500 times the
-H.264 size. libx264 sits between the two: a real CPU cost, H.264-sized files,
-and no encode pass after the session.
+`raw.bin`, the whole Mono8 frame every frame
+([CONFIGURATION.md](CONFIGURATION.md#disk) gives both disk rates).
+libx264 sits between the two: a real CPU cost, H.264-sized files, and no
+encode pass after the session.
 
 ## How it is wired in
 
