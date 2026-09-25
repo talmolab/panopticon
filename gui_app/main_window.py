@@ -240,10 +240,13 @@ class MainWindow(QMainWindow):
                 f"window {old.value if old is not None else 'start'} -> "
                 f"{new.value}")
 
-    def __init__(self, profile_name: str | None = None):
+    def __init__(self, profile_name: str | None = None, status=None):
         """``profile_name`` is gui.py's --profile: the profile to open and
         remember for later launches. None opens the one this computer
-        remembers."""
+        remembers. ``status(text)`` reports each startup step (gui.py shows it
+        on the splash screen); it is called on this thread only while the
+        window is being built."""
+        self._startup_status = status or (lambda _text: None)
         super().__init__()
         self.setWindowTitle("Panopticon")
         self.setMinimumSize(1000, 400)
@@ -328,14 +331,19 @@ class MainWindow(QMainWindow):
         self._hw_check_thread: HardwareCheckThread | None = None
 
         self._camera_grid = CameraGridWidget()
+        self._startup_status("Reading the rig profiles…")
         self._sidebar = SidebarWidget()
 
         # The grid and the sidebar share a splitter, so the operator can drag
         # the divider left to widen the sidebar (a bigger coverage graph
-        # during calibration). The grid takes every resize of the window; the
-        # sidebar keeps the width it was dragged to, which is remembered.
+        # during calibration), or right past the sidebar's narrowest width to
+        # collapse it and leave only the cameras. The sidebar never shows
+        # narrower than SidebarWidget.MIN_WIDTH, where nothing in it is cut
+        # off: QSplitter collapses a collapsible child dragged below its
+        # minimum instead of squeezing it. The grid takes every resize of the
+        # window; the sidebar keeps its width, collapsed included, which is
+        # remembered.
         self._splitter = QSplitter(Qt.Horizontal)
-        self._splitter.setChildrenCollapsible(False)
         self._splitter.setHandleWidth(5)
         self._splitter.setStyleSheet(
             "QSplitter::handle { background: #333; }"
@@ -350,6 +358,8 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(sidebar_container)
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 0)
+        self._splitter.setCollapsible(0, False)
+        self._splitter.setCollapsible(1, True)
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
         self.setCentralWidget(self._splitter)
@@ -421,11 +431,25 @@ class MainWindow(QMainWindow):
         self._apply_log_level()
 
         if self._profile.name:
-            self._open_cameras()
+            self._startup_status(
+                f"Opening the cameras for {self._profile.name}…")
+            # Only while the window is being built: the open runs here, on
+            # the UI thread, and the splash is repainted from the callback. A
+            # profile switch opens on a worker thread and reports nothing.
+            self._camera_mgr.progress = self._startup_status
+            try:
+                self._open_cameras()
+            finally:
+                self._camera_mgr.progress = None
+        self._startup_status("Starting the window…")
         # The launch header: off the UI thread, because the first gathering
         # of the environment facts runs git and nvidia-smi.
         self._log_header_async("launch")
         self._size_to_screen()
+        # Where the window was last left, if it still fits a screen.
+        geometry = settings.get_bytes(settings.KEY_WINDOW_GEOMETRY)
+        if geometry is not None:
+            self.restoreGeometry(geometry)
         if self._profile.name:
             self._sidebar.set_status("IDLE", "#888")
             self._run_hardware_check()
@@ -759,13 +783,16 @@ class MainWindow(QMainWindow):
         return int(min(100, max(33, round(33 * n / 6))))
 
     def _sidebar_width(self) -> int:
-        """The remembered sidebar width, inside the sidebar's limits."""
+        """The remembered sidebar width inside the sidebar's limits, or 0 when
+        it was left collapsed."""
         w = settings.sidebar_width(SidebarWidget.MIN_WIDTH)
+        if w <= 0:
+            return 0
         return max(SidebarWidget.MIN_WIDTH, min(SidebarWidget.MAX_WIDTH, w))
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
         sizes = self._splitter.sizes()
-        if len(sizes) == 2 and sizes[1] > 0:
+        if len(sizes) == 2:
             settings.set_sidebar_width(sizes[1])
 
     def _size_to_screen(self):
@@ -1480,9 +1507,7 @@ class MainWindow(QMainWindow):
             date=vals["date"],
             mouse_1=vals["mouse_1"],
             mouse_2=vals["mouse_2"],
-            assay=vals["assay"],
             experimenter=vals["experimenter"],
-            cohort=vals["cohort"],
             cage=vals["cage"],
             notes=vals["notes"],
             base_data_dir=Path(self._sidebar.output_dir),
@@ -5152,6 +5177,16 @@ class MainWindow(QMainWindow):
                     self._start_thermal_watch()
                 event.ignore()
                 return
+
+        # The form, the sliders and where the window sits, for the next
+        # launch. Before anything is torn down, and never able to stop the
+        # quit.
+        try:
+            self._sidebar.save_state()
+            settings.set_value(settings.KEY_WINDOW_GEOMETRY,
+                               self.saveGeometry())
+        except Exception as e:
+            print(f"[acq] could not save the window state: {e}", flush=True)
 
         # From here on no start may reach the board: a start worker checks
         # this immediately before it claims the port and before it sends the

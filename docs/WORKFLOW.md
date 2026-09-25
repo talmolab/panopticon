@@ -212,7 +212,8 @@ recording follows [Your own trigger source](#your-own-trigger-source).
 
 The button under the dropdown shows the folder that sessions are written
 under. Click it to choose another folder. Choose the profile first, because
-switching profiles and relaunching both reset the folder to the profile's
+the folder you choose is remembered for that profile, at the next launch and
+when you switch back to it. A profile you have not chosen a folder for uses its
 `output_dir`.
 
 Every session is written as
@@ -229,16 +230,19 @@ drive.
 | Date | today, as `YYYYMMDD` | folder and file names |
 | Mouse 1 | blank, which becomes `m1` | folder and file names |
 | Mouse 2 | blank, which becomes `m2` | folder and file names |
-| Assay, Experimenter, Cohort, Cage, Notes | the profile's `metadata_defaults` | `session_metadata.json` |
+| Experimenter, Cage, Notes | what you typed last, else the profile's `metadata_defaults` | `session_metadata.json` |
 
 With Date `20260904` and both mice blank, the session folder is
 `<output>/20260904/m1_m2/`, and cam1's recording is
 `20260904-m1_m2-cam1-recording.mp4`.
 
-The reference rig's profile fills in Experimenter `IT` and Assay `open_field`.
-Put your own values in your profile's `metadata_defaults`, because whatever a
-field holds when an acquisition ends goes into `session_metadata.json`.
-Switching profiles fills in only the fields you have not typed into.
+The reference rig's profile fills in Experimenter `IT`. Put your own values in
+your profile's `metadata_defaults`, because whatever a field holds when an
+acquisition ends goes into `session_metadata.json`. Assay and cohort have no
+field: the profile's `metadata_defaults` writes them into
+`session_metadata.json` as they are (the reference rig's assay is
+`open_field`). Switching profiles fills in only the fields you have not typed
+into, and what you typed, except the date, is back at the next launch.
 
 Fill in Date and the mice before you calibrate. Solve looks for the
 calibration in the folder the fields name when you press it, so a changed

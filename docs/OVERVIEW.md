@@ -19,14 +19,27 @@ are finalised.
 
 The camera grid fills the left of the window, and the sidebar fills the
 right. The sidebar opens 260 px wide. Drag the divider on its left edge to
-widen it, up to 900 px, and Panopticon remembers the width at the next launch.
-From 520 px the metadata fields sit two to a row, and the coverage display
-(12) takes the height that saves, so a wide sidebar gives a larger graph
-during a calibration. The sidebar holds the Metadata, Acquisition and Display
-groups, with the state label at its foot. The status bar runs along the bottom of the
+widen it, up to 900 px. Drag it right past 260 px and the sidebar collapses,
+leaving only the cameras; drag the divider back out from the right edge to open
+it again. From 520 px the metadata fields sit two to a row, and the coverage
+display (12) takes the height that saves, so a wide sidebar gives a larger
+graph during a calibration. The sidebar holds the Metadata, Acquisition and
+Display groups, with the state label at its foot. The status bar runs along the bottom of the
 window. Every other setting is in the rig profile
-([CONFIGURATION.md](CONFIGURATION.md)). The window opens at about 80% of the
-screen height, shaped to fit the camera grid.
+([CONFIGURATION.md](CONFIGURATION.md)). The first launch opens the window at
+about 80% of the screen height, shaped to fit the camera grid.
+
+Each later launch puts back what you left:
+
+- the window's position and size, and the sidebar's width, collapsed included;
+- the session fields, except the date, which follows the calendar;
+- a folder chosen with the output button, for each profile;
+- the Display sliders;
+- the Stimulation editor's pin, frequency, pulse width and duration fields.
+
+The editor's canvas is not restored, and nothing reaches the trigger board
+until Apply. While Panopticon starts, the splash screen names each step, down
+to the camera it is opening.
 
 ### Preview
 
@@ -71,7 +84,10 @@ link or trigger.
 Chooses the rig profile ([CONFIGURATION.md](CONFIGURATION.md)).
 [WORKFLOW.md](WORKFLOW.md#2-choose-a-profile) says what a switch does to the
 cameras and the trigger board. On a computer with no remembered profile the
-dropdown shows `Choose a profile`.
+dropdown shows `Choose a profile`. Its last entry, `Add a profile from a
+file…`, opens a file dialog for a profile kept outside `profiles/`, switches
+to it and lists it at every later launch
+([CONFIGURATION.md](CONFIGURATION.md#where-settings-live)).
 
 The dropdown is disabled from the start of an acquisition until its videos
 are finalised, during a solve, and during a blocking operation (16). A switch
@@ -82,11 +98,13 @@ with a dialog that says what to wait for.
 
 The folder that sessions are written under. The button shows the path
 shortened in the middle, with the full path as its tooltip.
-[WORKFLOW.md](WORKFLOW.md#3-set-the-output-directory) says when it resets.
+[WORKFLOW.md](WORKFLOW.md#3-set-the-output-directory) says which folder a
+profile starts with.
 
 #### 6. Session fields
 
-Date, Mouse 1, Mouse 2, Assay, Experimenter, Cohort, Cage and Notes.
+Date, Mouse 1, Mouse 2, Experimenter, Cage and Notes, which is three lines
+tall.
 [WORKFLOW.md](WORKFLOW.md#4-fill-in-the-metadata) says what each one feeds,
 gives the defaults and lists the checks.
 
