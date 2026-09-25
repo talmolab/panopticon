@@ -6,11 +6,10 @@ Panopticon prints, with `<...>` in place of the parts that change, such as a
 camera name or a number.
 
 Messages appear in dialogs, in the status bar at the bottom of the window, in
-the console, and in the log. Every launch writes its log to
-`logs\panopticon_<date>_<time>.log` in the repository folder. Each recording
-and calibration folder holds `session.log`, the part of the log for that
-acquisition, and `WARNINGS.txt` when something needs your attention. Every log
-line starts with the time and the thread that printed it.
+the console, and in the log ([WORKFLOW.md](WORKFLOW.md#the-log) says where each
+launch's log and each acquisition's `session.log` are). Each recording and
+calibration folder also holds `WARNINGS.txt` when something needs your
+attention.
 
 When you report a problem, attach the log, the profile and any `WARNINGS.txt`.
 
@@ -46,7 +45,7 @@ Contents:
 | `A package this build needs is not installed.` | Part of the dialog above for an import error. Run `uv sync` again, or choose a profile whose `camera_backend` does not need the missing package. |
 | `Panopticon is already running (pid <pid>).` | Another copy of the window runs on this computer. Switch to it, or close it. A second copy would compete for the cameras, the trigger board and the GPU encoder, and could flash the board during a recording. |
 | `Panopticon, or one of its probes, is already running:` | As above, and the list names each process. Close it first. |
-| `To start a second copy anyway, run gui.py --force.` | The refusal above exits with status 3. Use `uv run gui.py --force` only after you have checked the other copy by hand. The desktop shortcut and `_launch.bat` pass no arguments. |
+| `To start a second copy anyway, run gui.py --force.` | The refusal above exits with status 3. Use `uv run gui.py --force`, or `.\_launch.bat --force`, only after you have checked the other copy by hand. The desktop shortcut passes no arguments. |
 | `Panopticon — Unexpected Error` | An error inside the window. It keeps running, and every occurrence goes to the log the dialog names. Attach that log to a report. |
 | `[guard] REFUSING TO START: Panopticon is already running, and two instances fight over the same cameras:` | From a probe (`probe_network.py --sweep`, `probe_flir.py`). Quit Panopticon and any other probe, then run it again. |
 
@@ -65,7 +64,7 @@ Contents:
 | `camera.flir.sdk_dir is not a folder:` | Point it at the Spinnaker install folder, or remove it to search the default places. |
 | `The profile sets capture_processes: <n>.` | Capturing in several processes is experimental, and the window captures in one. Set `capture_processes: 0`. |
 | `A solve is running` | The profile switch was refused, and the list shows the old profile again. Choose the profile again once the calibration solve has finished. |
-| `Firmware upload in progress` | The profile switch or the close was refused during a flash, which takes about 30 s. Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
+| `Firmware upload in progress` | The profile switch, the start or the close was refused during a [flash](OVERVIEW.md#16-state). Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
 | `The hardware check is running` | The profile switch or the start was refused. Choose the profile, or start, again once the status bar says the check is done. |
 
 ## Opening the cameras
@@ -112,7 +111,7 @@ Calibrate stay disabled while it runs.
 | `ffmpeg's h264_nvenc test encode failed` | The post-session encodes run on the CPU instead, which is slower. |
 | `GOP NOT APPLIED` | The encoder ignored the keyframe setting, so recordings would have one keyframe and could not be seeked. Report the driver and PyNvVideoCodec versions. |
 | `nvenc_upload: pinned needs the launch check` | The pinned GPU upload did not pass its launch check, so this session uses the host upload. The video is the same, and grab threads can fall behind ([INSTALLATION.md](INSTALLATION.md#cpu)). The `[nvenc]` lines in the log say why. |
-| `nvenc_context: own gives each of the <n> encoders a CUDA context of its own` | The GPU lacks free memory for one context per camera, so the pinned upload runs in the shared context. |
+| `nvenc_context: own gives each of the <n> encoders a CUDA context of its own` | The GPU lacks free memory for one context per camera, or Panopticon could not measure it (the message says which), so the [pinned upload](GLOSSARY.md#pinned-upload) runs in the shared context. |
 | `usbfs_memory_mb is <n> MB` | Linux only. Raise the usbfs limit as the message says. |
 | The report's `Camera SDK:` line says `cannot load` | The camera SDK the profile needs did not load. Install it ([INSTALLATION.md](INSTALLATION.md#step-2--install-the-basler-pylon-sdk), or [FLIR.md](FLIR.md#1-install)). |
 | `The hardware check could not finish` | Its findings are incomplete. The capacity check still runs at Record. |
@@ -151,7 +150,7 @@ before you connect a laser or LED driver to the board.
 | The laser flashes briefly at launch | The board resets when its port opens and when it is flashed, and its pins float during the reset ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). The laser's own interlock is the only hard gate. |
 | `Could not clear stim firmware` | The board could not be flashed, so it may still carry an earlier paradigm, a looping one included. Fix the cause the message gives, then press **Apply** on an empty Stimulation canvas, or switch the laser off. |
 | `arduino-cli was not found` | Install the Arduino IDE or `arduino-cli`, or set `PANOPTICON_ARDUINO_CLI` to its path. The message lists every place searched. Only flashing, Apply and Test need it. |
-| `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next start opens the port, which resets the board: switch the laser off first. |
+| `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next Calibrate, Record or Test opens the port, which resets the board: switch the laser off first ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `trigger board reports sketch <id>, not the recording-only <id>; flashing` | The board ran another sketch, and Panopticon flashes the recording-only one. |
 | `trigger board still reports sketch <id>; not flashing again this launch` | The board kept reporting another sketch after one flash. Check `serial_port` names the right board, then Apply an empty canvas. |
 | `trigger board reported no sketch identity` | The board runs firmware that does not report its identity. Apply an empty canvas to flash Panopticon's sketch. |
@@ -181,7 +180,7 @@ preview.
 | `Raw capture will write <n> GiB/s.` | Use a drive rated for that sustained rate, or split the cameras across drives. |
 | `Overwrite the existing data?` | The folder holds an earlier acquisition. **Yes** deletes it, except `calibration.toml`, once the board's port is claimed, even if the start is then refused. To keep it, choose **Cancel** and change the metadata. |
 | `Overwrite the existing data?`, with an external trigger source | **Yes** sets the earlier acquisition aside until the first trigger, and puts it back if the start ends before then. |
-| `Serial port <port> could not be opened, so no triggers would be sent.` | Something holds the port (the Arduino Serial Monitor, another program), or `serial_port` names the wrong port. Close it and start again. That start opens the port, which resets the board: switch the laser off first. |
+| `Serial port <port> could not be opened, so no triggers would be sent.` | Something holds the port (the Arduino Serial Monitor, another program), or `serial_port` names the wrong port. Close it and start again. That start opens the port, which resets the board: switch the laser off first ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `Could not create the session directories` | The output folder cannot be written. Check it and start again. |
 | `Stop the stimulation test first` | A stimulation test drives the board. Stop it in the editor. |
 | `Cannot record with this stim workflow` | The canvas has a pin conflict, a forbidden pin or a loop with no start, or it does not compile. The message says which ([Stimulation](#stimulation)). |
@@ -189,7 +188,7 @@ preview.
 | `Apply the edited paradigm first` | The canvas changed since the last Apply, so the board would run the old paradigm. Press **Apply**, or undo the edit. |
 | `Apply the empty canvas first` | The canvas is empty and the board still carries the paradigm Applied earlier this session. Press **Apply** to clear the board. |
 | `Stimulation needs the trigger board` | The profile uses `trigger_source: external`, which has no board to run a paradigm. Use a profile with `trigger_source: board`. |
-| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which takes about 30 s and resets the board. Switch the laser off before that start. |
+| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which resets the board. Switch the laser off before that start ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `The trigger board could not be flashed with the <kind> firmware` | Nothing started. Switch the laser off, check the board and the port, and retry. |
 | `had not armed after <n> s, so the trigger board was not started` | A camera that arms after the board starts would pair every frame with the wrong trigger. Arming fills each camera's frame ring, so memory pressure is the usual cause: close other programs, or lower `kick_max_lag` or `max_num_buffer`. |
 | `had not armed after <n> s, so you were not asked to start your trigger source.` | The same, with `trigger_source: external`. |
@@ -208,7 +207,7 @@ Most of these appear in the status bar.
 
 | Message or symptom | Cause and fix |
 |---|---|
-| `Capture healthy — every camera within <n> trigger(s) of the leader` | Normal in the default kick-out mode. |
+| `Capture healthy — every camera within <n> trigger(s) of the leader` | Normal in the default [kick-out](GLOSSARY.md#kick-out) mode. |
 | `CAPTURE FALLING BEHIND: <cam> is <n> triggers behind the leader (cap <cap>). Close other applications.` | A camera lags by more than a quarter of `kick_max_lag`. Nothing is lost yet. Close other programs. |
 | `TRIGGERS BEHIND THE LEADER (cap <cap>): frames every camera captured are being dropped. Stop and investigate.` | A camera lags by more than three quarters of `kick_max_lag`. At the cap, triggers every other camera captured are dropped from every video. Stop and check that camera ([After a recording](#after-a-recording)). |
 | `Capture healthy — keeping up with the trigger (max lag <n> ms)` | Normal with `realtime_kick: false`. |
@@ -236,8 +235,8 @@ runs after the encode, and its rows appear in dialogs of their own, such as
 | Message or symptom | Cause and fix |
 |---|---|
 | `Effective frame rate <rate> fps (target <rate>).` | More than 0.5% of the triggers were missing from at least one camera, so they were dropped from every video. The videos stay aligned. The log has each camera's losses, and `session_metadata.json` the counts. |
-| `are missing from every camera's video: they were force-dropped because a camera fell more than kick_max_lag` | A camera fell a full `kick_max_lag` behind, and the message names it. The videos stay aligned. Find why that camera lagged: its link, its CPU core, its temperature. |
-| `was RETIRED mid-recording` | That camera's video ends at the retirement, and the others stay aligned. The reason follows in brackets, and the rows below explain the common ones. |
+| `are missing from every camera's video: they were force-dropped because a camera fell more than kick_max_lag` | A camera fell a full `kick_max_lag` behind ([forced drop](GLOSSARY.md#forced-drop)), and the message names it. The videos stay aligned. Find why that camera lagged: its link, its CPU core, its temperature. |
+| `was RETIRED mid-recording` | That camera's video ends at the [retirement](GLOSSARY.md#retirement), and the others stay aligned. The reason follows in brackets, and the rows below explain the common ones. |
 | `every grab failing` | Every frame from this camera failed. On GigE, check jumbo frames on the adapter and on every switch port in its path. On USB3, check the cable and the host controller. |
 | `grabs failed (<n>%, last:` | More than 0.5% of this camera's frames were lost in transmission. Same checks as above. |
 | `no frame received since the triggers started` | The camera never triggered. Check its trigger cable, its pin in `trigger_pins`, and its trigger line setting. |
@@ -276,18 +275,23 @@ runs after the encode, and its rows appear in dialogs of their own, such as
 
 ## The recording looks fine but the views are out of sync
 
-Symptom: every camera has the same number of frames and no counter moved, yet
-triangulated points miss the animal and fast movements happen at different
-times in different views. Or `WARNINGS.txt` says a camera's block IDs advanced
-at the wrong rate.
+Symptom: every camera has the same number of frames and no packet or buffer
+counter moved, yet triangulated points miss the animal and fast movements
+happen at different times in different views. Or `WARNINGS.txt` says a camera's
+block IDs advanced at the wrong rate. In the default kick-out mode that camera
+also falls one trigger further behind the leader for every trigger it ignores,
+which the status bar shows during the recording
+([INTERNALS.md](INTERNALS.md#what-happens-over-the-ceiling)).
 
 Alignment treats "same [block ID](GLOSSARY.md#block-id)" as "same instant". A
-block ID counts the frames
-a camera acquired, so it equals the trigger count only while the camera acquires
-one frame per trigger. A camera still busy when the next trigger arrives ignores
-that trigger. It acquires no frame and consumes no block ID, so from then on its
-block ID *N* belongs to trigger *N+k*. Its block IDs have no gap, its frame
-count matches the others, and the videos drift apart in time.
+frame-ID block ID (every Basler camera, and a FLIR camera on its frame ID)
+counts the frames a camera acquired. It equals the trigger count only while the
+camera acquires one frame per trigger. A camera still busy when the next trigger
+arrives ignores that trigger. It acquires no frame and consumes no block ID, so
+from then on its block ID *N* belongs to trigger *N+k*. Its block IDs have no
+gap, its frame count matches the others, and the videos drift apart in time.
+On a FLIR camera that uses its trigger counter, the ignored trigger is a gap
+([FLIR cameras](#flir-cameras)).
 
 The common causes:
 

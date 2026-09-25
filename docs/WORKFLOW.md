@@ -44,7 +44,9 @@ Start Panopticon from the desktop shortcut, `_launch.bat` or a terminal:
 - Run `uv run gui.py` in a terminal in the repository folder. The log then
   appears in the terminal as it is written.
 
-Only the terminal passes options. `--profile <name>` opens that profile and
+The terminal and `_launch.bat` pass options on
+(`.\_launch.bat --profile <name>` in the repository folder), and the shortcut
+passes none. `--profile <name>` opens that profile and
 remembers it for later launches. `--force` starts a second copy of Panopticon.
 
 Only one copy runs at a time. A second launch, or a launch while one of
@@ -76,10 +78,8 @@ of every acquisition.
 The profile's `log_level` sets how much else the log holds
 ([CONFIGURATION.md](CONFIGURATION.md#log_level)). The default, `verbose`, adds
 the camera settings Panopticon asked for and read back, and a `[state]` line
-at each step of an acquisition. No level logs each frame, and printing never
-makes a capture thread wait. If the log writer falls behind, it drops lines
-and says so with `[log] N log lines dropped`. `probe_flir.py` writes its own
-log at `verbose`, or at `debug` when the profile asks for it.
+at each step of an acquisition. If the log writer falls behind, it drops lines
+and says so with `[log] N log lines dropped`.
 
 Quote the launch log and the acquisition's `session.log`
 ([section 10](#10-what-the-session-leaves-on-disk)) when you report a problem.
@@ -95,7 +95,7 @@ Panopticon at launch:
    The check measures the output drive, probes how many NVENC sessions the
    GPU driver grants, times a libx264 encode and picks the encoder. A
    `Hardware Check` dialog lists any problem it finds, for example:
-   - fewer than 4 CPU cores, under 16 GB of RAM, under 500 GB free or under
+   - fewer than 4 CPU cores, under 16 GiB of RAM, under 500 GiB free or under
      500 MB/s of writing on the output drive;
    - an NVENC path that does not work, or an encoder that ignores the
      keyframe setting, which would leave recordings with one keyframe and
@@ -111,7 +111,7 @@ Panopticon at launch:
    the board's flash memory and survives quitting, a power cycle and an
    unplugged cable. So Panopticon reflashes the board at every launch, unless
    this computer's record says the board already carries the recording-only
-   sketch. The sidebar reads `Clearing stim firmware…` for about 30 s. If
+   sketch. The sidebar reads `Clearing stim firmware…` while it flashes. If
    the flash fails, a `Could not clear stim firmware` dialog says the board
    may still carry a paradigm, possibly a looping one. Open Stimulation and
    press Apply with an empty canvas before you record, or switch the laser
@@ -161,14 +161,14 @@ to start from. The dropdown at the top of the sidebar lists every profile that
 loaded. A file that fails to load is left out, and after the window opens a
 `Rig profiles` dialog names the file and the field at fault.
 
-Choosing a profile closes the cameras and opens the new profile's. The sidebar
-reads `Switching cameras…` for a second or two. Panopticon remembers the choice
-on this computer and opens it at the next launch.
+Choosing a profile closes the cameras and opens the new profile's, while the
+sidebar reads `Switching cameras…`. Panopticon remembers the choice on this
+computer and opens it at the next launch.
 
 When the new profile names a different serial port, Panopticon sends the old
 board a stop and closes its link. The new board then gets the launch sequence,
-including the 30 s flash. Choosing a profile on a new computer runs the same
-sequence on that profile's board.
+flash included. Choosing a profile on a new computer runs the same sequence on
+that profile's board.
 
 [OVERVIEW.md](OVERVIEW.md#4-profile) says when the dropdown is disabled and
 when it refuses a switch.
@@ -195,7 +195,7 @@ Power-cycle the missing camera and choose the profile again.
 The open is also refused when a camera's pixel format is not Mono8, or when
 its image size differs from the profile's `frame_width` and `frame_height`.
 A profile with `capture_processes` above 0 opens no camera: capture in several
-processes is experimental and the window cannot use it yet
+processes is experimental and the window does not use it
 ([CONFIGURATION.md](CONFIGURATION.md#capture_processes)).
 
 For FLIR cameras, [FLIR.md](FLIR.md) covers the profile's `camera:` block, the
@@ -251,8 +251,7 @@ A Date that is not a `YYYYMMDD` calendar date is refused with a
 folder name, such as one with a slash, `..`, a reserved Windows name or a
 trailing dot or space.
 
-Press Snapshot to save one full-resolution PNG per camera into
-`<session>/snapshots/<date>_<HHMMSS>/`.
+Snapshot saves into `<session>/snapshots/<date>_<HHMMSS>/`.
 [OVERVIEW.md](OVERVIEW.md#10-snapshot) says what a snapshot shows.
 
 ---
@@ -292,7 +291,7 @@ A calibration is an acquisition, so the checks under [Record](#8-record) run
 for it as well. They include the prompt when the `calibration/` folder already
 holds data. A calibration always runs under the recording-only sketch. If a
 paradigm is on the board, Panopticon first flashes the recording-only sketch
-(`Flashing recording-only firmware…`, about 30 s). A calibration therefore
+(`Flashing recording-only firmware…`). A calibration therefore
 never runs stimulation while you stand in the arena.
 
 Flip Calibrate on. The cameras switch to triggered mode at
@@ -488,8 +487,8 @@ aniposelib both read the `calibration.toml` this writes.
 A calibration describes the cameras as they were while the board was recorded.
 From the calibration to the last recording of the session, do not move,
 re-aim, refocus or re-mount any camera. If one is bumped, calibrate again
-before you record. A moved camera leaves the frame counts, the plot and the
-warnings unchanged, and the 3D output is wrong.
+before you record. A moved camera changes no frame count and raises no
+warning, and its 3D output is wrong.
 
 ---
 
@@ -554,7 +553,7 @@ whenever the serial port is opened or the board is flashed:
   sketch (`Flashing recording-only firmware…`). The next recording flashes the
   paradigm back (`Flashing recording + stimulation firmware…`). After a failed
   launch flash, the first Calibrate or Record can flash the recording-only
-  sketch too. Each flash takes about 30 s;
+  sketch too;
 - at the first Calibrate, Record or Test after the port could not be opened.
   At launch the log then says `will retry on first use`. After an Apply the
   editor's status line says that Record reopens the port;
@@ -573,7 +572,7 @@ Manager during a flash: while the sidebar reads `Clearing stim firmware…` or a
 ### Apply, then Record
 
 The paradigm is compiled into the board's sketch. Nothing you draw reaches the
-board until Apply compiles and uploads it, which takes about 30 s. Record then
+board until Apply compiles and uploads it. Record then
 sends its usual start command, and the board runs the paradigm from the first
 trigger on its own clock.
 
@@ -592,11 +591,8 @@ launch, Load it and press Apply.
 
 ### Build a paradigm
 
-A block drives one pin with one square wave for a set time. An arrow means
-"when this block ends, start that one", so a chain runs in sequence. Chains
-that are not connected run at the same time.
-[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) describes each field and
-button, and the rules a graph must follow.
+[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) says what blocks and arrows
+mean, and describes each field and button and the rules a graph must follow.
 
 1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block.
 2. Drag from a port on one block to a port on another to connect them.
@@ -606,8 +602,8 @@ button, and the rules a graph must follow.
 4. Read the preview's caption before you Apply. A pulse as long as its period
    or longer holds the pin HIGH for the whole block
    ([the waveform preview](OVERVIEW.md#the-waveform-preview)).
-5. Save writes the graph as JSON, by default `stim_config.json` in the output
-   folder. Load reads one back.
+5. Save the graph if you will use it again
+   ([Load and Save](OVERVIEW.md#11-apply-to-arduino)).
 
 ### A worked paradigm
 
@@ -620,17 +616,10 @@ on pin 53, joined in one chain:
 2. 20 Hz, 10 ms, 30 s: 20 pulses a second, 10 ms each, at 20% duty.
 3. 0 Hz, 0 ms, 300 s, with Ending ticked.
 
-The status line then reads `Recording will stop 630 s after start.` Press Test
-with the beam blocked, and watch the paradigm run once without recording. Then
-press Apply, wait for `Upload successful — press Record to run paradigm.`, and
-press Record.
-
-### Test
-
-Press Test to run the paradigm on the board with no camera triggered and
-nothing recorded. [OVERVIEW.md](OVERVIEW.md#10-test) describes its countdown,
-how a looping test ends, and what to do when the board does not confirm the
-stop.
+The status line then reads `Recording will stop 630 s after start.` Press
+[Test](OVERVIEW.md#10-test) with the beam blocked, and watch the paradigm run
+once without recording. Then press Apply, wait for
+`Upload successful — press Record to run paradigm.`, and press Record.
 
 ### After a stimulated recording
 
@@ -669,7 +658,7 @@ the start before anything is recorded:
 4. Capacity, for the open cameras at this acquisition's frame rate
    ([Capacity](#capacity)).
 5. The board's sketch. When the board does not carry the sketch this
-   recording needs, Panopticon flashes it, which takes about 30 s
+   recording needs, Panopticon flashes it first
    ([section 7](#when-the-board-resets)).
 6. Data already in the folder
    ([If the folder already holds data](#if-the-folder-already-holds-data)).
@@ -704,9 +693,8 @@ open. These refuse the start:
   `kick_max_lag` in the profile, or close other programs.
 - `NVENC granted only S concurrent sessions but N cameras need one each (the driver caps this).`
   With `encoder: auto` this refuses only when libx264 on the CPU cannot take
-  the cameras either, and with `encoder: nvenc` it always refuses. More
-  cameras need a more capable GPU, and the driver's NVENC session cap is often
-  the limit.
+  the cameras either, and with `encoder: nvenc` it always refuses
+  ([INSTALLATION.md](INSTALLATION.md#gpu) sizes the GPU).
 - `libx264 encodes about R fps per core at WxH here, enough for K cameras at F fps, but N are open.`
   with `encoder: x264`.
 - `encoder: raw` with `realtime_encode: true`
@@ -722,7 +710,7 @@ These warn, in a `Proceed?` dialog that asks `Start anyway?`:
 - raw capture (`realtime_encode: false`) that writes faster than 1.5 GiB/s, or
   whose encode after the stop has to run on the CPU.
 
-There is no RAM warning: RAM either refuses the start or raises nothing.
+Low RAM never warns: it refuses the start, as above.
 
 ### If the folder already holds data
 
@@ -755,15 +743,15 @@ that ends before then puts it back.
 
 ### While it records
 
-The state label reads `RECORDING` in red. Each pane's frame rate should read
+The state label reads `RECORDING`. Each pane's frame rate should read
 the trigger rate, 100 fps on the reference rig. One pane at about half the
 rate usually means that camera's exposure is over the ceiling
 ([CONFIGURATION.md](CONFIGURATION.md#trigger_rate_limit)).
 
 With real-time kick-out (`realtime_kick: true`, the default), Panopticon
 drops every trigger that some camera missed while it records, so every video
-holds the same triggers. The status bar reports capture health each time
-the [frame-rate labels](OVERVIEW.md#3-frame-rate) refresh. In kick-out it
+holds the same triggers. The status bar reports
+[capture health](OVERVIEW.md#17-status-bar). In kick-out it
 counts how many triggers the slowest camera is behind the fastest, against a
 cap of `kick_max_lag` (480 on the reference rig).
 
@@ -789,18 +777,15 @@ When a camera stops delivering, the status bar reads:
   power leaves those pins undriven.
 
 A camera near its shutdown temperature puts `CAMERA TEMPERATURE: camN T C ...`
-at the start of the status bar. The alert fires at the shutdown temperature
-the camera reports, minus the profile's `thermal_warn_margin_c`
-(2 C on the reference rig, so 79 C on cameras that shut down at 81 C). It also
-fires whenever a camera reports its own over-temperature state. On a camera
-that reports its shutdown temperature, the `Critical` status alone does not
-raise it. A camera that reports no shutdown temperature is judged by its own
-status instead: any status but `Ok` raises the alert, `Critical` included. A
-camera that reports neither cannot be watched. For a camera that reports no
-shutdown temperature, the log says once how it is judged
-(`[acq] thermal watch: camN reports no shutdown temperature`), or that it
-cannot be watched
-(`[acq] thermal watch: camN reports neither a shutdown temperature nor a temperature status`).
+at the start of the status bar. The alert fires `thermal_warn_margin_c` below
+the shutdown temperature the camera reports (at 79 °C on the reference rig's
+cameras, which shut down at 81 °C), and whenever a camera reports its own
+over-temperature state.
+[CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) says how a camera that
+reports no shutdown temperature is judged. The log then says once how it is
+judged (`[acq] thermal watch: camN reports no shutdown temperature ...`), or
+that it cannot be watched
+(`[acq] thermal watch: camN reports neither a shutdown temperature nor a temperature status ...`).
 
 The warning reaches `WARNINGS.txt` when the recording lost frames, and always
 when a camera reached its shutdown point. `camera_thermals` in
@@ -819,29 +804,31 @@ board and switch the laser off.
 ### Your own trigger source
 
 With `trigger_source: external`, a pulse generator or DAQ that you run
-triggers the cameras, and Panopticon opens no serial port. Stimulation needs
-Panopticon's board, so a recording with blocks on the canvas is refused. Every
-camera must be armed before the first pulse, so a recording runs in this
-order:
+triggers the cameras, and Panopticon opens no serial port
+([CONFIGURATION.md](CONFIGURATION.md#your-own-ttl-source) says what else the
+mode changes, and how to wire it). Stimulation needs Panopticon's board, so a
+recording with blocks on the canvas is refused. Every camera must be armed
+before the first pulse, so a recording, or a calibration at
+`calibration_frame_rate`, runs in this order:
 
 1. Keep the source stopped, and press Record (or Calibrate).
-2. Panopticon arms every camera and watches them for at least 0.5 s. A frame
-   on any camera means the source was already running. The start is then
-   refused (`The trigger was already running`) and nothing is kept.
+2. Panopticon arms every camera and watches them for at least 0.5 s, or five
+   trigger periods if that is longer. A frame on any camera means the source
+   was already running. The start is then refused
+   (`The trigger was already running`, naming the cameras that
+   `received frames before every camera was armed`) and nothing is kept.
 3. The label reads `WAITING FOR TRIGGER`, and a `Start your trigger source`
-   prompt appears. Start the source at `frame_rate`. The recording begins with
-   its first pulse. With no pulse within 45 s the start ends in `NO TRIGGER`
+   prompt appears. Start the source at the rate the prompt names:
+   `frame_rate`, or `calibration_frame_rate` for a calibration. The recording
+   begins with its first pulse. With no pulse within 45 s the start ends in `NO TRIGGER`
    and nothing is kept. Cancel on the prompt also ends the start and keeps
    nothing.
 4. To finish, stop the source. The recording ends once no camera has received
-   a frame for 2 s. If you flip Record off before you stop the source, the
-   label reads `STOP YOUR TRIGGER SOURCE`. Panopticon waits up to 30 s for the
-   source to stop, then stops the cameras itself and notes it in
-   `WARNINGS.txt`.
-
-Panopticon cannot read the source's rate. After the recording, the block-ID
-rate check compares each camera against `frame_rate`.
-[FLIR.md](FLIR.md#use-your-own-trigger-source) covers the wiring.
+   a frame for 2 s, or four trigger periods if that is longer. If you flip
+   Record off before you stop the source, the label reads
+   `STOP YOUR TRIGGER SOURCE`. Panopticon counts the source stopped after 1 s
+   of silence (or two periods). It waits up to 30 s for the source to stop,
+   then stops the cameras itself and notes it in `WARNINGS.txt`.
 
 ---
 
@@ -921,9 +908,9 @@ Check the session before the animal goes back, while the rig is still set up:
 2. No `WARNINGS.txt` anywhere under the acquisition folder.
 3. The block IDs ([Check the block IDs](#check-the-block-ids)).
 4. One frame of each video. Open an mp4 and check that the animal is neither
-   black nor blown out. The preview cannot show this
+   black nor blown out, which the preview cannot show
    ([OVERVIEW.md](OVERVIEW.md#1-camera-grid) says how it differs from a
-   recording), so check an exposure change against a recording.
+   recording).
    For more light, add infrared illumination first, then exposure, then gain
    ([CONFIGURATION.md](CONFIGURATION.md#pfs_path)).
 5. After a stimulated recording, the stimulation files
@@ -962,7 +949,7 @@ and `--truncate-to-shortest` cuts every camera anyway. A camera with a
 
 The command also runs the block-ID rate check on every camera. A camera that
 ignores triggers keeps equal frame counts and gapless block IDs while its
-frames drift in time, and only this check finds it. The command always writes
+frames drift in time, and this check is what names it. The command always writes
 the `aligned/` index, even for a clean recording. Only `--replace` changes the
 videos. Its exit status is 0 when all is well, 2 for a warning such as a rate
 warning, and 1 for an error or a refused replace.

@@ -68,8 +68,8 @@ A capture-path change merges only with that rig run.
 
 [CLAUDE.md](CLAUDE.md) holds the rules these modules rely on. Among them: the grab loop
 reads each frame through a zero-copy view, the NV12 ring is pre-faulted, NVENC sessions
-are counted, and `blockids.npy` lists only frames that were persisted. Every mp4 gets
-`-g <fps>` and `+faststart`. Read it before you edit the capture path. A change that
+are counted, and `blockids.npy` lists only frames that were persisted. Read it before you
+edit the capture path. A change that
 breaks one of those rules does not merge, even when every test passes.
 
 ## Adding a camera backend
@@ -91,12 +91,14 @@ its reason.
 
 ## Style
 
-- Camera SDK imports stay in `gui_app/backends/`. `probe_flir.py` is an exception: its
-  optional `--pyspin` stage imports PySpin.
+- Camera SDK imports stay in `gui_app/backends/`, PySpin included: `probe_flir.py`'s
+  optional `--pyspin` stage runs through `gui_app/backends/pyspin_probe.py`.
 - No rig-specific number lives in code. Numbers that belong to a rig go in its profile,
   because `gui_app/` also runs rigs other than the reference one.
-- Every mp4 writer passes `-g <fps>` and `-movflags +faststart`, so the recordings seek
-  and open quickly in the browser labeller.
+- Every mp4 writer builds its ffmpeg command with `gui_app/ffmpeg_cmd.py`, which adds
+  the index at the front, and the keyframe interval on every re-encode
+  ([why](docs/INTERNALS.md#the-stream-and-the-remux)). The remux is a stream copy, so
+  its keyframes come from the encoder's GOP.
 - Commit messages say what changed and why in plain words, and name the checks that
   verified it.
 - Documentation states each fact once, in the page where a reader acts on it, and links

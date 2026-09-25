@@ -128,7 +128,8 @@ Keep these properties when you edit it:
   `noInterrupts()` and `interrupts()`, so an interrupt cannot stretch the skew
   between pins. The design follows campy by Kyle Severson (`trigger.ino` in
   <https://github.com/ksseverson57/campy>), which documents ±0.35 µs
-  inter-frame precision and about 30 ns between pins.
+  inter-frame precision for its own firmware. This sketch writes the pins one
+  `digitalWrite` at a time, so its pins change microseconds apart.
 - Nothing on the host is in the timing path. The host sends the pins and the
   rate, and the board runs on its own.
 
@@ -175,9 +176,8 @@ These rules protect the timing and the laser:
   pull-up is so stiff that a resistor strong enough to beat it would exceed
   the Arduino's 20 mA per-pin limit.
 
-The operating rule that follows from the last two, switching the laser off
-before anything resets the board, is in
-[WORKFLOW.md](WORKFLOW.md#7-optional-stimulation).
+The operating rule that follows from the last two is the
+[laser warning](WORKFLOW.md#7-optional-stimulation).
 
 ### The serial protocol
 
@@ -206,7 +206,7 @@ Opening the serial port pulses DTR, which resets the board and returns the
 sketch to `setup()` with an empty receive buffer. The reset is needed: with
 DTR suppressed (`dtr=False`) the board ignores the configuration and sends no
 triggers, and the session records no frames. The window keeps the reset away
-from recordings instead. It holds one `TeensyController` open from the moment
+from recordings. It holds one `TeensyController` open from the moment
 a profile is open until quit, and each start reuses that open port. The board
 therefore resets at launch, when a profile on another port is chosen, and when
 firmware is flashed, and not at the start of a recording.
@@ -273,10 +273,10 @@ board that reports anything other than the profile's recording-only sketch is
 flashed, at most once per launch. Firmware without an identity falls back to
 the stored record, and the log says so.
 
-With no profile chosen, the window opens no camera and no serial port and
-flashes nothing until the operator picks one. The profile names the port and
-the pins the board holds LOW at boot, so a profile picked on the operator's
-behalf would be another rig's.
+With no profile chosen, the window touches no hardware until the operator
+picks one ([WORKFLOW.md](WORKFLOW.md#what-happens-at-launch)). The profile
+names the port and the pins the board holds LOW at boot, so a profile picked
+on the operator's behalf would be another rig's.
 
 ### An external trigger source
 
@@ -291,7 +291,7 @@ longer. A frame on any camera in that window means the source was already
 running, and the start is refused: each camera would count its block IDs from
 the first pulse after its own arming. Stimulation needs the board, so the
 editor is unavailable in this mode. The operator's steps are in
-[FLIR.md](FLIR.md#use-your-own-trigger-source).
+[WORKFLOW.md](WORKFLOW.md#your-own-trigger-source).
 
 ---
 
@@ -337,9 +337,9 @@ cannot reach a recording.
 Calibration runs the arithmetic the other way. At a 30 fps
 `calibration_frame_rate` the period is 33.3 ms instead of 10 ms, so
 [`calibration_exposure_us`](CONFIGURATION.md#calibration_exposure_us) can be
-much longer than any recording exposure; the reference rig uses 5 ms. Motion
-blur limits it. A board moved briskly under a long exposure smears, and its
-ChArUco corners stop resolving in the poses you are trying to add.
+much longer than any recording exposure; the reference rig uses 5 ms. How fast
+the board moves limits it in practice
+([calibration_exposure_us](CONFIGURATION.md#calibration_exposure_us)).
 
 ### What happens over the ceiling
 
@@ -376,10 +376,8 @@ acquired shortens the span itself. The alignment path can recover only the
 first kind, and every time base built on block IDs (`stim_trace.csv`
 included) assumes one trigger per ID.
 
-The preview cannot show any of this. It runs in free-run mode at 30 fps, with
-33 ms of headroom, so an over-long exposure looks healthy there and halves the
-rate only once the cameras are triggered. Check an exposure change on a
-recording.
+The preview cannot show any of this, because it runs untriggered
+([CONFIGURATION.md](CONFIGURATION.md#basler-cameras-the-pfs-file)).
 
 ### Why the limiter stays on
 
@@ -407,18 +405,18 @@ A FLIR camera has no `AcquisitionFrameRate` limiter in this sense, so
 the frame rate to the acquisition's rate at the shortest exposure, then reads
 the longest `ExposureTime` the camera allows at that rate. Opening the cameras
 refuses an exposure above 90% of that ceiling at `frame_rate`, and a
-calibration exposure above it is clamped.
-[FLIR.md](FLIR.md#the-exposure-ceiling) has the operator's side.
+calibration exposure above it is clamped
+([CONFIGURATION.md](CONFIGURATION.md#exposure-ceiling)).
 
 ---
 
 ## 4. The network
 
 This section covers GigE Vision cameras, which stream over UDP and may lose
-packets. On the reference rig nine cameras send 1.84 Gbit/s each. A frame can
-go missing on the network or in a host too slow to receive it. The two look the
-same in a video file and have different fixes, and the camera's stream
-counters tell them apart ([The counters that matter](#the-counters-that-matter)).
+packets. A frame can go missing on the network or in a host too slow to receive
+it. The two look the same in a video file and have different fixes, and the
+camera's stream counters tell them apart
+([The counters that matter](#the-counters-that-matter)).
 
 ### GVSP and the block ID
 
@@ -457,10 +455,8 @@ drops every oversized packet, and the camera delivers incomplete buffers or
 nothing. Enable jumbo frames on the NIC and on every switch, and verify it with
 `probe_network.py --sweep` ([Probes](#probes)).
 
-Bandwidth per camera is `width x height x bytes_per_pixel x 8 x fps`, 1.84
-Gbit/s at 1920x1200 and 100 fps. Three such cameras need a 10 GbE port with
-margin for resends. At 30 fps, or at a smaller frame, the same camera fits on 1
-GbE.
+[Network](CONFIGURATION.md#network) gives the bandwidth per camera, and
+[INSTALLATION.md](INSTALLATION.md#network) how to size links and ports for it.
 
 ### Resends, driver choice and flow control
 
@@ -491,13 +487,12 @@ resends themselves fail. The switch settings are in
 ### The buffer pool
 
 The profile's [`max_num_buffer`](CONFIGURATION.md#max_num_buffer) sets the
-driver buffers per camera, applied at open. The pool costs
-`n_cameras x max_num_buffer x frame bytes`: 19.3 GiB at nine cameras and 1000
-buffers. The reference rig uses 600 to fit its RAM (11.6 GiB, still 6 s of
-slack at 100 fps). In kick-out mode the loader refuses a pool smaller than
-`kick_max_lag`, because a lagging camera's backlog waits in its pool, and a
-pool that runs dry first loses frames the coordinator would have waited for.
-Frames leave the pool oldest first.
+driver buffers per camera, applied at open ([RAM](CONFIGURATION.md#ram) gives
+its cost). The reference rig uses 600 to fit its RAM, still 6 s of slack at 100
+fps. In kick-out mode the loader refuses a pool smaller than `kick_max_lag`,
+because a lagging camera's backlog waits in its pool, and a pool that runs dry
+first loses frames the coordinator would have waited for. Frames leave the pool
+oldest first.
 
 A deep pool absorbs network jitter, and it also hides a per-frame deficit. A
 grab loop a fraction of a millisecond over budget loses nothing at first,
@@ -695,8 +690,9 @@ drifting behind, a different one each time.
 `gui_app/cpu_affinity.py` holds the placement, driven by the profile.
 [`pin_capture_threads`](CONFIGURATION.md#pin_capture_threads) gives each grab
 thread a performance core of its own while they last. The rest float over the
-same pool and share its cores with the pinned threads. Every grab thread runs
-at raised priority, and no two are pinned to one core. `capture_core_exclude`
+same pool and share its cores with the pinned threads. With it on, every grab
+thread runs at raised priority, and no two are pinned to one core. On a CPU
+without performance cores it changes nothing. `capture_core_exclude`
 removes cores from the pool, for the cores that carry the NIC's DPCs.
 `encoder_pcores` and `pin_encoder_threads` place the encoder threads and ship
 off, because both measured worse than leaving the encoders to Windows. The
@@ -886,9 +882,9 @@ the camera's own shutdown, and no backend writes it.
 [`capture_processes`](CONFIGURATION.md#capture_processes) above 0 splits the
 cameras across that many worker processes, each capturing and encoding its
 own share (`gui_app/mp/`). The loader accepts it only with real-time encoding
-and kick-out both on. The window refuses such a profile for now and opens no
-camera; only the maintainers' local probe builds the multi-process manager,
-while it is measured on the rig. The design, in brief:
+and kick-out both on. It is experimental: the window refuses such a profile
+and opens no camera, and only the maintainers' local probe builds the
+multi-process manager. The design, in brief:
 
 - The parent holds no camera and no encoder. It resolves cam1..camN, deals
   the cameras to workers in contiguous groups, and runs one
@@ -924,8 +920,10 @@ ID goes into `blockids.npy`, so a position in a video maps back to a trigger
 number by lookup. Real-time kick-out and the post-hoc intersection each turn
 that into aligned videos, and they differ in when they pay for it. They keep
 the same frames unless a camera falls more than `kick_max_lag` triggers
-behind. Kick-out then force-drops, and keeps a subset of the intersection's
-frames (see
+behind or is retired. Past the cap, kick-out force-drops the triggers the
+lagging camera holds up. Before a retirement, it has already dropped the
+triggers the retired camera missed. Either way it keeps a subset of the
+intersection's frames (see
 [The equivalence of the two paths](#the-equivalence-of-the-two-paths)).
 
 ### Real-time kick-out (the default)
@@ -997,8 +995,9 @@ At stop the router computes the kick-out counts
 (`sync_encode.kick_counts()`), and the window writes them into
 `session_metadata.json` (`kickout`: triggers decided, kept, kicked out and
 forced, and the effective frame rate). Forced drops always produce a warning.
-Ordinary kick-outs above 0.5% of the decided triggers produce one line,
-"Effective frame rate X fps (target Y).", and the detail goes to the log.
+Ordinary kick-outs above `KICKOUT_WARN_FRACTION` of the decided triggers
+produce one line, "Effective frame rate X fps (target Y).", and the detail
+goes to the log.
 
 ### The release backlog
 
@@ -1090,11 +1089,11 @@ single copy.
 
 ### NV12 from Mono8
 
-NVENC takes NV12: a full-resolution 8-bit Y plane followed by an interleaved
-half-resolution UV plane. A Mono8 frame is the Y plane, and neutral chroma is a
-constant 128. The conversion is therefore one memcpy into the top `height` rows
-of a buffer whose lower `height/2` rows were filled with 128 once. The loader
-refuses an odd frame size for the same reason.
+NVENC takes [NV12](GLOSSARY.md#nv12): a full-resolution 8-bit Y plane followed
+by an interleaved half-resolution UV plane. A Mono8 frame is the Y plane, and
+neutral chroma is a constant 128. The conversion is therefore one memcpy into
+the top `height` rows of a buffer whose lower `height/2` rows were filled with
+128 once. The loader refuses an odd frame size for the same reason.
 
 `nvenc.probe_monochrome_support()` reads NVENC's `support_monochrome`
 capability. On the reference GPU it returns 0: the encoder takes no monochrome
@@ -1118,20 +1117,19 @@ counts.
 
 ### NVENC sessions
 
-A session is one live NVENC encode context, and the driver caps how many
-exist at once. The cap is undocumented and has moved across driver versions (2,
-3, 5, 8, then 12 on the reference rig's driver), so it is probed, never
-hardcoded. `nvenc.probe_max_sessions_isolated()` creates encoders in a child
-process until the driver refuses or the count asked for is reached, and the
-child's exit frees them all. The encoder selection and the capacity check ask
-for `n_cameras + 2`. When the probe grants fewer than `n_cameras`, no start
-proceeds on NVENC, because a camera without a session would fall back to
-`raw.bin`, which writes every frame whole. The cap is often what limits how
-many cameras one GPU can encode, so more cameras need a GPU whose driver grants
-more sessions. The remux after a real-time recording is a stream copy and uses
-no session. The raw-mode encode, the tail merge and the alignment re-encode run
-ffmpeg's `h264_nvenc` (libx264 where that failed the launch check), up to
-`encode_parallel` jobs at once.
+A session is one live NVENC encode context, and the driver caps how many exist
+at once. The cap is undocumented and has moved across driver versions (2, 3, 5,
+8, then 12 on the reference rig's driver), so it is probed, never hardcoded.
+`nvenc.probe_max_sessions_isolated()` creates encoders in a child process until
+the driver refuses or the count asked for is reached, and the child's exit frees
+them all. The encoder selection and the capacity check ask for `n_cameras + 2`.
+When the probe grants fewer than `n_cameras`, no start proceeds on NVENC,
+because a camera without a session would fall back to `raw.bin`, which writes
+every frame whole. [INSTALLATION.md](INSTALLATION.md#gpu) says what the cap
+means for the GPU a rig needs. The remux after a real-time recording is a stream
+copy and uses no session. The raw-mode encode, the tail merge and the alignment
+re-encode run ffmpeg's `h264_nvenc` (libx264 where that failed the launch
+check), up to `encode_parallel` jobs at once.
 
 The count is cached, and a cached value below what a start needs is probed
 again, because a shortfall is usually another process holding sessions for a
@@ -1384,9 +1382,8 @@ encoded after the session, and says so in a warning with the disk cost.
 `realtime_encode: false` writes whole frames to `raw.bin` during capture and
 encodes them after the session with the `h264_nvenc` ffmpeg pool, or libx264
 where `h264_nvenc` failed the launch check. There is no GPU work during
-capture; the disk takes `n_cameras x fps x width x height` bytes a second
-instead, 2.07 GB/s for nine cameras at 1920x1200 and 100 fps. Each camera
-keeps every frame it recorded, and no camera is cut to another's length. When
+capture, and the disk takes the full [raw rate](CONFIGURATION.md#disk). Each
+camera keeps every frame it recorded, and no camera is cut to another's length. When
 a `raw.bin` and its camera's block IDs disagree, both are cut to the frames
 they share, because a frame without a block ID cannot be placed in time, and
 a warning names the camera.
@@ -1573,12 +1570,12 @@ is where a better global solution would come from.
 
 Camera names are positions: cam{i+1} is entry i of the profile's
 `camera_serials`, or, without that list, the i-th camera in the backend's
-serial-sorted enumeration. The names are baked into the extrinsics. Without a
-serial list, a camera that fails to enumerate renames every camera after it,
-and every extrinsic then attaches to the wrong physical camera while the
-triangulation still produces plausible numbers. `n_cameras` makes
-`open_all()` refuse any other number of available cameras, and
-`camera_serials` names a missing camera instead. Every acquisition's
+serial-sorted enumeration. The names are baked into the extrinsics. A name
+that moves to another camera attaches every extrinsic to the wrong physical
+camera while the triangulation still produces plausible numbers
+([camera_serials](CONFIGURATION.md#camera_serials) says when that happens).
+`n_cameras` makes `open_all()` refuse any other number of available cameras,
+and `camera_serials` names a missing camera instead. Every acquisition's
 `session_metadata.json` records which serial each name had, and the solve
 warns when another acquisition in the session had a different serial under a
 name it solved.
@@ -1623,7 +1620,7 @@ These links carry an instant to a frame index in a file:
 
 | Where | What breaks | Guard |
 |---|---|---|
-| Camera naming | A missing camera renames the cameras after it | `n_cameras` and `camera_serials`; `open_all()` refuses a partial set |
+| Camera naming | A missing camera shifts the names after it ([camera_serials](CONFIGURATION.md#camera_serials)) | `n_cameras` and `camera_serials`; `open_all()` refuses a partial set |
 | Pixel format | A wider format keeps only its low 8 bits | Format and size read back at open; anything but Mono8 refused |
 | Row padding | A padded buffer read as (H, W) shears every frame | `PaddingX` and `PaddingY` checked every frame; nonzero retires |
 | A camera that never arms | In kick-out mode it force-drops every trigger for every camera | Readiness barrier; every early exit retires the camera |
@@ -1866,8 +1863,9 @@ The pipeline depends on these guarantees:
    cost every camera its first frame and label every later frame with the
    trigger before it. A 16-bit counter may cycle 1 to 65535; any other period
    is unwrapped in the backend. A frame lost in transmission must still
-   consume its number. A camera that can skip a trigger without leaving a gap
-   is caught only by the block-ID rate check.
+   consume its number. The block-ID rate check catches a camera that can skip
+   a trigger without leaving a gap. A backend that counts its ignored
+   triggers, as the FLIR trigger witness does, catches it as well.
 2. `TimeStamp` from a free-running device clock, in nanoseconds, that keeps
    running across a stream restart. The stall resync, the delivery lag and
    the rate check all depend on it. A backend whose camera counts in other
@@ -1897,7 +1895,8 @@ Bring up a new backend in this order:
 GigE or USB3, from what each camera reports about itself: node ranges,
 increments, trigger lines and pixel formats, with no table of models. The
 operator's guide is [FLIR.md](FLIR.md); what follows is how the backend meets
-the contract. None of it has run on FLIR hardware yet.
+the contract. None of it has run on FLIR hardware
+([FLIR.md](FLIR.md#status-nothing-has-run-on-flir-hardware-yet)).
 
 - The SDK binding. `_spinc.SpinC` wraps Spinnaker's C library
   (`SpinnakerC_v140.dll`) through ctypes. `ctypes.CDLL` releases the GIL around
@@ -1936,11 +1935,12 @@ the contract. None of it has run on FLIR hardware yet.
   whose link cannot carry the frames at that rate, whose
   `AcquisitionFrameRate` cannot reach it, or whose exposure is above 90% of
   the ceiling it reports ([FLIR cameras](#flir-cameras)). These raise
-  `FlirRateError`, the backend's `RefusalException`: at open the cameras do
-  not open, and at an acquisition's start (at the calibration rate, for
-  example) the start is refused before any exposure is written. The `[camN]
-  exposure=` line names the bound as "the ExposureTime limit this camera
-  reports" (`CEILING_BASIS`).
+  `FlirRateError`, the backend's `RefusalException`, and the cameras do not
+  open. At an acquisition's start (at the calibration rate, for example) only
+  the link and frame-rate checks run. They refuse the start before any
+  exposure is written, and a calibration exposure above the ceiling is
+  clamped. The `[camN] exposure=` line names the bound as "the ExposureTime
+  limit this camera reports" (`CEILING_BASIS`).
 - Triggering. `set_triggered()` sets the trigger source, activation and
   overlap from `camera.trigger` (overlap `ReadOut` by default, so a trigger
   during readout is not disregarded) and never uses a software trigger or a
@@ -1990,8 +1990,8 @@ most already do nothing on other systems:
 
 pypylon, PyQt5, numpy, OpenCV, PyNvVideoCodec and the Arduino toolchain run on
 both. Nothing in `frame_sync.py`, `alignment.py`, `stim_compiler.py` or
-`stim_trace.py` depends on the operating system. The FLIR backend is Windows
-only for now.
+`stim_trace.py` depends on the operating system. The FLIR backend runs on
+Windows only.
 
 ### Constants
 
@@ -2031,7 +2031,5 @@ query, and runs at any time.
 | `uv run probe_network.py --sweep` | Whether each camera's path carries every packet size up to 9000 bytes, by a real grab at each size | Opens the cameras through the profile's backend |
 | `uv run probe_flir.py --list` (and its other stages) | What each FLIR camera reports, which line its trigger is on, and the behaviours the FLIR backend cannot know in advance | FLIR cameras; `--fake` needs none ([FLIR.md](FLIR.md#5-run-the-probe)) |
 
-Ping cannot test jumbo frames on these paths, because the cameras answer only
-small ICMP echoes. The sweep grabs real frames. How the maintainers' tests
-are kept, and how to have a change tested, is in
+How the maintainers' tests are kept, and how to have a change tested, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md).

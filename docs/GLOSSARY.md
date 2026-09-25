@@ -110,8 +110,7 @@ name it during a recording.
 
 The longest exposure a camera can use at a given frame rate and still take every
 trigger. A camera over the ceiling ignores some triggers, and [Block ID](#block-id)
-says which checks find them on each kind of camera. Check an exposure change on a
-recording: the preview is free-run, where an over-long exposure looks fine.
+says which checks find them on each kind of camera.
 [CONFIGURATION.md](CONFIGURATION.md#exposure-ceiling) gives each vendor's rule.
 
 ## Capture and encoding
@@ -137,8 +136,8 @@ and encodes H.264 while it records.
 
 One encode stream on NVENC. A recording needs one per camera. The driver caps how many
 sessions run at once, and the cap varies with the GPU and the driver version, so
-Panopticon measures it before it records. The cap is often what limits the camera
-count.
+Panopticon measures it before it records. [INSTALLATION.md](INSTALLATION.md#gpu)
+says what that means for the GPU.
 
 ### NV12
 
@@ -150,8 +149,7 @@ fills the colour plane with 128, the value for no colour.
 
 The NV12 frame buffers between a camera's grab thread and its encoder. In kick-out
 mode each camera's ring holds `kick_max_lag` plus 264 frames, so its size follows
-[`kick_max_lag`](CONFIGURATION.md#kick_max_lag). Panopticon frees the rings after every
-acquisition.
+[`kick_max_lag`](CONFIGURATION.md#kick_max_lag) ([RAM](CONFIGURATION.md#ram)).
 
 ### Pinned upload
 
@@ -188,8 +186,8 @@ up. [CPU_ENCODE.md](CPU_ENCODE.md) describes it.
 ### Raw capture
 
 With `realtime_encode: false`, every frame goes to disk uncompressed (`raw.bin`) and is
-encoded after the session. At 1920x1200 that takes about 500 times the disk space of
-H.264.
+encoded after the session, at hundreds of times the disk rate of H.264
+([Disk](CONFIGURATION.md#disk)).
 
 ## Network and camera settings
 
@@ -276,9 +274,9 @@ printed board.
 
 The YAML file in `configs/boards/` that describes the printed calibration board: the
 number of squares, the square and marker sizes, the ArUco dictionary, and whether the
-board uses the pre-OpenCV-4.6 ChArUco layout (`board_legacy`). The square size sets the
-scale of every 3D coordinate, so measure the printed board. A wrong `board_legacy`
-finds every marker and no ChArUco corners.
+board uses the pre-OpenCV-4.6 ChArUco layout (`board_legacy`).
+[CONFIGURATION.md](CONFIGURATION.md#board-config) says what goes wrong when a key does
+not match the printed board.
 
 ### Co-detection
 
@@ -288,16 +286,9 @@ does not have to scan whole videos.
 
 ### READY
 
-What the calibration coverage display shows once three conditions hold:
-
-- each camera has `calibration_min_per_cam_shared` co-detections;
-- the cameras form one connected group, in which a pair with `calibration_min_edge`
-  co-detections is linked;
-- each camera has seen the board in `calibration_min_grid_cells` of the four quadrants
-  of its view.
-
-You can stop before READY appears. The recording is still valid, and the solve reports
-whether it had enough views.
+What the calibration coverage display shows once every camera has enough views of
+the board, shared with other cameras and spread over its own view.
+[OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) gives the three conditions.
 
 ### Intrinsics
 
@@ -388,17 +379,15 @@ when you report a problem.
 
 ### Log level
 
-`log_level` in the rig profile: `normal`, `verbose` (the default) or `debug`. Every
-level stamps each line with its time and thread, and writes the session header.
-`verbose` adds each camera setting written with the value read back, and each change of
-acquisition state. `debug` adds more detail from outside the capture loop. No level
-logs anything per frame or makes a capture thread wait.
+`log_level` in the rig profile: `normal`, `verbose` (the default) or `debug`
+([CONFIGURATION.md](CONFIGURATION.md#log_level) says what each level adds).
 
 ### session.log
 
 The part of the log that covers one acquisition, from its start until its files are
-written, copied into that acquisition's folder beside `session_metadata.json`. The full log of each launch is
-`logs/panopticon_<date>_<time>.log` in the Panopticon folder.
+written, copied into that acquisition's folder beside `session_metadata.json`. The
+full log of each launch is `logs/panopticon_<date>_<time>.log` in the Panopticon
+folder.
 
 ### WARNINGS.txt
 

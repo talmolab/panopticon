@@ -204,8 +204,8 @@ the frame size and the frame rate to its camera.
     hybrid Intel part and a test recording shows a camera falling behind.
 12. Switch the laser off or block the beam, then open the profile with
     `uv run gui.py --profile NAME`. Opening it resets the board on
-    [serial_port](#serial_port), and every pin floats during the reset
-    ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
+    [serial_port](#serial_port), which floats every pin
+    ([laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
     A profile that fails the [loader's checks](#what-the-loader-checks-and-what-it-does-not)
     is not in the dropdown.
 13. Record a one-minute test. Check that every camera's video has the same number
@@ -297,8 +297,8 @@ Mapping. Default `null` (no block). Reference rig: not set.
 Integer, pixels. Default `1920`. Reference rig: `1920`.
 
 - Does: The width of the frame every camera records. It sizes the frame buffers
-  and the RAM and disk checks. On Basler it must equal `Width` in the `.pfs`; on
-  FLIR the backend writes it to each camera.
+  and the RAM and disk checks. On Basler it must equal `Width` in the `.pfs`.
+  On FLIR the backend writes it to each camera.
 - Change when: When you change the frame size.
 - Goes wrong: An odd width is refused when the profile loads, because the
   encoders' NV12 frames need even sizes. A width that differs from what the
@@ -324,10 +324,10 @@ Integer. Default `0`. Reference rig: `9`.
   are not counted.
 - Change when: When you add or remove a camera. Read
   [camera_serials](#camera_serials) first.
-- Goes wrong: At `0` a rig with one camera missing opens the others. Without
-  `camera_serials`, a missing camera then renames every camera after it, and the
-  calibration attaches to the wrong cameras. A count that differs refuses the
-  open (`Expected 9 cameras but 8 are available to open`).
+- Goes wrong: At `0` and without [camera_serials](#camera_serials), a rig with
+  one camera missing opens the others under the wrong names. With
+  `camera_serials`, the missing camera refuses the open by name. A count that
+  differs refuses the open (`Expected 9 cameras but 8 are available to open`).
 
 #### `camera_serials`
 
@@ -340,11 +340,13 @@ List of quoted text, or null. Default `null`. Reference rig: not set.
 - Change when: Set it on every rig whose calibration you keep. After replacing a
   camera, update the list and calibrate again.
 - Goes wrong: Without it, cameras are named in serial-number order as they
-  enumerate, so a camera that fails to appear renames every camera after it. The
+  enumerate, so a camera that fails to appear renames every camera after it, and
+  the calibration attaches to the wrong cameras. A nonzero `n_cameras` refuses
+  that open, unless another camera on the computer fills the count. The
   loader refuses an unquoted serial, because YAML reads a leading-zero number as
   octal. It also refuses a serial listed twice, a list out of ascending text
   order, and a length that differs from a nonzero `n_cameras`. Text order puts
-  `"10"` before `"9"`; the refusal gives the order to use.
+  `"10"` before `"9"`, and the refusal gives the order to use.
 
 ### Timing and exposure
 
@@ -391,8 +393,8 @@ Number, frames per second. Default `165`. Reference rig: `165`.
   15% of frames were lost on the network ([HISTORY.md](HISTORY.md)). A value
   above the camera's real maximum makes the computed ceiling too long. An
   exposure Panopticon accepts can then make the camera skip triggers
-  ([exposure ceiling](#exposure-ceiling)). A FLIR profile refuses
-  the field; FLIR pacing is [camera.flir.link_throughput_limit](#cameraflirlink_throughput_limit).
+  ([exposure ceiling](#exposure-ceiling)). A FLIR profile refuses the field.
+  FLIR pacing is [camera.flir.link_throughput_limit](#cameraflirlink_throughput_limit).
 
 #### `calibration_exposure_us`
 
@@ -414,7 +416,7 @@ Number, microseconds. Default `0`. Reference rig: `5000`.
 Number, dB. Default `-1`. Reference rig: `-1`.
 
 - Does: The gain used while calibrating, and only then. Any negative value keeps
-  the recording gain; `0` is a real gain of 0 dB.
+  the recording gain, and `0` is a real gain of 0 dB.
 - Change when: After you have added light and raised `calibration_exposure_us`.
 - Goes wrong: Each +6 dB doubles the noise along with the signal.
 
@@ -427,8 +429,8 @@ Text. Default `auto`. Reference rig: `auto`.
 - Does: Picks the H.264 encoder. Panopticon decides at launch and again at each
   Record and Calibrate. `auto` uses NVENC when the driver grants a session per
   camera, else libx264 on the CPU when the launch benchmark says the CPU keeps
-  up, and otherwise refuses the start. `nvenc` and `x264` force one path; `x264`
-  also moves the post-session re-encodes to the CPU. `raw` is accepted only with
+  up, and otherwise refuses the start. `nvenc` and `x264` force one path, and
+  `x264` also moves the post-session re-encodes to the CPU. `raw` is accepted only with
   `realtime_encode: false`. When the session limit cannot be measured, `auto` and
   `nvenc` keep NVENC, and the start asks whether to proceed
   (`The NVENC session cap could not be probed`).
@@ -488,7 +490,7 @@ Text. Default `pinned`. Reference rig: not set.
   the reference rig one camera then drifts behind the others. `pinned` costs about
   1 ms more CPU per frame per camera and 4 × width × height × 1.5 bytes of
   page-locked memory per camera. At launch Panopticon checks that PyNvVideoCodec
-  copies on the encoder's stream; if the check fails, the session uses `host` and
+  copies on the encoder's stream. If the check fails, the session uses `host` and
   the log says why. An encoder that cannot get page-locked memory uses `host` by
   itself, and `WARNINGS.txt` says so (`real-time encode uses the host upload`).
   `session_metadata.json` records what each acquisition used
@@ -503,7 +505,7 @@ Text. Default `shared`. Reference rig: not set.
 - Change when: Leave `shared`. On the reference rig the two lagged alike, and
   `own` used about 225 MiB more GPU memory per camera.
 - Goes wrong: `own` with `nvenc_upload: host` is refused when the profile loads.
-  At launch Panopticon measures what a context costs on this GPU; when the free
+  At launch Panopticon measures what a context costs on this GPU. When the free
   memory does not cover one per camera, it uses `shared` and logs a warning.
 
 ### Alignment and memory
@@ -513,11 +515,12 @@ Text. Default `shared`. Reference rig: not set.
 True or false. Default `true`. Reference rig: `true`.
 
 - Does: `true` drops, during the recording, every trigger that some camera
-  missed, so the videos come out aligned. When more than 0.5% of the triggers are
-  dropped, the post-session dialog and `WARNINGS.txt` give the recording's
-  `Effective frame rate`, and `session_metadata.json` holds the counts
-  (`kickout`). `false` records every frame each camera caught and aligns the
-  videos after the recording with a full re-encode.
+  missed, so the videos come out aligned. When more than 0.5% of the triggers
+  are dropped, the dialog after the recording and `WARNINGS.txt` report the
+  recording's [effective frame rate](GLOSSARY.md#effective-frame-rate).
+  `session_metadata.json` holds the counts (`kickout`). `false` records every
+  frame each camera caught and aligns the videos after the recording with a
+  full re-encode.
 - Change when: Leave `true`. Set `false` only to compare with post-session
   alignment.
 - Goes wrong: With `false`, the post-session pass re-encodes every video, which
@@ -550,7 +553,7 @@ Integer. Default `1000`. Reference rig: `600`.
   `buffers_underrun` in the recording's `session_metadata.json`
   (`camera_stream_stats`) is above 0.
 - Goes wrong: Below `kick_max_lag`, the pool runs dry while the kick-out still
-  waits, and a camera that could have caught up loses frames; the loader refuses
+  waits, and a camera that could have caught up loses frames. The loader refuses
   that in kick-out mode. Too high, and the RAM check refuses to start. A deep pool
   also hides a grab loop that is slightly too slow, because each frame retrieved
   is older than the last. FLIR refuses a value above the camera's
@@ -584,10 +587,10 @@ Text. Default `socket`. Reference rig: `socket`.
   resend settings it discards a frame that lost a packet. `auto` keeps pylon's
   default. USB3 cameras ignore it.
 - Change when: Keep `socket` unless a test on your rig favours another driver.
-- Goes wrong: `filter` lost about 23% of frames with six of the reference rig's
-  cameras at 100 fps. Any other value is refused when the profile loads. A FLIR
-  profile refuses any value but `auto`; its equivalent is
-  [camera.flir.stream_mode](#cameraflirstream_mode).
+- Goes wrong: On the reference rig `filter` lost frames
+  ([measured](INTERNALS.md#resends-driver-choice-and-flow-control)). Any other
+  value is refused when the profile loads. A FLIR profile refuses any value but
+  `auto`, and its equivalent is [camera.flir.stream_mode](#cameraflirstream_mode).
 
 #### `gev_bandwidth_reserve_pct`
 
@@ -633,9 +636,10 @@ Text. Default `""`. Reference rig: `COM3`.
 - Does: The trigger board's serial port, `COMn` on Windows (Device Manager, under
   Ports (COM & LPT)). `sim` selects the simulated board. Opening the profile
   resets the device on this port and, unless it already carries it, programs it
-  with the recording-only sketch: camera triggers and no stimulation. Switch the
-  laser off or block the beam before you open the profile
-  ([stim_safe_pins](#stim_safe_pins)).
+  with the recording-only sketch: camera triggers and no stimulation. Every pin
+  floats during the reset
+  ([laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)). Switch
+  the laser off or block the beam before you open the profile.
 - Change when: For every new computer or board.
 - Goes wrong: A wrong port resets whatever device is on it, and can reprogram
   it, so check the port before you open the profile. Left empty, nothing is
@@ -707,9 +711,8 @@ Text, a path. Default `""`. Reference rig: `configs/boards/charuco_8x8_15mm.yaml
 
 ### Calibration coverage
 
-These three decide when the coverage display shows READY during a calibration.
-You can stop before READY appears. The recording is still valid, and Solve
-reports whether it had enough views.
+These three decide when the coverage display shows READY during a calibration
+([OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) gives the rule).
 
 #### `calibration_min_per_cam_shared`
 
@@ -717,7 +720,7 @@ Integer. Default `120`. Reference rig: `120`.
 
 - Does: How many detection ticks each camera needs in which it saw the board
   together with at least one other camera.
-- Change when: Raise it if calibrations come out marginal; lower it if waving
+- Change when: Raise it if calibrations come out marginal. Lower it if waving
   takes too long while the per-pair chart in `reprojection_error_histogram.png`
   stays good.
 - Goes wrong: Too high wastes time in the arena, because the solve uses at most 60
@@ -761,7 +764,7 @@ True or false. Default `false`. Reference rig: `true`.
 - Change when: Turn it on for a hybrid Intel CPU after a test recording shows a
   camera falling behind.
 - Goes wrong: Off on a hybrid CPU, Windows may run a grab thread on an efficiency
-  core, and that camera falls behind; which camera changes from launch to launch.
+  core, and that camera falls behind, a different camera from launch to launch.
   With more cameras than cores in the pool, the extra grab threads share the
   pool's cores.
 
@@ -773,8 +776,8 @@ List of integers. Default `[0]`. Reference rig: `[0, 1]`.
   handle the network card's interrupts. It applies only with
   `pin_capture_threads: true`.
 - Change when: Set it to the cores your network card's receive work lands on,
-  measured with a DPC trace. With six of the reference rig's cameras, CPUs 0 and
-  1 carried about 46% of that work.
+  measured with a DPC trace. On the reference rig that is CPUs 0 and 1
+  ([measured](INTERNALS.md#receive-load-on-the-host)).
 - Goes wrong: A list that excludes every performance core falls back to all of
   them. The log line `[rig] capture core pool` shows the pool in use.
 
@@ -825,27 +828,24 @@ Number, °C. Default `3.0`. Reference rig: `2.0`.
 - Change when: Raise it if your cameras heat quickly and you need more time to
   act. The thresholds themselves always come from the camera.
 - Goes wrong: The loader refuses 0 or less. A camera that reports no shutdown
-  temperature is judged by its own temperature status, Critical included; one
-  that reports neither cannot warn, and the log says which, once per camera. A
-  camera that reaches its shutdown point is named in `WARNINGS.txt` and the
-  post-session dialog. A warning below that point reaches them only when the
-  recording lost frames.
+  temperature is judged by its own temperature status: any status but `Ok`
+  warns, Critical included. One that reports neither cannot warn, and the log
+  says which, once per camera. A camera that reaches its shutdown point is
+  named in `WARNINGS.txt` and the post-session dialog. A warning below that
+  point reaches them only when the recording lost frames.
 
 #### `log_level`
 
 Text. Default `verbose`. Reference rig: not set.
 
-- Does: How much the log says. At every level each line starts with the time, to
-  the millisecond, and the thread that printed it. A header at launch and at each
-  acquisition start records the computer, GPU, driver, NVENC session limit,
-  package versions, the whole profile and each camera. `verbose` adds each camera
-  setting written, with the value the camera reads back, each acquisition step,
-  and a per-camera summary at Stop. `debug` adds more detail on the same cold
-  paths, such as every `.pfs` feature read back. One log per launch goes to
-  `logs\` in the repository folder, and each recording and calibration folder
-  gets its part as `session.log`. Capture worker processes log at the same
-  level. `uv run probe_flir.py` logs at `debug` when the profile sets it, and
-  at `verbose` otherwise.
+- Does: How much the log says. Every level stamps each line and writes the
+  session header ([WORKFLOW.md](WORKFLOW.md#the-log) describes the log and where
+  it is written). `verbose` adds each camera setting written, with the value the
+  camera reads back, each acquisition step, and a per-camera summary at Stop.
+  `debug` adds more detail on the same cold paths, such as every `.pfs` feature
+  read back. Capture worker processes log at the same level.
+  `uv run probe_flir.py` logs at `debug` when the profile sets it, and at
+  `verbose` otherwise.
 - Change when: Leave `verbose` while you bring a rig up: its read-backs are what a
   bug report needs. `normal` gives a shorter log.
 - Goes wrong: Any other value is refused when the profile loads. No level logs
@@ -1031,7 +1031,7 @@ Text, `Line0`, `Line1` and so on. Required.
 Number, microseconds, or null. Default `null`.
 
 - Does: The camera's `TriggerDelay`. `null` leaves the user set's value.
-- Change when: Rarely; for example to line up cameras whose exposures start at
+- Change when: Rarely, for example to line up cameras whose exposures start at
   different delays.
 - Goes wrong: A negative value is refused when the profile loads, and one outside
   the camera's range refuses the open.
@@ -1095,7 +1095,7 @@ Number or null. Default `null`.
 Bytes per second, `auto`, `max` or null. Default `auto`.
 
 - Does: Writes `DeviceLinkThroughputLimit`, which spaces each camera's frame
-  transfer; it is the FLIR counterpart of `trigger_rate_limit`'s pacing. `auto`
+  transfer. It is the FLIR counterpart of `trigger_rate_limit`'s pacing. `auto`
   gives one frame 60% of the trigger period (payload × frame rate ÷ 0.6, within
   the camera's range). `max` sets the camera's maximum, a number is used as
   given, and `null` leaves the camera's value.
@@ -1131,8 +1131,8 @@ Integer 0 or more, or null. Default `null`.
 
 `auto`, `TeledyneGigEVision`, `LWF` or `Socket`. Default `auto`.
 
-- Does: GigE only. Picks Spinnaker's GigE stream driver; `auto` leaves Spinnaker's
-  choice. It is the FLIR counterpart of `gige_driver`.
+- Does: GigE only. Picks Spinnaker's GigE stream driver, and `auto` leaves
+  Spinnaker's choice. It is the FLIR counterpart of `gige_driver`.
 - Change when: Only for a comparison test on your rig.
 - Goes wrong: A USB3 camera refuses any value but `auto`. An entry the camera does
   not offer refuses the open.
@@ -1224,7 +1224,7 @@ key named. Unknown keys are ignored, so a misspelled `board_legacy` falls back t
 ## Sizing formulas
 
 Each formula is per rig, for N cameras of W × H pixels at F frames per second.
-Mono8 is one byte per pixel. GiB is 2^30 bytes; GB and MB/s are powers of 10.
+Mono8 is one byte per pixel. GiB is 2^30 bytes, and GB and MB/s are powers of 10.
 Section 1 of [INSTALLATION.md](INSTALLATION.md) explains how to choose hardware
 from these numbers.
 
@@ -1234,8 +1234,9 @@ The longest exposure at which a camera still takes every trigger.
 
 - Basler (and `sim`): in trigger mode the camera's frame-rate timer starts after
   the exposure ends, so the ceiling is `1/F − 1/trigger_rate_limit`.
-- FLIR: Panopticon measures each camera's ceiling at F from what the camera
-  reports ([FLIR.md](FLIR.md#the-exposure-ceiling)).
+- FLIR: Panopticon sets each camera to F at its shortest exposure and reads the
+  longest `ExposureTime` the camera then allows
+  ([INTERNALS.md](INTERNALS.md#flir-cameras)).
 
 Panopticon keeps a 10% margin below the ceiling, so the exposure limit is 90% of
 it:
@@ -1243,7 +1244,9 @@ it:
 - On Basler it lowers an exposure above the limit at every acquisition start,
   and the `[camN] exposure=` line says `CLAMPED`.
 - On FLIR, opening the cameras refuses a recording exposure above the limit at
-  `frame_rate`. It caps a calibration exposure and logs `CLAMPED`.
+  `frame_rate` (`is above what this camera can expose`), and the message gives
+  the longest exposure allowed. A calibration exposure above the limit is
+  capped, and the camera's exposure line says `CLAMPED`.
 
 With `trigger_rate_limit: 165`:
 
@@ -1252,9 +1255,12 @@ With `trigger_rate_limit: 165`:
 | 100 fps (recording) | 10.0 ms | 3.94 ms | 3.55 ms |
 | 30 fps (calibration) | 33.3 ms | 27.3 ms | 24.5 ms |
 
-A camera over its ceiling ignores the next trigger and uses no block ID for it,
-so its video drifts in time with no gap in `blockids.npy`. The block-ID rate check
-after each recording reports that.
+A camera over its ceiling ignores the next trigger. With
+[frame-ID block IDs](GLOSSARY.md#block-id) (every Basler camera, and a FLIR camera
+on its frame ID) it uses no block ID for that trigger. Its video then drifts in
+time with no gap in `blockids.npy`, and the block-ID rate check after each
+recording reports it. With `camera.flir.block_id_source: trigger_counter` the
+ignored trigger is a gap.
 
 ### Network
 
@@ -1277,8 +1283,9 @@ page-locked = N × 4 × W × H × 1.5   (nvenc_upload: pinned)
 The reference rig needs 11.6 GiB of pool and 21.6 GiB of ring, 33.1 GiB in all,
 plus 119 MiB page-locked. Record and Calibrate refuse to start when the pool and
 ring need more than the memory available at that moment
-(`Not enough RAM for`). The rings are freed when each acquisition stops. Leave
-room for Windows and the window itself: plan for about twice the total.
+(`Not enough RAM for`). The rings are freed when each acquisition stops, so the
+next acquisition needs the same memory as the first.
+[INSTALLATION.md](INSTALLATION.md#ram) says how much RAM to buy.
 
 ### Disk
 
@@ -1298,10 +1305,9 @@ the recording may be shorter.
 Real-time encoding holds one NVENC session per camera for the whole recording.
 The NVIDIA driver limits how many sessions run at once, and the limit depends on
 the GPU and the driver version. Panopticon measures it at launch, and again at a
-start that needs more sessions than it last measured. More cameras need a more
-capable GPU, and this driver limit is often what caps the camera count. With
-`encoder: auto` and fewer sessions than cameras, Panopticon encodes on the CPU if
-its benchmark says the CPU keeps up, and otherwise refuses the start. The copies
+start that needs more sessions than it last measured.
+[INSTALLATION.md](INSTALLATION.md#gpu) says what that means for the GPU you buy,
+and [encoder](#encoder) what happens with fewer sessions than cameras. The copies
 into mp4 after Stop use no session. In raw mode, and during alignment re-encodes,
 each of the `encode_parallel` jobs holds one.
 
@@ -1337,33 +1343,18 @@ serial port. Start from [`external_ttl.yaml`](../profiles/templates/external_ttl
   `stim_safe_pins`, because each names a board this mode never opens.
 - Panopticon cannot read your source's rate. Set `frame_rate` and
   `calibration_frame_rate` to the rates you run it at. The block-ID rate check
-  after each recording compares each camera with `frame_rate`, and
+  after each acquisition compares each camera with the acquisition's rate, and
   `session_metadata.json` records `trigger_source: external`.
 - Wire the source to every camera's trigger input with a common ground, and check
   that one output can drive every input it feeds.
 
 Every camera must be armed before the first pulse, or the cameras count their
-frames from different pulses and nothing in the files shows it. A recording runs
-in this order:
-
-1. Keep the source stopped and press **Record** (or **Calibrate**).
-2. Panopticon arms every camera and watches them for 0.5 s, or five trigger
-   periods if that is longer. If any camera receives a frame, the source was
-   already running, and the recording is refused with the cameras named
-   (`received frames before every camera was armed`).
-3. When the prompt `Every camera is armed. Start your trigger source now` appears,
-   start the source. The recording begins with the first pulse. If no camera
-   receives a pulse within 45 s, or you press **Cancel**, nothing is kept.
-4. To finish, stop the source. The recording ends when no camera has received a
-   frame for 2 s, or four trigger periods if that is longer. You can press
-   **Record** first instead: Panopticon then asks you to stop the source, counts
-   it stopped after 1 s of silence (or two periods), and after 30 s stops the
-   cameras itself and notes it in `WARNINGS.txt`.
-
-If you agreed to overwrite an earlier session, Panopticon moves it into a hidden
-folder beside it (`.<name>-overwritten-…`) until the first pulse arrives. It
-deletes that folder then, and puts the session back if the start ends before
-then.
+frames from different pulses and nothing in the files shows it. Panopticon
+therefore refuses a recording in which any camera receives a frame before every
+camera is armed (`received frames before every camera was armed`), and asks you
+to start the source only after that check.
+[WORKFLOW.md](WORKFLOW.md#your-own-trigger-source) gives the order a recording
+runs in, with its timings.
 
 ## What the loader checks, and what it does not
 
