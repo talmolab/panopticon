@@ -382,8 +382,8 @@ Panopticon warns at Record, because a consumer NVMe drive falls to about
 1-2 GB/s once its write cache fills. Use a drive rated for that sustained rate,
 or split the cameras across drives.
 
-The launch check warns below 500 GiB free and below 500 MB/s measured write
-speed. It measures the speed by writing 256 MB to the output directory and
+The launch check warns below 500 GiB free and below 500 MiB/s measured write
+speed. It measures the speed by writing 256 MiB to the output directory and
 deleting it.
 
 ### Operating system

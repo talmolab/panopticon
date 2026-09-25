@@ -96,7 +96,7 @@ Panopticon at launch:
    GPU driver grants, times a libx264 encode and picks the encoder. A
    `Hardware Check` dialog lists any problem it finds, for example:
    - fewer than 4 CPU cores, under 16 GiB of RAM, under 500 GiB free or under
-     500 MB/s of writing on the output drive;
+     500 MiB/s of writing on the output drive;
    - an NVENC path that does not work, or an encoder that ignores the
      keyframe setting, which would leave recordings with one keyframe and
      hard to seek;
