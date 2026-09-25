@@ -331,7 +331,9 @@ Integer. Default `0`. Reference rig: `9`.
 
 #### `camera_serials`
 
-List of quoted text, or null. Default `null`. Reference rig: not set.
+List of quoted text, or null. Default `null`. Reference rig: `["41920544",
+"41920545", "41920546", "41920547", "41920548", "41920549", "42017507",
+"42017508", "42019425"]`.
 
 - Does: The serial numbers of the cameras the rig is made of. cam1 is the first
   entry, cam2 the second, and so on. Panopticon opens only these cameras, logs

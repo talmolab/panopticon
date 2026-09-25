@@ -45,14 +45,18 @@ kick_max_lag: 480            # Frames the coordinator waits for a lagging camera
                              # Change it only after an A/B test on the rig; docs/HISTORY.md
                              # has the measurements.
 
-# Number of cameras that must enumerate before the cameras open. Without
-# camera_serials the names follow serial-number order, so a camera that fails
-# to enumerate (dead switch port, unpowered, still booting) renames every camera
-# after it and attaches the calibration to the wrong physical cameras. When
-# adding cameras, check that the new serials sort after the existing ones
-# (41920544-41920549 are cam1-cam6, 42017507, 42017508 and 42019425 are
-# cam7-cam9), or every later camera is renamed.
+# Number of cameras that must enumerate before the cameras open.
 n_cameras: 9
+
+# The rig's cameras, cam1 first. Each name stays on its physical camera, so a
+# camera that fails to enumerate (dead switch port, unpowered, still booting)
+# refuses the open by serial instead of renaming every camera after it and
+# attaching the calibration to the wrong cameras. The loader wants them quoted
+# and in ascending order, which is the order the cameras were named in before
+# this list existed. After replacing a camera, update the list and calibrate
+# again.
+camera_serials: ["41920544", "41920545", "41920546", "41920547", "41920548",
+                 "41920549", "42017507", "42017508", "42019425"]
 
 # --- Calibration-only exposure and gain ---------------------------------------
 # The ChArUco board needs more light than the experiment does, most of all with
