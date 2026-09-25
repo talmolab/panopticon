@@ -609,6 +609,16 @@ Dead ends, do not retry:
   after it. The list is in ascending order, which is the order the cameras were
   already named in, so existing calibrations keep their camera names
   (`e68d682`).
+- 2026-09-25: The desktop shortcut opened a console window before
+  Panopticon's. In a venv made by uv, `Scripts\pythonw.exe` is a copy of the
+  console launcher and starts the console `python.exe`. `make_shortcut.ps1`
+  now checks the launcher's PE subsystem and, for a console one, points the
+  shortcut at CPython's windowless venv launcher, copied to
+  `Scripts\panopticonw.exe` (`9a2a90c`).
+- 2026-09-25: No dialog opens after an acquisition. Its problems go to
+  `WARNINGS.txt`, the log and the status bar, at the maintainer's request: the
+  dialog opened after most takes for one routine line, the effective frame
+  rate (`9f0dc5f`).
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
