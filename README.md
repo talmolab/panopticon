@@ -100,7 +100,8 @@ programmed it with the same firmware
 > [!WARNING]
 > Flashing resets the trigger board, and the laser driver input floats during
 > the reset. Switch the laser off or block the beam before you launch
-> Panopticon, and before Apply, Calibrate, or the first Record after an Apply.
+> Panopticon, before Apply, and, while a paradigm is Applied, before each
+> Calibrate and each Record that follows a calibration.
 
 ### Settings to change first
 

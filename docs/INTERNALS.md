@@ -1646,7 +1646,7 @@ The other rows of that table either refuse the start, retire the camera
 before a frame is written under a wrong number, or leave a gap in
 `blockids.npy` that the intersection sees. With frame-ID block IDs (every
 Basler camera, and a FLIR camera that uses its frame ID), a camera whose
-exposure exceeds the ceiling does none of these: it ignores the trigger
+exposure exceeds the ceiling does none of these. It ignores the trigger
 ([Exposure](#what-happens-over-the-ceiling)) and consumes no block ID. For
 that camera:
 

@@ -87,7 +87,7 @@ During an acquisition Panopticon reads each camera's temperature every
 comes within `thermal_warn_margin_c` of the shutdown temperature the camera
 reports, or when the camera reports its over-temperature state. That warning
 reaches `WARNINGS.txt` and the post-session dialog only when the recording lost
-frames; a camera that reached its shutdown point is always listed there. Every
+frames. A camera that reached its shutdown point is always listed there. Every
 session's `session_metadata.json` records each camera's peak temperature
 (`temp_max_c`). On a camera that reports its shutdown temperature, the Critical
 flag alone raises no alert. A camera that reports none is judged by its own
@@ -999,7 +999,8 @@ Panopticon flashes it for you.
 > [!WARNING]
 > Flashing resets the trigger board, and the laser driver input floats during
 > the reset. Switch the laser off or block the beam before you launch
-> Panopticon, and before Apply, Calibrate, or the first Record after an Apply.
+> Panopticon, before Apply, and, while a paradigm is Applied, before each
+> Calibrate and each Record that follows a calibration.
 
 During a flash the board sits in its bootloader with no program running, so
 every pin floats, and a powered laser driver can read that as on. The boot guard
