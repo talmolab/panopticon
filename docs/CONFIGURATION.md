@@ -296,8 +296,8 @@ Mapping. Default `null` (no block). Reference rig: not set.
 Integer, pixels. Default `1920`. Reference rig: `1920`.
 
 - Does: The width of the frame every camera records. It sizes the frame buffers
-  and the RAM and disk checks. On Basler it must equal `Width` in the `.pfs`; on
-  FLIR the backend writes it to each camera.
+  and the RAM and disk checks. On Basler it must equal `Width` in the `.pfs`.
+  On FLIR the backend writes it to each camera.
 - Change when: When you change the frame size.
 - Goes wrong: An odd width is refused when the profile loads, because the
   encoders' NV12 frames need even sizes. A width that differs from what the
@@ -344,7 +344,7 @@ List of quoted text, or null. Default `null`. Reference rig: not set.
   loader refuses an unquoted serial, because YAML reads a leading-zero number as
   octal. It also refuses a serial listed twice, a list out of ascending text
   order, and a length that differs from a nonzero `n_cameras`. Text order puts
-  `"10"` before `"9"`; the refusal gives the order to use.
+  `"10"` before `"9"`, and the refusal gives the order to use.
 
 ### Timing and exposure
 
@@ -391,8 +391,8 @@ Number, frames per second. Default `165`. Reference rig: `165`.
   15% of frames were lost on the network ([HISTORY.md](HISTORY.md)). A value
   above the camera's real maximum makes the computed ceiling too long. An
   exposure Panopticon accepts can then make the camera skip triggers
-  ([exposure ceiling](#exposure-ceiling)). A FLIR profile refuses
-  the field; FLIR pacing is [camera.flir.link_throughput_limit](#cameraflirlink_throughput_limit).
+  ([exposure ceiling](#exposure-ceiling)). A FLIR profile refuses the field.
+  FLIR pacing is [camera.flir.link_throughput_limit](#cameraflirlink_throughput_limit).
 
 #### `calibration_exposure_us`
 
@@ -414,7 +414,7 @@ Number, microseconds. Default `0`. Reference rig: `5000`.
 Number, dB. Default `-1`. Reference rig: `-1`.
 
 - Does: The gain used while calibrating, and only then. Any negative value keeps
-  the recording gain; `0` is a real gain of 0 dB.
+  the recording gain, and `0` is a real gain of 0 dB.
 - Change when: After you have added light and raised `calibration_exposure_us`.
 - Goes wrong: Each +6 dB doubles the noise along with the signal.
 
@@ -427,8 +427,8 @@ Text. Default `auto`. Reference rig: `auto`.
 - Does: Picks the H.264 encoder. Panopticon decides at launch and again at each
   Record and Calibrate. `auto` uses NVENC when the driver grants a session per
   camera, else libx264 on the CPU when the launch benchmark says the CPU keeps
-  up, and otherwise refuses the start. `nvenc` and `x264` force one path; `x264`
-  also moves the post-session re-encodes to the CPU. `raw` is accepted only with
+  up, and otherwise refuses the start. `nvenc` and `x264` force one path, and
+  `x264` also moves the post-session re-encodes to the CPU. `raw` is accepted only with
   `realtime_encode: false`. When the session limit cannot be measured, `auto` and
   `nvenc` keep NVENC, and the start asks whether to proceed
   (`The NVENC session cap could not be probed`).
@@ -488,7 +488,7 @@ Text. Default `pinned`. Reference rig: not set.
   the reference rig one camera then drifts behind the others. `pinned` costs about
   1 ms more CPU per frame per camera and 4 × width × height × 1.5 bytes of
   page-locked memory per camera. At launch Panopticon checks that PyNvVideoCodec
-  copies on the encoder's stream; if the check fails, the session uses `host` and
+  copies on the encoder's stream. If the check fails, the session uses `host` and
   the log says why. An encoder that cannot get page-locked memory uses `host` by
   itself, and `WARNINGS.txt` says so (`real-time encode uses the host upload`).
   `session_metadata.json` records what each acquisition used
@@ -503,7 +503,7 @@ Text. Default `shared`. Reference rig: not set.
 - Change when: Leave `shared`. On the reference rig the two lagged alike, and
   `own` used about 225 MiB more GPU memory per camera.
 - Goes wrong: `own` with `nvenc_upload: host` is refused when the profile loads.
-  At launch Panopticon measures what a context costs on this GPU; when the free
+  At launch Panopticon measures what a context costs on this GPU. When the free
   memory does not cover one per camera, it uses `shared` and logs a warning.
 
 ### Alignment and memory
@@ -551,7 +551,7 @@ Integer. Default `1000`. Reference rig: `600`.
   `buffers_underrun` in the recording's `session_metadata.json`
   (`camera_stream_stats`) is above 0.
 - Goes wrong: Below `kick_max_lag`, the pool runs dry while the kick-out still
-  waits, and a camera that could have caught up loses frames; the loader refuses
+  waits, and a camera that could have caught up loses frames. The loader refuses
   that in kick-out mode. Too high, and the RAM check refuses to start. A deep pool
   also hides a grab loop that is slightly too slow, because each frame retrieved
   is older than the last. FLIR refuses a value above the camera's
@@ -588,7 +588,7 @@ Text. Default `socket`. Reference rig: `socket`.
 - Goes wrong: On the reference rig `filter` lost frames by the thousand
   ([measured](INTERNALS.md#resends-driver-choice-and-flow-control)). Any other
   value is refused when the profile loads. A FLIR profile refuses any value but
-  `auto`; its equivalent is [camera.flir.stream_mode](#cameraflirstream_mode).
+  `auto`, and its equivalent is [camera.flir.stream_mode](#cameraflirstream_mode).
 
 #### `gev_bandwidth_reserve_pct`
 
@@ -718,7 +718,7 @@ Integer. Default `120`. Reference rig: `120`.
 
 - Does: How many detection ticks each camera needs in which it saw the board
   together with at least one other camera.
-- Change when: Raise it if calibrations come out marginal; lower it if waving
+- Change when: Raise it if calibrations come out marginal. Lower it if waving
   takes too long while the per-pair chart in `reprojection_error_histogram.png`
   stays good.
 - Goes wrong: Too high wastes time in the arena, because the solve uses at most 60
@@ -762,7 +762,7 @@ True or false. Default `false`. Reference rig: `true`.
 - Change when: Turn it on for a hybrid Intel CPU after a test recording shows a
   camera falling behind.
 - Goes wrong: Off on a hybrid CPU, Windows may run a grab thread on an efficiency
-  core, and that camera falls behind; which camera changes from launch to launch.
+  core, and that camera falls behind, a different camera from launch to launch.
   With more cameras than cores in the pool, the extra grab threads share the
   pool's cores.
 
@@ -1029,7 +1029,7 @@ Text, `Line0`, `Line1` and so on. Required.
 Number, microseconds, or null. Default `null`.
 
 - Does: The camera's `TriggerDelay`. `null` leaves the user set's value.
-- Change when: Rarely; for example to line up cameras whose exposures start at
+- Change when: Rarely, for example to line up cameras whose exposures start at
   different delays.
 - Goes wrong: A negative value is refused when the profile loads, and one outside
   the camera's range refuses the open.
@@ -1093,7 +1093,7 @@ Number or null. Default `null`.
 Bytes per second, `auto`, `max` or null. Default `auto`.
 
 - Does: Writes `DeviceLinkThroughputLimit`, which spaces each camera's frame
-  transfer; it is the FLIR counterpart of `trigger_rate_limit`'s pacing. `auto`
+  transfer. It is the FLIR counterpart of `trigger_rate_limit`'s pacing. `auto`
   gives one frame 60% of the trigger period (payload × frame rate ÷ 0.6, within
   the camera's range). `max` sets the camera's maximum, a number is used as
   given, and `null` leaves the camera's value.
@@ -1129,8 +1129,8 @@ Integer 0 or more, or null. Default `null`.
 
 `auto`, `TeledyneGigEVision`, `LWF` or `Socket`. Default `auto`.
 
-- Does: GigE only. Picks Spinnaker's GigE stream driver; `auto` leaves Spinnaker's
-  choice. It is the FLIR counterpart of `gige_driver`.
+- Does: GigE only. Picks Spinnaker's GigE stream driver, and `auto` leaves
+  Spinnaker's choice. It is the FLIR counterpart of `gige_driver`.
 - Change when: Only for a comparison test on your rig.
 - Goes wrong: A USB3 camera refuses any value but `auto`. An entry the camera does
   not offer refuses the open.
@@ -1222,7 +1222,7 @@ key named. Unknown keys are ignored, so a misspelled `board_legacy` falls back t
 ## Sizing formulas
 
 Each formula is per rig, for N cameras of W × H pixels at F frames per second.
-Mono8 is one byte per pixel. GiB is 2^30 bytes; GB and MB/s are powers of 10.
+Mono8 is one byte per pixel. GiB is 2^30 bytes, and GB and MB/s are powers of 10.
 Section 1 of [INSTALLATION.md](INSTALLATION.md) explains how to choose hardware
 from these numbers.
 

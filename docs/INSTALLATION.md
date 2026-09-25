@@ -276,8 +276,8 @@ The CPU work per camera:
   as deferred procedure calls (DPCs) on the cores the adapter's receive-side
   scaling (RSS) assigns. Three 1920x1200 cameras at 100 fps send about 78,000
   packets/s into one port, and on the reference rig one core ran at 46% DPC load
-  for such a port ([INTERNALS.md](INTERNALS.md#receive-load-on-the-host) has the
-  nine-camera figures).
+  for such a port. [INTERNALS.md](INTERNALS.md#receive-load-on-the-host) has
+  the nine-camera figures.
 
 The GIL limits how far this scales. A recording runs two threads per camera plus
 the window's, about 19 busy threads at nine cameras, and only one thread runs
@@ -316,9 +316,9 @@ figures.
 - The [NV12 ring](GLOSSARY.md#nv12-ring) holds frames on their way to the
   encoder. In the default [kick-out](GLOSSARY.md#kick-out) mode a trigger's
   frames wait in the ring until every camera has delivered that trigger, for at
-  most `kick_max_lag` frames, so the ring grows with `kick_max_lag`
-  ([what the lag limit costs](CONFIGURATION.md#kick_max_lag)). It is usually the
-  larger of the two.
+  most `kick_max_lag` frames. The ring therefore grows with `kick_max_lag`
+  ([what the lag limit costs](CONFIGURATION.md#kick_max_lag)), and it is usually
+  the larger of the two.
 - The pinned GPU upload adds a little page-locked memory.
 
 The total has to be available when you press Record, with the operating system
