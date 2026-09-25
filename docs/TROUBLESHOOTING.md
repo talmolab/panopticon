@@ -64,7 +64,7 @@ Contents:
 | `camera.flir.sdk_dir is not a folder:` | Point it at the Spinnaker install folder, or remove it to search the default places. |
 | `The profile sets capture_processes: <n>.` | Capturing in several processes is experimental, and the window captures in one. Set `capture_processes: 0`. |
 | `A solve is running` | The profile switch was refused, and the list shows the old profile again. Choose the profile again once the calibration solve has finished. |
-| `Firmware upload in progress` | The profile switch or the close was refused during a flash, which takes about 30 s. Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
+| `Firmware upload in progress` | The profile switch, the start or the close was refused during a flash, which takes about 30 s. Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
 | `The hardware check is running` | The profile switch or the start was refused. Choose the profile, or start, again once the status bar says the check is done. |
 
 ## Opening the cameras
@@ -111,7 +111,7 @@ Calibrate stay disabled while it runs.
 | `ffmpeg's h264_nvenc test encode failed` | The post-session encodes run on the CPU instead, which is slower. |
 | `GOP NOT APPLIED` | The encoder ignored the keyframe setting, so recordings would have one keyframe and could not be seeked. Report the driver and PyNvVideoCodec versions. |
 | `nvenc_upload: pinned needs the launch check` | The pinned GPU upload did not pass its launch check, so this session uses the host upload. The video is the same, and grab threads can fall behind ([INSTALLATION.md](INSTALLATION.md#cpu)). The `[nvenc]` lines in the log say why. |
-| `nvenc_context: own gives each of the <n> encoders a CUDA context of its own` | The GPU lacks free memory for one context per camera, so the pinned upload runs in the shared context. |
+| `nvenc_context: own gives each of the <n> encoders a CUDA context of its own` | The GPU lacks free memory for one context per camera, or Panopticon could not measure it (the message says which), so the [pinned upload](GLOSSARY.md#pinned-upload) runs in the shared context. |
 | `usbfs_memory_mb is <n> MB` | Linux only. Raise the usbfs limit as the message says. |
 | The report's `Camera SDK:` line says `cannot load` | The camera SDK the profile needs did not load. Install it ([INSTALLATION.md](INSTALLATION.md#step-2--install-the-basler-pylon-sdk), or [FLIR.md](FLIR.md#1-install)). |
 | `The hardware check could not finish` | Its findings are incomplete. The capacity check still runs at Record. |
@@ -207,7 +207,7 @@ Most of these appear in the status bar.
 
 | Message or symptom | Cause and fix |
 |---|---|
-| `Capture healthy — every camera within <n> trigger(s) of the leader` | Normal in the default kick-out mode. |
+| `Capture healthy — every camera within <n> trigger(s) of the leader` | Normal in the default [kick-out](GLOSSARY.md#kick-out) mode. |
 | `CAPTURE FALLING BEHIND: <cam> is <n> triggers behind the leader (cap <cap>). Close other applications.` | A camera lags by more than a quarter of `kick_max_lag`. Nothing is lost yet. Close other programs. |
 | `TRIGGERS BEHIND THE LEADER (cap <cap>): frames every camera captured are being dropped. Stop and investigate.` | A camera lags by more than three quarters of `kick_max_lag`. At the cap, triggers every other camera captured are dropped from every video. Stop and check that camera ([After a recording](#after-a-recording)). |
 | `Capture healthy — keeping up with the trigger (max lag <n> ms)` | Normal with `realtime_kick: false`. |
@@ -235,8 +235,8 @@ runs after the encode, and its rows appear in dialogs of their own, such as
 | Message or symptom | Cause and fix |
 |---|---|
 | `Effective frame rate <rate> fps (target <rate>).` | More than 0.5% of the triggers were missing from at least one camera, so they were dropped from every video. The videos stay aligned. The log has each camera's losses, and `session_metadata.json` the counts. |
-| `are missing from every camera's video: they were force-dropped because a camera fell more than kick_max_lag` | A camera fell a full `kick_max_lag` behind, and the message names it. The videos stay aligned. Find why that camera lagged: its link, its CPU core, its temperature. |
-| `was RETIRED mid-recording` | That camera's video ends at the retirement, and the others stay aligned. The reason follows in brackets, and the rows below explain the common ones. |
+| `are missing from every camera's video: they were force-dropped because a camera fell more than kick_max_lag` | A camera fell a full `kick_max_lag` behind ([forced drop](GLOSSARY.md#forced-drop)), and the message names it. The videos stay aligned. Find why that camera lagged: its link, its CPU core, its temperature. |
+| `was RETIRED mid-recording` | That camera's video ends at the [retirement](GLOSSARY.md#retirement), and the others stay aligned. The reason follows in brackets, and the rows below explain the common ones. |
 | `every grab failing` | Every frame from this camera failed. On GigE, check jumbo frames on the adapter and on every switch port in its path. On USB3, check the cable and the host controller. |
 | `grabs failed (<n>%, last:` | More than 0.5% of this camera's frames were lost in transmission. Same checks as above. |
 | `no frame received since the triggers started` | The camera never triggered. Check its trigger cable, its pin in `trigger_pins`, and its trigger line setting. |

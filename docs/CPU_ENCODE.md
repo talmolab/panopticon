@@ -38,7 +38,7 @@ capacity check then warns before the start ("The NVENC session cap could not
 be probed ...") that a camera without a session falls back to `raw.bin`, and
 asks whether to start.
 
-When `auto` falls back, the capacity check warns before the recording ("...
+When `auto` falls back, the capacity check warns before the start ("...
 Recording on the CPU with libx264 instead ...") and asks whether to start. Each
 camera recorded on libx264 carries a note in its `WARNINGS.txt` ("Real-time
 encoding runs on the CPU (libx264, ..."). `session_metadata.json` records both
@@ -54,11 +54,11 @@ libraries fail independently, so a host where PyNvVideoCodec works and
 `realtime_encode` is the only field that switches the capture path, and nothing
 in the capture path reads `encoder`. With `realtime_encode: true`,
 `encoder: raw` would still encode in real time while skipping the NVENC session
-check, and every camera without a session would fall back to `raw.bin` one at a
-time, with nothing said. `select_encoder()` and the capacity check therefore
-refuse that combination and name `realtime_encode: false` as the field to set.
-With raw capture set, the disk budget counts the whole frame every frame
-instead of the H.264 rate.
+check. Every camera without a session would then fall back to `raw.bin` one at a
+time, and the preflight would not warn. `select_encoder()` and the capacity
+check therefore refuse that combination and name `realtime_encode: false` as the
+field to set. With raw capture set, the disk budget counts the whole frame every
+frame instead of the H.264 rate.
 
 ## Why it exists
 
@@ -185,7 +185,7 @@ and a count below it as a refusal.
 
 `hardware_check.H264_BYTES_PER_FRAME = 4600` was measured on NVENC recordings
 at the rig's qp. libx264 at `ultrafast` and the same qp writes more, and the
-CPU path has not yet been measured on rig content. The disk warnings therefore
+CPU path has no measurement on rig content. The disk warnings therefore
 call the estimate a lower bound whenever the CPU encoder is installed.
 
 ## When to prefer which

@@ -128,7 +128,8 @@ Keep these properties when you edit it:
   `noInterrupts()` and `interrupts()`, so an interrupt cannot stretch the skew
   between pins. The design follows campy by Kyle Severson (`trigger.ino` in
   <https://github.com/ksseverson57/campy>), which documents ±0.35 µs
-  inter-frame precision and about 30 ns between pins.
+  inter-frame precision for its own firmware. This sketch writes the pins one
+  `digitalWrite` at a time, so its pins change microseconds apart.
 - Nothing on the host is in the timing path. The host sends the pins and the
   rate, and the board runs on its own.
 
@@ -205,7 +206,7 @@ Opening the serial port pulses DTR, which resets the board and returns the
 sketch to `setup()` with an empty receive buffer. The reset is needed: with
 DTR suppressed (`dtr=False`) the board ignores the configuration and sends no
 triggers, and the session records no frames. The window keeps the reset away
-from recordings instead. It holds one `TeensyController` open from the moment
+from recordings. It holds one `TeensyController` open from the moment
 a profile is open until quit, and each start reuses that open port. The board
 therefore resets at launch, when a profile on another port is chosen, and when
 firmware is flashed, and not at the start of a recording.
@@ -689,8 +690,9 @@ drifting behind, a different one each time.
 `gui_app/cpu_affinity.py` holds the placement, driven by the profile.
 [`pin_capture_threads`](CONFIGURATION.md#pin_capture_threads) gives each grab
 thread a performance core of its own while they last. The rest float over the
-same pool and share its cores with the pinned threads. Every grab thread runs
-at raised priority, and no two are pinned to one core. `capture_core_exclude`
+same pool and share its cores with the pinned threads. With it on, every grab
+thread runs at raised priority, and no two are pinned to one core. On a CPU
+without performance cores it changes nothing. `capture_core_exclude`
 removes cores from the pool, for the cores that carry the NIC's DPCs.
 `encoder_pcores` and `pin_encoder_threads` place the encoder threads and ship
 off, because both measured worse than leaving the encoders to Windows. The
@@ -880,9 +882,9 @@ the camera's own shutdown, and no backend writes it.
 [`capture_processes`](CONFIGURATION.md#capture_processes) above 0 splits the
 cameras across that many worker processes, each capturing and encoding its
 own share (`gui_app/mp/`). The loader accepts it only with real-time encoding
-and kick-out both on. The window refuses such a profile for now and opens no
-camera; only the maintainers' local probe builds the multi-process manager,
-while it is measured on the rig. The design, in brief:
+and kick-out both on. It is experimental: the window refuses such a profile
+and opens no camera, and only the maintainers' local probe builds the
+multi-process manager. The design, in brief:
 
 - The parent holds no camera and no encoder. It resolves cam1..camN, deals
   the cameras to workers in contiguous groups, and runs one
@@ -918,7 +920,7 @@ ID goes into `blockids.npy`, so a position in a video maps back to a trigger
 number by lookup. Real-time kick-out and the post-hoc intersection each turn
 that into aligned videos, and they differ in when they pay for it. They keep
 the same frames unless a camera falls more than `kick_max_lag` triggers
-behind. Kick-out then force-drops, and keeps a subset of the intersection's
+behind or is retired. Kick-out then force-drops, and keeps a subset of the intersection's
 frames (see
 [The equivalence of the two paths](#the-equivalence-of-the-two-paths)).
 
@@ -1084,11 +1086,11 @@ single copy.
 
 ### NV12 from Mono8
 
-NVENC takes NV12: a full-resolution 8-bit Y plane followed by an interleaved
-half-resolution UV plane. A Mono8 frame is the Y plane, and neutral chroma is a
-constant 128. The conversion is therefore one memcpy into the top `height` rows
-of a buffer whose lower `height/2` rows were filled with 128 once. The loader
-refuses an odd frame size for the same reason.
+NVENC takes [NV12](GLOSSARY.md#nv12): a full-resolution 8-bit Y plane followed
+by an interleaved half-resolution UV plane. A Mono8 frame is the Y plane, and
+neutral chroma is a constant 128. The conversion is therefore one memcpy into
+the top `height` rows of a buffer whose lower `height/2` rows were filled with
+128 once. The loader refuses an odd frame size for the same reason.
 
 `nvenc.probe_monochrome_support()` reads NVENC's `support_monochrome`
 capability. On the reference GPU it returns 0: the encoder takes no monochrome
@@ -1891,7 +1893,8 @@ Bring up a new backend in this order:
 GigE or USB3, from what each camera reports about itself: node ranges,
 increments, trigger lines and pixel formats, with no table of models. The
 operator's guide is [FLIR.md](FLIR.md); what follows is how the backend meets
-the contract. None of it has run on FLIR hardware yet.
+the contract. None of it has run on FLIR hardware
+([FLIR.md](FLIR.md#status-nothing-has-run-on-flir-hardware-yet)).
 
 - The SDK binding. `_spinc.SpinC` wraps Spinnaker's C library
   (`SpinnakerC_v140.dll`) through ctypes. `ctypes.CDLL` releases the GIL around
@@ -1930,11 +1933,12 @@ the contract. None of it has run on FLIR hardware yet.
   whose link cannot carry the frames at that rate, whose
   `AcquisitionFrameRate` cannot reach it, or whose exposure is above 90% of
   the ceiling it reports ([FLIR cameras](#flir-cameras)). These raise
-  `FlirRateError`, the backend's `RefusalException`: at open the cameras do
-  not open, and at an acquisition's start (at the calibration rate, for
-  example) the start is refused before any exposure is written. The `[camN]
-  exposure=` line names the bound as "the ExposureTime limit this camera
-  reports" (`CEILING_BASIS`).
+  `FlirRateError`, the backend's `RefusalException`, and the cameras do not
+  open. At an acquisition's start (at the calibration rate, for example) only
+  the link and frame-rate checks run. They refuse the start before any
+  exposure is written, and a calibration exposure above the ceiling is
+  clamped. The `[camN] exposure=` line names the bound as "the ExposureTime
+  limit this camera reports" (`CEILING_BASIS`).
 - Triggering. `set_triggered()` sets the trigger source, activation and
   overlap from `camera.trigger` (overlap `ReadOut` by default, so a trigger
   during readout is not disregarded) and never uses a software trigger or a
@@ -1984,8 +1988,8 @@ most already do nothing on other systems:
 
 pypylon, PyQt5, numpy, OpenCV, PyNvVideoCodec and the Arduino toolchain run on
 both. Nothing in `frame_sync.py`, `alignment.py`, `stim_compiler.py` or
-`stim_trace.py` depends on the operating system. The FLIR backend is Windows
-only for now.
+`stim_trace.py` depends on the operating system. The FLIR backend runs on
+Windows only.
 
 ### Constants
 

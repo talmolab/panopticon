@@ -193,7 +193,7 @@ Power-cycle the missing camera and choose the profile again.
 The open is also refused when a camera's pixel format is not Mono8, or when
 its image size differs from the profile's `frame_width` and `frame_height`.
 A profile with `capture_processes` above 0 opens no camera: capture in several
-processes is experimental and the window cannot use it yet
+processes is experimental and the window does not use it
 ([CONFIGURATION.md](CONFIGURATION.md#capture_processes)).
 
 For FLIR cameras, [FLIR.md](FLIR.md) covers the profile's `camera:` block, the

@@ -57,15 +57,15 @@ middle of a recording.
 Measured on the reference rig in September 2026 (nine Basler a2A1920-165g5m
 cameras, no fans):
 
-- With one heatsink each, idle cameras levelled off at 72-78 C. Three sat above
-  76 C, the level the camera itself flags as Critical. The camera shuts down at
-  81 C.
-- The heatsinks lowered the idle temperature by 2-4 C. A second heatsink on the
-  hottest camera lowered it by another 2.7 C.
-- Recording raised the temperature by about 0.3-0.7 C per minute with the
-  heatsinks, and by 1.1-1.3 C per minute before them. From the hottest
-  camera's idle level of about 77.5 C, a recording reaches 80 C within about
-  3-8 minutes, 1 C below the shutdown.
+- With one heatsink each, idle cameras levelled off at 72-78 °C. Three sat above
+  76 °C, the level the camera itself flags as Critical. The camera shuts down at
+  81 °C.
+- The heatsinks lowered the idle temperature by 2-4 °C. A second heatsink on the
+  hottest camera lowered it by another 2.7 °C.
+- Recording raised the temperature by about 0.3-0.7 °C per minute with the
+  heatsinks, and by 1.1-1.3 °C per minute before them. At those rates, a
+  recording started at the one-heatsink idle level of about 77.5 °C would reach
+  80 °C, 1 °C below the shutdown, in about 3-8 minutes (an estimate).
 
 Plan the cooling before you mount the cameras:
 
@@ -167,7 +167,8 @@ Before you fan one pin out to several cameras, add up their input currents.
 
 The order of `trigger_pins` carries no meaning, but every pin that drives a
 camera must be in the list. A camera on an unlisted pin receives no triggers.
-Panopticon retires it once it stalls, and the other cameras record without it.
+Panopticon [retires](GLOSSARY.md#retirement) it once it stalls, and the other
+cameras record without it.
 
 ### Network
 
@@ -263,14 +264,14 @@ buffer pool until the pool runs out.
 The CPU work per camera:
 
 - A grab thread retrieves each frame, copies it into a buffer of the
-  [NV12](GLOSSARY.md#nv12) ring, queues it for the encoder and releases the
+  [NV12 ring](GLOSSARY.md#nv12-ring), queues it for the encoder and releases the
   driver's buffer. At 1920x1200 that takes about 0.8 ms per frame, roughly 8% of
   one core at 100 fps.
 - An encoder thread feeds the GPU encoder. With the default
-  `nvenc_upload: pinned` it first copies each frame into page-locked memory
-  without holding Python's global interpreter lock (the
-  [GIL](GLOSSARY.md#gil)). That costs about
-  1 ms of CPU per frame, outside the GIL.
+  [pinned upload](GLOSSARY.md#pinned-upload) it first copies each frame into
+  page-locked memory without holding Python's global interpreter lock (the
+  [GIL](GLOSSARY.md#gil)). That costs about 1 ms of CPU per frame, outside the
+  GIL.
 - For GigE cameras, the network driver reassembles the packets. That work runs
   as deferred procedure calls (DPCs) on the cores the adapter's receive-side
   scaling (RSS) assigns. Three 1920x1200 cameras at 100 fps send about 78,000
@@ -579,9 +580,12 @@ With a single switch, pylon can assign every address:
 & "C:\Program Files\Basler\pylon\Runtime\x64\PylonGigEConfigurator.exe" auto-all
 ```
 
-It gives every adapter and camera it finds compatible addresses. It does not
-configure the switch, and it does not let you choose which camera gets which
-address, so plan the addresses by hand once you have more than one switch.
+It gives every adapter and camera it finds compatible addresses, and then
+changes adapter and system settings of its own (jumbo frames, interrupt
+moderation, receive descriptors). The host-adapter settings below replace
+those. It does not configure the switch, and it does not let you choose which
+camera gets which address, so plan the addresses by hand once you have more
+than one switch.
 
 #### Configure the switches
 
@@ -771,7 +775,7 @@ tl.RestartIpConfiguration(mac)          # applies without a power cycle
 
 #### Let the traffic through the firewall
 
-Discovery and streaming use UDP, and Windows blocks inbound UDP that no rule
+Discovery and streaming use UDP, and Windows can block inbound UDP that no rule
 allows. Allow inbound UDP on the camera adapters. From an elevated PowerShell,
 with your own adapter names:
 
@@ -1185,10 +1189,10 @@ A healthy recording shows:
   thread retrieves it, by the camera's own clock.
 - `Buffer_Underrun_Count` 0 on every camera, in the `stream stats` line printed
   at the stop. A nonzero count means the host did not keep up.
-- Equal frame counts on every camera, and `forced=0`.
-- No dialog after the stop. A recording that lost more than 0.5% of its
-  triggers shows `Effective frame rate <rate> fps (target <rate>).` in the
-  post-session dialog and in `WARNINGS.txt`.
+- Equal frame counts on every camera, and `forced=0`
+  ([forced drops](GLOSSARY.md#forced-drop)).
+- No dialog after the stop. A recording that lost triggers to kick-out reports
+  its [effective frame rate](GLOSSARY.md#effective-frame-rate) there.
 
 A 60-second six-camera recording on the reference rig at 100 fps reported:
 

@@ -513,11 +513,12 @@ Text. Default `shared`. Reference rig: not set.
 True or false. Default `true`. Reference rig: `true`.
 
 - Does: `true` drops, during the recording, every trigger that some camera
-  missed, so the videos come out aligned. When more than 0.5% of the triggers are
-  dropped, the post-session dialog and `WARNINGS.txt` give the recording's
-  `Effective frame rate`, and `session_metadata.json` holds the counts
-  (`kickout`). `false` records every frame each camera caught and aligns the
-  videos after the recording with a full re-encode.
+  missed, so the videos come out aligned. The dialog after the recording reports
+  those drops as the recording's
+  [effective frame rate](GLOSSARY.md#effective-frame-rate), and
+  `session_metadata.json` holds the counts (`kickout`). `false` records every
+  frame each camera caught and aligns the videos after the recording with a
+  full re-encode.
 - Change when: Leave `true`. Set `false` only to compare with post-session
   alignment.
 - Goes wrong: With `false`, the post-session pass re-encodes every video, which
