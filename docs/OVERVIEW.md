@@ -17,9 +17,13 @@ The figure shows every control at once. In use, the coverage display (12)
 appears only during a calibration and the progress bar (15) only while videos
 are finalised.
 
-The camera grid fills the left of the window, and a sidebar 260 px wide fills
-the right. The sidebar holds the Metadata, Acquisition and Display groups,
-with the state label at its foot. The status bar runs along the bottom of the
+The camera grid fills the left of the window, and the sidebar fills the
+right. The sidebar opens 260 px wide. Drag the divider on its left edge to
+widen it, up to 900 px, and Panopticon remembers the width at the next launch.
+From 520 px the metadata fields sit two to a row, and the coverage display
+(12) takes the height that saves, so a wide sidebar gives a larger graph
+during a calibration. The sidebar holds the Metadata, Acquisition and Display
+groups, with the state label at its foot. The status bar runs along the bottom of the
 window. Every other setting is in the rig profile
 ([CONFIGURATION.md](CONFIGURATION.md)). The window opens at about 80% of the
 screen height, shaped to fit the camera grid.
