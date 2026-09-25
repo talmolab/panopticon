@@ -324,8 +324,9 @@ Integer. Default `0`. Reference rig: `9`.
   are not counted.
 - Change when: When you add or remove a camera. Read
   [camera_serials](#camera_serials) first.
-- Goes wrong: At `0` a rig with one camera missing opens the others, under the
-  wrong names unless [camera_serials](#camera_serials) is set. A count that
+- Goes wrong: At `0` and without [camera_serials](#camera_serials), a rig with
+  one camera missing opens the others under the wrong names. With
+  `camera_serials`, the missing camera refuses the open by name. A count that
   differs refuses the open (`Expected 9 cameras but 8 are available to open`).
 
 #### `camera_serials`
