@@ -17,21 +17,14 @@ Contents:
 
 Panopticon runs on Windows with an NVIDIA GPU, Basler or FLIR machine-vision
 cameras and a hardware TTL trigger, for any number of cameras. The load on
-each part of the rig follows from the frame size, the frame rate, the camera
-count and the pixel format. The pixel format is always Mono8, one byte per
-pixel.
-A part too small for its load loses frames while the recording carries on, so
-size each part before you buy it.
+each part of the rig follows from the frame size, the frame rate and the camera
+count. The pixel format is always Mono8, one byte per pixel, so a 1920x1200
+frame is 2.3 MB. A part too small for its load loses frames while the recording
+carries on, so size each part before you buy it.
 
-A frame's size is its width times its height, in bytes:
-
-```
-frame_bytes = width x height                (Mono8)
-1920 x 1200 = 2,304,000 bytes                (2.3 MB per frame per camera)
-```
-
-[CONFIGURATION.md](CONFIGURATION.md#sizing-formulas) collects the formulas for
-network, RAM, disk and NVENC sessions.
+This section says what each load depends on and how to choose the hardware.
+[CONFIGURATION.md](CONFIGURATION.md#sizing-formulas) holds the formulas for the
+network, RAM, disk and NVENC sessions, with the reference rig's figures.
 
 ### Cameras
 
@@ -189,32 +182,18 @@ A GigE Vision camera sends each frame as a burst of UDP packets. A link near its
 capacity drops packets, and the frame is lost unless a resend recovers it. USB3
 cameras skip this section, apart from [USB3 cameras](#usb3-cameras) at its end.
 
-One camera's rate on its link is its frame size in bits times the frame rate:
-
-```
-bits per second = width x height x 8 x frame rate
-1920 x 1200 x 8 x 100 = 1.84 Gbit/s per camera
-```
-
-| Format | Bytes per frame | Payload rate |
-|---|---|---|
-| 1920x1200 Mono8, 100 fps | 2,304,000 | 1.84 Gbit/s |
-| 1920x1200 Mono8, 30 fps | 2,304,000 | 553 Mbit/s |
-| 1280x1024 Mono8, 100 fps | 1,310,720 | 1.05 Gbit/s |
-
-These rates leave out the packet headers, so treat them as a floor.
-
-Each camera's rate crosses its own link and the host port it shares with the
+One camera's rate on its link is its frame size in bits times the frame rate,
+before packet headers ([Network](CONFIGURATION.md#network) gives the formula).
+That rate crosses the camera's own link and the host port it shares with the
 other cameras behind the same switch. GigE Vision is the protocol, and it runs
 over 1, 2.5, 5, 10 and 25 Gbit/s links.
 
 #### The camera's own link
 
-A 1920x1200 camera at 100 fps needs 1.84 Gbit/s. A 1 Gbit/s link carries about
-54 fps of that frame, so the reference rig uses the a2A1920-165g5m, a 5 Gbit/s
-model. At 30 fps the same frame needs 553 Mbit/s and fits a 1 Gbit/s camera.
-The frame rate moves the number most: 1280x1024 at 100 fps still needs
-1.05 Gbit/s.
+A 1 Gbit/s link carries about 54 fps of a 1920x1200 frame, so the reference rig
+uses the a2A1920-165g5m, a 5 Gbit/s model, for 100 fps. At 30 fps the same frame
+needs 553 Mbit/s and fits a 1 Gbit/s camera. The frame rate moves the number
+most: 1280x1024 at 100 fps still needs 1.05 Gbit/s.
 
 The link speed also decides how long one frame takes to send. The camera leaves
 a gap between its packets, the [inter-packet delay](GLOSSARY.md#inter-packet-delay)
@@ -240,7 +219,7 @@ With the reference camera settings (9000-byte packets, `GevSCPD` 10000, which is
 
 At 2.5 Gbit/s the inter-packet delay makes each frame take 10.1 ms, longer than
 the 10 ms period, although the link's bandwidth would carry the camera's
-1.84 Gbit/s. The recording looks normal, and the block-ID rate check after it
+payload. The recording looks normal, and the block-ID rate check after it
 reports that camera at half the trigger rate. Keep
 every camera on a port that negotiates 5 Gbit/s or more. On a 2.5 Gbit/s link,
 `GevSCPD` would have to drop to about 3000 (about 8.3 ms per frame), and the rig
@@ -250,11 +229,8 @@ would need testing again at that setting.
 
 Add up the cameras that share a host port and keep the total well under the
 port's line rate. Three 1920x1200 cameras at 100 fps send 5.53 Gbit/s, which a
-10 GbE port carries with about 45% to spare. The number of host ports follows:
-
-```
-host ports = ceil(n_cameras / cameras per port)
-```
+10 GbE port carries with about 45% to spare. Divide the camera count by the
+cameras one port can take, rounding up, for the number of host ports.
 
 The reference rig has nine cameras in three groups of three. Each group sits
 behind its own switch, and each switch has its own 10 GbE port on the host.
@@ -333,47 +309,26 @@ Panopticon at all. Size the CPU from the figures above.
 ### RAM
 
 Panopticon holds two sets of frame buffers per camera during an acquisition.
-When you press Record it adds them up, and it refuses the start when the total exceeds the
-memory available at that moment. Running out of memory in the middle of a
-recording would lose frames, so a start that does not fit is refused.
+When you press Record it adds them up, and it refuses the start when the total
+exceeds the memory available at that moment. Running out of memory in the
+middle of a recording would lose frames, so a start that does not fit is
+refused. [RAM](CONFIGURATION.md#ram) gives the formula and the reference rig's
+figures.
 
-```
-driver pool = n_cameras x max_num_buffer x frame_bytes
-NV12 ring   = n_cameras x (kick_max_lag + 264) x frame_bytes x 1.5
-```
-
-- `max_num_buffer` sets the depth of the camera driver's buffer pool, which
-  holds frames while a grab thread catches up. Keep it at or above
-  `kick_max_lag`. The profile loader refuses a pool shallower than
-  `kick_max_lag` in kick-out mode.
-- The NV12 ring holds frames on their way to the encoder. In the default
-  kick-out mode a trigger's frames wait in the ring until every camera has
-  delivered that trigger, for at most `kick_max_lag` frames. The 264 is the
-  encoder queue (200 frames) plus 64 spare slots. The factor 1.5 is the size of
-  an NV12 frame: a full-size gray plane and a half-size colour plane. With
-  `realtime_kick: false` the ring is 204 buffers per camera, and with
-  `realtime_encode: false` there is none.
-- Each ring is freed when its acquisition stops, so the next recording needs the
-  same memory as the first.
-- The pinned GPU upload adds page-locked memory of n_cameras x 4 x frame_bytes x
-  1.5, 0.12 GiB at nine 1920x1200 cameras.
-
-Nine 1920x1200 cameras with the reference profile (`max_num_buffer: 600`,
-`kick_max_lag: 480`):
-
-```
-pool  = 9 x 600 x 2,304,000 B        = 11.6 GiB
-ring  = 9 x 744 x 3,456,000 B        = 21.6 GiB
-total                                = 33.1 GiB
-```
-
-At `kick_max_lag: 240` the ring is 504 buffers per camera, 14.6 GiB at nine
-cameras. [CONFIGURATION.md](CONFIGURATION.md#kick_max_lag) says what the lag
-limit costs and when to change it.
+- The driver's buffer pool (`max_num_buffer` per camera) holds frames while a
+  grab thread catches up. Keep it at or above `kick_max_lag`. The profile loader
+  refuses a pool shallower than `kick_max_lag` in kick-out mode.
+- The [NV12 ring](GLOSSARY.md#nv12-ring) holds frames on their way to the
+  encoder. In the default [kick-out](GLOSSARY.md#kick-out) mode a trigger's
+  frames wait in the ring until every camera has delivered that trigger, for at
+  most `kick_max_lag` frames, so the ring grows with `kick_max_lag`
+  ([what the lag limit costs](CONFIGURATION.md#kick_max_lag)). It is usually the
+  larger of the two.
+- The pinned GPU upload adds a little page-locked memory.
 
 The total has to be available when you press Record, with the operating system
-and the window on top, so budget about twice that total. The reference rig has
-63.4 GiB for a nine-camera need of 33.1 GiB. A start that fits goes ahead
+and the window on top, so budget about twice that total. The reference rig's
+nine cameras need about half of its 63.4 GiB. A start that fits goes ahead
 without a prompt, and the log records the figures on a `[hw] RAM for N cameras`
 line. The launch check warns below 16 GiB of RAM as Windows reports it, so a
 16 GB machine usually gets the warning. That is the floor for running
@@ -410,10 +365,8 @@ driver granted no session: close other programs that encode on the GPU and ask
 again. An error instead of a number means the GPU or its driver refused to
 create an encoder.
 
-With the default `encoder: auto`, a machine whose GPU cannot give every camera a
-session encodes on the CPU with libx264 instead, when the launch benchmark
-shows the CPU can keep up. The CPU encoder competes with the grab threads for
-cores. [CPU_ENCODE.md](CPU_ENCODE.md) describes it, and
+The CPU encoder competes with the grab threads for cores, so treat it as a
+fallback. [CPU_ENCODE.md](CPU_ENCODE.md) describes it, and
 [CONFIGURATION.md](CONFIGURATION.md#encoder) lists the choices. ffmpeg comes
 with the Python packages (`imageio-ffmpeg`), so there is nothing else to
 install.
@@ -422,28 +375,17 @@ install.
 
 The profile field `realtime_encode` decides the disk rate.
 
-With real-time encoding (the default) only H.264 reaches the disk, about 4.6 KB
-per 1920x1200 frame at the default quality:
-
-```
-9 cameras x 100 fps x 4,600 B = 4.1 MB/s    (about 15 GB per hour)
-```
-
-Any ordinary drive keeps up.
+With real-time encoding (the default) only H.264 reaches the disk, a few MB/s
+even for nine cameras ([Disk](CONFIGURATION.md#disk) gives the rate), and any
+ordinary drive keeps up.
 
 With `realtime_encode: false` every frame is written whole to `raw.bin` and
 encoded after the recording. Use it only when the GPU cannot give every camera
-a session and the CPU cannot encode them either. The rate is the full payload:
-
-```
-n_cameras x fps x frame_bytes
-9 x 100 x 2,304,000 B = 2.07 GB/s
-```
-
-That is about 500 times the H.264 rate. Above 1.5 GiB/s Panopticon warns at
-Record, because a consumer NVMe drive falls to about 1-2 GB/s once its write
-cache fills. Use a drive rated for that sustained rate, or split the cameras
-across drives.
+a session and the CPU cannot encode them either. The rate is then the full
+payload, 2.07 GB/s for nine 1920x1200 cameras at 100 fps. Above 1.5 GiB/s
+Panopticon warns at Record, because a consumer NVMe drive falls to about
+1-2 GB/s once its write cache fills. Use a drive rated for that sustained rate,
+or split the cameras across drives.
 
 The launch check warns below 500 GiB free and below 500 MB/s measured write
 speed. It measures the speed by writing 256 MB to the output directory and

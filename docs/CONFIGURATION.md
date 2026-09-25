@@ -1277,8 +1277,9 @@ page-locked = N × 4 × W × H × 1.5   (nvenc_upload: pinned)
 The reference rig needs 11.6 GiB of pool and 21.6 GiB of ring, 33.1 GiB in all,
 plus 119 MiB page-locked. Record and Calibrate refuse to start when the pool and
 ring need more than the memory available at that moment
-(`Not enough RAM for`). The rings are freed when each acquisition stops. Leave
-room for Windows and the window itself: plan for about twice the total.
+(`Not enough RAM for`). The rings are freed when each acquisition stops, so the
+next acquisition needs the same memory as the first.
+[INSTALLATION.md](INSTALLATION.md#ram) says how much RAM to buy.
 
 ### Disk
 
