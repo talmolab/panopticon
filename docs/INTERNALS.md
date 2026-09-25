@@ -414,10 +414,10 @@ calibration exposure above it is clamped.
 ## 4. The network
 
 This section covers GigE Vision cameras, which stream over UDP and may lose
-packets. On the reference rig nine cameras send 1.84 Gbit/s each. A frame can
-go missing on the network or in a host too slow to receive it. The two look the
-same in a video file and have different fixes, and the camera's stream
-counters tell them apart ([The counters that matter](#the-counters-that-matter)).
+packets. A frame can go missing on the network or in a host too slow to receive
+it. The two look the same in a video file and have different fixes, and the
+camera's stream counters tell them apart
+([The counters that matter](#the-counters-that-matter)).
 
 ### GVSP and the block ID
 
@@ -456,10 +456,8 @@ drops every oversized packet, and the camera delivers incomplete buffers or
 nothing. Enable jumbo frames on the NIC and on every switch, and verify it with
 `probe_network.py --sweep` ([Probes](#probes)).
 
-Bandwidth per camera is `width x height x bytes_per_pixel x 8 x fps`, 1.84
-Gbit/s at 1920x1200 and 100 fps. Three such cameras need a 10 GbE port with
-margin for resends. At 30 fps, or at a smaller frame, the same camera fits on 1
-GbE.
+[Network](CONFIGURATION.md#network) gives the bandwidth per camera, and
+[INSTALLATION.md](INSTALLATION.md#network) how to size links and ports for it.
 
 ### Resends, driver choice and flow control
 
@@ -490,13 +488,12 @@ resends themselves fail. The switch settings are in
 ### The buffer pool
 
 The profile's [`max_num_buffer`](CONFIGURATION.md#max_num_buffer) sets the
-driver buffers per camera, applied at open. The pool costs
-`n_cameras x max_num_buffer x frame bytes`: 19.3 GiB at nine cameras and 1000
-buffers. The reference rig uses 600 to fit its RAM (11.6 GiB, still 6 s of
-slack at 100 fps). In kick-out mode the loader refuses a pool smaller than
-`kick_max_lag`, because a lagging camera's backlog waits in its pool, and a
-pool that runs dry first loses frames the coordinator would have waited for.
-Frames leave the pool oldest first.
+driver buffers per camera, applied at open ([RAM](CONFIGURATION.md#ram) gives
+its cost). The reference rig uses 600 to fit its RAM, still 6 s of slack at 100
+fps. In kick-out mode the loader refuses a pool smaller than `kick_max_lag`,
+because a lagging camera's backlog waits in its pool, and a pool that runs dry
+first loses frames the coordinator would have waited for. Frames leave the pool
+oldest first.
 
 A deep pool absorbs network jitter, and it also hides a per-frame deficit. A
 grab loop a fraction of a millisecond over budget loses nothing at first,
@@ -1382,8 +1379,8 @@ encoded after the session, and says so in a warning with the disk cost.
 `realtime_encode: false` writes whole frames to `raw.bin` during capture and
 encodes them after the session with the `h264_nvenc` ffmpeg pool, or libx264
 where `h264_nvenc` failed the launch check. There is no GPU work during
-capture; the disk takes `n_cameras x fps x width x height` bytes a second
-instead, 2.07 GB/s for nine cameras at 1920x1200 and 100 fps. Each camera
+capture; the disk takes the full [raw rate](CONFIGURATION.md#disk) instead.
+Each camera
 keeps every frame it recorded, and no camera is cut to another's length. When
 a `raw.bin` and its camera's block IDs disagree, both are cut to the frames
 they share, because a frame without a block ID cannot be placed in time, and
@@ -2029,7 +2026,5 @@ query, and runs at any time.
 | `uv run probe_network.py --sweep` | Whether each camera's path carries every packet size up to 9000 bytes, by a real grab at each size | Opens the cameras through the profile's backend |
 | `uv run probe_flir.py --list` (and its other stages) | What each FLIR camera reports, which line its trigger is on, and the behaviours the FLIR backend cannot know in advance | FLIR cameras; `--fake` needs none ([FLIR.md](FLIR.md#5-run-the-probe)) |
 
-Ping cannot test jumbo frames on these paths, because the cameras answer only
-small ICMP echoes. The sweep grabs real frames. How the maintainers' tests
-are kept, and how to have a change tested, is in
+How the maintainers' tests are kept, and how to have a change tested, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md).

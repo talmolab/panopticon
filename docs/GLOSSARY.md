@@ -150,8 +150,7 @@ fills the colour plane with 128, the value for no colour.
 
 The NV12 frame buffers between a camera's grab thread and its encoder. In kick-out
 mode each camera's ring holds `kick_max_lag` plus 264 frames, so its size follows
-[`kick_max_lag`](CONFIGURATION.md#kick_max_lag). Panopticon frees the rings after every
-acquisition.
+[`kick_max_lag`](CONFIGURATION.md#kick_max_lag) ([RAM](CONFIGURATION.md#ram)).
 
 ### Pinned upload
 
@@ -188,8 +187,8 @@ up. [CPU_ENCODE.md](CPU_ENCODE.md) describes it.
 ### Raw capture
 
 With `realtime_encode: false`, every frame goes to disk uncompressed (`raw.bin`) and is
-encoded after the session. At 1920x1200 that takes about 500 times the disk space of
-H.264.
+encoded after the session, at hundreds of times the disk rate of H.264
+([Disk](CONFIGURATION.md#disk)).
 
 ## Network and camera settings
 

@@ -583,10 +583,10 @@ Text. Default `socket`. Reference rig: `socket`.
   resend settings it discards a frame that lost a packet. `auto` keeps pylon's
   default. USB3 cameras ignore it.
 - Change when: Keep `socket` unless a test on your rig favours another driver.
-- Goes wrong: `filter` lost about 23% of frames with six of the reference rig's
-  cameras at 100 fps. Any other value is refused when the profile loads. A FLIR
-  profile refuses any value but `auto`; its equivalent is
-  [camera.flir.stream_mode](#cameraflirstream_mode).
+- Goes wrong: On the reference rig `filter` lost frames by the thousand
+  ([measured](INTERNALS.md#resends-driver-choice-and-flow-control)). Any other
+  value is refused when the profile loads. A FLIR profile refuses any value but
+  `auto`; its equivalent is [camera.flir.stream_mode](#cameraflirstream_mode).
 
 #### `gev_bandwidth_reserve_pct`
 
@@ -773,8 +773,8 @@ List of integers. Default `[0]`. Reference rig: `[0, 1]`.
   handle the network card's interrupts. It applies only with
   `pin_capture_threads: true`.
 - Change when: Set it to the cores your network card's receive work lands on,
-  measured with a DPC trace. With six of the reference rig's cameras, CPUs 0 and
-  1 carried about 46% of that work.
+  measured with a DPC trace. On the reference rig that is CPUs 0 and 1
+  ([measured](INTERNALS.md#receive-load-on-the-host)).
 - Goes wrong: A list that excludes every performance core falls back to all of
   them. The log line `[rig] capture core pool` shows the pool in use.
 

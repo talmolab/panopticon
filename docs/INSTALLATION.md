@@ -282,16 +282,17 @@ The CPU work per camera:
   as deferred procedure calls (DPCs) on the cores the adapter's receive-side
   scaling (RSS) assigns. Three 1920x1200 cameras at 100 fps send about 78,000
   packets/s into one port, and on the reference rig one core ran at 46% DPC load
-  for such a port.
+  for such a port ([INTERNALS.md](INTERNALS.md#receive-load-on-the-host) has the
+  nine-camera figures).
 
 The GIL limits how far this scales. A recording runs two threads per camera plus
 the window's, about 19 busy threads at nine cameras, and only one thread runs
 Python at a time. The time each thread holds the GIL per frame therefore matters
-more than the number of cores. Up to about 300 µs per thread per frame is safe
-even at 17 threads, and about 1000 µs breaks the 10 ms budget at 11 threads. The pinned upload exists
-for this reason. The GPU encoder's own copy of each frame holds the GIL, and on
-the nine-camera rig that copy made one camera drift behind the others.
-[CONFIGURATION.md](CONFIGURATION.md#nvenc_upload) describes the setting.
+more than the number of cores
+([measured](INTERNALS.md#why-a-copying-accessor-is-unaffordable)). The pinned
+upload exists for this reason. The GPU encoder's own copy of each frame holds
+the GIL, and on the nine-camera rig that copy made one camera drift behind the
+others. [CONFIGURATION.md](CONFIGURATION.md#nvenc_upload) describes the setting.
 
 On a CPU with performance and efficiency cores the scheduler moves threads
 between the two kinds. A grab thread on an efficiency core runs a few percent
@@ -598,23 +599,19 @@ use, the uplink to the host included:
 | Setting | Value | Why |
 |---|---|---|
 | Maximum frame size | 9216 | Image packets are 9000 bytes. |
-| Flow control | Symmetric | Lets the switch pause a camera for microseconds instead of dropping its packets. Measured below. |
+| Flow control | Symmetric | Lets the switch pause a camera for microseconds instead of dropping its packets. |
 | Energy Efficient Ethernet | Disabled | Off on the reference rig's switches. On the host adapters it caused a stall ([Configure the host adapters](#configure-the-host-adapters)). |
 | Storm control | Disabled | Off on the reference rig's switches, which is the setting its measurements were made with. |
-
-Flow control measured on three switches of the same model, firmware and ports,
-nine cameras, 90 s:
-
-| Flow control | GVSP resend requests per camera | Worst per-camera lag |
-|---|---|---|
-| Symmetric | 8-10 | 1-4 frames |
-| Disabled | 16,700-16,900 | 5-12 frames |
 
 Several cameras burst into one uplink at once. With flow control, 802.3x PAUSE
 frames ask a camera to wait while the switch's queue drains. Without it the
 switch drops the packet, the camera resends it, and that camera's frame
-completes late, which looks like a slow camera. At the end of each recording
-the grab threads print each camera's stream counters. `Resend_Request_Count` in
+completes late, which looks like a slow camera. On the reference rig, flow
+control cut resend requests from thousands per camera to about ten
+([measured](INTERNALS.md#resends-driver-choice-and-flow-control)).
+
+At the end of each recording the grab threads print each camera's stream
+counters. `Resend_Request_Count` in
 the thousands with `Buffer_Underrun_Count` at 0 means loss in the network, and
 flow control is the first thing to check.
 
