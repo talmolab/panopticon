@@ -79,17 +79,18 @@ checked by hand that no other one holds the hardware.
   in one place with a clear message. A new vendor is one new module, a name in
   `KNOWN_BACKENDS` and a branch in `load_backend()`.
 - `gui_app/backends/_spinc.py` is the only code that loads the Spinnaker DLL,
-  apart from `probe_flir.py`'s optional `--pyspin` stage (next rule). `_spinc`
-  loads through `ctypes.CDLL`, never `PyDLL`, which holds the GIL through
-  every wait, inside a scoped `os.add_dll_directory`. Never add the SDK's
-  `bin64\vs2015` to `PATH`: its Qt5 DLLs would shadow PyQt5's. Importing
-  `_spinc` or `fake_spinc` loads no DLL.
+  apart from PySpin itself, which only `gui_app/backends/pyspin_probe.py`
+  imports, and only when `probe_flir.py --pyspin` runs. `_spinc` loads through
+  `ctypes.CDLL`, never `PyDLL`, which holds the GIL through every wait, inside
+  a scoped `os.add_dll_directory`. Never add the SDK's `bin64\vs2015` to
+  `PATH`: its Qt5 DLLs would shadow PyQt5's. Importing `_spinc` or
+  `fake_spinc` loads no DLL.
 - `probe_flir.py` is tracked, because FLIR volunteers run it from the clone. It
-  is the only exception to the vendor rule: its optional `--pyspin` stage
-  imports PySpin lazily, and its measurements call SpinC methods through
-  `FlirBackend.api` on cameras the backend would refuse. Importing
-  `probe_flir.py` imports no vendor SDK. Its UNKNOWNS mirror `flir.py`'s
-  docstring, and `test_probe_flir.py` fails when they drift.
+  imports no vendor SDK: its optional `--pyspin` stage goes through
+  `gui_app/backends/pyspin_probe.py`, and its other measurements call SpinC
+  methods through `FlirBackend.api`, on cameras the backend would refuse.
+  `test_flir_backend.py` fails if any other file imports PySpin. Its UNKNOWNS
+  mirror `flir.py`'s docstring, and `test_probe_flir.py` fails when they drift.
 - `docs/FLIR.md` quotes `probe_flir.py`'s stages and constants and the FLIR
   refusal texts, and `test_flir_doc.py` fails when they drift. Change the guide
   in the same commit as the code.
