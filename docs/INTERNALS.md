@@ -993,8 +993,9 @@ At stop the router computes the kick-out counts
 (`sync_encode.kick_counts()`), and the window writes them into
 `session_metadata.json` (`kickout`: triggers decided, kept, kicked out and
 forced, and the effective frame rate). Forced drops always produce a warning.
-Ordinary kick-outs above 0.5% of the decided triggers produce one line,
-"Effective frame rate X fps (target Y).", and the detail goes to the log.
+Ordinary kick-outs above `KICKOUT_WARN_FRACTION` of the decided triggers
+produce one line, "Effective frame rate X fps (target Y).", and the detail
+goes to the log.
 
 ### The release backlog
 
