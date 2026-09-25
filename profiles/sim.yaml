@@ -1,4 +1,5 @@
-# Simulated rig — 3 virtual cameras and a virtual trigger board, no hardware.
+# Simulated rig: three virtual cameras and a virtual trigger board, no
+# hardware. docs/SIMULATION.md describes it.
 #
 # Selecting this profile runs the whole application against
 # gui_app/backends/sim.py and gui_app/backends/sim_board.py: the cameras are
@@ -12,19 +13,18 @@ camera_backend: sim
 # hands the sketch to the simulated board, whose RDY ack then reports that
 # sketch's identity.
 serial_port: sim
-# auto so a host without an NVIDIA GPU falls through to libx264 rather than
-# failing the recording — the simulated rig exists to run anywhere.
+# auto, so a host without an NVIDIA GPU records with libx264: the simulated rig
+# runs on any computer.
 encoder: auto
 
 # Small frames and few cameras: this profile is for exercising the pipeline,
 # not for measuring it, and the NV12 ring is sized from these numbers.
 #
-# These three are the ONLY declaration of the simulated rig's shape:
+# These three declare the simulated rig's shape, here and nowhere else:
 # gui_app/backends/sim.py reads them from this file (`sim.profile_shape`) and
-# builds that many cameras at that size, so growing the simulated rig is an
-# edit here and nowhere else. A second copy in the backend would be what the
-# application actually built, and the disagreement would surface as "Expected
-# N cameras but M enumerated" with nothing naming the cause.
+# builds that many cameras at that size, so a bigger simulated rig is an edit
+# here. A second copy in the backend could disagree with this one, and the
+# camera open would then refuse with "Expected N cameras" and no hint why.
 n_cameras: 3
 frame_width: 640
 frame_height: 400
@@ -43,17 +43,16 @@ metadata_defaults:
   experimenter: ""
   assay: ""
 
-# No .pfs is read: the simulated camera has no feature file, and the backend
-# accepts the path and ignores it. The value is kept so the field is exercised.
+# The simulated backend reads no .pfs and ignores this path.
 pfs_path: "configs/mono8_1920x1200.pfs"
 output_dir: "data"
 board_config: "configs/boards/charuco_8x8_15mm.yaml"
 
 trigger_pins: [2, 4, 6, 8, 10, 12]
 stim_safe_pins: [53]
-# The simulated camera enforces `exposure + 1/trigger_rate_limit` exactly as a
-# real one does — a value over the ceiling makes it ignore triggers — so this
-# stays at the rigs' setting rather than being switched off for convenience.
+# The simulated camera enforces exposure + 1/trigger_rate_limit as a Basler
+# camera does, and an exposure over the ceiling makes it ignore triggers, so
+# this stays at the rigs' setting.
 trigger_rate_limit: 165
 
 # No thread placement and no thermal poll: there is no hybrid-CPU behaviour to

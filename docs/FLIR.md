@@ -53,8 +53,7 @@ What that means for you:
 
 - 64-bit Windows, in a version the Spinnaker SDK supports (Teledyne's download
   page lists them).
-- An NVIDIA GPU. Real-time encoding uses one NVENC session per camera, and the
-  driver limits how many run at once, so more cameras need a more capable GPU.
+- An NVIDIA GPU that grants one NVENC session per camera.
   [INSTALLATION.md](INSTALLATION.md#gpu) sizes it for your camera count.
 - FLIR cameras, GigE or USB3, each with a Mono8 pixel format and a hardware
   trigger input.
@@ -242,8 +241,9 @@ does not carry into a recording.
      numbers, centred on the sensor.
    - `frame_rate`.
    - `camera.exposure_us` and `camera.gain_db`. Keep the exposure under 90% of
-     the camera's [exposure ceiling](#the-exposure-ceiling) at `frame_rate`.
-     The ceiling is at most the trigger period, 10,000 µs at 100 fps.
+     the camera's [exposure ceiling](CONFIGURATION.md#exposure-ceiling) at
+     `frame_rate`: opening the cameras refuses a longer one. The ceiling is at
+     most the trigger period, 10,000 µs at 100 fps.
    - `camera.trigger.line`: a first guess is fine, because `--find-line` checks
      it in section 5.
    - `serial_port` and `trigger_pins`, for the trigger board.
@@ -252,16 +252,24 @@ Leave `stim_safe_pins: []` and leave out `log_level`. Its default, `verbose`,
 logs every setting written to a camera with the value the camera reads back,
 which is what the maintainers need to see.
 
-Settings a bring-up may need beyond the template's `SITE` values:
+Settings a bring-up may need beyond the template's `SITE` values, each described
+in [CONFIGURATION.md](CONFIGURATION.md#flir-cameras-the-camera-block):
 
-| Key | What it does |
-|---|---|
-| `camera.per_camera` | Values for single cameras, keyed by quoted serial: `exposure_us`, `gain_db`, `offset_x`, `offset_y`, `trigger_line` |
-| `camera.offset_x`, `camera.offset_y` | Where the region sits on the sensor, in pixels. The default, `center`, centres it. |
-| `camera.flir.sdk_dir` | The Spinnaker install folder, when it is not in a default location |
-| `camera.flir.packet_size` | GigE only. 9000 needs jumbo frames end to end. |
-| `camera.flir.user_set` | The user set loaded before anything else: `Default` (factory settings), `UserSet0`, `UserSet1` or `none` |
-| `camera.flir.block_id_source` | `auto`: the frame ID when the camera's self-test proves it restarts, else the camera's count of trigger edges |
+- [`camera.per_camera`](CONFIGURATION.md#cameraper_camera): values for single
+  cameras, keyed by quoted serial: `exposure_us`, `gain_db`, `offset_x`,
+  `offset_y`, `trigger_line`.
+- [`camera.offset_x`](CONFIGURATION.md#cameraoffset_x) and
+  [`camera.offset_y`](CONFIGURATION.md#cameraoffset_y): where the region sits
+  on the sensor.
+- [`camera.flir.sdk_dir`](CONFIGURATION.md#cameraflirsdk_dir): the Spinnaker
+  install folder, when it is not in a default location.
+- [`camera.flir.packet_size`](CONFIGURATION.md#cameraflirpacket_size): GigE
+  only. 9000 needs jumbo frames end to end.
+- [`camera.flir.user_set`](CONFIGURATION.md#camerafliruser_set): the user set
+  loaded before anything else: `Default` (factory settings), `UserSet0`,
+  `UserSet1` or `none`.
+- [`camera.flir.block_id_source`](CONFIGURATION.md#cameraflirblock_id_source):
+  what each frame's block ID comes from.
 
 Each template's comments explain the rest of its values.
 
@@ -272,19 +280,6 @@ says to remove the field, and names the FLIR setting to use where there is one.
 Opening the cameras then checks every value against what each camera
 reports, and refuses one outside the camera's range. The message names the
 camera, the setting and the range.
-
-### The exposure ceiling
-
-Panopticon measures each camera's exposure ceiling at `frame_rate`: the longest
-exposure at which the camera still takes every trigger. Opening the cameras
-refuses an exposure above 90% of the ceiling. The message includes
-`is above what this camera can expose at frame_rate` and the longest exposure
-allowed.
-
-A calibration runs at `calibration_frame_rate`, with `calibration_exposure_us`
-(0 keeps the recording exposure). Panopticon caps the calibration's exposure at
-90% of the ceiling at that rate. A capped exposure shows as `CLAMPED` in that
-camera's exposure line in the log.
 
 ## 4. Open your profile in Panopticon
 
@@ -306,7 +301,7 @@ reports that sketch.
      no camera and no serial port, and programs no board. Choose yours in the
      profile dropdown.
 2. With Panopticon's board, wait until the PowerShell window shows
-   `board flashed with the recording-only sketch`, which takes about 30 s, or
+   `board flashed with the recording-only sketch` or
    `board already carries the recording-only sketch`. The sidebar shows
    `Clearing stim firmware…` meanwhile. The dropdown is unavailable while
    Panopticon programs a board.
@@ -450,8 +445,7 @@ recording the same way.
 | `flir_probe_<computer>_<date>-<time>.json` and `.log` | `probe_out\` in the repository folder | One probe run |
 | `flir_collect_<computer>_<date>-<time>.zip` | `probe_out\` in the repository folder | What `--collect` gathered |
 
-Every log line starts with the time, to the millisecond, and the name of the
-thread that printed it.
+[WORKFLOW.md](WORKFLOW.md#the-log) describes the log's lines and header.
 
 `--collect` puts these files in its zip:
 
@@ -485,41 +479,15 @@ them.
 With `trigger_source: external` in the profile, Panopticon opens no trigger
 board. Your pulse generator or DAQ drives every camera's trigger input, and you
 start and stop it yourself. Start from
-[`external_ttl.yaml`](../profiles/templates/external_ttl.yaml).
+[`external_ttl.yaml`](../profiles/templates/external_ttl.yaml), and wire the
+source to each camera as in [Wire the trigger](#2-wire-the-trigger), with a
+common ground.
 
-What changes:
-
-- Stimulation needs Panopticon's board, so the Stimulation editor is
-  unavailable.
-- Panopticon cannot read your source's rate. Set `frame_rate` and
-  `calibration_frame_rate` to the rates you run it at. After each recording,
-  the block-ID rate check compares the rate at which each camera's block IDs
-  advanced with the rate you set.
-- The profile refuses `serial_port`, `trigger_pins` and a non-empty
-  `stim_safe_pins`.
-- Wire the source's output to each camera's trigger input with a common ground,
-  as in [Wire the trigger](#2-wire-the-trigger). Check that one output can drive
-  every input it feeds.
-
-Every camera has to be armed before the first pulse. A camera armed after it
-counts its frames from a later pulse than the others, and nothing in the files
-would show that. So a recording runs in this order:
-
-1. Keep your source stopped, and press **Record** (or **Calibrate**).
-2. Panopticon arms every camera and watches them for at least half a second. If
-   any camera receives a frame, the source was already running. Panopticon then
-   refuses the recording, names the cameras that received frames, and removes
-   what the start wrote. Stop the source and press **Record** again.
-3. When the prompt `Every camera is armed. Start your trigger source now`
-   appears, start the source at `frame_rate`. The recording begins with the first
-   pulse. If no camera receives a pulse within 45 s, the start is cancelled and
-   nothing is kept. **Cancel** on the prompt does the same.
-4. To finish, stop your source. The recording ends once no camera has received a
-   frame for 2 s. You can also press **Record** first. Panopticon then asks you
-   to stop the source, and if frames still arrive 30 s later it stops the cameras
-   itself and notes it in `WARNINGS.txt`.
-
-Calibrate runs the same way, at `calibration_frame_rate`.
+[CONFIGURATION.md](CONFIGURATION.md#your-own-ttl-source) says what the mode
+changes: no stimulation, the fields a profile may not set, and the rates to
+state. Every camera has to be armed before the first pulse, so a recording runs
+in a fixed order, which
+[WORKFLOW.md](WORKFLOW.md#your-own-trigger-source) gives step by step.
 
 The probe works with your source too:
 
@@ -550,7 +518,7 @@ The probe works with your source too:
   hub or a 1 GbE link. Spread the cameras over controllers and links, and test
   them together in SpinView.
 - On a camera without counters there is no count of ignored triggers. The
-  block-ID rate check after each recording is then the only check, as on a
+  block-ID rate check after each acquisition is then the only check, as on a
   Basler rig, and the log says the camera has no counters.
 - On a camera whose trigger counters are narrower than 32 bits, the count of
   ignored triggers covers only a recording shorter than half the counter's
@@ -565,8 +533,8 @@ The probe works with your source too:
 - A camera that reports no shutdown temperature is judged by its own
   temperature status instead. One that reports neither raises no temperature
   alert. The log says which, once per camera.
-- With your own trigger source, stimulation is unavailable, and the rate is
-  checked only after each recording.
+- With your own trigger source, stimulation is unavailable, and the source's
+  rate is checked only by the block-ID rate check after each acquisition.
 
 ## When something refuses
 

@@ -5,7 +5,11 @@
 #
 # To use it, copy it into profiles/, give it a name of your own, and replace
 # every value marked SITE. Files in profiles/templates/ never appear in the
-# profile dropdown.
+# profile dropdown. docs/FLIR.md takes a FLIR rig from install to a first test
+# recording, and docs/CONFIGURATION.md describes every field.
+#
+# A FLIR profile refuses the Basler-only fields: pfs_path, trigger_rate_limit,
+# gige_driver (other than auto) and the gev_ fields.
 name: flir_usb3
 camera_backend: flir
 encoder: auto
@@ -47,6 +51,6 @@ calibration_gain_db: -1            # -1 keeps the recording gain
 output_dir: data
 board_config: configs/boards/charuco_8x8_15mm.yaml
 serial_port: COM4                  # SITE
-trigger_pins: [2, 4, 6, 8, 10, 12] # one Mega pin per camera
-stim_safe_pins: []                 # no stimulation hardware on this rig
+trigger_pins: [2, 4, 6, 8, 10, 12] # SITE: the board pin wired to each camera's trigger line
+stim_safe_pins: []                 # SITE: every pin wired to a laser or LED driver; [] if none
 thermal_poll_s: 20

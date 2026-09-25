@@ -28,7 +28,7 @@ _lock = threading.Lock()
 # NVENCSTATUS codes that are NOT configuration problems. Descending the kwarg
 # ladder on these is wrong: it cannot help, and if a session happens to free up
 # mid-ladder a LATER rung succeeds with a REDUCED config — which is how a
-# recording silently ends up with NVENC's driver-default GOP (CLAUDE.md: one IDR
+# recording silently ends up with NVENC's driver-default GOP (HISTORY.md: one IDR
 # for an 898 s / 415 MB file, unseekable in LUC3D, unwalkable by ffprobe).
 _NVENC_FATAL = {
     1: "no encode-capable device",

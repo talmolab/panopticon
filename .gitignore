@@ -17,13 +17,12 @@ probe_out/
 # Its history stays in the repo; it simply stops receiving updates upstream.
 docs/PERF_EXPERIMENTS.md
 
-# Dev-only files kept locally but not shipped in the public product tree
-# (git history preserves them, so `git log -- <path>` and a checkout of an
-# older commit still have them). The offline test suite still runs locally;
-# CONTRIBUTING.md explains where it lives. probe_network.py,
-# gui_app/probe_guard.py and configure_nic.ps1 stay tracked, because the
-# install guide points users to them. probe_flir.py is tracked too: a FLIR
-# volunteer runs it.
+# Dev-only files kept on the maintainer's machine and not shipped in the
+# public tree: the offline test suites, the dev probes and tools/. The
+# maintainer runs the suites before a change merges (CONTRIBUTING.md,
+# "Tests"). probe_network.py, gui_app/probe_guard.py and configure_nic.ps1
+# stay tracked, because the install guide points users to them.
+# probe_flir.py is tracked too: a FLIR volunteer runs it.
 /test_*.py
 /probe_abuse.py
 /probe_cpu_load.py

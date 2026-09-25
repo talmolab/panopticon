@@ -1,4 +1,4 @@
-"""Panopticon Acquisition GUI — launch with: conda run -n 3dpose python gui.py"""
+"""Panopticon Acquisition GUI — launch with: uv run gui.py"""
 import os
 import sys
 import threading
