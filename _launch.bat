@@ -6,6 +6,8 @@ rem window open on any non-zero exit so the traceback can be read. The
 rem string compare, not `if errorlevel 1`, because errorlevel is a signed
 rem >= test that misses negative NTSTATUS codes, which is how a native
 rem crash (an access violation, a Qt fail-fast) reports its exit.
+rem Its arguments pass on to gui.py, so _launch.bat takes --profile and
+rem --force as gui.py does.
 cd /d "%~dp0"
-uv run python gui.py
+uv run python gui.py %*
 if not "%errorlevel%"=="0" pause

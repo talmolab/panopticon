@@ -44,7 +44,8 @@ Start Panopticon from the desktop shortcut, `_launch.bat` or a terminal:
 - Run `uv run gui.py` in a terminal in the repository folder. The log then
   appears in the terminal as it is written.
 
-Only the terminal passes options. `--profile <name>` opens that profile and
+The terminal and `_launch.bat` pass options on (`_launch.bat --profile <name>`),
+and the shortcut passes none. `--profile <name>` opens that profile and
 remembers it for later launches. `--force` starts a second copy of Panopticon.
 
 Only one copy runs at a time. A second launch, or a launch while one of

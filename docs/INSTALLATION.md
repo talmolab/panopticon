@@ -1101,9 +1101,9 @@ the script prints `No venv at ...`, run `uv sync` first.
 
 `_launch.bat` is the other way in. It runs through `uv run` with a console that
 stays open, and it pauses when Panopticon exits with an error, so you can read
-why it failed to start. Neither the shortcut nor `_launch.bat` passes arguments
-to Panopticon, so run `uv run gui.py --profile my_rig` from PowerShell to
-choose a profile at launch.
+why it failed to start. It passes its arguments on to Panopticon, so
+`_launch.bat --profile my_rig` chooses a profile at launch. The shortcut passes
+none.
 
 ### Adding cameras to a rig that already works
 

@@ -45,7 +45,7 @@ Contents:
 | `A package this build needs is not installed.` | Part of the dialog above for an import error. Run `uv sync` again, or choose a profile whose `camera_backend` does not need the missing package. |
 | `Panopticon is already running (pid <pid>).` | Another copy of the window runs on this computer. Switch to it, or close it. A second copy would compete for the cameras, the trigger board and the GPU encoder, and could flash the board during a recording. |
 | `Panopticon, or one of its probes, is already running:` | As above, and the list names each process. Close it first. |
-| `To start a second copy anyway, run gui.py --force.` | The refusal above exits with status 3. Use `uv run gui.py --force` only after you have checked the other copy by hand. The desktop shortcut and `_launch.bat` pass no arguments. |
+| `To start a second copy anyway, run gui.py --force.` | The refusal above exits with status 3. Use `uv run gui.py --force`, or `_launch.bat --force`, only after you have checked the other copy by hand. The desktop shortcut passes no arguments. |
 | `Panopticon — Unexpected Error` | An error inside the window. It keeps running, and every occurrence goes to the log the dialog names. Attach that log to a report. |
 | `[guard] REFUSING TO START: Panopticon is already running, and two instances fight over the same cameras:` | From a probe (`probe_network.py --sweep`, `probe_flir.py`). Quit Panopticon and any other probe, then run it again. |
 
