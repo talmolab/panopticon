@@ -554,6 +554,10 @@ whenever the serial port is opened or the board is flashed:
   paradigm back (`Flashing recording + stimulation firmware…`). After a failed
   launch flash, the first Calibrate or Record can flash the recording-only
   sketch too;
+- at the first Calibrate or Record after a switch between two profiles on the
+  same port whose `trigger_pins` or `stim_safe_pins` differ. The switch itself
+  flashes nothing, and until that start the board keeps the previous profile's
+  boot guard;
 - at the first Calibrate, Record or Test after the port could not be opened.
   At launch the log then says `will retry on first use`. After an Apply the
   editor's status line says that Record reopens the port;
