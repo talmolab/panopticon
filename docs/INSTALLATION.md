@@ -120,10 +120,8 @@ that count.
 Panopticon programs its board itself, through `arduino-cli`
 ([step 8](#step-8--flash-the-trigger-firmware)). With your own source you start
 and stop the pulses yourself, and Panopticon refuses the recording if any
-camera receives a frame before every camera is armed. The order of the steps is
-in FLIR.md's [Use your own trigger source](FLIR.md#use-your-own-trigger-source),
-and it applies to Basler cameras too.
-[CONFIGURATION.md](CONFIGURATION.md#trigger_source) describes the field.
+camera receives a frame before every camera is armed
+([CONFIGURATION.md](CONFIGURATION.md#your-own-ttl-source) describes the mode).
 
 #### Wiring the trigger line
 

@@ -290,7 +290,7 @@ longer. A frame on any camera in that window means the source was already
 running, and the start is refused: each camera would count its block IDs from
 the first pulse after its own arming. Stimulation needs the board, so the
 editor is unavailable in this mode. The operator's steps are in
-[FLIR.md](FLIR.md#use-your-own-trigger-source).
+[WORKFLOW.md](WORKFLOW.md#your-own-trigger-source).
 
 ---
 

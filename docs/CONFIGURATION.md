@@ -1343,27 +1343,12 @@ serial port. Start from [`external_ttl.yaml`](../profiles/templates/external_ttl
   that one output can drive every input it feeds.
 
 Every camera must be armed before the first pulse, or the cameras count their
-frames from different pulses and nothing in the files shows it. A recording runs
-in this order:
-
-1. Keep the source stopped and press **Record** (or **Calibrate**).
-2. Panopticon arms every camera and watches them for 0.5 s, or five trigger
-   periods if that is longer. If any camera receives a frame, the source was
-   already running, and the recording is refused with the cameras named
-   (`received frames before every camera was armed`).
-3. When the prompt `Every camera is armed. Start your trigger source now` appears,
-   start the source. The recording begins with the first pulse. If no camera
-   receives a pulse within 45 s, or you press **Cancel**, nothing is kept.
-4. To finish, stop the source. The recording ends when no camera has received a
-   frame for 2 s, or four trigger periods if that is longer. You can press
-   **Record** first instead: Panopticon then asks you to stop the source, counts
-   it stopped after 1 s of silence (or two periods), and after 30 s stops the
-   cameras itself and notes it in `WARNINGS.txt`.
-
-If you agreed to overwrite an earlier session, Panopticon moves it into a hidden
-folder beside it (`.<name>-overwritten-…`) until the first pulse arrives. It
-deletes that folder then, and puts the session back if the start ends before
-then.
+frames from different pulses and nothing in the files shows it. Panopticon
+therefore refuses a recording in which any camera receives a frame before every
+camera is armed (`received frames before every camera was armed`), and asks you
+to start the source only after that check.
+[WORKFLOW.md](WORKFLOW.md#your-own-trigger-source) gives the order a recording
+runs in, with its timings.
 
 ## What the loader checks, and what it does not
 

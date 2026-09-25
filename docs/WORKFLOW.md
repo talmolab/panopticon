@@ -819,29 +819,33 @@ board and switch the laser off.
 ### Your own trigger source
 
 With `trigger_source: external`, a pulse generator or DAQ that you run
-triggers the cameras, and Panopticon opens no serial port. Stimulation needs
-Panopticon's board, so a recording with blocks on the canvas is refused. Every
-camera must be armed before the first pulse, so a recording runs in this
-order:
+triggers the cameras, and Panopticon opens no serial port
+([CONFIGURATION.md](CONFIGURATION.md#your-own-ttl-source) says what else the
+mode changes, and how to wire it). Stimulation needs Panopticon's board, so a
+recording with blocks on the canvas is refused. Every camera must be armed
+before the first pulse, so a recording, or a calibration at
+`calibration_frame_rate`, runs in this order:
 
 1. Keep the source stopped, and press Record (or Calibrate).
-2. Panopticon arms every camera and watches them for at least 0.5 s. A frame
-   on any camera means the source was already running. The start is then
-   refused (`The trigger was already running`) and nothing is kept.
+2. Panopticon arms every camera and watches them for at least 0.5 s, or five
+   trigger periods if that is longer. A frame on any camera means the source
+   was already running. The start is then refused
+   (`The trigger was already running`, naming the cameras that
+   `received frames before every camera was armed`) and nothing is kept.
 3. The label reads `WAITING FOR TRIGGER`, and a `Start your trigger source`
    prompt appears. Start the source at `frame_rate`. The recording begins with
    its first pulse. With no pulse within 45 s the start ends in `NO TRIGGER`
    and nothing is kept. Cancel on the prompt also ends the start and keeps
    nothing.
 4. To finish, stop the source. The recording ends once no camera has received
-   a frame for 2 s. If you flip Record off before you stop the source, the
-   label reads `STOP YOUR TRIGGER SOURCE`. Panopticon waits up to 30 s for the
-   source to stop, then stops the cameras itself and notes it in
-   `WARNINGS.txt`.
+   a frame for 2 s, or four trigger periods if that is longer. If you flip
+   Record off before you stop the source, the label reads
+   `STOP YOUR TRIGGER SOURCE`. Panopticon counts the source stopped after 1 s
+   of silence (or two periods). It waits up to 30 s for the source to stop,
+   then stops the cameras itself and notes it in `WARNINGS.txt`.
 
 Panopticon cannot read the source's rate. After the recording, the block-ID
 rate check compares each camera against `frame_rate`.
-[FLIR.md](FLIR.md#use-your-own-trigger-source) covers the wiring.
 
 ---
 

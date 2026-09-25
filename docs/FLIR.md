@@ -485,41 +485,15 @@ them.
 With `trigger_source: external` in the profile, Panopticon opens no trigger
 board. Your pulse generator or DAQ drives every camera's trigger input, and you
 start and stop it yourself. Start from
-[`external_ttl.yaml`](../profiles/templates/external_ttl.yaml).
+[`external_ttl.yaml`](../profiles/templates/external_ttl.yaml), and wire the
+source to each camera as in [Wire the trigger](#2-wire-the-trigger), with a
+common ground.
 
-What changes:
-
-- Stimulation needs Panopticon's board, so the Stimulation editor is
-  unavailable.
-- Panopticon cannot read your source's rate. Set `frame_rate` and
-  `calibration_frame_rate` to the rates you run it at. After each recording,
-  the block-ID rate check compares the rate at which each camera's block IDs
-  advanced with the rate you set.
-- The profile refuses `serial_port`, `trigger_pins` and a non-empty
-  `stim_safe_pins`.
-- Wire the source's output to each camera's trigger input with a common ground,
-  as in [Wire the trigger](#2-wire-the-trigger). Check that one output can drive
-  every input it feeds.
-
-Every camera has to be armed before the first pulse. A camera armed after it
-counts its frames from a later pulse than the others, and nothing in the files
-would show that. So a recording runs in this order:
-
-1. Keep your source stopped, and press **Record** (or **Calibrate**).
-2. Panopticon arms every camera and watches them for at least half a second. If
-   any camera receives a frame, the source was already running. Panopticon then
-   refuses the recording, names the cameras that received frames, and removes
-   what the start wrote. Stop the source and press **Record** again.
-3. When the prompt `Every camera is armed. Start your trigger source now`
-   appears, start the source at `frame_rate`. The recording begins with the first
-   pulse. If no camera receives a pulse within 45 s, the start is cancelled and
-   nothing is kept. **Cancel** on the prompt does the same.
-4. To finish, stop your source. The recording ends once no camera has received a
-   frame for 2 s. You can also press **Record** first. Panopticon then asks you
-   to stop the source, and if frames still arrive 30 s later it stops the cameras
-   itself and notes it in `WARNINGS.txt`.
-
-Calibrate runs the same way, at `calibration_frame_rate`.
+[CONFIGURATION.md](CONFIGURATION.md#your-own-ttl-source) says what the mode
+changes: no stimulation, the fields a profile may not set, and the rates to
+state. Every camera has to be armed before the first pulse, so a recording runs
+in a fixed order, which
+[WORKFLOW.md](WORKFLOW.md#your-own-trigger-source) gives step by step.
 
 The probe works with your source too:
 
