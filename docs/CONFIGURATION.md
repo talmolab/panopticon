@@ -1252,9 +1252,12 @@ With `trigger_rate_limit: 165`:
 | 100 fps (recording) | 10.0 ms | 3.94 ms | 3.55 ms |
 | 30 fps (calibration) | 33.3 ms | 27.3 ms | 24.5 ms |
 
-A camera over its ceiling ignores the next trigger and uses no block ID for it,
-so its video drifts in time with no gap in `blockids.npy`. The block-ID rate check
-after each recording reports that.
+A camera over its ceiling ignores the next trigger. With
+[frame-ID block IDs](GLOSSARY.md#block-id) (every Basler camera, and a FLIR camera
+on its frame ID) it uses no block ID for that trigger. Its video then drifts in
+time with no gap in `blockids.npy`, and the block-ID rate check after each
+recording reports it. With `camera.flir.block_id_source: trigger_counter` the
+ignored trigger is a gap.
 
 ### Network
 

@@ -275,18 +275,23 @@ runs after the encode, and its rows appear in dialogs of their own, such as
 
 ## The recording looks fine but the views are out of sync
 
-Symptom: every camera has the same number of frames and no counter moved, yet
-triangulated points miss the animal and fast movements happen at different
-times in different views. Or `WARNINGS.txt` says a camera's block IDs advanced
-at the wrong rate.
+Symptom: every camera has the same number of frames and no packet or buffer
+counter moved, yet triangulated points miss the animal and fast movements
+happen at different times in different views. Or `WARNINGS.txt` says a camera's
+block IDs advanced at the wrong rate. In the default kick-out mode that camera
+also falls one trigger further behind the leader for every trigger it ignores,
+which the status bar shows during the recording
+([INTERNALS.md](INTERNALS.md#what-happens-over-the-ceiling)).
 
 Alignment treats "same [block ID](GLOSSARY.md#block-id)" as "same instant". A
-block ID counts the frames
-a camera acquired, so it equals the trigger count only while the camera acquires
-one frame per trigger. A camera still busy when the next trigger arrives ignores
-that trigger. It acquires no frame and consumes no block ID, so from then on its
-block ID *N* belongs to trigger *N+k*. Its block IDs have no gap, its frame
-count matches the others, and the videos drift apart in time.
+frame-ID block ID (every Basler camera, and a FLIR camera on its frame ID)
+counts the frames a camera acquired. It equals the trigger count only while the
+camera acquires one frame per trigger. A camera still busy when the next trigger
+arrives ignores that trigger. It acquires no frame and consumes no block ID, so
+from then on its block ID *N* belongs to trigger *N+k*. Its block IDs have no
+gap, its frame count matches the others, and the videos drift apart in time. A
+FLIR camera on its trigger counter shows the ignored trigger as a gap instead
+([FLIR cameras](#flir-cameras)).
 
 The common causes:
 
