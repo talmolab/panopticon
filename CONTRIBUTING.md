@@ -96,8 +96,9 @@ its reason.
 - No rig-specific number lives in code. Numbers that belong to a rig go in its profile,
   because `gui_app/` also runs rigs other than the reference one.
 - Every mp4 writer builds its ffmpeg command with `gui_app/ffmpeg_cmd.py`, which adds
-  the keyframe interval and the index at the front
-  ([why](docs/INTERNALS.md#the-stream-and-the-remux)).
+  the index at the front, and the keyframe interval on every re-encode
+  ([why](docs/INTERNALS.md#the-stream-and-the-remux)). The remux is a stream copy, so
+  its keyframes come from the encoder's GOP.
 - Commit messages say what changed and why in plain words, and name the checks that
   verified it.
 - Documentation states each fact once, in the page where a reader acts on it, and links
