@@ -83,12 +83,15 @@ Plan the cooling before you mount the cameras:
   plan for passive cooling first.
 
 During an acquisition Panopticon reads each camera's temperature every
-`thermal_poll_s` seconds. It warns in the status bar and in `WARNINGS.txt` when
-a camera comes within `thermal_warn_margin_c` of the shutdown temperature the
-camera reports, or when the camera reports its over-temperature state. On a
-camera that reports its shutdown temperature, the Critical flag alone raises no
-alert. A camera that reports none is judged by its own status, Critical
-included. The reference profile sets the margin to 2 C, so it warns at 79 C on
+`thermal_poll_s` seconds. It warns in the status bar and the log when a camera
+comes within `thermal_warn_margin_c` of the shutdown temperature the camera
+reports, or when the camera reports its over-temperature state. That warning
+reaches `WARNINGS.txt` and the post-session dialog only when the recording lost
+frames; a camera that reached its shutdown point is always listed there. Every
+session's `session_metadata.json` records each camera's peak temperature
+(`temp_max_c`). On a camera that reports its shutdown temperature, the Critical
+flag alone raises no alert. A camera that reports none is judged by its own
+status, Critical included. The reference profile sets the margin to 2 C, so it warns at 79 C on
 these cameras.
 [CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) describes both
 settings.
