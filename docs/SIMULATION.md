@@ -28,11 +28,13 @@ What it cannot show is in
 uv run gui.py --profile sim
 ```
 
-`--profile` opens the profile and remembers it for later launches. On a
-computer with no profile remembered, `uv run gui.py` opens no camera and no
-serial port until you choose one; choose **sim** in the profile dropdown.
-The window remembers that choice too. The log then shows lines like these
-(each line starts with a time stamp and a thread name, left out here):
+`--profile` opens the profile and remembers it for later launches. On a computer
+with no profile remembered, or whose remembered profile does not load,
+`uv run gui.py` opens nothing until you choose one
+([WORKFLOW.md](WORKFLOW.md#what-happens-at-launch)). Choose **sim** in the
+profile dropdown, and the window remembers that choice too. The log then shows
+lines like these (each line starts with a time stamp and a thread name, left out
+here):
 
 ```
 [acq] profile: sim

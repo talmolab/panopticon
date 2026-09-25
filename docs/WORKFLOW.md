@@ -76,10 +76,8 @@ of every acquisition.
 The profile's `log_level` sets how much else the log holds
 ([CONFIGURATION.md](CONFIGURATION.md#log_level)). The default, `verbose`, adds
 the camera settings Panopticon asked for and read back, and a `[state]` line
-at each step of an acquisition. No level logs each frame, and printing never
-makes a capture thread wait. If the log writer falls behind, it drops lines
-and says so with `[log] N log lines dropped`. `probe_flir.py` writes its own
-log at `verbose`, or at `debug` when the profile asks for it.
+at each step of an acquisition. If the log writer falls behind, it drops lines
+and says so with `[log] N log lines dropped`.
 
 Quote the launch log and the acquisition's `session.log`
 ([section 10](#10-what-the-session-leaves-on-disk)) when you report a problem.
@@ -777,18 +775,15 @@ When a camera stops delivering, the status bar reads:
   power leaves those pins undriven.
 
 A camera near its shutdown temperature puts `CAMERA TEMPERATURE: camN T C ...`
-at the start of the status bar. The alert fires at the shutdown temperature
-the camera reports, minus the profile's `thermal_warn_margin_c`
-(2 C on the reference rig, so 79 C on cameras that shut down at 81 C). It also
-fires whenever a camera reports its own over-temperature state. On a camera
-that reports its shutdown temperature, the `Critical` status alone does not
-raise it. A camera that reports no shutdown temperature is judged by its own
-status instead: any status but `Ok` raises the alert, `Critical` included. A
-camera that reports neither cannot be watched. For a camera that reports no
-shutdown temperature, the log says once how it is judged
-(`[acq] thermal watch: camN reports no shutdown temperature`), or that it
-cannot be watched
-(`[acq] thermal watch: camN reports neither a shutdown temperature nor a temperature status`).
+at the start of the status bar. The alert fires `thermal_warn_margin_c` below
+the shutdown temperature the camera reports (at 79 °C on the reference rig's
+cameras, which shut down at 81 °C), and whenever a camera reports its own
+over-temperature state.
+[CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) says how a camera that
+reports no shutdown temperature is judged. The log then says once how it is
+judged (`[acq] thermal watch: camN reports no shutdown temperature ...`), or
+that it cannot be watched
+(`[acq] thermal watch: camN reports neither a shutdown temperature nor a temperature status ...`).
 
 The warning reaches `WARNINGS.txt` when the recording lost frames, and always
 when a camera reached its shutdown point. `camera_thermals` in
@@ -913,9 +908,9 @@ Check the session before the animal goes back, while the rig is still set up:
 2. No `WARNINGS.txt` anywhere under the acquisition folder.
 3. The block IDs ([Check the block IDs](#check-the-block-ids)).
 4. One frame of each video. Open an mp4 and check that the animal is neither
-   black nor blown out. The preview cannot show this
+   black nor blown out, which the preview cannot show
    ([OVERVIEW.md](OVERVIEW.md#1-camera-grid) says how it differs from a
-   recording), so check an exposure change against a recording.
+   recording).
    For more light, add infrared illumination first, then exposure, then gain
    ([CONFIGURATION.md](CONFIGURATION.md#pfs_path)).
 5. After a stimulated recording, the stimulation files

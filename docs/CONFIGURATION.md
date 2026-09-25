@@ -323,10 +323,9 @@ Integer. Default `0`. Reference rig: `9`.
   are not counted.
 - Change when: When you add or remove a camera. Read
   [camera_serials](#camera_serials) first.
-- Goes wrong: At `0` a rig with one camera missing opens the others. Without
-  `camera_serials`, a missing camera then renames every camera after it, and the
-  calibration attaches to the wrong cameras. A count that differs refuses the
-  open (`Expected 9 cameras but 8 are available to open`).
+- Goes wrong: At `0` a rig with one camera missing opens the others, under the
+  wrong names unless [camera_serials](#camera_serials) is set. A count that
+  differs refuses the open (`Expected 9 cameras but 8 are available to open`).
 
 #### `camera_serials`
 
@@ -339,7 +338,9 @@ List of quoted text, or null. Default `null`. Reference rig: not set.
 - Change when: Set it on every rig whose calibration you keep. After replacing a
   camera, update the list and calibrate again.
 - Goes wrong: Without it, cameras are named in serial-number order as they
-  enumerate, so a camera that fails to appear renames every camera after it. The
+  enumerate, so a camera that fails to appear renames every camera after it, and
+  the calibration attaches to the wrong cameras. A nonzero `n_cameras` refuses
+  that open, unless another camera on the computer fills the count. The
   loader refuses an unquoted serial, because YAML reads a leading-zero number as
   octal. It also refuses a serial listed twice, a list out of ascending text
   order, and a length that differs from a nonzero `n_cameras`. Text order puts
@@ -707,9 +708,8 @@ Text, a path. Default `""`. Reference rig: `configs/boards/charuco_8x8_15mm.yaml
 
 ### Calibration coverage
 
-These three decide when the coverage display shows READY during a calibration.
-You can stop before READY appears. The recording is still valid, and Solve
-reports whether it had enough views.
+These three decide when the coverage display shows READY during a calibration
+([OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) gives the rule).
 
 #### `calibration_min_per_cam_shared`
 
@@ -825,27 +825,24 @@ Number, °C. Default `3.0`. Reference rig: `2.0`.
 - Change when: Raise it if your cameras heat quickly and you need more time to
   act. The thresholds themselves always come from the camera.
 - Goes wrong: The loader refuses 0 or less. A camera that reports no shutdown
-  temperature is judged by its own temperature status, Critical included; one
-  that reports neither cannot warn, and the log says which, once per camera. A
-  camera that reaches its shutdown point is named in `WARNINGS.txt` and the
-  post-session dialog. A warning below that point reaches them only when the
-  recording lost frames.
+  temperature is judged by its own temperature status: any status but `Ok`
+  warns, Critical included. One that reports neither cannot warn, and the log
+  says which, once per camera. A camera that reaches its shutdown point is
+  named in `WARNINGS.txt` and the post-session dialog. A warning below that
+  point reaches them only when the recording lost frames.
 
 #### `log_level`
 
 Text. Default `verbose`. Reference rig: not set.
 
-- Does: How much the log says. At every level each line starts with the time, to
-  the millisecond, and the thread that printed it. A header at launch and at each
-  acquisition start records the computer, GPU, driver, NVENC session limit,
-  package versions, the whole profile and each camera. `verbose` adds each camera
-  setting written, with the value the camera reads back, each acquisition step,
-  and a per-camera summary at Stop. `debug` adds more detail on the same cold
-  paths, such as every `.pfs` feature read back. One log per launch goes to
-  `logs\` in the repository folder, and each recording and calibration folder
-  gets its part as `session.log`. Capture worker processes log at the same
-  level. `uv run probe_flir.py` logs at `debug` when the profile sets it, and
-  at `verbose` otherwise.
+- Does: How much the log says. Every level stamps each line and writes the
+  session header ([WORKFLOW.md](WORKFLOW.md#the-log) describes the log and where
+  it is written). `verbose` adds each camera setting written, with the value the
+  camera reads back, each acquisition step, and a per-camera summary at Stop.
+  `debug` adds more detail on the same cold paths, such as every `.pfs` feature
+  read back. Capture worker processes log at the same level.
+  `uv run probe_flir.py` logs at `debug` when the profile sets it, and at
+  `verbose` otherwise.
 - Change when: Leave `verbose` while you bring a rig up: its read-backs are what a
   bug report needs. `normal` gives a shorter log.
 - Goes wrong: Any other value is refused when the profile loads. No level logs

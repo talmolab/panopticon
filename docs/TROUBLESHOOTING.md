@@ -6,11 +6,10 @@ Panopticon prints, with `<...>` in place of the parts that change, such as a
 camera name or a number.
 
 Messages appear in dialogs, in the status bar at the bottom of the window, in
-the console, and in the log. Every launch writes its log to
-`logs\panopticon_<date>_<time>.log` in the repository folder. Each recording
-and calibration folder holds `session.log`, the part of the log for that
-acquisition, and `WARNINGS.txt` when something needs your attention. Every log
-line starts with the time and the thread that printed it.
+the console, and in the log ([WORKFLOW.md](WORKFLOW.md#the-log) says where each
+launch's log and each acquisition's `session.log` are). Each recording and
+calibration folder also holds `WARNINGS.txt` when something needs your
+attention.
 
 When you report a problem, attach the log, the profile and any `WARNINGS.txt`.
 

@@ -445,8 +445,7 @@ recording the same way.
 | `flir_probe_<computer>_<date>-<time>.json` and `.log` | `probe_out\` in the repository folder | One probe run |
 | `flir_collect_<computer>_<date>-<time>.zip` | `probe_out\` in the repository folder | What `--collect` gathered |
 
-Every log line starts with the time, to the millisecond, and the name of the
-thread that printed it.
+[WORKFLOW.md](WORKFLOW.md#the-log) describes the log's lines and header.
 
 `--collect` puts these files in its zip:
 

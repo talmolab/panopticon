@@ -272,10 +272,10 @@ board that reports anything other than the profile's recording-only sketch is
 flashed, at most once per launch. Firmware without an identity falls back to
 the stored record, and the log says so.
 
-With no profile chosen, the window opens no camera and no serial port and
-flashes nothing until the operator picks one. The profile names the port and
-the pins the board holds LOW at boot, so a profile picked on the operator's
-behalf would be another rig's.
+With no profile chosen, the window touches no hardware until the operator
+picks one ([WORKFLOW.md](WORKFLOW.md#what-happens-at-launch)). The profile
+names the port and the pins the board holds LOW at boot, so a profile picked
+on the operator's behalf would be another rig's.
 
 ### An external trigger source
 
@@ -336,9 +336,9 @@ cannot reach a recording.
 Calibration runs the arithmetic the other way. At a 30 fps
 `calibration_frame_rate` the period is 33.3 ms instead of 10 ms, so
 [`calibration_exposure_us`](CONFIGURATION.md#calibration_exposure_us) can be
-much longer than any recording exposure; the reference rig uses 5 ms. Motion
-blur limits it. A board moved briskly under a long exposure smears, and its
-ChArUco corners stop resolving in the poses you are trying to add.
+much longer than any recording exposure; the reference rig uses 5 ms. How fast
+the board moves limits it in practice
+([calibration_exposure_us](CONFIGURATION.md#calibration_exposure_us)).
 
 ### What happens over the ceiling
 
@@ -375,10 +375,8 @@ acquired shortens the span itself. The alignment path can recover only the
 first kind, and every time base built on block IDs (`stim_trace.csv`
 included) assumes one trigger per ID.
 
-The preview cannot show any of this. It runs in free-run mode at 30 fps, with
-33 ms of headroom, so an over-long exposure looks healthy there and halves the
-rate only once the cameras are triggered. Check an exposure change on a
-recording.
+The preview cannot show any of this, because it runs untriggered
+([CONFIGURATION.md](CONFIGURATION.md#basler-cameras-the-pfs-file)).
 
 ### Why the limiter stays on
 
@@ -1618,7 +1616,7 @@ These links carry an instant to a frame index in a file:
 
 | Where | What breaks | Guard |
 |---|---|---|
-| Camera naming | A missing camera renames the cameras after it | `n_cameras` and `camera_serials`; `open_all()` refuses a partial set |
+| Camera naming | Names follow the serial order ([camera_serials](CONFIGURATION.md#camera_serials)) | `n_cameras` and `camera_serials`; `open_all()` refuses a partial set |
 | Pixel format | A wider format keeps only its low 8 bits | Format and size read back at open; anything but Mono8 refused |
 | Row padding | A padded buffer read as (H, W) shears every frame | `PaddingX` and `PaddingY` checked every frame; nonzero retires |
 | A camera that never arms | In kick-out mode it force-drops every trigger for every camera | Readiness barrier; every early exit retires the camera |
@@ -1862,7 +1860,8 @@ The pipeline depends on these guarantees:
    trigger before it. A 16-bit counter may cycle 1 to 65535; any other period
    is unwrapped in the backend. A frame lost in transmission must still
    consume its number. A camera that can skip a trigger without leaving a gap
-   is caught only by the block-ID rate check.
+   is caught by the block-ID rate check, unless the backend counts its ignored
+   triggers itself, as the FLIR trigger witness does.
 2. `TimeStamp` from a free-running device clock, in nanoseconds, that keeps
    running across a stream restart. The stall resync, the delivery lag and
    the rate check all depend on it. A backend whose camera counts in other

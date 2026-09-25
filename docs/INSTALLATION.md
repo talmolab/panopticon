@@ -75,19 +75,12 @@ Plan the cooling before you mount the cameras:
 - Some recording rooms do not allow fans (the reference rig's room is one), so
   plan for passive cooling first.
 
-During an acquisition Panopticon reads each camera's temperature every
-`thermal_poll_s` seconds. It warns in the status bar and the log when a camera
-comes within `thermal_warn_margin_c` of the shutdown temperature the camera
-reports, or when the camera reports its over-temperature state. That warning
-reaches `WARNINGS.txt` and the post-session dialog only when the recording lost
-frames. A camera that reached its shutdown point is always listed there. Every
-session's `session_metadata.json` records each camera's peak temperature
-(`temp_max_c`). On a camera that reports its shutdown temperature, the Critical
-flag alone raises no alert. A camera that reports none is judged by its own
-status, Critical included. The reference profile sets the margin to 2 C, so it warns at 79 C on
-these cameras.
-[CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) describes both
-settings.
+During an acquisition Panopticon reads each camera's temperature and warns
+before the camera reaches the shutdown temperature it reports. The reference
+profile warns at 79 °C on these cameras.
+[CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) gives the rule and
+its two settings, and [WORKFLOW.md](WORKFLOW.md#while-it-records) says where
+the warning appears.
 
 The Critical and shutdown levels are fixed in the camera's firmware and cannot
 be raised. Leave the camera's temperature override node
@@ -878,19 +871,15 @@ the board's `serial_port` and `trigger_pins` (step 8) and `stim_safe_pins`. Put
 `output_dir` on the largest, fastest drive, and point `board_config` at the file
 that describes your printed calibration board.
 
-`stim_safe_pins` protects your stimulation hardware. The board drives those
-pins low as its first action at every boot, before it waits for Panopticon. A
-laser or LED pin missing from the list floats during that wait, and a powered
-laser driver can read a floating input as on. The default, `[53]`, is the
-reference rig's laser pin and protects nothing on other wiring.
-[CONFIGURATION.md](CONFIGURATION.md#stim_safe_pins) describes the field.
+List every pin wired to a laser or LED driver in `stim_safe_pins`, or write
+`[]`. The board holds those pins low from boot, and the default, `[53]`, is the
+reference rig's laser pin and protects nothing on other wiring
+([stim_safe_pins](CONFIGURATION.md#stim_safe_pins)).
 
-`camera_serials` names each camera by its place in the list. Without it, the
-cameras are named in serial-number order. A camera that fails to appear then
-renames every camera after it, and a calibration describes the wrong cameras,
-unless `n_cameras` refuses the open. With the list, the refusal names the
-missing camera, and a device the list does not name stays closed.
-[CONFIGURATION.md](CONFIGURATION.md#camera_serials) describes the field.
+List every camera's serial number in `camera_serials`, with cam1 first. A
+missing camera then refuses the open by name, and a device the list does not
+name stays closed. [camera_serials](CONFIGURATION.md#camera_serials) says what
+goes wrong without it.
 
 A profile with a mistake does not load. Panopticon leaves it out of the list and
 names the file and the field in a dialog once the window opens.
@@ -1056,9 +1045,8 @@ Check in that output:
 - One `[camN] <serial> <width>x<height> Mono8` line per camera, with the frame
   size you set.
 - `zero-copy view OK (PaddingX=0 PaddingY=0)` for every camera.
-- The `[header]` block. It lists the software version, the computer, the GPU
-  and its driver, every profile field, and each camera's model, firmware and
-  link. Quote it when you report a problem.
+- The `[header]` block ([WORKFLOW.md](WORKFLOW.md#the-log) lists what it
+  holds). Quote it when you report a problem.
 
 The firmware check and the serial port open about a second and a half after the
 window, so the window can draw first.
@@ -1137,10 +1125,8 @@ choose a profile at launch.
    fanned off existing ones. Fanning out needs no profile change, which is how
    the reference rig went from six cameras to nine. Check each pin's current
    first ([Wiring the trigger line](#wiring-the-trigger-line)).
-6. Raise `n_cameras`, and add the new serials to `camera_serials`. Without
-   `camera_serials`, Panopticon refuses to open any camera until `n_cameras`
-   matches the cameras present, and names the ones it found. With it, a camera
-   missing from the list stays closed, and the log names it.
+6. Raise `n_cameras`, and add the new serials to `camera_serials`
+   ([step 7](#step-7--write-the-rig-profile)).
 7. Check capacity again. RAM grows with the camera count and with
    `kick_max_lag` ([RAM](#ram)), and the GPU has to grant one NVENC session per
    camera ([GPU](#gpu)).
