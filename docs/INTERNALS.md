@@ -67,6 +67,7 @@ The code follows that shape:
 | `gui_app/backends/__init__.py` | The camera-backend contract, the backend registry and `load_backend()` |
 | `gui_app/backends/basler.py` | Basler cameras through pypylon |
 | `gui_app/backends/flir.py`, `_spinc.py` | FLIR cameras through the Spinnaker C library, loaded with ctypes |
+| `gui_app/backends/pyspin_probe.py` | The `probe_flir.py --pyspin` stage, the only module that imports PySpin |
 | `gui_app/backends/sim.py`, `sim_board.py`, `fake_spinc.py` | The simulated rig ([SIMULATION.md](SIMULATION.md)) |
 | `gui_app/camera_manager.py` | Vendor-neutral open, mode switches, start, readiness barrier and stop |
 | `gui_app/grab_thread.py` | The per-camera capture loop, its NV12 ring and the encoder thread |
