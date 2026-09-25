@@ -1341,7 +1341,7 @@ serial port. Start from [`external_ttl.yaml`](../profiles/templates/external_ttl
   `stim_safe_pins`, because each names a board this mode never opens.
 - Panopticon cannot read your source's rate. Set `frame_rate` and
   `calibration_frame_rate` to the rates you run it at. The block-ID rate check
-  after each recording compares each camera with `frame_rate`, and
+  after each acquisition compares each camera with the acquisition's rate, and
   `session_metadata.json` records `trigger_source: external`.
 - Wire the source to every camera's trigger input with a common ground, and check
   that one output can drive every input it feeds.

@@ -817,8 +817,9 @@ before the first pulse, so a recording, or a calibration at
    (`The trigger was already running`, naming the cameras that
    `received frames before every camera was armed`) and nothing is kept.
 3. The label reads `WAITING FOR TRIGGER`, and a `Start your trigger source`
-   prompt appears. Start the source at `frame_rate`. The recording begins with
-   its first pulse. With no pulse within 45 s the start ends in `NO TRIGGER`
+   prompt appears. Start the source at the rate the prompt names:
+   `frame_rate`, or `calibration_frame_rate` for a calibration. The recording
+   begins with its first pulse. With no pulse within 45 s the start ends in `NO TRIGGER`
    and nothing is kept. Cancel on the prompt also ends the start and keeps
    nothing.
 4. To finish, stop the source. The recording ends once no camera has received
@@ -827,9 +828,6 @@ before the first pulse, so a recording, or a calibration at
    `STOP YOUR TRIGGER SOURCE`. Panopticon counts the source stopped after 1 s
    of silence (or two periods). It waits up to 30 s for the source to stop,
    then stops the cameras itself and notes it in `WARNINGS.txt`.
-
-Panopticon cannot read the source's rate. After the recording, the block-ID
-rate check compares each camera against `frame_rate`.
 
 ---
 
