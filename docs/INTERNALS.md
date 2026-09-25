@@ -298,8 +298,7 @@ editor is unavailable in this mode. The operator's steps are in
 ## 3. Exposure and the frame-rate ceiling
 
 Exposure has an upper bound that depends on the trigger rate. A camera past it
-records at half the rate while the log shows nothing wrong, and its block IDs
-stop being trigger numbers.
+records at half the rate, and its block IDs stop being trigger numbers.
 
 ### The rule
 
@@ -352,7 +351,8 @@ fps.
 A block ID counts the frames a camera acquired. An ignored trigger produces no
 frame, so it consumes no block ID, and from then on this camera's block ID N is
 trigger N+k for a k that keeps growing. No frame was lost anywhere, so the
-block IDs stay gapless, no counter moves and every frame is whole. The camera's
+block IDs stay gapless, no packet, buffer or underrun counter moves and every
+frame is whole. The camera's
 frames get paired with other cameras' frames from other instants.
 [The failure that leaves no gap](#the-failure-that-leaves-no-gap) covers the
 check that catches it.
@@ -363,6 +363,11 @@ The symptoms, in the order people notice them:
 - a `frametimes.npy` spanning the right duration with half the rows;
 - a block-ID span over the device-clock duration near 50 per second instead
   of 100.
+
+In kick-out mode the camera's trigger lag (the `[sync] lag_behind_leader` line
+and the status bar) grows by one for every trigger it ignores, while its
+delivery lag stays near zero. Past `kick_max_lag`, every later trigger is
+force-dropped and the drops are blamed on that camera.
 
 That last ratio separates an acquisition failure from a delivery failure. A
 frame lost in transmission still consumed its block ID, so a delivery loss
@@ -1637,22 +1642,27 @@ These links carry an instant to a frame index in a file:
 
 ### The failure that leaves no gap
 
-Every other row of that table leaves its evidence in `blockids.npy` as a gap:
-a block ID was consumed and no frame survived to carry it, and the
-intersection sees the hole. A camera whose exposure exceeds the ceiling
-ignores the trigger instead ([Exposure](#what-happens-over-the-ceiling)) and
-consumes no block ID. For that camera:
+The other rows of that table either refuse the start, retire the camera
+before a frame is written under a wrong number, or leave a gap in
+`blockids.npy` that the intersection sees. With frame-ID block IDs (every
+Basler camera, and a FLIR camera that uses its frame ID), a camera whose
+exposure exceeds the ceiling does none of these: it ignores the trigger
+([Exposure](#what-happens-over-the-ceiling)) and consumes no block ID. For
+that camera:
 
 - its block IDs stay gapless, so the release rule, which compares block IDs
   and nothing else, sees a clean, in-order stream;
 - its frame count matches the other cameras', because only common IDs are
   kept;
-- no packet, buffer, underrun or forced-drop counter moves, because nothing
-  was lost on the link, in the pool or in the coordinator.
+- no packet, buffer or underrun counter moves, because nothing was lost on
+  the link or in the pool. In kick-out mode its trigger lag grows instead,
+  and past `kick_max_lag` the coordinator force-drops triggers and blames
+  them on it.
 
 The block-ID rate check below detects it on every camera. On FLIR cameras the
 trigger witness also counts the ignored triggers
-([The FLIR backend](#the-flir-backend)).
+([The FLIR backend](#the-flir-backend)). With `trigger_counter` block IDs an
+ignored trigger is a gap, which kick-out and the intersection drop.
 
 ### Checking the axiom against an independent clock
 
@@ -1678,7 +1688,8 @@ configured rate. That is the fixed difference between the board's resonator and
 the cameras' oscillators, in a band 30 ppm wide. 0.3% is about 12 times the
 worst real sample, and still catches a camera that skips one trigger in a
 hundred (10,000 ppm) with a factor of three to spare. A 2:1 halving shows in
-the live frame rate; a camera missing 1% of its triggers looks normal.
+the live frame rate. A camera missing 1% of its triggers shows only as a
+growing trigger lag in kick-out mode, and looks normal in the other modes.
 
 The check runs off the capture path, on timestamps already collected. It runs
 in the router's stop in kick-out mode, and at stop from the saved files in the

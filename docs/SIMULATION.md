@@ -62,7 +62,11 @@ that has neither installs with
 uv sync --no-group rig
 ```
 
-Everything on this page runs in that environment. The camera manager loads a
+In that environment pass `--no-group rig` to every `uv run`, for example
+`uv run --no-group rig gui.py --profile sim`. A plain `uv run` installs the
+default groups again, the rig group included
+([INSTALLATION.md](INSTALLATION.md#step-4--install-the-python-dependencies)).
+The camera manager loads a
 backend only when it first opens cameras, so the window starts on a host
 without pypylon. A remembered Basler profile there shows the Camera Error
 dialog instead of stopping the window.
@@ -178,7 +182,7 @@ restores the profile's. Every default is a healthy camera.
 | `drop_triggers` (a set), `drop_every` | Frames lost in transmission; the camera acquired them, so a block ID is consumed | A gap in `blockids.npy`, and `Failed_Buffer_Count` rising |
 | `underrun_every` | The host's buffer pool running dry | A gap, counted under `Buffer_Underrun_Count` |
 | `failed_grab_every` | A result arriving with `GrabSucceeded()` False | One failed buffer, counted once |
-| `ignore_every` | The camera not acquiring a trigger, as an exposure over the ceiling causes | No gap: the IDs stay contiguous while the camera falls behind; only the block-ID rate check catches it |
+| `ignore_every` | The camera not acquiring a trigger, as an exposure over the ceiling causes | No gap: the IDs stay contiguous while the camera falls behind. In kick-out mode its trigger lag grows, and past `kick_max_lag` the forced drops name it; the block-ID rate check catches it in every mode |
 | `stall_at`, `stall_s` | A wedged stream | Silence long enough for a re-arm, after which the counter restarts and must be re-based |
 | `blockid_start` | Where the counter starts after each `StartGrabbing` | `65500` puts a 16-bit wrap a few frames in |
 | `first_block_id` | The counter's numbering: 1 is the contract's, 0 a 0-based counter passed through unnormalised | With 0, the first frame reads `blockid_start - 1`, and the counter never wraps |
