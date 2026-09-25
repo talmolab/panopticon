@@ -920,8 +920,10 @@ ID goes into `blockids.npy`, so a position in a video maps back to a trigger
 number by lookup. Real-time kick-out and the post-hoc intersection each turn
 that into aligned videos, and they differ in when they pay for it. They keep
 the same frames unless a camera falls more than `kick_max_lag` triggers
-behind or is retired. Kick-out then force-drops, and keeps a subset of the intersection's
-frames (see
+behind or is retired. Past the cap, kick-out force-drops the triggers the
+lagging camera holds up. Before a retirement, it has already dropped the
+triggers the retired camera missed. Either way it keeps a subset of the
+intersection's frames (see
 [The equivalence of the two paths](#the-equivalence-of-the-two-paths)).
 
 ### Real-time kick-out (the default)
@@ -1380,9 +1382,8 @@ encoded after the session, and says so in a warning with the disk cost.
 `realtime_encode: false` writes whole frames to `raw.bin` during capture and
 encodes them after the session with the `h264_nvenc` ffmpeg pool, or libx264
 where `h264_nvenc` failed the launch check. There is no GPU work during
-capture; the disk takes the full [raw rate](CONFIGURATION.md#disk) instead.
-Each camera
-keeps every frame it recorded, and no camera is cut to another's length. When
+capture, and the disk takes the full [raw rate](CONFIGURATION.md#disk). Each
+camera keeps every frame it recorded, and no camera is cut to another's length. When
 a `raw.bin` and its camera's block IDs disagree, both are cut to the frames
 they share, because a frame without a block ID cannot be placed in time, and
 a warning names the camera.
@@ -1619,7 +1620,7 @@ These links carry an instant to a frame index in a file:
 
 | Where | What breaks | Guard |
 |---|---|---|
-| Camera naming | Names follow the serial order ([camera_serials](CONFIGURATION.md#camera_serials)) | `n_cameras` and `camera_serials`; `open_all()` refuses a partial set |
+| Camera naming | A missing camera shifts the names after it ([camera_serials](CONFIGURATION.md#camera_serials)) | `n_cameras` and `camera_serials`; `open_all()` refuses a partial set |
 | Pixel format | A wider format keeps only its low 8 bits | Format and size read back at open; anything but Mono8 refused |
 | Row padding | A padded buffer read as (H, W) shears every frame | `PaddingX` and `PaddingY` checked every frame; nonzero retires |
 | A camera that never arms | In kick-out mode it force-drops every trigger for every camera | Readiness barrier; every early exit retires the camera |
@@ -1862,9 +1863,9 @@ The pipeline depends on these guarantees:
    cost every camera its first frame and label every later frame with the
    trigger before it. A 16-bit counter may cycle 1 to 65535; any other period
    is unwrapped in the backend. A frame lost in transmission must still
-   consume its number. A camera that can skip a trigger without leaving a gap
-   is caught by the block-ID rate check, unless the backend counts its ignored
-   triggers itself, as the FLIR trigger witness does.
+   consume its number. The block-ID rate check catches a camera that can skip
+   a trigger without leaving a gap. A backend that counts its ignored
+   triggers, as the FLIR trigger witness does, catches it as well.
 2. `TimeStamp` from a free-running device clock, in nanoseconds, that keeps
    running across a stream restart. The stall resync, the delivery lag and
    the rate check all depend on it. A backend whose camera counts in other
