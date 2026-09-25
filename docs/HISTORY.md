@@ -622,10 +622,10 @@ Dead ends, do not retry:
 - 2026-09-25: The sidebar can be dragged wider, from 260 px to 900 px, and
   the coverage graph grows with it, at the maintainer's request: a larger
   graph is easier to read during a calibration (`51d945d`).
-- 2026-09-25: The window remembers its state between launches, the sidebar
-  collapses to a camera-only view, a profile can be added from any file, the
-  assay and cohort fields are gone and notes is three lines, at the
-  maintainer's request (`3b7d365`).
+- 2026-09-25: At the maintainer's request, the window remembers its state
+  between launches and the sidebar collapses to a camera-only view. A profile
+  can be added from any file, the assay and cohort fields are gone, and notes
+  is three lines (`3b7d365`).
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
