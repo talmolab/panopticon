@@ -241,8 +241,9 @@ does not carry into a recording.
      numbers, centred on the sensor.
    - `frame_rate`.
    - `camera.exposure_us` and `camera.gain_db`. Keep the exposure under 90% of
-     the camera's [exposure ceiling](#the-exposure-ceiling) at `frame_rate`.
-     The ceiling is at most the trigger period, 10,000 µs at 100 fps.
+     the camera's [exposure ceiling](CONFIGURATION.md#exposure-ceiling) at
+     `frame_rate`: opening the cameras refuses a longer one. The ceiling is at
+     most the trigger period, 10,000 µs at 100 fps.
    - `camera.trigger.line`: a first guess is fine, because `--find-line` checks
      it in section 5.
    - `serial_port` and `trigger_pins`, for the trigger board.
@@ -251,16 +252,24 @@ Leave `stim_safe_pins: []` and leave out `log_level`. Its default, `verbose`,
 logs every setting written to a camera with the value the camera reads back,
 which is what the maintainers need to see.
 
-Settings a bring-up may need beyond the template's `SITE` values:
+Settings a bring-up may need beyond the template's `SITE` values, each described
+in [CONFIGURATION.md](CONFIGURATION.md#flir-cameras-the-camera-block):
 
-| Key | What it does |
-|---|---|
-| `camera.per_camera` | Values for single cameras, keyed by quoted serial: `exposure_us`, `gain_db`, `offset_x`, `offset_y`, `trigger_line` |
-| `camera.offset_x`, `camera.offset_y` | Where the region sits on the sensor, in pixels. The default, `center`, centres it. |
-| `camera.flir.sdk_dir` | The Spinnaker install folder, when it is not in a default location |
-| `camera.flir.packet_size` | GigE only. 9000 needs jumbo frames end to end. |
-| `camera.flir.user_set` | The user set loaded before anything else: `Default` (factory settings), `UserSet0`, `UserSet1` or `none` |
-| `camera.flir.block_id_source` | `auto`: the frame ID when the camera's self-test proves it restarts, else the camera's count of trigger edges |
+- [`camera.per_camera`](CONFIGURATION.md#cameraper_camera): values for single
+  cameras, keyed by quoted serial: `exposure_us`, `gain_db`, `offset_x`,
+  `offset_y`, `trigger_line`.
+- [`camera.offset_x`](CONFIGURATION.md#cameraoffset_x) and
+  [`camera.offset_y`](CONFIGURATION.md#cameraoffset_y): where the region sits
+  on the sensor.
+- [`camera.flir.sdk_dir`](CONFIGURATION.md#cameraflirsdk_dir): the Spinnaker
+  install folder, when it is not in a default location.
+- [`camera.flir.packet_size`](CONFIGURATION.md#cameraflirpacket_size): GigE
+  only. 9000 needs jumbo frames end to end.
+- [`camera.flir.user_set`](CONFIGURATION.md#camerafliruser_set): the user set
+  loaded before anything else: `Default` (factory settings), `UserSet0`,
+  `UserSet1` or `none`.
+- [`camera.flir.block_id_source`](CONFIGURATION.md#cameraflirblock_id_source):
+  what each frame's block ID comes from.
 
 Each template's comments explain the rest of its values.
 
@@ -271,19 +280,6 @@ says to remove the field, and names the FLIR setting to use where there is one.
 Opening the cameras then checks every value against what each camera
 reports, and refuses one outside the camera's range. The message names the
 camera, the setting and the range.
-
-### The exposure ceiling
-
-Panopticon measures each camera's exposure ceiling at `frame_rate`: the longest
-exposure at which the camera still takes every trigger. Opening the cameras
-refuses an exposure above 90% of the ceiling. The message includes
-`is above what this camera can expose at frame_rate` and the longest exposure
-allowed.
-
-A calibration runs at `calibration_frame_rate`, with `calibration_exposure_us`
-(0 keeps the recording exposure). Panopticon caps the calibration's exposure at
-90% of the ceiling at that rate. A capped exposure shows as `CLAMPED` in that
-camera's exposure line in the log.
 
 ## 4. Open your profile in Panopticon
 

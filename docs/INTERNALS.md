@@ -406,8 +406,8 @@ A FLIR camera has no `AcquisitionFrameRate` limiter in this sense, so
 the frame rate to the acquisition's rate at the shortest exposure, then reads
 the longest `ExposureTime` the camera allows at that rate. Opening the cameras
 refuses an exposure above 90% of that ceiling at `frame_rate`, and a
-calibration exposure above it is clamped.
-[FLIR.md](FLIR.md#the-exposure-ceiling) has the operator's side.
+calibration exposure above it is clamped
+([CONFIGURATION.md](CONFIGURATION.md#exposure-ceiling)).
 
 ---
 

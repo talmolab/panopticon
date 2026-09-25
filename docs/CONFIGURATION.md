@@ -1234,8 +1234,9 @@ The longest exposure at which a camera still takes every trigger.
 
 - Basler (and `sim`): in trigger mode the camera's frame-rate timer starts after
   the exposure ends, so the ceiling is `1/F − 1/trigger_rate_limit`.
-- FLIR: Panopticon measures each camera's ceiling at F from what the camera
-  reports ([FLIR.md](FLIR.md#the-exposure-ceiling)).
+- FLIR: Panopticon sets each camera to F at its shortest exposure and reads the
+  longest `ExposureTime` the camera then allows
+  ([INTERNALS.md](INTERNALS.md#flir-cameras)).
 
 Panopticon keeps a 10% margin below the ceiling, so the exposure limit is 90% of
 it:
@@ -1243,7 +1244,9 @@ it:
 - On Basler it lowers an exposure above the limit at every acquisition start,
   and the `[camN] exposure=` line says `CLAMPED`.
 - On FLIR, opening the cameras refuses a recording exposure above the limit at
-  `frame_rate`. It caps a calibration exposure and logs `CLAMPED`.
+  `frame_rate` (`is above what this camera can expose`), and the message gives
+  the longest exposure allowed. A calibration exposure above the limit is
+  capped, and the camera's exposure line says `CLAMPED`.
 
 With `trigger_rate_limit: 165`:
 
