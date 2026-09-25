@@ -115,6 +115,14 @@ checked by hand that no other one holds the hardware.
 - Comments and docstrings state the rule and its reason in the present tense,
   with no dates, names, commit hashes or story (`CONTRIBUTING.md`). The story
   goes in `docs/HISTORY.md`.
+- The window's state between launches lives in `gui_app/settings.py`, whose
+  keys are spelled only there. It covers the window's geometry and the
+  sidebar's width (0 when collapsed), and the session fields except the date.
+  It also covers a hand-chosen output folder per profile, the Display sliders,
+  the Stimulation editor's entry fields and the profiles added from a file.
+  Nothing that decides what reaches the trigger board is restored: the
+  editor's canvas and the uploaded sketch stay per launch. A test that builds
+  a sidebar, a window or the editor sets `PANOPTICON_SETTINGS_FILE` first.
 - Blocking camera work (open, close, reconfigure) runs off the Qt main thread
   through `ui_workers.CallableWorker`. On the main thread the window would stop
   responding. Quitting mid-session abandons the incomplete data and deletes it

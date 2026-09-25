@@ -18,7 +18,7 @@ from PyQt5.QtGui import (
     QPainterPathStroker, QTransform,
 )
 
-from gui_app import stim_compiler
+from gui_app import settings, stim_compiler
 from gui_app.serial_controller import TeensyController
 
 # ── geometry constants ────────────────────────────────────────────────────────
@@ -1105,6 +1105,16 @@ class StimulationWindow(QDialog):
         self._f_freq = _field("Hz")
         self._f_pw   = _field("ms")
         self._f_dur  = _field("s")
+        # What the operator last typed into each field comes back at the next
+        # launch. Only typing is stored (textEdited, never a selected block's
+        # values), and nothing here reaches the board: a block is made only
+        # by Create, and the sketch changes only at Apply.
+        for key, f in (("pin", self._f_pin), ("freq", self._f_freq),
+                       ("pw", self._f_pw), ("dur", self._f_dur)):
+            f.setText(settings.get_text(settings.KEY_STIM_FIELD_PREFIX + key, ""))
+            f.textEdited.connect(
+                lambda text, k=key: settings.set_value(
+                    settings.KEY_STIM_FIELD_PREFIX + k, text))
 
         self._start_cb = QCheckBox("Starting")
         self._start_cb.setToolTip(

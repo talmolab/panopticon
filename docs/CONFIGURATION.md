@@ -40,6 +40,12 @@ then restart. The profile dropdown at the top of the sidebar lists every file
 that loaded. A file with a mistake is left out, and a dialog after the window
 opens names the file and the field.
 
+The dropdown's last entry, `Add a profile from a file…`, adds a profile kept
+anywhere else. Panopticon switches to it and lists it at every later launch;
+a file that is gone by then is dropped from the list. Its relative paths still
+resolve against the repository root, so give a profile kept elsewhere absolute
+paths. Two profiles in the list may not share a `name`.
+
 This computer also remembers the last profile you opened, outside the repository,
 and opens it at the next launch. `uv run gui.py --profile NAME` opens the profile
 whose `name` is `NAME` instead, and remembers it. When this computer has never
@@ -243,8 +249,10 @@ Mapping. Default `{experimenter: "", assay: ""}`. Reference rig:
 `{experimenter: IT, assay: open_field}`.
 
 - Does: Fills the sidebar's metadata fields for a new session. The keys may be
-  `experimenter`, `assay`, `cohort`, `cage` and `notes`. What the fields hold
-  when an acquisition ends goes into `session_metadata.json`.
+  `experimenter`, `assay`, `cohort`, `cage` and `notes`. Experimenter, cage and
+  notes fill fields, and what they hold when an acquisition ends goes into
+  `session_metadata.json`. Assay and cohort have no field and go into it as
+  written here.
 - Change when: Set your own operator and assay when you copy a shipped profile.
 - Goes wrong: A copy of `profiles/3dpose.yaml` keeps `experimenter: IT`, so every
   session nobody edits is attributed to that operator. Any other key is refused

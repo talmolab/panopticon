@@ -115,11 +115,15 @@ class CoverageGraphWidget(QWidget):
         s = max(1.0, min(self.MAX_SCALE, min(w, h) / self.BASE_EXTENT))
         text_s = min(s, 1.6)
         caption_h = 2 * 16 * text_s + 4
+        # Room from the centre to the edge, less a node and its badge, so no
+        # node is ever drawn past the widget's edge.
         margin = 22 * s
-        ry = max(12.0, (h - caption_h) / 2.0 - margin)
-        # Round when the graph is square; wider, the ring stretches, up to
-        # MAX_ASPECT, so the extra width spreads the nodes apart.
-        rx = max(ry, min(w / 2.0 - margin, ry * self.MAX_ASPECT))
+        avail_x = max(12.0, w / 2.0 - margin)
+        avail_y = max(12.0, (h - caption_h) / 2.0 - margin)
+        # Round, sized by the tighter side; given spare width, the ring
+        # stretches up to MAX_ASPECT so the extra width spreads the nodes.
+        ry = min(avail_x, avail_y)
+        rx = min(avail_x, ry * self.MAX_ASPECT)
         pos = self._node_positions(w, h - caption_h + 4, rx, ry)
         ready = self._ready
 

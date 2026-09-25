@@ -1,16 +1,58 @@
 """Sidebar widget with session parameters, toggle switches, progress bar, and status."""
 from datetime import datetime
+from pathlib import Path
+
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLineEdit, QLabel,
     QProgressBar, QFrame, QPushButton, QFileDialog, QSlider, QComboBox,
+    QPlainTextEdit, QMessageBox,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 
 from gui_app.widgets.toggle_switch import ToggleSwitch
 from gui_app.widgets.coverage_graph import CoverageGraphWidget
 from gui_app import session_config, settings
 from gui_app.session_config import RigProfile, ProfileError, REPO_ROOT
+
+
+class NotesEdit(QPlainTextEdit):
+    """A multi-line session field with the QLineEdit calls the sidebar uses:
+    text(), setText() and a textEdited signal that fires for the operator's
+    typing only, never for setText, so a prefill is not taken for intent."""
+
+    textEdited = pyqtSignal(str)
+
+    #: Lines of text the box shows without scrolling.
+    LINES = 3
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._programmatic = False
+        self.setTabChangesFocus(True)
+        self.setPlainText(text)
+        self.textChanged.connect(self._on_changed)
+
+    def _on_changed(self):
+        if not self._programmatic:
+            self.textEdited.emit(self.toPlainText())
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def setText(self, text: str) -> None:
+        self._programmatic = True
+        try:
+            self.setPlainText(text)
+        finally:
+            self._programmatic = False
+
+    def fit_height(self) -> None:
+        """Size the box to LINES lines of its current font."""
+        m = self.contentsMargins()
+        doc = self.document().documentMargin()
+        self.setFixedHeight(int(self.fontMetrics().lineSpacing() * self.LINES
+                                + 2 * doc + m.top() + m.bottom() + 8))
 
 
 class SidebarWidget(QWidget):
@@ -28,6 +70,11 @@ class SidebarWidget(QWidget):
     #: From this width the metadata fields sit two to a row, which gives the
     #: coverage graph the height the second column saves.
     TWO_COLUMN_WIDTH = 520
+    #: The dropdown's last entry: it opens a file dialog for a profile kept
+    #: outside profiles/, which is then listed at every launch.
+    BROWSE_ITEM = "Add a profile from a file…"
+    #: Seconds after the last edit before the form and sliders are saved.
+    SAVE_DELAY_MS = 800
 
     def __init__(self, default_output_dir: str = str(REPO_ROOT / "data"), parent=None):
         super().__init__(parent)
@@ -57,7 +104,12 @@ class SidebarWidget(QWidget):
         # collected rather than shown here because no window exists yet; the
         # main window reads profile_warnings once it is up.
         self._profiles: list[RigProfile] = []
+        #: The resolved file each entry of _profiles was loaded from.
+        self._profile_paths: list[str] = []
         self._profile_warnings: list[str] = []
+        #: The profile the dropdown shows as running ("" for none), which a
+        #: cancelled "Add a profile from a file" goes back to.
+        self._shown_name = ""
         for path in RigProfile.list_profiles():
             try:
                 profile = RigProfile.load(path)
@@ -67,7 +119,27 @@ class SidebarWidget(QWidget):
                 self._profile_warnings.append(msg)
                 continue
             self._profiles.append(profile)
+            self._profile_paths.append(str(Path(path).resolve()))
             self._profile_combo.addItem(profile.name)
+        # Profiles added from elsewhere with the dropdown's last entry. A file
+        # that is gone is dropped from the list; one that no longer loads is
+        # skipped with a warning and kept, so fixing it brings it back.
+        kept = []
+        for path in settings.extra_profiles():
+            if not Path(path).is_file():
+                msg = f"forgetting the added profile {path}: the file is gone"
+                print(f"[profile] {msg}", flush=True)
+                self._profile_warnings.append(msg)
+                continue
+            kept.append(path)
+            _profile, why = self._add_profile_file(path)
+            if why:
+                msg = f"skipping the added profile {path}: {why}"
+                print(f"[profile] {msg}", flush=True)
+                self._profile_warnings.append(msg)
+        if kept != settings.extra_profiles():
+            settings.set_extra_profiles(kept)
+        self._profile_combo.addItem(self.BROWSE_ITEM)
         if not self._profiles:
             # Read at call time so it names the directory list_profiles used.
             msg = (f"No rig profile could be loaded from {session_config.PROFILES_DIR}. "
@@ -111,40 +183,47 @@ class SidebarWidget(QWidget):
         self._form_rows: list = []
         self._form_cols = 0
 
-        # Experimenter and assay have no built-in default: they are rig
-        # properties and come from the profile's metadata_defaults, so a
-        # shared codebase does not ship one operator's initials. The date is
-        # refreshed on read while the operator has not typed into it, because
-        # a GUI left open past midnight would otherwise file the session
-        # under the previous day.
-        self._fields: dict[str, QLineEdit] = {}
+        # Experimenter has no built-in default: it is a rig property and
+        # comes from the profile's metadata_defaults, so a shared codebase
+        # does not ship one operator's initials. The date is refreshed on read
+        # while the operator has not typed into it, because a GUI left open
+        # past midnight would otherwise file the session under the previous
+        # day. Assay and cohort have no field: a profile's metadata_defaults
+        # still writes them into session_metadata.json.
+        self._fields: dict = {}
         self._user_edited: set[str] = set()
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(self.SAVE_DELAY_MS)
+        self._save_timer.timeout.connect(self.save_state)
         defaults = [
             ("date", self._today()),
             ("mouse_1", ""),
             ("mouse_2", ""),
-            ("assay", ""),
             ("experimenter", ""),
-            ("cohort", ""),
             ("cage", ""),
             ("notes", ""),
         ]
         for name, default in defaults:
-            field = QLineEdit(default)
+            field = NotesEdit(default) if name == "notes" else QLineEdit(default)
             # textEdited fires for keyboard input only, never for setText, so
             # it separates operator intent from programmatic prefill.
-            field.textEdited.connect(lambda _text, n=name: self._user_edited.add(n))
+            field.textEdited.connect(lambda _text, n=name: self._on_field_edited(n))
+            kind = "QPlainTextEdit" if name == "notes" else "QLineEdit"
             field.setStyleSheet(
-                "QLineEdit { background: #1a1a2e; color: #dcdcdc; border: 1px solid #444; "
-                "border-radius: 3px; padding: 4px 6px; font-size: 11px; }"
-                "QLineEdit:focus { border-color: #5078c8; }"
-                "QLineEdit:read-only { background: #111122; color: #888; }"
+                f"{kind} {{ background: #1a1a2e; color: #dcdcdc; border: 1px solid #444; "
+                f"border-radius: 3px; padding: 4px 6px; font-size: 11px; }}"
+                f"{kind}:focus {{ border-color: #5078c8; }}"
+                f"{kind}:read-only {{ background: #111122; color: #888; }}"
             )
+            if name == "notes":
+                field.fit_height()
             label_text = name.replace("_", " ").title()
             label = QLabel(label_text)
             label.setStyleSheet("color: #aaa; font-size: 11px; border: none;")
-            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self._form_rows.append((label, field))
+            label.setAlignment(Qt.AlignRight
+                               | (Qt.AlignTop if name == "notes" else Qt.AlignVCenter))
+            self._form_rows.append((name, label, field))
             self._fields[name] = field
         self._place_fields(1)
 
@@ -291,6 +370,47 @@ class SidebarWidget(QWidget):
         self._status.setStyleSheet("color: #888; border: none; padding: 4px;")
         layout.addWidget(self._status)
 
+        self._restore_state()
+        self._brightness_slider.valueChanged.connect(self._schedule_save)
+        self._contrast_slider.valueChanged.connect(self._schedule_save)
+
+    # --- the state kept between launches ---
+    def _on_field_edited(self, name: str) -> None:
+        self._user_edited.add(name)
+        self._schedule_save()
+
+    def _schedule_save(self, *_args) -> None:
+        self._save_timer.start()
+
+    def _restore_state(self) -> None:
+        """Put back the fields and sliders as the last launch left them.
+
+        A stored field that is not empty counts as typed, so a profile's
+        metadata_defaults does not overwrite it at startup or at a switch. The
+        date is never restored: it follows the calendar unless typed."""
+        for name, field in self._fields.items():
+            key = settings.KEY_FIELD_PREFIX + name
+            if name == "date" or not settings.has(key):
+                continue
+            value = settings.get_text(key, "")
+            if value:
+                field.setText(value)
+                self._user_edited.add(name)
+        self._brightness_slider.setValue(
+            settings.get_int(settings.KEY_BRIGHTNESS, 0))
+        self._contrast_slider.setValue(
+            settings.get_int(settings.KEY_CONTRAST, 0))
+
+    def save_state(self) -> None:
+        """Store the fields (not the date) and the sliders for the next
+        launch. Runs shortly after each edit and when the window closes."""
+        self._save_timer.stop()
+        for name, field in self._fields.items():
+            if name != "date":
+                settings.set_value(settings.KEY_FIELD_PREFIX + name, field.text())
+        settings.set_value(settings.KEY_BRIGHTNESS, self._brightness_slider.value())
+        settings.set_value(settings.KEY_CONTRAST, self._contrast_slider.value())
+
     #: Horizontal room the button's stylesheet takes from its text: 8px of
     #: padding and 1px of border on each side.
     _DIR_BUTTON_CHROME = 18
@@ -313,18 +433,26 @@ class SidebarWidget(QWidget):
         btn.setText(btn.fontMetrics().elidedText(self._output_dir, Qt.ElideMiddle, avail))
 
     def _place_fields(self, cols: int) -> None:
-        """Lay the metadata fields out ``cols`` label-field pairs to a row."""
+        """Lay the metadata fields out ``cols`` label-field pairs to a row.
+        Notes takes a row of its own, across the full width."""
         if cols == self._form_cols:
             return
-        for label, field in self._form_rows:
+        for _name, label, field in self._form_rows:
             self._form.removeWidget(label)
             self._form.removeWidget(field)
         for c in range(4):
             self._form.setColumnStretch(c, 0)
-        for i, (label, field) in enumerate(self._form_rows):
+        i = 0
+        for name, label, field in self._form_rows:
+            if name == "notes":
+                row = (i + cols - 1) // cols
+                self._form.addWidget(label, row, 0)
+                self._form.addWidget(field, row, 1, 1, 2 * cols - 1)
+                continue
             row, pair = divmod(i, cols)
             self._form.addWidget(label, row, 2 * pair)
             self._form.addWidget(field, row, 2 * pair + 1)
+            i += 1
         for pair in range(cols):
             self._form.setColumnStretch(2 * pair + 1, 1)
         self._form_cols = cols
@@ -339,6 +467,11 @@ class SidebarWidget(QWidget):
         d = QFileDialog.getExistingDirectory(self, "Select Output Directory", self._output_dir)
         if d:
             self._set_output_dir(d)
+            # Remembered for this profile, so the next launch (and a switch
+            # back to it) records here instead of the profile's output_dir.
+            if self._shown_name:
+                settings.set_value(
+                    settings.KEY_OUTPUT_DIR_PREFIX + self._shown_name, d)
 
     @property
     def output_dir(self) -> str:
@@ -425,8 +558,68 @@ class SidebarWidget(QWidget):
         refused rig, sent the next recording to its output directory, and
         brought the next launch up on it, while the window ran the old one.
         """
+        if index == len(self._profiles):
+            self._browse_for_profile()
+            return
         if 0 <= index < len(self._profiles):
             self.profile_changed.emit(self._profiles[index])
+
+    def _add_profile_file(self, path: str):
+        """Load a profile file into the list, before the dropdown's last
+        entry. Returns (profile, None), or (None, why it was not added).
+
+        RULE: two entries never share a name. REASON: the launch remembers a
+        profile by name, so a second file with the same name would bring up
+        whichever loaded first. The same file picked again just returns the
+        entry it already has."""
+        resolved = str(Path(path).resolve())
+        if resolved in self._profile_paths:
+            return self._profiles[self._profile_paths.index(resolved)], None
+        try:
+            profile = RigProfile.load(Path(path))
+        except ProfileError as e:
+            return None, str(e)
+        for other, other_path in zip(self._profiles, self._profile_paths):
+            if other.name == profile.name:
+                return None, (f"the list already has a profile named "
+                              f"{profile.name!r} ({other_path}). Give this "
+                              f"file a different name: field.")
+        self._profiles.append(profile)
+        self._profile_paths.append(resolved)
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.insertItem(len(self._profiles) - 1, profile.name)
+        self._profile_combo.blockSignals(False)
+        return profile, None
+
+    def _browse_for_profile(self) -> None:
+        """The dropdown's last entry: pick a profile file anywhere, add it to
+        the list for this and every later launch, and switch to it."""
+        extras = settings.extra_profiles()
+        start = (str(Path(extras[-1]).parent) if extras
+                 else str(session_config.PROFILES_DIR))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Add a rig profile", start, "Rig profiles (*.yaml *.yml)")
+        if not path:
+            self.restore_profile_choice(self._shown_name)
+            return
+        profile, why = self._add_profile_file(path)
+        if profile is None:
+            print(f"[profile] could not add {path}: {why}", flush=True)
+            QMessageBox.warning(self, "Profile not added",
+                                f"{path} was not added.\n\n{why}")
+            self.restore_profile_choice(self._shown_name)
+            return
+        resolved = str(Path(path).resolve())
+        builtin = str(session_config.PROFILES_DIR.resolve())
+        if (resolved not in extras
+                and str(Path(resolved).parent) != builtin):
+            settings.set_extra_profiles(extras + [resolved])
+            print(f"[profile] added {resolved} to the profile list", flush=True)
+        idx = self._profiles.index(profile)
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.blockSignals(False)
+        self.profile_changed.emit(profile)
 
     def accept_profile(self, profile: RigProfile):
         """The window has taken this profile: apply its fields, remember it."""
@@ -446,10 +639,12 @@ class SidebarWidget(QWidget):
                 self._profile_combo.blockSignals(True)
                 self._profile_combo.setCurrentIndex(i)
                 self._profile_combo.blockSignals(False)
+                self._shown_name = name
                 return True
         self._profile_combo.blockSignals(True)
         self._profile_combo.setCurrentIndex(-1)
         self._profile_combo.blockSignals(False)
+        self._shown_name = ""
         return False
 
     def clear_profile_choice(self) -> None:
@@ -464,6 +659,7 @@ class SidebarWidget(QWidget):
         self._profile_combo.blockSignals(True)
         self._profile_combo.setCurrentIndex(-1)
         self._profile_combo.blockSignals(False)
+        self._shown_name = ""
         self._set_output_dir(self._default_output_dir)
         for key, field in self._fields.items():
             if key != "date" and key not in self._user_edited:
@@ -474,14 +670,22 @@ class SidebarWidget(QWidget):
 
         A metadata field the operator has typed into is left alone: the
         profile supplies defaults, not overrides, and switching profiles must
-        not discard what was entered for this session.
+        not discard what was entered for this session. Every other metadata
+        field takes this profile's default, or empties, so the form carries
+        nothing from the previous profile's defaults.
         """
-        if profile.output_dir:
+        chosen = settings.get_text(
+            settings.KEY_OUTPUT_DIR_PREFIX + profile.name, "")
+        if chosen:
+            self._set_output_dir(chosen)
+        elif profile.output_dir:
             self._set_output_dir(profile.output_dir)
-        for key, value in profile.metadata_defaults.items():
+        for key in session_config.METADATA_DEFAULT_KEYS:
             field = self._fields.get(key)
-            if field is not None and key not in self._user_edited:
-                field.setText("" if value is None else str(value))
+            if field is None or key in self._user_edited:
+                continue
+            value = profile.metadata_defaults.get(key)
+            field.setText("" if value is None else str(value))
 
     @staticmethod
     def _today() -> str:
@@ -513,6 +717,7 @@ class SidebarWidget(QWidget):
                 self._profile_combo.blockSignals(True)
                 self._profile_combo.setCurrentIndex(i)
                 self._profile_combo.blockSignals(False)
+                self._shown_name = name
                 self._apply_profile(profile)
                 return True
         return False

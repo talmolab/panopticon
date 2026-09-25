@@ -173,6 +173,14 @@ def _num(value) -> str:
         return str(value)
 
 
+def _device_serial(dev) -> str:
+    """The serial an enumerated device reports, or "serial unknown"."""
+    try:
+        return f"serial {dev.GetSerialNumber()}"
+    except Exception:
+        return "serial unknown"
+
+
 def _device_model(dev):
     """The model name an enumerated device reports, or None.
 
@@ -253,6 +261,11 @@ class CameraManager(QObject):
         #: The same string the `error` signal carried, kept so a caller that
         #: reads the return value never has to also listen to the signal.
         self.last_open_error = None
+        #: Called with a short line at each step of open_all (the window's
+        #: splash screen at launch), on the thread that runs the open. None
+        #: reports nothing. It never gates the open: an error it raises is
+        #: dropped.
+        self.progress = None
         #: Problems found while finalising the last recording (retired cameras,
         #: block-ID truncation). Read by the GUI after stop_acquisition().
         self.last_warnings: list = []
@@ -602,6 +615,8 @@ class CameraManager(QObject):
             self._backend_obj = load_backend(self._backend_name,
                                              camera_spec=camera_spec)
         t_open = time.monotonic()
+        self._say(f"Looking for {self._backend_name} cameras "
+                  f"(the first search loads the camera SDK)…")
         devices = self._backend.enumerate_devices()
         logging_setup.transition(
             f"open: the {self._backend_name} backend enumerated "
@@ -624,6 +639,8 @@ class CameraManager(QObject):
         infos = []
         fix = self._settings_source()
         for i, dev in enumerate(sorted_devs):
+            self._say(f"Opening {self._cn(i)} of {len(sorted_devs)} "
+                      f"({_device_serial(dev)}) and loading its settings…")
             try:
                 cam = self._backend.open(dev, pfs_path, self._max_num_buffer,
                                          **spec_kw)
@@ -712,6 +729,7 @@ class CameraManager(QObject):
                     "Power-cycle it (or close the app holding it) and reselect the profile.")
 
         self._camera_info = tuple(infos)
+        self._say(f"Starting the preview on {len(self._cameras)} camera(s)…")
         self._set_freerun_mode()
         self._start_grab_threads()
         logging_setup.transition(
@@ -818,6 +836,15 @@ class CameraManager(QObject):
     def _cn(self, i: int) -> str:
         """The camN name of open camera `i`."""
         return f"cam{self._gi(i) + 1}"
+
+    def _say(self, text: str) -> None:
+        """Report one step of the open to ``progress``, if anyone listens."""
+        if self.progress is None:
+            return
+        try:
+            self.progress(text)
+        except Exception:
+            pass
 
     def pinning_report(self) -> str:
         """One line saying how many grab threads actually pinned.

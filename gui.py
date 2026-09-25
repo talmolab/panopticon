@@ -253,17 +253,38 @@ def _single_instance_refusal() -> str | None:
 
 
 def make_splash():
-    px = QPixmap(360, 120)
+    """The splash's background: the name. The step under way is drawn over
+    it by _SplashStatus."""
+    px = QPixmap(420, 140)
     px.fill(QColor(25, 25, 42))
     p = QPainter(px)
     p.setPen(QColor(220, 220, 220))
     p.setFont(QFont("Segoe UI", 18, QFont.Bold))
-    p.drawText(px.rect(), Qt.AlignCenter, "Panopticon")
-    p.setPen(QColor(120, 120, 160))
-    p.setFont(QFont("Segoe UI", 10))
-    p.drawText(px.rect().adjusted(0, 40, 0, 0), Qt.AlignCenter, "Loading cameras...")
+    p.drawText(px.rect().adjusted(0, 0, 0, -30), Qt.AlignCenter, "Panopticon")
     p.end()
     return px
+
+
+class _SplashStatus:
+    """Shows each startup step on the splash and logs it, so a launch that
+    spends seconds opening cameras reads as working, not frozen.
+
+    showMessage repaints the splash at once, so a step shows while the UI
+    thread is busy with the next one. No event loop is run here: a timer the
+    half-built window has already started must not fire before its
+    constructor returns."""
+
+    def __init__(self, splash):
+        self._splash = splash
+
+    def __call__(self, text: str) -> None:
+        print(f"[startup] {text}", flush=True)
+        try:
+            self._splash.showMessage(
+                text, int(Qt.AlignHCenter | Qt.AlignBottom),
+                QColor(150, 150, 190))
+        except Exception:
+            pass
 
 
 def _take_profile_arg(argv: list) -> tuple:
@@ -336,9 +357,12 @@ def main():
     splash = QSplashScreen(make_splash())
     splash.show()
     app.processEvents()
+    status = _SplashStatus(splash)
+    status("Loading Panopticon (Python, OpenCV and the encoder)…")
 
     from gui_app.main_window import MainWindow
-    window = MainWindow(profile_name=profile_name)
+    window = MainWindow(profile_name=profile_name, status=status)
+    status("Ready")
     window.show()
     splash.finish(window)
 
