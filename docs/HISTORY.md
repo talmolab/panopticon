@@ -462,7 +462,7 @@ Dead ends, do not retry:
 
 ---
 
-## 9. The drop fix, FLIR and the review fixes (22-24 September 2026)
+## 9. The drop fix, FLIR and the review fixes (22-25 September 2026)
 
 - 2026-09-22: Backend contract: optional members are read with `getattr`, and
   the Basler exposure-ceiling formula lives in the backend (`1ec1db0`). Each
@@ -587,6 +587,22 @@ Dead ends, do not retry:
 - 2026-09-24: `rig_setup` applies the profile's `log_level`, so `probe_lag.py`
   (which `probe_mp.py` runs) and the capture workers log at it, and a
   normal-versus-verbose comparison measures something (`8d03136`).
+- 2026-09-25: `probe_flir.py --pyspin` imported PySpin at the repository root,
+  the one vendor import outside `gui_app/backends/`. The maintainer chose to
+  move the stage's PySpin calls into `gui_app/backends/pyspin_probe.py`
+  (`1f459c0`, merged as `b76b249`). The alternative was to exempt the probe
+  from the vendor rule. CLAUDE.md now states the rule for every file
+  (`1a13772`).
+- 2026-09-25: The user docs were restructured so that each fact has one home.
+  CONFIGURATION.md holds every profile field and the new-rig steps (`566edd2`).
+  TROUBLESHOOTING.md holds the messages Panopticon prints (`0065eee`), and
+  GLOSSARY.md the terms (`29f277a`). README keeps an eight-row table of the
+  settings a new rig sets first and links CONFIGURATION.md for the rest. The
+  laser alert has one wording, at the two points of action, INSTALLATION.md
+  step 8 and WORKFLOW.md section 7 (`534a63e`). WORKFLOW.md and OVERVIEW.md
+  (`2462bda`) and INTERNALS.md, SIMULATION.md and CPU_ENCODE.md (`3e01b43`)
+  were rewritten for the merged code. A consistency pass then checked every
+  page against the others (`8c71482`).
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
