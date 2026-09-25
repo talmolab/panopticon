@@ -710,7 +710,7 @@ These warn, in a `Proceed?` dialog that asks `Start anyway?`:
 - raw capture (`realtime_encode: false`) that writes faster than 1.5 GiB/s, or
   whose encode after the stop has to run on the CPU.
 
-Low RAM never warns: it refuses the start, as above.
+At the start, RAM never warns: a start that does not fit is refused, as above.
 
 ### If the folder already holds data
 
