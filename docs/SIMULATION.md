@@ -111,10 +111,15 @@ The fields that mean something different on the simulated rig
 - `thermal_poll_s: 0`, because the simulated temperatures never move.
   `SimBackend.thermals()` still answers in the thermal watch's keys.
 
-The other fields take the rig's values: the capture path of
-`realtime_encode: true` and `realtime_kick: true`, `encoder: auto`, 100 fps for
-recordings and 30 for calibration, and `kick_max_lag: 240`, which small frames
-keep cheap.
+The other fields are ordinary values:
+
+- `realtime_encode: true` and `realtime_kick: true`, the reference rig's
+  capture path.
+- `encoder: auto`, 100 fps for recordings and 30 for calibration.
+- `kick_max_lag: 240`, the code default. The reference rig uses 480. The
+  frames are small, so the ring stays cheap.
+- `pin_capture_threads: false`, because the simulated rig has no hybrid-CPU
+  placement to tune.
 
 The baseline exposure and gain are `sim.BASELINE_EXPOSURE_US` (3000 µs) and
 `sim.BASELINE_GAIN_DB` (6.0 dB), the values the reference rig records with, so
