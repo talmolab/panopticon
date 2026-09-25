@@ -151,7 +151,7 @@ before you connect a laser or LED driver to the board.
 | The laser flashes briefly at launch | The board resets when its port opens and when it is flashed, and its pins float during the reset ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). The laser's own interlock is the only hard gate. |
 | `Could not clear stim firmware` | The board could not be flashed, so it may still carry an earlier paradigm, a looping one included. Fix the cause the message gives, then press **Apply** on an empty Stimulation canvas, or switch the laser off. |
 | `arduino-cli was not found` | Install the Arduino IDE or `arduino-cli`, or set `PANOPTICON_ARDUINO_CLI` to its path. The message lists every place searched. Only flashing, Apply and Test need it. |
-| `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next start opens the port, which resets the board: switch the laser off first. |
+| `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next Calibrate, Record or Test opens the port, which resets the board: switch the laser off first ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `trigger board reports sketch <id>, not the recording-only <id>; flashing` | The board ran another sketch, and Panopticon flashes the recording-only one. |
 | `trigger board still reports sketch <id>; not flashing again this launch` | The board kept reporting another sketch after one flash. Check `serial_port` names the right board, then Apply an empty canvas. |
 | `trigger board reported no sketch identity` | The board runs firmware that does not report its identity. Apply an empty canvas to flash Panopticon's sketch. |
@@ -181,7 +181,7 @@ preview.
 | `Raw capture will write <n> GiB/s.` | Use a drive rated for that sustained rate, or split the cameras across drives. |
 | `Overwrite the existing data?` | The folder holds an earlier acquisition. **Yes** deletes it, except `calibration.toml`, once the board's port is claimed, even if the start is then refused. To keep it, choose **Cancel** and change the metadata. |
 | `Overwrite the existing data?`, with an external trigger source | **Yes** sets the earlier acquisition aside until the first trigger, and puts it back if the start ends before then. |
-| `Serial port <port> could not be opened, so no triggers would be sent.` | Something holds the port (the Arduino Serial Monitor, another program), or `serial_port` names the wrong port. Close it and start again. That start opens the port, which resets the board: switch the laser off first. |
+| `Serial port <port> could not be opened, so no triggers would be sent.` | Something holds the port (the Arduino Serial Monitor, another program), or `serial_port` names the wrong port. Close it and start again. That start opens the port, which resets the board: switch the laser off first ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `Could not create the session directories` | The output folder cannot be written. Check it and start again. |
 | `Stop the stimulation test first` | A stimulation test drives the board. Stop it in the editor. |
 | `Cannot record with this stim workflow` | The canvas has a pin conflict, a forbidden pin or a loop with no start, or it does not compile. The message says which ([Stimulation](#stimulation)). |
@@ -189,7 +189,7 @@ preview.
 | `Apply the edited paradigm first` | The canvas changed since the last Apply, so the board would run the old paradigm. Press **Apply**, or undo the edit. |
 | `Apply the empty canvas first` | The canvas is empty and the board still carries the paradigm Applied earlier this session. Press **Apply** to clear the board. |
 | `Stimulation needs the trigger board` | The profile uses `trigger_source: external`, which has no board to run a paradigm. Use a profile with `trigger_source: board`. |
-| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which takes about 30 s and resets the board. Switch the laser off before that start. |
+| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which takes about 30 s and resets the board. Switch the laser off before that start ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `The trigger board could not be flashed with the <kind> firmware` | Nothing started. Switch the laser off, check the board and the port, and retry. |
 | `had not armed after <n> s, so the trigger board was not started` | A camera that arms after the board starts would pair every frame with the wrong trigger. Arming fills each camera's frame ring, so memory pressure is the usual cause: close other programs, or lower `kick_max_lag` or `max_num_buffer`. |
 | `had not armed after <n> s, so you were not asked to start your trigger source.` | The same, with `trigger_source: external`. |

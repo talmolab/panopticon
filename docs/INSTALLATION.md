@@ -1021,9 +1021,9 @@ the session.
 
 A switch between profiles on the same port flashes nothing. If their
 `trigger_pins` or `stim_safe_pins` differ, the first Calibrate or Record flashes
-the board, so switch the laser off before it. Until that flash the board keeps
-the previous profile's boot guard, which may leave this profile's laser pin
-undriven.
+the board, so switch the laser off before that start too. Until that flash the
+board keeps the previous profile's boot guard, which may leave this profile's
+laser pin undriven.
 
 To set it up:
 

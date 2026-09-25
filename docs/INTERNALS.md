@@ -175,9 +175,8 @@ These rules protect the timing and the laser:
   pull-up is so stiff that a resistor strong enough to beat it would exceed
   the Arduino's 20 mA per-pin limit.
 
-The operating rule that follows from the last two, switching the laser off
-before anything resets the board, is in
-[WORKFLOW.md](WORKFLOW.md#7-optional-stimulation).
+The operating rule that follows from the last two is the
+[laser warning](WORKFLOW.md#7-optional-stimulation).
 
 ### The serial protocol
 
