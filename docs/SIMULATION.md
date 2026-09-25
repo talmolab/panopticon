@@ -93,25 +93,28 @@ because `load_backend` takes only a name. A second copy in the backend would be
 what the application built, while `camera_manager` checks the cameras against
 the profile. Growing the simulated rig is an edit to this file.
 
-The fields that select or shape the simulation:
+The fields that mean something different on the simulated rig
+([CONFIGURATION.md](CONFIGURATION.md) describes every field):
 
-| Field | Value | What it does here |
-|---|---|---|
-| `camera_backend` | `sim` | Selects `SimBackend` |
-| `serial_port` | `sim` | `TeensyController` opens a `SimSerial` on the shared clock instead of a port |
-| `encoder` | `auto` | NVENC when the driver grants a session per camera, else libx264 |
-| `n_cameras` | `3` | How many simulated cameras exist, and the count `open_all` checks |
-| `frame_width` / `frame_height` | `640` / `400` | The simulated sensor size, the NV12 ring's geometry, and the size `open_all` checks |
-| `frame_rate` | `100` | The recording trigger rate sent to the simulated board |
-| `calibration_frame_rate` | `30` | The calibration trigger rate |
-| `trigger_rate_limit` | `165` | The simulated camera applies `exposure + 1/trigger_rate_limit`, so an over-long exposure makes it ignore triggers, as on the rig |
-| `realtime_encode` / `realtime_kick` | `true` / `true` | The rig's capture path |
-| `kick_max_lag` | `240` | The kick-out cap; small frames keep the ring cheap |
-| `max_num_buffer` | `600` | Recorded, not allocated: the simulated pool is four buffers deep (`sim.BUFFER_POOL`), so a leaked result fails at once |
-| `pfs_path` | a `.pfs` | Ignored: the simulated camera has no settings file |
-| `trigger_pins` / `stim_safe_pins` | `[2, 4, 6, 8, 10, 12]` / `[53]` | Compiled into the sketch, so the pin guards and the boot order run |
-| `pin_capture_threads` | `false` | No hybrid-CPU placement to tune here |
-| `thermal_poll_s` | `0` | The simulated temperatures never move; `SimBackend.thermals()` still answers in the thermal watch's keys |
+- `camera_backend: sim` selects `SimBackend`, and `serial_port: sim` makes
+  `TeensyController` open a `SimSerial` on the shared clock instead of a port.
+- `n_cameras: 3`, `frame_width: 640` and `frame_height: 400` are the simulated
+  rig's shape: how many cameras exist, the sensor size and the NV12 ring's
+  geometry, which `open_all` then checks as on the rig.
+- The simulated camera applies `exposure + 1/trigger_rate_limit` (165), so an
+  over-long exposure makes it ignore triggers, as on the rig.
+- `max_num_buffer` is recorded and not allocated: the simulated pool is four
+  buffers deep (`sim.BUFFER_POOL`), so a leaked result fails at once.
+- `pfs_path` is ignored, because the simulated camera has no settings file.
+- `trigger_pins` and `stim_safe_pins` are compiled into the sketch, so the pin
+  guards and the boot order run.
+- `thermal_poll_s: 0`, because the simulated temperatures never move.
+  `SimBackend.thermals()` still answers in the thermal watch's keys.
+
+The other fields take the rig's values: the capture path of
+`realtime_encode: true` and `realtime_kick: true`, `encoder: auto`, 100 fps for
+recordings and 30 for calibration, and `kick_max_lag: 240`, which small frames
+keep cheap.
 
 The baseline exposure and gain are `sim.BASELINE_EXPOSURE_US` (3000 µs) and
 `sim.BASELINE_GAIN_DB` (6.0 dB), the values the reference rig records with, so

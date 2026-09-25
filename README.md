@@ -104,11 +104,9 @@ first.
 | Profile field | What to set |
 |---|---|
 | [`name`](docs/CONFIGURATION.md#name) | The name shown in the profile dropdown and given to `--profile`. |
-| [`camera_backend`](docs/CONFIGURATION.md#camera_backend) | `basler` or `flir` (`sim` and `flir_sim` are simulated rigs). |
-| [`camera_serials`](docs/CONFIGURATION.md#camera_serials) | Every camera's serial number, quoted, in ascending order. |
-| [`n_cameras`](docs/CONFIGURATION.md#n_cameras) | How many cameras must be present. Any other count refuses to open. |
-| [`pfs_path`](docs/CONFIGURATION.md#pfs_path) or [`camera`](docs/CONFIGURATION.md#camera) | Camera settings: a Basler `.pfs` file, or the FLIR `camera:` block. |
-| [`frame_rate`](docs/CONFIGURATION.md#frame_rate) | The recording trigger rate. Keep exposure under the [exposure ceiling](docs/GLOSSARY.md#exposure-ceiling). |
+| [`camera_backend`](docs/CONFIGURATION.md#camera_backend), [`pfs_path`](docs/CONFIGURATION.md#pfs_path), [`camera`](docs/CONFIGURATION.md#camera) | `basler` with a `.pfs` settings file, or `flir` with a `camera:` block. `sim` and `flir_sim` are simulated. |
+| [`camera_serials`](docs/CONFIGURATION.md#camera_serials), [`n_cameras`](docs/CONFIGURATION.md#n_cameras) | Every camera's serial number, quoted, in ascending order, and how many cameras must be present. |
+| [`frame_rate`](docs/CONFIGURATION.md#frame_rate) | The recording trigger rate. Keep exposure under the [exposure ceiling](docs/CONFIGURATION.md#exposure-ceiling). |
 | [`serial_port`](docs/CONFIGURATION.md#serial_port), [`trigger_pins`](docs/CONFIGURATION.md#trigger_pins) | The trigger board's port, and every pin wired to a camera. A camera on an unlisted pin gets no triggers. |
 | [`stim_safe_pins`](docs/CONFIGURATION.md#stim_safe_pins) | Every pin wired to a laser or LED driver, held low from boot. |
 | [`output_dir`](docs/CONFIGURATION.md#output_dir) | Where sessions go. Use your largest, fastest drive. |

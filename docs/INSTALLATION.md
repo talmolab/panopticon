@@ -130,7 +130,7 @@ Which pins to use on a Mega:
 | Pins | Rule |
 |---|---|
 | `0` and `1` | Never. They carry the serial link that configures the board. The profile loader refuses them in `trigger_pins`. |
-| Any pin in `stim_safe_pins` | Never. The loader refuses a pin listed in both. |
+| A pin wired to a laser or LED | Never. It belongs in `stim_safe_pins`, and the loader refuses a pin listed in both. |
 | `14` to `19` | Avoid. They are the board's extra serial ports. The sketch does not use them, so they work as outputs. |
 
 The stimulation editor refuses a stimulation block on a camera's trigger pin,
