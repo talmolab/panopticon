@@ -607,7 +607,8 @@ Dead ends, do not retry:
   Before, it listed them only in a comment and named the cameras in
   serial-number order, so a camera that failed to enumerate renamed every camera
   after it. The list is in ascending order, which is the order the cameras were
-  already named in, so existing calibrations keep their camera names.
+  already named in, so existing calibrations keep their camera names
+  (`e68d682`).
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
