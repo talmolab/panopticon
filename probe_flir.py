@@ -67,7 +67,6 @@ import contextlib
 import ctypes
 import dataclasses
 import hashlib
-import importlib
 import json
 import math
 import os
@@ -4368,55 +4367,15 @@ def _wrap_run(p: Probe, h) -> dict:
 
 
 # =============================================================== --pyspin
-def _ps_node(ps, nodemap, name, kind):
-    ptr = {"enum": "CEnumerationPtr", "int": "CIntegerPtr",
-           "float": "CFloatPtr", "bool": "CBooleanPtr",
-           "string": "CStringPtr"}[kind]
-    return getattr(ps, ptr)(nodemap.GetNode(name))
-
-
-def _ps_set(ps, nodemap, name, value) -> bool:
-    try:
-        if isinstance(value, bool):
-            n = _ps_node(ps, nodemap, name, "bool")
-        elif isinstance(value, int):
-            n = _ps_node(ps, nodemap, name, "int")
-        elif isinstance(value, float):
-            n = _ps_node(ps, nodemap, name, "float")
-        else:
-            n = _ps_node(ps, nodemap, name, "enum")
-            if not (ps.IsAvailable(n) and ps.IsWritable(n)):
-                return False
-            e = n.GetEntryByName(value)
-            if not (ps.IsAvailable(e) and ps.IsReadable(e)):
-                return False
-            n.SetIntValue(e.GetValue())
-            return True
-        if not (ps.IsAvailable(n) and ps.IsWritable(n)):
-            return False
-        if isinstance(value, float):
-            value = min(max(value, n.GetMin()), n.GetMax())
-        n.SetValue(value)
-        return True
-    except Exception:
-        return False
-
-
-def _ps_get_string(ps, nodemap, name):
-    try:
-        n = _ps_node(ps, nodemap, name, "string")
-        return n.GetValue() if ps.IsAvailable(n) and ps.IsReadable(n) else None
-    except Exception:
-        return None
-
-
 def stage_pyspin(p: Probe):
     """--pyspin: PySpin's GetNDArray (view or copy) and the GIL during a
-    PySpin wait, on one camera. PySpin is imported here and nowhere else;
+    PySpin wait, on one camera. The PySpin calls live in
+    gui_app/backends/pyspin_probe.py, the one module that imports PySpin;
     under --fake only a module that declares PANOPTICON_FAKE is used."""
+    from gui_app.backends import pyspin_probe
     sdk = p.report["sdk"]
     try:
-        ps = importlib.import_module("PySpin")
+        ps = pyspin_probe.load()
     except Exception as e:
         sdk["pyspin_import_error"] = _err(e)
         p.check("pyspin", "PySpin is installed", "SKIP",
@@ -4432,104 +4391,14 @@ def stage_pyspin(p: Probe):
         return
     rep = {}
     p.report["pyspin"] = rep
-    import numpy as np
     p.release_devices()
-    system = ps.System.GetInstance()
-    try:
-        v = system.GetLibraryVersion()
-        sdk["pyspin_version"] = ".".join(str(getattr(v, k, "?")) for k in
-                                         ("major", "minor", "type", "build"))
-    except Exception as e:
-        sdk["pyspin_version"] = None
-        sdk["pyspin_version_error"] = _err(e)
-    cams = system.GetCameras()
-    want = [str(s) for s in (getattr(p.profile, "camera_serials", None) or [])]
-    cam = None
-    try:
-        for i in range(cams.GetSize()):
-            c = cams.GetByIndex(i)
-            serial = _ps_get_string(ps, c.GetTLDeviceNodeMap(),
-                                    "DeviceSerialNumber")
-            if not want or serial in want:
-                cam, rep["serial"] = c, serial
-                break
-            del c
-        if cam is None:
-            p.check("pyspin", "a camera", "FAIL", "PySpin lists no camera")
-            return
-        cam.Init()
-        try:
-            nm = cam.GetNodeMap()
-            snm = cam.GetTLStreamNodeMap()
-            for sel in ("FrameStart", "AcquisitionStart", "FrameBurstStart"):
-                if _ps_set(ps, nm, "TriggerSelector", sel):
-                    _ps_set(ps, nm, "TriggerMode", "Off")
-            _ps_set(ps, nm, "AcquisitionMode", "Continuous")
-            _ps_set(ps, snm, "StreamBufferCountMode", "Manual")
-            _ps_set(ps, snm, "StreamBufferCountManual", SELFTEST_BUFFERS)
-            _ps_set(ps, nm, "AcquisitionFrameRateEnable", True)
-            _ps_set(ps, nm, "AcquisitionFrameRate", SELFTEST_FPS)
-            shares, own, base, ptrs, n = [], [], set(), set(), 0
-            cam.BeginAcquisition()
-            try:
-                for _k in range(2 * SELFTEST_BUFFERS):
-                    img = cam.GetNextImage(2000)
-                    try:
-                        if img.IsIncomplete():
-                            continue
-                        a = img.GetNDArray()
-                        b = img.GetNDArray()
-                        shares.append(bool(np.shares_memory(a, b)))
-                        own.append(bool(a.flags.owndata))
-                        base.add(type(a.base).__name__)
-                        ptrs.add(int(a.ctypes.data))
-                        n += 1
-                        del a, b
-                    finally:
-                        img.Release()
-            finally:
-                cam.EndAcquisition()
-            zc = {"frames": n, "buffers": SELFTEST_BUFFERS,
-                  "shares_memory": all(shares) if shares else None,
-                  "owndata": any(own) if own else None,
-                  "base_type": sorted(base), "distinct_ptrs": len(ptrs)}
-            rep["zero_copy"] = zc
-            _ps_set(ps, nm, "AcquisitionFrameRate", GIL_FPS)
-            meter = _GilMeter()
-            try:
-                cam.BeginAcquisition()
-                try:
-                    def wait(stop):
-                        seen = {"frames": 0, "errors": 0, "last_error": None}
-                        while not stop.is_set():
-                            try:
-                                im = cam.GetNextImage(2000)
-                            except Exception as e:
-                                # A timeout (-1011) retries at once; any
-                                # other error is counted and waits, so the
-                                # meter does not measure a spinning loop.
-                                if getattr(e, "errorcode", None) != -1011:
-                                    seen["errors"] += 1
-                                    seen["last_error"] = _err(e)
-                                    time.sleep(0.05)
-                                continue
-                            im.Release()
-                            seen["frames"] += 1
-                        return seen
-                    rep["gil"] = meter.held(wait, GIL_WINDOW_S)
-                finally:
-                    cam.EndAcquisition()
-            finally:
-                meter.close()
-        finally:
-            cam.DeInit()
-    finally:
-        del cam
-        cams.Clear()
-        try:
-            system.ReleaseInstance()
-        except Exception as e:
-            rep["release_error"] = _err(e)
+    found = pyspin_probe.measure(
+        ps, getattr(p.profile, "camera_serials", None), rep, sdk,
+        buffers=SELFTEST_BUFFERS, selftest_fps=SELFTEST_FPS, gil_fps=GIL_FPS,
+        gil_window_s=GIL_WINDOW_S, make_meter=_GilMeter, err=_err)
+    if not found:
+        p.check("pyspin", "a camera", "FAIL", "PySpin lists no camera")
+        return
     zc = rep.get("zero_copy", {})
     view = zc.get("shares_memory") and not zc.get("owndata")
     frac = rep.get("gil", {}).get("held_fraction")
