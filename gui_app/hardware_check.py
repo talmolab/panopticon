@@ -1057,10 +1057,10 @@ def check_capacity(n_cams: int, width: int, height: int,
             # A WARNING, never a blocker. `minutes` is an assumed worst case, not
             # a known recording length, and it is the most speculative number
             # here — so it must not be the one the operator cannot override. It
-            # would otherwise refuse a raw-capture profile outright, which
-            # CLAUDE.md documents as the fallback when the real-time path
-            # misbehaves, over hundreds of GiB demanded for what may be a
-            # one-minute test.
+            # would otherwise refuse a raw-capture profile outright (the path
+            # for a computer that cannot encode every camera live,
+            # CONFIGURATION.md `realtime_encode`), over hundreds of GiB
+            # demanded for what may be a one-minute test.
             warnings.append(
                 f"Disk may be short: a {minutes:g}-minute recording would need "
                 f"~{need_disk_gb:.0f} GiB and only {free_gb:.0f} GiB is free. "

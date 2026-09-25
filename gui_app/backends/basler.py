@@ -96,11 +96,11 @@ class BaslerBackend:
     def describe(self, cam) -> dict:
         """Read geometry and format back FROM THE CAMERA.
 
-        Never trust the profile here. `CLAUDE.md` tells users to edit the .pfs in
-        pylon Viewer, where pixel format and ROI are one click apart, and a
-        Mono12 .pfs makes every frame uint16 — which the NV12 copy then truncates
-        **mod 256 with no error at all**, producing a full-length, perfectly
-        aligned, visually shredded recording.
+        Never trust the profile here. Users edit the .pfs in pylon Viewer
+        (INSTALLATION.md step 6), where pixel format and ROI are one click
+        apart, and a Mono12 .pfs makes every frame uint16 — which the NV12
+        copy then truncates **mod 256 with no error at all**, producing a
+        full-length, perfectly aligned, visually shredded recording.
         """
         out = {
             "width": cam.Width.GetValue(),

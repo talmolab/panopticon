@@ -633,9 +633,9 @@ class CameraManager(QObject):
                 # asks for would find the camera busy.
                 self._cameras.append(cam)
                 # Read back what the .pfs actually applied. FeaturePersistence
-                # is loaded with validation disabled, and CLAUDE.md tells users
-                # to edit the .pfs in pylon Viewer — where ROI and pixel format
-                # are one click away. Both failure modes are severe:
+                # is loaded with validation disabled, and users edit the .pfs
+                # in pylon Viewer (INSTALLATION.md step 6), where ROI and pixel
+                # format are one click away. Both failure modes are severe:
                 #   - a Width/Height divergence makes `buf[:H,:] = img` raise
                 #     EVERY frame, which now retires the camera but wastes a
                 #     session;

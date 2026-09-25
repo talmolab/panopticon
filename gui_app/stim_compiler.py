@@ -337,7 +337,8 @@ def forbidden_pin_uses(blocks: list[dict], trigger_pins=(),
       quietly stops meaning simultaneity. `frame_sync`, `alignment.py` and
       `stim_trace` all take that identity as given.
     - **RX0/TX0 (pins 0 and 1).** Driving them garbles the serial protocol and
-      the RDY ack that CLAUDE.md calls "the whole safety property". Pin 0 is
+      the RDY ack that confirms every start (`TeensyController.start_triggers`),
+      which is what tells a started board from a failed start. Pin 0 is
       especially easy to hit because a blank pin field in the editor coerces to
       0.
 
