@@ -7,8 +7,8 @@
 #
 # To use it, copy it into profiles/, give it a name of your own, and replace
 # every value marked SITE. Files in profiles/templates/ never appear in the
-# profile dropdown. docs/CONFIGURATION.md ("Your own TTL source") gives the
-# whole procedure and describes every field.
+# profile dropdown. docs/WORKFLOW.md ("Your own trigger source") gives the
+# procedure, and docs/CONFIGURATION.md describes every field.
 #
 # With trigger_source: external a recording runs like this:
 #   1. Keep your trigger source stopped and press Record.
@@ -23,8 +23,9 @@
 #      The recording ends once every camera has stopped receiving frames.
 # Calibrate works the same way, with the source at calibration_frame_rate.
 #
-# Panopticon cannot read your source's rate, so frame_rate must be the rate
-# it runs at; the block-ID rate check after each recording compares the two.
+# Panopticon cannot read your source's rate, so frame_rate and
+# calibration_frame_rate must be the rates you run it at. The block-ID rate
+# check after each acquisition compares each camera with that rate.
 # Stimulation runs on Panopticon's trigger board, so it is unavailable here.
 # There is no serial_port, trigger_pins or stim_safe_pins: this mode opens no
 # board, and the profile refuses them.
