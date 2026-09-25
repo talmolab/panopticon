@@ -1117,20 +1117,19 @@ counts.
 
 ### NVENC sessions
 
-A session is one live NVENC encode context, and the driver caps how many
-exist at once. The cap is undocumented and has moved across driver versions (2,
-3, 5, 8, then 12 on the reference rig's driver), so it is probed, never
-hardcoded. `nvenc.probe_max_sessions_isolated()` creates encoders in a child
-process until the driver refuses or the count asked for is reached, and the
-child's exit frees them all. The encoder selection and the capacity check ask
-for `n_cameras + 2`. When the probe grants fewer than `n_cameras`, no start
-proceeds on NVENC, because a camera without a session would fall back to
-`raw.bin`, which writes every frame whole. The cap is often what limits how
-many cameras one GPU can encode, so more cameras need a GPU whose driver grants
-more sessions. The remux after a real-time recording is a stream copy and uses
-no session. The raw-mode encode, the tail merge and the alignment re-encode run
-ffmpeg's `h264_nvenc` (libx264 where that failed the launch check), up to
-`encode_parallel` jobs at once.
+A session is one live NVENC encode context, and the driver caps how many exist
+at once. The cap is undocumented and has moved across driver versions (2, 3, 5,
+8, then 12 on the reference rig's driver), so it is probed, never hardcoded.
+`nvenc.probe_max_sessions_isolated()` creates encoders in a child process until
+the driver refuses or the count asked for is reached, and the child's exit frees
+them all. The encoder selection and the capacity check ask for `n_cameras + 2`.
+When the probe grants fewer than `n_cameras`, no start proceeds on NVENC,
+because a camera without a session would fall back to `raw.bin`, which writes
+every frame whole. [INSTALLATION.md](INSTALLATION.md#gpu) says what the cap
+means for the GPU a rig needs. The remux after a real-time recording is a stream
+copy and uses no session. The raw-mode encode, the tail merge and the alignment
+re-encode run ffmpeg's `h264_nvenc` (libx264 where that failed the launch
+check), up to `encode_parallel` jobs at once.
 
 The count is cached, and a cached value below what a start needs is probed
 again, because a shortfall is usually another process holding sessions for a

@@ -1299,10 +1299,9 @@ the recording may be shorter.
 Real-time encoding holds one NVENC session per camera for the whole recording.
 The NVIDIA driver limits how many sessions run at once, and the limit depends on
 the GPU and the driver version. Panopticon measures it at launch, and again at a
-start that needs more sessions than it last measured. More cameras need a more
-capable GPU, and this driver limit is often what caps the camera count. With
-`encoder: auto` and fewer sessions than cameras, Panopticon encodes on the CPU if
-its benchmark says the CPU keeps up, and otherwise refuses the start. The copies
+start that needs more sessions than it last measured.
+[INSTALLATION.md](INSTALLATION.md#gpu) says what that means for the GPU you buy,
+and [encoder](#encoder) what happens with fewer sessions than cameras. The copies
 into mp4 after Stop use no session. In raw mode, and during alignment re-encodes,
 each of the `encode_parallel` jobs holds one.
 

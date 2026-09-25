@@ -5,11 +5,10 @@ other real-time encoder: `gui_app/cpu_encode.py`, which encodes with libx264 in
 one `ffmpeg` child process per camera. It is the fallback for a machine whose
 GPU cannot give every camera an NVENC session.
 
-Panopticon still expects an NVIDIA GPU. The driver's cap on NVENC sessions is
-often what limits how many cameras one machine records
-([NVENC sessions](INTERNALS.md#nvenc-sessions)). libx264 covers a shortfall
-only while the CPU has cores to spare, and those are the cores the capture
-threads need.
+Panopticon still expects an NVIDIA GPU, sized for the camera count
+([INSTALLATION.md](INSTALLATION.md#gpu)). libx264 covers a shortfall of NVENC
+sessions only while the CPU has cores to spare, and those are the cores the
+capture threads need.
 
 ## Choosing the encoder
 

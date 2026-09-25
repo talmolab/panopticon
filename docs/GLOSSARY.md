@@ -137,8 +137,8 @@ and encodes H.264 while it records.
 
 One encode stream on NVENC. A recording needs one per camera. The driver caps how many
 sessions run at once, and the cap varies with the GPU and the driver version, so
-Panopticon measures it before it records. The cap is often what limits the camera
-count.
+Panopticon measures it before it records
+([INSTALLATION.md](INSTALLATION.md#gpu) says what that means for the GPU).
 
 ### NV12
 

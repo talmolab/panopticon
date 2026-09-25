@@ -704,9 +704,8 @@ open. These refuse the start:
   `kick_max_lag` in the profile, or close other programs.
 - `NVENC granted only S concurrent sessions but N cameras need one each (the driver caps this).`
   With `encoder: auto` this refuses only when libx264 on the CPU cannot take
-  the cameras either, and with `encoder: nvenc` it always refuses. More
-  cameras need a more capable GPU, and the driver's NVENC session cap is often
-  the limit.
+  the cameras either, and with `encoder: nvenc` it always refuses
+  ([INSTALLATION.md](INSTALLATION.md#gpu) sizes the GPU).
 - `libx264 encodes about R fps per core at WxH here, enough for K cameras at F fps, but N are open.`
   with `encoder: x264`.
 - `encoder: raw` with `realtime_encode: true`

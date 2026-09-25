@@ -53,8 +53,7 @@ What that means for you:
 
 - 64-bit Windows, in a version the Spinnaker SDK supports (Teledyne's download
   page lists them).
-- An NVIDIA GPU. Real-time encoding uses one NVENC session per camera, and the
-  driver limits how many run at once, so more cameras need a more capable GPU.
+- An NVIDIA GPU that grants one NVENC session per camera.
   [INSTALLATION.md](INSTALLATION.md#gpu) sizes it for your camera count.
 - FLIR cameras, GigE or USB3, each with a Mono8 pixel format and a hardware
   trigger input.
