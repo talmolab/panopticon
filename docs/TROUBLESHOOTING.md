@@ -225,12 +225,10 @@ Most of these appear in the status bar.
 
 ## After a recording
 
-These go to the recording's `WARNINGS.txt`. Most also appear in the
-`Recording completed with problems` dialog. In the default kick-out mode, the
-rows about unequal videos appear in a `Videos are not equal length` dialog.
-With `realtime_kick: false` or `realtime_encode: false`, the post-hoc alignment
-runs after the encode, and its rows appear in dialogs of their own, such as
-`Alignment reported problems`.
+These go to the recording's `WARNINGS.txt` and to the log, and the status bar
+says how many the take has. No dialog opens for them. With
+`realtime_kick: false` or `realtime_encode: false`, the post-hoc alignment runs
+after the encode, and its rows go to the same file.
 
 | Message or symptom | Cause and fix |
 |---|---|

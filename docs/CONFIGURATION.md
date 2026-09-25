@@ -518,8 +518,8 @@ True or false. Default `true`. Reference rig: `true`.
 
 - Does: `true` drops, during the recording, every trigger that some camera
   missed, so the videos come out aligned. When more than 0.5% of the triggers
-  are dropped, the dialog after the recording and `WARNINGS.txt` report the
-  recording's [effective frame rate](GLOSSARY.md#effective-frame-rate).
+  are dropped, `WARNINGS.txt` and the status bar report the recording's
+  [effective frame rate](GLOSSARY.md#effective-frame-rate).
   `session_metadata.json` holds the counts (`kickout`). `false` records every
   frame each camera caught and aligns the videos after the recording with a
   full re-encode.
@@ -833,8 +833,8 @@ Number, °C. Default `3.0`. Reference rig: `2.0`.
   temperature is judged by its own temperature status: any status but `Ok`
   warns, Critical included. One that reports neither cannot warn, and the log
   says which, once per camera. A camera that reaches its shutdown point is
-  named in `WARNINGS.txt` and the post-session dialog. A warning below that
-  point reaches them only when the recording lost frames.
+  named in `WARNINGS.txt`. A warning below that point reaches it only when
+  the recording lost frames.
 
 #### `log_level`
 

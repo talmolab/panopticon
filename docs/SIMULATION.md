@@ -77,11 +77,10 @@ The encoder depends on the host. `profiles/sim.yaml` sets `encoder: auto`, so
 the launch check picks NVENC on a machine that has it and libx264 on one that
 does not. On the CPU path Panopticon asks "Proceed?" before each acquisition,
 because the capacity check warns that it records on the CPU, and after it
-shows "Recording completed with problems" with libx264's note from
-`WARNINGS.txt`. The GPU path shows neither. To try the CPU path on a machine
-with a GPU, set `encoder: x264` in a copy of `profiles/sim.yaml` that has a
-`name` of its own; a forced libx264 shows the completion note but no
-"Proceed?". [CPU_ENCODE.md](CPU_ENCODE.md) describes the CPU path.
+writes libx264's note to `WARNINGS.txt`. The GPU path does neither. To try the
+CPU path on a machine with a GPU, set `encoder: x264` in a copy of
+`profiles/sim.yaml` that has a `name` of its own; a forced libx264 writes the
+note but asks no "Proceed?". [CPU_ENCODE.md](CPU_ENCODE.md) describes the CPU path.
 
 ---
 
