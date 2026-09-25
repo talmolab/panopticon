@@ -518,7 +518,7 @@ The probe works with your source too:
   hub or a 1 GbE link. Spread the cameras over controllers and links, and test
   them together in SpinView.
 - On a camera without counters there is no count of ignored triggers. The
-  block-ID rate check after each recording is then the only check, as on a
+  block-ID rate check after each acquisition is then the only check, as on a
   Basler rig, and the log says the camera has no counters.
 - On a camera whose trigger counters are narrower than 32 bits, the count of
   ignored triggers covers only a recording shorter than half the counter's
@@ -533,8 +533,8 @@ The probe works with your source too:
 - A camera that reports no shutdown temperature is judged by its own
   temperature status instead. One that reports neither raises no temperature
   alert. The log says which, once per camera.
-- With your own trigger source, stimulation is unavailable, and the rate is
-  checked only after each recording.
+- With your own trigger source, stimulation is unavailable, and the source's
+  rate is checked only by the block-ID rate check after each acquisition.
 
 ## When something refuses
 

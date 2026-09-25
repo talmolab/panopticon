@@ -48,10 +48,11 @@ ignored triggers. With `trigger_counter` block IDs, each ignored trigger is a ga
 
 ### Block-ID rate check
 
-After every recording, Panopticon compares how fast each camera's block IDs advanced
-with that camera's own hardware clock. When the block IDs count frames, a camera that
-ignored triggers falls behind the trigger rate, and the check reports it in
-`WARNINGS.txt`. The two rates may differ by 0.3% before the check reports a camera.
+After every recording and calibration, Panopticon compares how fast each camera's
+block IDs advanced with that camera's own hardware clock. When the block IDs count
+frames, a camera that ignored triggers falls behind the trigger rate, and the check
+reports it in `WARNINGS.txt`. The two rates may differ by 0.3% before the check
+reports a camera.
 
 ### Trigger witness
 
