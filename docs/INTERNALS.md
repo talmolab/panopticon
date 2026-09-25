@@ -1566,12 +1566,12 @@ is where a better global solution would come from.
 
 Camera names are positions: cam{i+1} is entry i of the profile's
 `camera_serials`, or, without that list, the i-th camera in the backend's
-serial-sorted enumeration. The names are baked into the extrinsics. Without a
-serial list, a camera that fails to enumerate renames every camera after it,
-and every extrinsic then attaches to the wrong physical camera while the
-triangulation still produces plausible numbers. `n_cameras` makes
-`open_all()` refuse any other number of available cameras, and
-`camera_serials` names a missing camera instead. Every acquisition's
+serial-sorted enumeration. The names are baked into the extrinsics, so a
+name that moves to another camera attaches every extrinsic to the wrong
+physical camera while the triangulation still produces plausible numbers
+([camera_serials](CONFIGURATION.md#camera_serials) says when that happens).
+`n_cameras` makes `open_all()` refuse any other number of available cameras,
+and `camera_serials` names a missing camera instead. Every acquisition's
 `session_metadata.json` records which serial each name had, and the solve
 warns when another acquisition in the session had a different serial under a
 name it solved.
