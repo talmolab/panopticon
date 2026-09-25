@@ -111,7 +111,7 @@ Panopticon at launch:
    the board's flash memory and survives quitting, a power cycle and an
    unplugged cable. So Panopticon reflashes the board at every launch, unless
    this computer's record says the board already carries the recording-only
-   sketch. The sidebar reads `Clearing stim firmware…` for about 30 s. If
+   sketch. The sidebar reads `Clearing stim firmware…` while it flashes. If
    the flash fails, a `Could not clear stim firmware` dialog says the board
    may still carry a paradigm, possibly a looping one. Open Stimulation and
    press Apply with an empty canvas before you record, or switch the laser
@@ -161,14 +161,14 @@ to start from. The dropdown at the top of the sidebar lists every profile that
 loaded. A file that fails to load is left out, and after the window opens a
 `Rig profiles` dialog names the file and the field at fault.
 
-Choosing a profile closes the cameras and opens the new profile's. The sidebar
-reads `Switching cameras…` for a second or two. Panopticon remembers the choice
-on this computer and opens it at the next launch.
+Choosing a profile closes the cameras and opens the new profile's, while the
+sidebar reads `Switching cameras…`. Panopticon remembers the choice on this
+computer and opens it at the next launch.
 
 When the new profile names a different serial port, Panopticon sends the old
 board a stop and closes its link. The new board then gets the launch sequence,
-including the 30 s flash. Choosing a profile on a new computer runs the same
-sequence on that profile's board.
+flash included. Choosing a profile on a new computer runs the same sequence on
+that profile's board.
 
 [OVERVIEW.md](OVERVIEW.md#4-profile) says when the dropdown is disabled and
 when it refuses a switch.
@@ -251,8 +251,7 @@ A Date that is not a `YYYYMMDD` calendar date is refused with a
 folder name, such as one with a slash, `..`, a reserved Windows name or a
 trailing dot or space.
 
-Press Snapshot to save one full-resolution PNG per camera into
-`<session>/snapshots/<date>_<HHMMSS>/`.
+Snapshot saves into `<session>/snapshots/<date>_<HHMMSS>/`.
 [OVERVIEW.md](OVERVIEW.md#10-snapshot) says what a snapshot shows.
 
 ---
@@ -292,7 +291,7 @@ A calibration is an acquisition, so the checks under [Record](#8-record) run
 for it as well. They include the prompt when the `calibration/` folder already
 holds data. A calibration always runs under the recording-only sketch. If a
 paradigm is on the board, Panopticon first flashes the recording-only sketch
-(`Flashing recording-only firmware…`, about 30 s). A calibration therefore
+(`Flashing recording-only firmware…`). A calibration therefore
 never runs stimulation while you stand in the arena.
 
 Flip Calibrate on. The cameras switch to triggered mode at
@@ -488,8 +487,8 @@ aniposelib both read the `calibration.toml` this writes.
 A calibration describes the cameras as they were while the board was recorded.
 From the calibration to the last recording of the session, do not move,
 re-aim, refocus or re-mount any camera. If one is bumped, calibrate again
-before you record. A moved camera leaves the frame counts, the plot and the
-warnings unchanged, and the 3D output is wrong.
+before you record. No count, plot or warning shows a moved camera. Only the 3D
+output does, and it is wrong.
 
 ---
 
@@ -554,7 +553,7 @@ whenever the serial port is opened or the board is flashed:
   sketch (`Flashing recording-only firmware…`). The next recording flashes the
   paradigm back (`Flashing recording + stimulation firmware…`). After a failed
   launch flash, the first Calibrate or Record can flash the recording-only
-  sketch too. Each flash takes about 30 s;
+  sketch too;
 - at the first Calibrate, Record or Test after the port could not be opened.
   At launch the log then says `will retry on first use`. After an Apply the
   editor's status line says that Record reopens the port;
@@ -573,7 +572,7 @@ Manager during a flash: while the sidebar reads `Clearing stim firmware…` or a
 ### Apply, then Record
 
 The paradigm is compiled into the board's sketch. Nothing you draw reaches the
-board until Apply compiles and uploads it, which takes about 30 s. Record then
+board until Apply compiles and uploads it. Record then
 sends its usual start command, and the board runs the paradigm from the first
 trigger on its own clock.
 
@@ -592,11 +591,8 @@ launch, Load it and press Apply.
 
 ### Build a paradigm
 
-A block drives one pin with one square wave for a set time. An arrow means
-"when this block ends, start that one", so a chain runs in sequence. Chains
-that are not connected run at the same time.
-[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) describes each field and
-button, and the rules a graph must follow.
+[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) says what blocks and arrows
+mean, and describes each field and button and the rules a graph must follow.
 
 1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block.
 2. Drag from a port on one block to a port on another to connect them.
@@ -606,8 +602,8 @@ button, and the rules a graph must follow.
 4. Read the preview's caption before you Apply. A pulse as long as its period
    or longer holds the pin HIGH for the whole block
    ([the waveform preview](OVERVIEW.md#the-waveform-preview)).
-5. Save writes the graph as JSON, by default `stim_config.json` in the output
-   folder. Load reads one back.
+5. Save the graph if you will use it again
+   ([Load and Save](OVERVIEW.md#11-apply-to-arduino)).
 
 ### A worked paradigm
 
@@ -620,17 +616,10 @@ on pin 53, joined in one chain:
 2. 20 Hz, 10 ms, 30 s: 20 pulses a second, 10 ms each, at 20% duty.
 3. 0 Hz, 0 ms, 300 s, with Ending ticked.
 
-The status line then reads `Recording will stop 630 s after start.` Press Test
-with the beam blocked, and watch the paradigm run once without recording. Then
-press Apply, wait for `Upload successful — press Record to run paradigm.`, and
-press Record.
-
-### Test
-
-Press Test to run the paradigm on the board with no camera triggered and
-nothing recorded. [OVERVIEW.md](OVERVIEW.md#10-test) describes its countdown,
-how a looping test ends, and what to do when the board does not confirm the
-stop.
+The status line then reads `Recording will stop 630 s after start.` Press
+[Test](OVERVIEW.md#10-test) with the beam blocked, and watch the paradigm run
+once without recording. Then press Apply, wait for
+`Upload successful — press Record to run paradigm.`, and press Record.
 
 ### After a stimulated recording
 
@@ -669,7 +658,7 @@ the start before anything is recorded:
 4. Capacity, for the open cameras at this acquisition's frame rate
    ([Capacity](#capacity)).
 5. The board's sketch. When the board does not carry the sketch this
-   recording needs, Panopticon flashes it, which takes about 30 s
+   recording needs, Panopticon flashes it first
    ([section 7](#when-the-board-resets)).
 6. Data already in the folder
    ([If the folder already holds data](#if-the-folder-already-holds-data)).
@@ -721,7 +710,7 @@ These warn, in a `Proceed?` dialog that asks `Start anyway?`:
 - raw capture (`realtime_encode: false`) that writes faster than 1.5 GiB/s, or
   whose encode after the stop has to run on the CPU.
 
-There is no RAM warning: RAM either refuses the start or raises nothing.
+Low RAM never warns: it refuses the start, as above.
 
 ### If the folder already holds data
 
@@ -754,15 +743,15 @@ that ends before then puts it back.
 
 ### While it records
 
-The state label reads `RECORDING` in red. Each pane's frame rate should read
+The state label reads `RECORDING`. Each pane's frame rate should read
 the trigger rate, 100 fps on the reference rig. One pane at about half the
 rate usually means that camera's exposure is over the ceiling
 ([CONFIGURATION.md](CONFIGURATION.md#trigger_rate_limit)).
 
 With real-time kick-out (`realtime_kick: true`, the default), Panopticon
 drops every trigger that some camera missed while it records, so every video
-holds the same triggers. The status bar reports capture health each time
-the [frame-rate labels](OVERVIEW.md#3-frame-rate) refresh. In kick-out it
+holds the same triggers. The status bar reports
+[capture health](OVERVIEW.md#17-status-bar). In kick-out it
 counts how many triggers the slowest camera is behind the fastest, against a
 cap of `kick_max_lag` (480 on the reference rig).
 
@@ -965,7 +954,7 @@ and `--truncate-to-shortest` cuts every camera anyway. A camera with a
 
 The command also runs the block-ID rate check on every camera. A camera that
 ignores triggers keeps equal frame counts and gapless block IDs while its
-frames drift in time, and only this check finds it. The command always writes
+frames drift in time, and this check is what names it. The command always writes
 the `aligned/` index, even for a clean recording. Only `--replace` changes the
 videos. Its exit status is 0 when all is well, 2 for a warning such as a rate
 warning, and 1 for an error or a refused replace.

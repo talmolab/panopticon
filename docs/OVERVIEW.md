@@ -20,7 +20,7 @@ are finalised.
 The camera grid fills the left of the window, and a sidebar 260 px wide fills
 the right. The sidebar holds the Metadata, Acquisition and Display groups,
 with the state label at its foot. The status bar runs along the bottom of the
-window. There is no settings window: everything else lives in the rig profile
+window. Every other setting is in the rig profile
 ([CONFIGURATION.md](CONFIGURATION.md)). The window opens at about 80% of the
 screen height, shaped to fit the camera grid.
 
@@ -42,15 +42,13 @@ apart, which keeps display work away from capture.
 | Recording | triggered at `frame_rate` | every 10th frame |
 
 The preview freezes on its last frame during a blocking operation, which the
-state label (16) names. A profile switch or the end of an acquisition takes a
-second or two, a firmware flash about 30 s.
+state label (16) names, with how long it takes.
 
 #### 2. Camera pane
 
 Each pane carries its camera's name, `cam1` to `camN`, in its top-left corner.
-Every file name and the calibration use that name.
 [WORKFLOW.md](WORKFLOW.md#camera-names) explains how names are assigned and
-why a missing camera matters. Double-click a pane to fill the grid with that
+where they are used. Double-click a pane to fill the grid with that
 camera, and double-click it again to go back.
 
 #### 3. Frame rate
@@ -66,7 +64,7 @@ link or trigger.
 
 #### 4. Profile
 
-Chooses the rig profile, one YAML file in `profiles/`.
+Chooses the rig profile ([CONFIGURATION.md](CONFIGURATION.md)).
 [WORKFLOW.md](WORKFLOW.md#2-choose-a-profile) says what a switch does to the
 cameras and the trigger board. On a computer with no remembered profile the
 dropdown shows `Choose a profile`.
@@ -84,12 +82,9 @@ shortened in the middle, with the full path as its tooltip.
 
 #### 6. Session fields
 
-Date, Mouse 1, Mouse 2, Assay, Experimenter, Cohort, Cage and Notes. Date and
-the two mice build the folder and file names, and all eight go into
-`session_metadata.json`. Assay, Experimenter, Cohort, Cage and Notes start with
-the profile's `metadata_defaults`.
-[WORKFLOW.md](WORKFLOW.md#4-fill-in-the-metadata) gives the defaults and the
-checks.
+Date, Mouse 1, Mouse 2, Assay, Experimenter, Cohort, Cage and Notes.
+[WORKFLOW.md](WORKFLOW.md#4-fill-in-the-metadata) says what each one feeds,
+gives the defaults and lists the checks.
 
 ### Acquisition
 
@@ -99,10 +94,9 @@ Solve, Record.
 
 #### 7. Calibrate
 
-Starts and stops a calibration. The cameras are triggered at
-`calibration_frame_rate` with the calibration exposure and gain, and the board
-always runs the [recording-only sketch](GLOSSARY.md#recording-only-sketch).
-The coverage display (12) appears. See [WORKFLOW.md](WORKFLOW.md#5-calibrate).
+Starts and stops a calibration, and shows the coverage display (12).
+[WORKFLOW.md](WORKFLOW.md#5-calibrate) says what a calibration does to the
+cameras and the board.
 
 #### 8. Record
 
@@ -154,8 +148,8 @@ when the board is too dark to detect.
 #### 15. Progress
 
 Shown while the videos are finalised (`Encoding k/N`) or aligned
-(`Aligning k/N`), where N is the number of cameras. With real-time encoding,
-finalising copies each stream into an mp4 and takes seconds.
+(`Aligning k/N`), where N is the number of cameras.
+[WORKFLOW.md](WORKFLOW.md#9-after-you-stop) says what each step does.
 
 #### 16. State
 
@@ -177,13 +171,13 @@ that could start something is disabled and the cursor shows a wait:
 
 | Text | Operation |
 |---|---|
-| `Switching cameras…` | Closing the cameras and opening the new profile's |
-| `Clearing stim firmware…` | The launch flash to the recording-only sketch, about 30 s |
+| `Switching cameras…` | Closing the cameras and opening the new profile's, a second or two |
+| `Clearing stim firmware…` | The launch flash to the [recording-only sketch](GLOSSARY.md#recording-only-sketch), about 30 s |
 | `Flashing recording-only firmware…` | Before a calibration, when a paradigm was on the board, about 30 s |
 | `Flashing recording + stimulation firmware…` | Before a recording, putting the Applied paradigm back, about 30 s |
 | `Checking capacity…` | The capacity checks at Calibrate or Record |
 | `Starting...` | Arming the cameras and starting the trigger board |
-| `Finishing…` | Stopping the cameras and saving the capture |
+| `Finishing…` | Stopping the cameras and saving the capture, a second or two |
 | `Updating the stimulus trace...` | Rewriting `stim_trace.csv` after an alignment |
 | `Cancelling…` | Ending a start on your own trigger source that recorded nothing |
 
@@ -198,9 +192,7 @@ not. Do not end Panopticon during a flash
 Carries the hardware check's progress, snapshot results, the solve's progress
 and the encode summary after a stop. During a recording it reports capture
 health each time the frame-rate labels (3) refresh.
-[WORKFLOW.md](WORKFLOW.md#while-it-records) lists the messages. Problems found
-after a stop also go into `WARNINGS.txt`, because a dialog is easily
-dismissed.
+[WORKFLOW.md](WORKFLOW.md#while-it-records) lists the messages.
 
 ---
 
@@ -244,21 +236,18 @@ READY appears once all of these hold at the same time:
    (20 on the reference rig) join every camera into one group, directly or
    through a chain of pairs.
 
-The third condition asks for one connected group, because cameras that face
-each other never see the front of the board at the same moment. They join
-through their neighbours. The solve keeps only its largest connected group, so
-`groups 1/1` is what lets every camera take part in the result. The quadrant
-condition stops the board being waved in one spot, which gives lens models that
-fit the centre of the image and fail towards its edges. All three thresholds
-are profile fields
+The third condition asks for one connected group, because cameras that face each
+other never see the front of the board at the same moment. They join through
+their neighbours, and `groups 1/1` is what lets every camera take part in the
+solve ([WORKFLOW.md](WORKFLOW.md#which-cameras-made-it-into-the-solve)). The
+quadrant condition stops the board being waved in one spot, which gives lens
+models that fit the centre of the image and fail towards its edges. All three
+thresholds are profile fields
 ([CONFIGURATION.md](CONFIGURATION.md#calibration_min_per_cam_shared)).
 
 At READY the graph turns solid white and the caption reads `READY — m:ss`, with
 the timer stopped. Detection goes on, and each further sighting still goes
-into the solve's list of frames.
-
-When a calibration stops, these sightings reach the solve through
-`codet_frames.json` ([WORKFLOW.md](WORKFLOW.md#6-solve)).
+into the solve's list of frames ([WORKFLOW.md](WORKFLOW.md#6-solve)).
 
 ---
 
@@ -268,9 +257,9 @@ When a calibration stops, these sightings reach the solve through
 
 The editor builds an optogenetic stimulation paradigm before a recording. A
 paradigm is a graph of blocks. Each block drives one output pin with one
-square wave for a set time, and arrows chain blocks into sequences that start
-with the recording's first trigger. The graph is compiled into the trigger
-board's sketch, so nothing reaches the board until Apply uploads it.
+square wave for a set time. An arrow means "when this block ends, start that
+one", so a chain runs in sequence, and chains that are not connected run at
+the same time. Every chain starts with the recording's first trigger.
 [WORKFLOW.md](WORKFLOW.md#7-optional-stimulation) covers building, testing and
 checking a paradigm, and gives the laser warning.
 
@@ -303,11 +292,9 @@ One second of the wave the Freq and PW fields describe
 #### 3. Pin
 
 The output pin. It has no default, and an empty Pin is refused with
-`Enter a pin number.` Apply, Test, Calibrate and Record refuse a camera
-trigger pin (the profile's `trigger_pins`), pins 0 and 1, which carry the
-board's serial link, and a pin the board does not have.
-[WORKFLOW.md](WORKFLOW.md#pins) explains why. Two chains may not drive one
-pin. One chain may use a pin in several blocks, because its blocks run one
+`Enter a pin number.` Apply, Test, Calibrate and Record refuse some pins
+([WORKFLOW.md](WORKFLOW.md#pins) lists them and says why). Two chains may not
+drive one pin. One chain may use a pin in several blocks, because its blocks run one
 after another.
 
 #### 4. Freq (Hz)
@@ -371,20 +358,20 @@ Power-cycle the board and switch the laser off.
 
 #### 11. Apply to Arduino
 
-Compiles the graph and uploads it to the board, in about 30 s. Apply is
-refused during an acquisition, during another flash or a Test, and for a graph
-with a blocking problem. On success the status line reads
-`Upload successful — press Record to run paradigm.` Panopticon then holds the
-paradigm for the rest of the launch, and swaps it on and off the board itself
-around calibrations. A failed upload leaves the board's contents unknown, and
-possibly without its safe-pins guard. Switch the laser off and Apply again:
-Record, Calibrate and Test refuse until an Apply succeeds.
+Compiles the graph and uploads it to the board, in about 30 s. Apply is refused
+during an acquisition, during another flash or a Test, and for a graph with a
+blocking problem. On success the status line reads
+`Upload successful — press Record to run paradigm.`
+[WORKFLOW.md](WORKFLOW.md#when-the-board-resets) says when Panopticon later
+swaps it off the board and back. A failed upload leaves the board's contents
+unknown, and possibly without its safe-pins guard. Switch the laser off and
+Apply again: Record, Calibrate and Test refuse until an Apply succeeds.
 
 Load, Clear and Save share the row. Load and Save read and write the graph as
-JSON, starting in the output directory. Load asks before it replaces unsaved
-changes, and leaves the canvas as it was when a file cannot be read. Clear
-asks before it empties the canvas. Save writes a file, and only Apply changes
-the board.
+JSON, by default `stim_config.json` in the output directory. Load asks before it
+replaces unsaved changes, and leaves the canvas as it was when a file cannot be
+read. Clear asks before it empties the canvas. Save writes a file, and only
+Apply changes the board.
 
 ---
 
@@ -403,9 +390,10 @@ it reaches the board. The period is `1000 / freq` ms, and the duty cycle is
 | 0 Hz: pin held LOW | ![0 Hz](images/wave_0hz.png) |
 | 10 Hz, 100 ms: period 100 ms, 100% duty | ![10 Hz, 100 ms pulse](images/wave_10hz_100ms.png) |
 
-A train denser than 400 cycles per second of preview is drawn as a band.
+The preview draws at most 400 cycles, so a train above 400 Hz fills only the
+first 400/f seconds of the plot, as a solid band.
 
-Look hardest at the last row. At 10 Hz each period is 100 ms, so a 100 ms
+Read the last row closely. At 10 Hz each period is 100 ms, so a 100 ms
 pulse fills it and the pin goes HIGH and stays HIGH for the whole block. The
 preview draws one rising edge, turns its border red and reads
 `100% duty — constant ON, not 10 Hz`. A pulse longer than its period does the
@@ -416,15 +404,11 @@ the pin HIGH in both cases, and the block reads `constant ON`.
 
 ## Controls that hide, and controls that disable
 
-Hidden until they have something to show:
-
-- The coverage display (12), during a calibration, when OpenCV is installed
-  and the board file can be used.
-- The progress bar (15), while videos are encoded or aligned.
+The coverage display (12) and the progress bar (15) stay hidden until they
+have something to show, as their entries say.
 
 Disabled while they would do the wrong thing:
 
-- Record while Calibrate is on, and Calibrate while Record is on.
 - Record and Calibrate while the hardware check runs, while videos are
   encoded or aligned, during a solve, during an editor upload, and until a
   profile is open.
