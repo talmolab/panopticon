@@ -50,7 +50,21 @@ checked by hand that no other one holds the hardware.
   - `test_probe_lag_sim.py` after `probe_lag.py`, `test_probe_flir.py` after
     `probe_flir.py`, and `test_probe_network.py` after `probe_network.py`;
   - `test_flir_doc.py` after `docs/FLIR.md` or anything it quotes;
-  - `test_history_claude.py` after this file or `docs/HISTORY.md`.
+  - `test_history_claude.py` after this file or `docs/HISTORY.md`;
+  - `test_config_doc.py` after `docs/CONFIGURATION.md` or a profile template;
+  - `test_readme_doc.py` after `README.md`, `CONTRIBUTING.md` or
+    `docs/GLOSSARY.md`;
+  - `test_troubleshooting_doc.py` after `docs/TROUBLESHOOTING.md` or
+    `docs/INSTALLATION.md`;
+  - `test_workflow_overview_doc.py` after `docs/WORKFLOW.md` or
+    `docs/OVERVIEW.md`;
+  - `test_internals_doc.py` after `docs/INTERNALS.md`, `docs/SIMULATION.md` or
+    `docs/CPU_ENCODE.md`;
+  - `tools/doc_style_check.py` after any tracked page;
+  - the doc suites also after a change to a constant or a message that a page
+    quotes. They read `main_window.py`, `session_config.py`,
+    `trigger_source.py`, `sync_encode.py`, `hardware_check.py`,
+    `grab_thread.py`, `serial_controller.py` and `_launch.bat`, among others.
 - In a working tree that has the local-only files,
   `bash tools/run_suite.sh <log_dir>` runs every hardware-free suite (all but
   `test_sync_router.py`) one at a time, each through `tools/run_nogpu.py`, so no
@@ -193,11 +207,14 @@ until someone analyses it.
   one still waiting at the stop deadline, is not recorded. No camera's `raw.bin`
   or block IDs are cut to another camera's length.
 - Block ID equals trigger ordinal is an axiom, and one failure breaks it without
-  a trace. A block ID counts frames the camera acquired, not triggers fired. A
-  camera over its exposure ceiling ignores the next pulse and consumes no ID, so
-  from then on its block ID N is trigger N+k, with no gap in `blockids.npy`. The
-  guard is `frame_sync.check_block_id_rate()`: the device clock is a hardware
-  clock, so block IDs must advance at the trigger rate. It runs from
+  a trace. A frame-ID block ID (every Basler camera, and a FLIR camera that uses
+  its frame ID) counts frames the camera acquired, not triggers fired. A camera
+  over its exposure ceiling ignores the next pulse and consumes no ID, so from
+  then on its block ID N is trigger N+k, with no gap in `blockids.npy`. With
+  `camera.flir.block_id_source: trigger_counter` the ID counts trigger edges,
+  and an ignored trigger is a gap. The guard is
+  `frame_sync.check_block_id_rate()`: the device clock is a hardware clock, so
+  block IDs must advance at the trigger rate. It runs from
   `sync_encode.stop()`, from `align_recording()` before its `needs_alignment`
   early return, and from the main window's finalize in every non-kick mode.
   `BLOCK_RATE_TOL = 0.003` is measured. Do not widen it to 1% (HISTORY.md).
@@ -236,8 +253,8 @@ until someone analyses it.
   barrier and refuses the recording if any camera retrieved a frame before the
   operator is asked to start the source. A source already running during arming
   gives each camera a different first pulse. This mode opens no serial port,
-  refuses `serial_port`, `trigger_pins` and `stim_safe_pins`, and runs no
-  stimulation.
+  refuses `serial_port`, `trigger_pins` and a non-empty `stim_safe_pins`, and
+  runs no stimulation.
 - A stall must not end the session. A recording camera re-arms after 25
   consecutive timeouts (`STALL_TIMEOUTS`, about 5 s), up to 5 times
   (`MAX_REARMS`). StartGrabbing restarts the block-ID counter, so
@@ -245,12 +262,16 @@ until someone analyses it.
   the gap is not within 0.25 of a period: a guessed ordinal is worse than losing
   the camera. A camera that cannot realign is retired, which keeps the
   survivors aligned.
-- While every active camera is silent (`CameraManager.source_silent`), a camera
-  with frames waits `SOURCE_DOWN_WAIT_WINDOWS` stall windows of that silence and
-  then re-arms as usual. A stalled shared switch, NIC port or USB host needs the
-  re-arm. Re-arms that run out while every camera is silent retire no camera. A
-  camera with no frame since the triggers started is retired at its first stall.
-  While every camera is silent, it waits instead.
+- While every active camera is silent, with at least two of them active
+  (`CameraManager._source_down`), a camera with frames waits
+  `SOURCE_DOWN_WAIT_WINDOWS` stall windows of that silence and then re-arms as
+  usual. One camera alone cannot tell its own stall from the source's, so a
+  single active camera keeps its per-camera ladder. The window's alarm uses
+  `CameraManager.source_silent`, which holds for one camera too. A stalled
+  shared switch, NIC port or USB host needs the re-arm. Re-arms that run out
+  while every camera is silent retire no camera. A camera with no frame since
+  the triggers started is retired at its first stall. While every camera is
+  silent, it waits instead.
 - A recording's kick-out losses reach the dialog and `WARNINGS.txt` as one line,
   "Effective frame rate X fps (target Y).", once they pass
   `KICKOUT_WARN_FRACTION`. The counts go to `session_metadata.json` (`kickout`)
@@ -259,7 +280,7 @@ until someone analyses it.
 - The RAM check at each acquisition start either refuses the start, when the
   need exceeds what is available, or raises no warning. Running out of RAM
   mid-session loses frames. The launch hardware check warns separately when the
-  computer has less than 16 GB in total.
+  computer has less than 16 GiB in total.
 
 ## FLIR backend
 
@@ -273,8 +294,9 @@ until someone analyses it.
   is aligned by its count of trigger edges (the CounterValue chunk) instead. It
   is refused only when it has no CounterValue chunk either, or when
   `block_id_source: frame_id` is forced.
-- `FlirBackend` never executes `TimestampReset` or `TriggerSoftware`, and it
-  releases every image before `EndAcquisition`.
+- `FlirBackend` never executes `TimestampReset` or `TriggerSoftware`. Every
+  image is released before `EndAcquisition`, and in a recording the grab loop is
+  what releases each one.
 - `camera.trigger.overlap` defaults to `ReadOut`. A camera that does not overlap
   exposure with readout ignores a trigger that arrives during readout, and an
   ignored trigger consumes no frame ID.
@@ -315,12 +337,14 @@ until someone analyses it.
   key (`gopLength`, `idrPeriod`) gives one IDR for a whole recording while the
   code reads as correct. The default path stream-copies `stream.h264`, so `-g`
   on the ffmpeg writers cannot repair it.
-- Every mp4 the rig writes carries `-g <fps>` and `-movflags +faststart`, so it
-  loads and seeks in the browser labeler (LUC3D). Without `-g` a file can hold
-  one IDR. Without `+faststart` the player reads the whole file before frame 1.
-  Build writer commands from `gui_app/ffmpeg_cmd.py` (`h264_encoder_args` plus
-  `mp4_container_args`). The rule covers the mp4 writers, not the Annex-B
-  `.h264` streams the remux wraps.
+- Every mp4 the rig writes carries `-movflags +faststart`, and every mp4 it
+  re-encodes carries `-g <fps>`, so it loads and seeks in the browser labeler
+  (LUC3D). Without `-g` a re-encoded file can hold one IDR. Without
+  `+faststart` the player reads the whole file before frame 1. Build writer
+  commands from `gui_app/ffmpeg_cmd.py`: `h264_encoder_args` plus
+  `mp4_container_args` for a re-encode, `stream_copy_args` for the remux. The
+  remux copies `stream.h264`, so its keyframes come from the encoder's GOP,
+  which the previous rule proves.
 - The encoder does not copy frames to the GPU with the GIL held. On the `host`
   path PyNvVideoCodec's `Encode()` uploads each NV12 frame with the GIL held,
   0.5-1.1 ms per call on the reference rig, and starves a grab thread until its
@@ -337,16 +361,18 @@ until someone analyses it.
   given, which the library does not document.
   `nvenc.pinned_upload_matches_host(width, height, context)` proves it: it
   stalls the stream, rewrites the staging buffer during the stall and compares
-  the bitstream with the host path's. The launch preflight runs it at every
-  launch, at the recording's frame size, and False means record with the host
-  upload. The process's one pinned warm-up encode (`nvenc._warm_pinned`) decides
-  for the whole process: if it fails, every later encoder gets the host upload
-  (`upload_stats()["pinned_disabled"]`). A pinned setup failure falls back to
-  the host upload for that encoder only, with a `WARNINGS.txt` line. A recording
-  encoder whose `Encode` fails takes the path of any encoder failure (flush,
-  then spill that camera's frames raw) and leaves the pinned path on for the
-  others. In a working tree that has the local-only suites, also run
-  `test_nvgil.py --gpu` after a PyNvVideoCodec or driver update.
+  the bitstream with the host path's. The launch preflight runs it when the
+  profile asks for `nvenc_upload: pinned` and NVENC is available, at launch and
+  after a profile switch, at the recording's frame size. Any answer but True
+  means record with the host upload. The process's one pinned warm-up encode
+  (`nvenc._warm_pinned`) decides for the whole process: if it fails, every
+  later encoder gets the host upload (`upload_stats()["pinned_disabled"]`). A
+  pinned setup failure falls back to the host upload for that encoder only,
+  with a `WARNINGS.txt` line. A recording encoder whose `Encode` fails takes the
+  path of any encoder failure (flush, then spill that camera's frames raw) and
+  leaves the pinned path on for the others. In a working tree that has the
+  local-only suites, also run `test_nvgil.py --gpu` after a PyNvVideoCodec or
+  driver update.
 - In the window, the profile reaches `nvenc` only through
   `hardware_check.configure_nvenc_upload`, at launch and after a profile switch,
   before any encoder exists and before the GOP check. A capture worker applies
@@ -377,12 +403,12 @@ until someone analyses it.
   (`AcquisitionStartRefused`) before any exposure is written. Keep it a refusal:
   a recording made anyway skips triggers or drops frames.
 - FLIR: settings come from the profile's `camera:` block and the user set it
-  names. There is no `.pfs`, and `pfs_path`, `trigger_rate_limit`, `gige_driver`
-  and the `gev_*` fields are refused. The ceiling is the camera's own
-  ExposureTime maximum at the frame rate, and opening refuses an exposure above
-  90% of it. `backend.open` receives `frame_size` and `frame_rate` only when its
-  signature names them. The Basler open is called with
-  `(device, pfs_path, max_num_buffer)`.
+  names. There is no `.pfs`, and `pfs_path`, `trigger_rate_limit`, a
+  `gige_driver` other than `auto` and the `gev_*` fields are refused. The
+  ceiling is the camera's own ExposureTime maximum at the frame rate, and
+  opening refuses an exposure above 90% of it. `backend.open` receives
+  `frame_size` and `frame_rate` only when its signature names them. The Basler
+  open is called with `(device, pfs_path, max_num_buffer)`.
 - Reference-rig recording exposure and gain are 3000 µs and 6 dB. Lower values
   crush the histogram, and about 7x total clips about 13% of pixels. Prefer more
   IR light, then exposure, then gain. Check any change on a recording: the
@@ -508,9 +534,20 @@ and no Qt.
 - Each board has one long-lived `TeensyController`, claimed eagerly at launch
   (`_warm_serial()`) and reclaimed eagerly after every Apply, failed or not
   (`_on_upload_done` after `release_serial_port()`). A lazy open moves the reset
-  flash into the first recording. The board resets at launch, on Apply and at a
-  switch to a profile on another port. At Record it resets only when the first
-  start gets no ack (branch 2 below).
+  flash into the first recording.
+- The board resets, and every pin floats, whenever its port opens or it is
+  flashed. [docs/WORKFLOW.md](docs/WORKFLOW.md#when-the-board-resets) lists the
+  cases for the operator. It resets:
+  - at launch, and when a profile is first chosen on a computer or moves the
+    board to another port;
+  - at every Apply, and at a Test that uploads a changed canvas;
+  - at every Calibrate or Record that swaps sketches (`_ensure_sketch_for`).
+    While a paradigm is Applied, that is each Calibrate and the Record after it;
+  - at the first Calibrate or Record after a failed launch flash, and after a
+    same-port switch to other `trigger_pins` or `stim_safe_pins`;
+  - at the first Calibrate, Record or Test after the port could not be opened
+    or reclaimed;
+  - at a start that gets no ack (branch 2 below).
 - Every exchange with the board holds the controller's lock. `board_id` is
   cleared on every open and at the start of every ack wait.
 - Every start is confirmed by an `RDY <n_cams> <fps> <id>` ack, because a start
