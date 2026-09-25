@@ -1,7 +1,7 @@
 """Sidebar widget with session parameters, toggle switches, progress bar, and status."""
 from datetime import datetime
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QLabel,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLineEdit, QLabel,
     QProgressBar, QFrame, QPushButton, QFileDialog, QSlider, QComboBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -21,9 +21,18 @@ class SidebarWidget(QWidget):
     stimulation_clicked = pyqtSignal()
     profile_changed = pyqtSignal(object)
 
+    #: The sidebar's width at first launch and its narrowest; the divider on
+    #: its left drags it wider, up to MAX_WIDTH.
+    MIN_WIDTH = 260
+    MAX_WIDTH = 900
+    #: From this width the metadata fields sit two to a row, which gives the
+    #: coverage graph the height the second column saves.
+    TWO_COLUMN_WIDTH = 520
+
     def __init__(self, default_output_dir: str = str(REPO_ROOT / "data"), parent=None):
         super().__init__(parent)
-        self.setFixedWidth(260)
+        self.setMinimumWidth(self.MIN_WIDTH)
+        self.setMaximumWidth(self.MAX_WIDTH)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(8)
@@ -93,9 +102,14 @@ class SidebarWidget(QWidget):
 
         layout.addSpacing(4)
 
-        form = QFormLayout()
-        form.setSpacing(6)
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # A grid, not a QFormLayout, so the fields can reflow into two
+        # columns when the sidebar is dragged wide (_place_fields).
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        self._form = form
+        self._form_rows: list = []
+        self._form_cols = 0
 
         # Experimenter and assay have no built-in default: they are rig
         # properties and come from the profile's metadata_defaults, so a
@@ -129,8 +143,10 @@ class SidebarWidget(QWidget):
             label_text = name.replace("_", " ").title()
             label = QLabel(label_text)
             label.setStyleSheet("color: #aaa; font-size: 11px; border: none;")
-            form.addRow(label, field)
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._form_rows.append((label, field))
             self._fields[name] = field
+        self._place_fields(1)
 
         layout.addLayout(form)
         layout.addSpacing(12)
@@ -206,10 +222,12 @@ class SidebarWidget(QWidget):
         self._stim_btn.clicked.connect(self.stimulation_clicked.emit)
         layout.addWidget(self._stim_btn)
 
-        # Live ChArUco coverage graph — shown only during calibration.
+        # Live ChArUco coverage graph, shown only during calibration. It takes
+        # the sidebar's spare height (stretch 1 against the bottom spacer's 0),
+        # so a sidebar dragged wider gives it a bigger ring.
         self._coverage_graph = CoverageGraphWidget()
         self._coverage_graph.setVisible(False)
-        layout.addWidget(self._coverage_graph)
+        layout.addWidget(self._coverage_graph, 1)
 
         layout.addSpacing(12)
 
@@ -294,8 +312,26 @@ class SidebarWidget(QWidget):
         avail = max(40, btn.width() - self._DIR_BUTTON_CHROME)
         btn.setText(btn.fontMetrics().elidedText(self._output_dir, Qt.ElideMiddle, avail))
 
+    def _place_fields(self, cols: int) -> None:
+        """Lay the metadata fields out ``cols`` label-field pairs to a row."""
+        if cols == self._form_cols:
+            return
+        for label, field in self._form_rows:
+            self._form.removeWidget(label)
+            self._form.removeWidget(field)
+        for c in range(4):
+            self._form.setColumnStretch(c, 0)
+        for i, (label, field) in enumerate(self._form_rows):
+            row, pair = divmod(i, cols)
+            self._form.addWidget(label, row, 2 * pair)
+            self._form.addWidget(field, row, 2 * pair + 1)
+        for pair in range(cols):
+            self._form.setColumnStretch(2 * pair + 1, 1)
+        self._form_cols = cols
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._place_fields(2 if self.width() >= self.TWO_COLUMN_WIDTH else 1)
         # The button's final width is only known once laid out.
         self._refresh_dir_text()
 

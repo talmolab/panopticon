@@ -29,6 +29,9 @@ KEY_BOARD_SKETCH = "board_sketch_sha"
 #: shared between rigs, so alphabetical order picks the wrong one.
 KEY_PROFILE = "profile_name"
 
+#: Width in pixels the operator last dragged the sidebar to.
+KEY_SIDEBAR_WIDTH = "sidebar_width"
+
 #: Set this to an absolute .ini path to send every value somewhere else.
 #:
 #: RULE: a test that builds a window, selects a profile or records a flash sets
@@ -49,6 +52,18 @@ def app_settings() -> QSettings:
     if override:
         return QSettings(override, QSettings.IniFormat)
     return QSettings(ORG, APP)
+
+
+def sidebar_width(default: int) -> int:
+    """The sidebar width this machine last used, or ``default``."""
+    try:
+        return int(app_settings().value(KEY_SIDEBAR_WIDTH, default, type=int))
+    except (TypeError, ValueError):
+        return default
+
+
+def set_sidebar_width(width: int) -> None:
+    app_settings().setValue(KEY_SIDEBAR_WIDTH, int(width))
 
 
 def board_sketch_hint() -> str:

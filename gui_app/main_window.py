@@ -11,7 +11,8 @@ import numpy as np
 from enum import Enum
 from pathlib import Path
 
-from PyQt5.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QApplication, QMessageBox
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QApplication,
+                             QMessageBox, QSplitter)
 from PyQt5.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QPalette, QColor, QIcon, QCursor
@@ -329,20 +330,29 @@ class MainWindow(QMainWindow):
         self._camera_grid = CameraGridWidget()
         self._sidebar = SidebarWidget()
 
-        central = QWidget()
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self._camera_grid, stretch=3)
+        # The grid and the sidebar share a splitter, so the operator can drag
+        # the divider left to widen the sidebar (a bigger coverage graph
+        # during calibration). The grid takes every resize of the window; the
+        # sidebar keeps the width it was dragged to, which is remembered.
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(5)
+        self._splitter.setStyleSheet(
+            "QSplitter::handle { background: #333; }"
+            "QSplitter::handle:hover { background: #5a5a8a; }")
+        self._splitter.addWidget(self._camera_grid)
 
         sidebar_container = QWidget()
-        sidebar_container.setStyleSheet("background-color: #141428; border-left: 1px solid #333;")
+        sidebar_container.setStyleSheet("background-color: #141428;")
         sidebar_layout = QHBoxLayout(sidebar_container)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.addWidget(self._sidebar)
-        layout.addWidget(sidebar_container, stretch=0)
+        self._splitter.addWidget(sidebar_container)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 0)
+        self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
-        self.setCentralWidget(central)
+        self.setCentralWidget(self._splitter)
 
         self._sidebar.calibrate_toggled.connect(self._on_calibrate_toggle)
         self._sidebar.record_toggled.connect(self._on_record_toggle)
@@ -748,9 +758,19 @@ class MainWindow(QMainWindow):
         n = max(1, getattr(self._camera_mgr, "num_cameras", 0) or 6)
         return int(min(100, max(33, round(33 * n / 6))))
 
+    def _sidebar_width(self) -> int:
+        """The remembered sidebar width, inside the sidebar's limits."""
+        w = settings.sidebar_width(SidebarWidget.MIN_WIDTH)
+        return max(SidebarWidget.MIN_WIDTH, min(SidebarWidget.MAX_WIDTH, w))
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        sizes = self._splitter.sizes()
+        if len(sizes) == 2 and sizes[1] > 0:
+            settings.set_sidebar_width(sizes[1])
+
     def _size_to_screen(self):
         screen = QApplication.primaryScreen().availableGeometry()
-        sidebar_w = 260
+        sidebar_w = self._sidebar_width()
         grid_aspect = self._camera_grid.grid_aspect()
         target_h = int(screen.height() * 0.8)
         target_w = int(target_h * grid_aspect) + sidebar_w
@@ -758,6 +778,7 @@ class MainWindow(QMainWindow):
             target_w = int(screen.width() * 0.9)
             target_h = int((target_w - sidebar_w) / grid_aspect)
         self.resize(target_w, target_h)
+        self._splitter.setSizes([max(1, target_w - sidebar_w), sidebar_w])
         self.move(
             (screen.width() - target_w) // 2 + screen.x(),
             (screen.height() - target_h) // 2 + screen.y(),

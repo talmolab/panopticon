@@ -619,6 +619,9 @@ Dead ends, do not retry:
   `WARNINGS.txt`, the log and the status bar, at the maintainer's request: the
   dialog opened after most takes for one routine line, the effective frame
   rate (`9f0dc5f`).
+- 2026-09-25: The sidebar can be dragged wider, from 260 px to 900 px, and
+  the coverage graph grows with it, at the maintainer's request: a larger
+  graph is easier to read during a calibration (`51d945d`).
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed

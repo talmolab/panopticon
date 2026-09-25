@@ -309,8 +309,9 @@ board, and a blurred board yields no corners.
 
 ### Work towards READY
 
-The coverage display in the sidebar shows what the cameras have seen.
-[OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
+The coverage display in the sidebar shows what the cameras have seen. Drag
+the divider on the sidebar's left edge to widen it, and the graph grows with
+it. [OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
 what READY needs, and gives the caption's format. The figures come from a
 six-camera profile, and their captions lack the `groups` segment yours shows.
 
