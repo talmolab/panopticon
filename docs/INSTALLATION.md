@@ -1082,11 +1082,13 @@ the part of the log from arming the cameras to the end of encoding.
 powershell -ExecutionPolicy Bypass -File make_shortcut.ps1
 ```
 
-Expected:
+Expected, on an environment made by uv:
 
 ```
+The venv's pythonw.exe is a console program; the shortcut uses
+CPython's GUI venv launcher, copied to C:\Users\you\Desktop\panopticon\.venv\Scripts\panopticonw.exe
 Shortcut written: C:\Users\you\Desktop\Panopticon.lnk
-  Target : C:\Users\you\Desktop\panopticon\.venv\Scripts\pythonw.exe
+  Target : C:\Users\you\Desktop\panopticon\.venv\Scripts\panopticonw.exe
   Args   : "C:\Users\you\Desktop\panopticon\gui.py"
   WorkDir: C:\Users\you\Desktop\panopticon
 
@@ -1095,9 +1097,14 @@ need to see why, run _launch.bat instead -- it keeps the console
 open and pauses on failure so the traceback can be read.
 ```
 
-The shortcut starts the environment's `pythonw.exe`, which Windows never gives a
-console, so the launch opens one window. It skips `uv run`, so it does not
-update the packages. Run `uv sync` yourself after `pyproject.toml` changes. If
+The shortcut needs a launcher that Windows never gives a console. In an
+environment made by uv, `.venv\Scripts\pythonw.exe` is a console program: it
+opens a console window before Panopticon's, and the taskbar entry then belongs
+to that console. The script checks, and in that case copies CPython's own
+windowless venv launcher to `.venv\Scripts\panopticonw.exe` and points the
+shortcut at it, so the launch opens one window. Run the script again after
+recreating the environment. The shortcut skips `uv run`, so it does not update
+the packages. Run `uv sync` yourself after `pyproject.toml` changes. If
 the script prints `No venv at ...`, run `uv sync` first.
 
 `_launch.bat` is the other way in. It runs through `uv run` with a console that
