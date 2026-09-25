@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
     #: The all-cameras-silent alarm has been raised for the current silence.
     _source_alarm_raised = False
     #: A camera that reached its shutdown temperature, one warning each. They
-    #: always reach WARNINGS.txt and the post-session dialog.
+    #: always reach WARNINGS.txt and the status bar.
     _thermal_shutdown_warnings: tuple | list = ()
     #: Cameras whose thermal-watch fallback has been logged this acquisition.
     _thermal_logged: frozenset | set = frozenset()
@@ -1382,8 +1382,8 @@ class MainWindow(QMainWindow):
             f"CAMERA TEMPERATURE: {name} {temp_s} C {word}{gap}{extra}")
 
         # One durable warning per camera per session, so this reaches
-        # WARNINGS.txt and the post-session dialog and not just a status bar
-        # message that scrolls past unread. A camera that reaches shutdown
+        # WARNINGS.txt, which outlasts a status bar message that scrolls
+        # past unread. A camera that reaches shutdown
         # gets a second one, which is reported whether or not frames were
         # lost: from that point it stops delivering.
         for _key, idx, temp, status, margin, at_shutdown in hot:
@@ -2163,7 +2163,7 @@ class MainWindow(QMainWindow):
 
         Only a directory strictly inside the output directory is removed.
         Whatever cannot be removed is logged and becomes a line of this
-        acquisition's WARNINGS.txt and its post-session dialog
+        acquisition's WARNINGS.txt and the status bar
         (_sweep_warnings), because it holds the earlier data under a hidden
         name beside this one.
         """
@@ -2265,7 +2265,7 @@ class MainWindow(QMainWindow):
         writes again only when it has a paradigm of its own.
 
         A file that cannot be removed is logged and becomes a line of this
-        recording's WARNINGS.txt and its post-session dialog
+        recording's WARNINGS.txt and the status bar
         (_sweep_warnings), because it now sits beside this take claiming to
         describe it.
         """
@@ -4388,15 +4388,8 @@ class MainWindow(QMainWindow):
         # an earlier take that could not be removed at the start.
         problems += list(self._sweep_warnings)
         if problems:
-            # Write it down as well as showing it: a dialog is dismissed and
-            # forgotten, and this is exactly what someone needs months later
-            # when the data looks odd.
-            body = "\n\n".join(problems)
             written = self._write_warnings_file(problems)
-            QMessageBox.warning(
-                self, "Recording completed with problems",
-                f"{body}\n\nThis has also been written to:\n"
-                f"{written or self._video_dir / recording_meta.WARNINGS_NAME}")
+            self._note_session_warnings(problems, written)
 
         # Kick-out keeps every camera on the same triggers, so a kick-mode
         # session is NOT auto-aligned, even after it dropped frames: its
@@ -4434,12 +4427,39 @@ class MainWindow(QMainWindow):
 
     def _append_warnings(self, problems: list):
         """Append paragraphs to this acquisition's WARNINGS.txt; its path, or
-        None when it could not be written (the caller shows them anyway)."""
+        None when it could not be written (the caller logs them anyway)."""
         path = recording_meta.append_warning(self._video_dir,
                                              "\n\n".join(problems))
         if path is None:
             print("[align] could not append to WARNINGS.txt", flush=True)
         return path
+
+    def _note_session_warnings(self, problems: list, written,
+                               log: bool = True) -> None:
+        """Log a finished acquisition's problems and name WARNINGS.txt in the
+        status bar. ``log=False`` when the caller has printed them already.
+
+        RULE: problems found once an acquisition is over go to WARNINGS.txt,
+        the log and the status bar, never to a dialog. REASON: the
+        maintainer's choice. The usual case is one routine line after every
+        take (the effective frame rate), and a dialog for it is dismissed
+        unread; the file is what someone reads when the data looks odd.
+        Dialogs that need the operator to act, such as a trigger board that
+        did not confirm its stop, are not these and stay dialogs.
+        """
+        if log:
+            for text in problems:
+                print(f"[acq] WARNING: {text}", flush=True)
+        where = written
+        if where is None and self._video_dir is not None:
+            where = self._video_dir / recording_meta.WARNINGS_NAME
+        n = len(problems)
+        note = f"{n} warning{'s' if n != 1 else ''}"
+        if where is not None:
+            note += f" in {where}"
+        current = self.statusBar().currentMessage()
+        self.statusBar().showMessage(f"{current}  |  {note}" if current
+                                     else note)
 
     @staticmethod
     def _names_text(names) -> str:
@@ -4507,8 +4527,8 @@ class MainWindow(QMainWindow):
             return
         note = "\n\n".join(notes)
         print(f"[align] {note}", flush=True)
-        self._append_warnings(notes)
-        QMessageBox.warning(self, "Videos are not equal length", note)
+        written = self._append_warnings(notes)
+        self._note_session_warnings(notes, written, log=False)
 
     def _start_alignment(self) -> bool:
         """Start the post-hoc alignment if cameras dropped different frames.
@@ -4517,7 +4537,7 @@ class MainWindow(QMainWindow):
 
         RULE: a camera that was retired, or that recorded no frames, is left
         out of the alignment, and every camera left out, every skip and every
-        failure is written to WARNINGS.txt and shown. REASON: aligning keeps
+        failure is written to WARNINGS.txt and the log. REASON: aligning keeps
         only the triggers every camera holds, so such a camera would cut the
         others down to its frames or to none, and a problem reported only on
         stdout reads afterwards as a recording that was aligned. The replace
@@ -4540,8 +4560,8 @@ class MainWindow(QMainWindow):
                        f"every camera. Fix the cause, then run 2_align.py "
                        f"--replace on {self._video_dir}.")
             print(f"[align] {problem}", flush=True)
-            self._append_warnings([problem])
-            QMessageBox.warning(self, "Videos were not aligned", problem)
+            written = self._append_warnings([problem])
+            self._note_session_warnings([problem], written, log=False)
             return False
         self._align_notes = [
             f"{nm} was left out of the post-hoc alignment ({why}). Its video "
@@ -4552,9 +4572,8 @@ class MainWindow(QMainWindow):
             # Loss-free among the cameras aligned: the videos already hold the
             # same triggers.
             if self._align_notes:
-                self._append_warnings(self._align_notes)
-                QMessageBox.warning(self, "Cameras left out of the alignment",
-                                    "\n\n".join(self._align_notes))
+                written = self._append_warnings(self._align_notes)
+                self._note_session_warnings(self._align_notes, written)
             return False
 
         self._state = State.ALIGNING
@@ -4715,10 +4734,7 @@ class MainWindow(QMainWindow):
         body = "\n\n".join(problems)
         print(f"[align] {body}", flush=True)
         written = self._append_warnings(problems)
-        QMessageBox.warning(
-            self, "Alignment reported problems",
-            body + (f"\n\nThis has also been written to:\n{written}"
-                    if written else ""))
+        self._note_session_warnings(problems, written, log=False)
 
     def _finish_to_idle(self):
         if self._acq_type == "calibration" and self._video_dir is not None:

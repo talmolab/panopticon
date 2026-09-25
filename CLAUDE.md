@@ -272,11 +272,16 @@ until someone analyses it.
   while every camera is silent retire no camera. A camera with no frame since
   the triggers started is retired at its first stall. While every camera is
   silent, it waits instead.
-- A recording's kick-out losses reach the dialog and `WARNINGS.txt` as one line,
+- A recording's kick-out losses reach `WARNINGS.txt` as one line,
   "Effective frame rate X fps (target Y).", once they pass
   `KICKOUT_WARN_FRACTION`. The counts go to `session_metadata.json` (`kickout`)
   and the detail to the log. Forced drops, the block-ID rate check and
   retirements keep messages of their own.
+- Problems found once an acquisition is over (the finalize report, unequal
+  videos, the post-hoc alignment's findings) go to `WARNINGS.txt`, the log and
+  the status bar (`_note_session_warnings`), never to a dialog: the
+  maintainer's choice. Dialogs that need the operator to act, such as a
+  trigger board that did not confirm its stop, stay dialogs.
 - The RAM check at each acquisition start either refuses the start, when the
   need exceeds what is available, or raises no warning. Running out of RAM
   mid-session loses frames. The launch hardware check warns separately when the

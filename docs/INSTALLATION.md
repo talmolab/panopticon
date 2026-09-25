@@ -1199,9 +1199,10 @@ A healthy recording shows:
   at the stop. A nonzero count means the host did not keep up.
 - Equal frame counts on every camera, and `forced=0`
   ([forced drops](GLOSSARY.md#forced-drop)).
-- No dialog after the stop. A recording that lost more than 0.5% of its
-  triggers to kick-out reports its
-  [effective frame rate](GLOSSARY.md#effective-frame-rate) there.
+- No warning in the status bar after the stop. A recording that lost more
+  than 0.5% of its triggers to kick-out reports its
+  [effective frame rate](GLOSSARY.md#effective-frame-rate) in
+  `WARNINGS.txt`.
 
 A 60-second six-camera recording on the reference rig at 100 fps reported:
 

@@ -856,9 +856,9 @@ camera whose encode fails keeps its source files and gets an
 What follows depends on the mode:
 
 - With kick-out, the videos already hold the same triggers and nothing is
-  re-encoded. If a camera was retired or the cameras kept different frames, a
-  `Videos are not equal length` dialog says so. It gives the `2_align.py`
-  command to run ([Check the block IDs](#check-the-block-ids)).
+  re-encoded. If a camera was retired or the cameras kept different frames,
+  `WARNINGS.txt` says so and gives the `2_align.py` command to run
+  ([Check the block IDs](#check-the-block-ids)).
 - Without kick-out (`realtime_kick: false`), or with `realtime_encode: false`,
   the alignment runs when the cameras kept different frames. It shows as
   `ALIGNING` and `Aligning k/N`. It keeps the triggers every camera recorded,
@@ -875,8 +875,8 @@ What follows depends on the mode:
 
 ### Warnings
 
-Problems appear in a `Recording completed with problems` dialog, and in
-`WARNINGS.txt` in the acquisition folder. A camera folder gets its own
+Problems go to `WARNINGS.txt` in the acquisition folder and to the log, and
+the status bar says how many the take has. No dialog opens for them. A camera folder gets its own
 `WARNINGS.txt` when that camera's block IDs had to be repaired to match its
 video, or its encode lost frames. A new take deletes the old take's
 `WARNINGS.txt`, so the file always describes the take beside it.
@@ -891,9 +891,8 @@ video, or its encode lost frames. A new take deletes the old take's
 
 The effective-frame-rate line appears when more than 0.5% of the triggers were
 dropped this way. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) explains every line
-and every dialog. After an alignment, `Alignment reported problems`,
-`Cameras left out of the alignment` and `Videos were not aligned` go into
-`WARNINGS.txt` too.
+and every dialog. After an alignment, its problems go into `WARNINGS.txt`
+too.
 
 A `Recording did not finish cleanly` dialog means saving failed, for example
 on a full disk. The capture files stay in the folder, neither encoded nor

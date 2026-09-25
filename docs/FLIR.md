@@ -416,9 +416,8 @@ Run each with the probe, for example `uv run probe_flir.py --exposure-sweep`.
    again to stop. Take a screenshot of the window while it records.
    [WORKFLOW.md](WORKFLOW.md#8-record) describes a recording in full.
 3. Wait until encoding finishes and the sidebar status returns to `IDLE`, then
-   quit. A dialog appears only when something went wrong, such as
-   `Recording completed with problems`, and what it says is also in
-   `WARNINGS.txt`.
+   quit. When something went wrong, the status bar says how many warnings
+   the take has, and they are in `WARNINGS.txt` and the log.
 4. Collect the recording:
 
    ```powershell
