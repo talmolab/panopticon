@@ -41,8 +41,8 @@ apart, which keeps display work away from capture.
 | Calibrating | triggered at `calibration_frame_rate` | every frame |
 | Recording | triggered at `frame_rate` | every 10th frame |
 
-The preview freezes on its last frame during a blocking operation, which the
-state label (16) names, with how long it takes.
+The preview freezes on its last frame during a blocking operation.
+[State](#16-state) (16) lists those operations and how long they take.
 
 #### 2. Camera pane
 
@@ -172,18 +172,18 @@ that could start something is disabled and the cursor shows a wait:
 | Text | Operation |
 |---|---|
 | `Switching cameras…` | Closing the cameras and opening the new profile's, a second or two |
-| `Clearing stim firmware…` | The launch flash to the [recording-only sketch](GLOSSARY.md#recording-only-sketch), about 30 s |
-| `Flashing recording-only firmware…` | Before a calibration, when a paradigm was on the board, about 30 s |
-| `Flashing recording + stimulation firmware…` | Before a recording, putting the Applied paradigm back, about 30 s |
+| `Clearing stim firmware…` | The launch flash to the [recording-only sketch](GLOSSARY.md#recording-only-sketch) |
+| `Flashing recording-only firmware…` | Before a calibration, when a paradigm was on the board |
+| `Flashing recording + stimulation firmware…` | Before a recording, putting the Applied paradigm back |
 | `Checking capacity…` | The capacity checks at Calibrate or Record |
 | `Starting...` | Arming the cameras and starting the trigger board |
 | `Finishing…` | Stopping the cameras and saving the capture, a second or two |
 | `Updating the stimulus trace...` | Rewriting `stim_trace.csv` after an alignment |
 | `Cancelling…` | Ending a start on your own trigger source that recorded nothing |
 
-The two flash states come right after you press Calibrate or Record. Wait for
-them: the acquisition starts when the flash ends, or a dialog says why it did
-not. Do not end Panopticon during a flash
+A flash takes about 30 s. The two flash states come right after you press
+Calibrate or Record. Wait for them: the acquisition starts when the flash ends,
+or a dialog says why it did not. Do not end Panopticon during a flash
 ([why](WORKFLOW.md#when-the-board-resets)), and read the
 [laser warning](WORKFLOW.md#7-optional-stimulation) before one.
 
@@ -358,7 +358,8 @@ Power-cycle the board and switch the laser off.
 
 #### 11. Apply to Arduino
 
-Compiles the graph and uploads it to the board, in about 30 s. Apply is refused
+Compiles the graph and flashes it to the board
+([how long](#16-state)). Apply is refused
 during an acquisition, during another flash or a Test, and for a graph with a
 blocking problem. On success the status line reads
 `Upload successful — press Record to run paradigm.`

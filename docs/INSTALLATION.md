@@ -989,8 +989,8 @@ The first time Panopticon opens your profile (step 9) the log shows:
 [acq] board flashed with the recording-only sketch; stim is off until you Apply one
 ```
 
-Flashing takes about 30 seconds, and the sidebar shows `Clearing stim firmware…`
-meanwhile. On later launches the flash is skipped:
+The sidebar shows `Clearing stim firmware…` while the board flashes
+([how long](OVERVIEW.md#16-state)). On later launches the flash is skipped:
 
 ```
 [acq] board already carries the recording-only sketch (no stim); skipping flash

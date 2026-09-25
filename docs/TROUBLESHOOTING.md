@@ -64,7 +64,7 @@ Contents:
 | `camera.flir.sdk_dir is not a folder:` | Point it at the Spinnaker install folder, or remove it to search the default places. |
 | `The profile sets capture_processes: <n>.` | Capturing in several processes is experimental, and the window captures in one. Set `capture_processes: 0`. |
 | `A solve is running` | The profile switch was refused, and the list shows the old profile again. Choose the profile again once the calibration solve has finished. |
-| `Firmware upload in progress` | The profile switch, the start or the close was refused during a flash, which takes about 30 s. Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
+| `Firmware upload in progress` | The profile switch, the start or the close was refused during a [flash](OVERVIEW.md#16-state). Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
 | `The hardware check is running` | The profile switch or the start was refused. Choose the profile, or start, again once the status bar says the check is done. |
 
 ## Opening the cameras
@@ -188,7 +188,7 @@ preview.
 | `Apply the edited paradigm first` | The canvas changed since the last Apply, so the board would run the old paradigm. Press **Apply**, or undo the edit. |
 | `Apply the empty canvas first` | The canvas is empty and the board still carries the paradigm Applied earlier this session. Press **Apply** to clear the board. |
 | `Stimulation needs the trigger board` | The profile uses `trigger_source: external`, which has no board to run a paradigm. Use a profile with `trigger_source: board`. |
-| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which takes about 30 s and resets the board. Switch the laser off before that start ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
+| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which resets the board. Switch the laser off before that start ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `The trigger board could not be flashed with the <kind> firmware` | Nothing started. Switch the laser off, check the board and the port, and retry. |
 | `had not armed after <n> s, so the trigger board was not started` | A camera that arms after the board starts would pair every frame with the wrong trigger. Arming fills each camera's frame ring, so memory pressure is the usual cause: close other programs, or lower `kick_max_lag` or `max_num_buffer`. |
 | `had not armed after <n> s, so you were not asked to start your trigger source.` | The same, with `trigger_source: external`. |

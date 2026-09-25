@@ -95,7 +95,7 @@ Panopticon at launch:
    The check measures the output drive, probes how many NVENC sessions the
    GPU driver grants, times a libx264 encode and picks the encoder. A
    `Hardware Check` dialog lists any problem it finds, for example:
-   - fewer than 4 CPU cores, under 16 GB of RAM, under 500 GB free or under
+   - fewer than 4 CPU cores, under 16 GiB of RAM, under 500 GiB free or under
      500 MB/s of writing on the output drive;
    - an NVENC path that does not work, or an encoder that ignores the
      keyframe setting, which would leave recordings with one keyframe and

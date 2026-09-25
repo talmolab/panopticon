@@ -301,7 +301,7 @@ reports that sketch.
      no camera and no serial port, and programs no board. Choose yours in the
      profile dropdown.
 2. With Panopticon's board, wait until the PowerShell window shows
-   `board flashed with the recording-only sketch`, which takes about 30 s, or
+   `board flashed with the recording-only sketch` or
    `board already carries the recording-only sketch`. The sidebar shows
    `Clearing stim firmware…` meanwhile. The dropdown is unavailable while
    Panopticon programs a board.
