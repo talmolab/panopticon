@@ -92,12 +92,11 @@ acquisition, and repeats the note when the acquisition ends.
    launches need only `uv run gui.py`. A launch with no profile chosen opens no camera
    and no serial port until you choose one in the sidebar.
 
-Before step 4, check that the profile's `serial_port` names the trigger board. Opening
-the profile resets the device on that port, and reprograms it unless Panopticon last
-programmed it with the same firmware. Every pin of the board floats during the reset, a
-laser driver's included, so read the
-[laser warning in INSTALLATION.md, step 8](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware)
-first.
+Before step 4, switch the laser off or block the beam, and check that the profile's
+`serial_port` names the trigger board. Opening the profile resets the device on that
+port, and reprograms it unless Panopticon last programmed it with the same firmware.
+Every pin of the board floats during the reset, a laser driver's included
+([laser warning in INSTALLATION.md, step 8](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware)).
 
 ### Settings to change first
 

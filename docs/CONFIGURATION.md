@@ -202,9 +202,10 @@ the frame size and the frame rate to its camera.
     coverage thresholds at their defaults for the first calibration.
 11. Leave the four CPU placement fields at their defaults unless the CPU is a
     hybrid Intel part and a test recording shows a camera falling behind.
-12. Open the profile with `uv run gui.py --profile NAME`. Opening it resets the
-    board on [serial_port](#serial_port), which floats every pin, so read the
-    [laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware) first.
+12. Switch the laser off or block the beam, then open the profile with
+    `uv run gui.py --profile NAME`. Opening it resets the board on
+    [serial_port](#serial_port), which floats every pin
+    ([laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
     A profile that fails the [loader's checks](#what-the-loader-checks-and-what-it-does-not)
     is not in the dropdown.
 13. Record a one-minute test. Check that every camera's video has the same number
@@ -635,9 +636,9 @@ Text. Default `""`. Reference rig: `COM3`.
   Ports (COM & LPT)). `sim` selects the simulated board. Opening the profile
   resets the device on this port and, unless it already carries it, programs it
   with the recording-only sketch: camera triggers and no stimulation. Every pin
-  floats during the reset, so read the
-  [laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware) before you
-  open the profile.
+  floats during the reset
+  ([laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)). Switch
+  the laser off or block the beam before you open the profile.
 - Change when: For every new computer or board.
 - Goes wrong: A wrong port resets whatever device is on it, and can reprogram
   it, so check the port before you open the profile. Left empty, nothing is
