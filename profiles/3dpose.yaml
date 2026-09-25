@@ -103,8 +103,9 @@ board_config: "configs/boards/charuco_8x8_15mm.yaml"
 
 serial_port: COM3
 # Every pin driven as a camera trigger. The order carries no meaning: the board
-# writes all pins in one noInterrupts() block, so every camera takes the same
-# edge. Each camera's Line1 must sit on a listed pin.
+# writes the pins one after another in one noInterrupts() block, microseconds
+# apart, and cameras on one pin share its edge. Each camera's Line1 must sit on
+# a listed pin.
 #
 # This rig fans out: cameras 7-9 share pins 10 and 12 with other cameras, so
 # nine cameras need only six pins. A listed pin with nothing on it does no harm,

@@ -652,9 +652,9 @@ Text. Default `""`. Reference rig: `COM3`.
 
 List of integers. Default `[2, 4, 6, 8, 10, 12]`. Reference rig: `[2, 4, 6, 8, 10, 12]`.
 
-- Does: Every board pin wired to a camera's trigger input. The board switches all
-  of them in one step, so their order carries no meaning, and one pin may drive
-  several cameras.
+- Does: Every board pin wired to a camera's trigger input. The board switches
+  them in one loop with interrupts off, microseconds apart, so their order
+  carries no meaning. One pin may drive several cameras.
 - Change when: When you rewire the trigger lines.
 - Goes wrong: A camera on a pin the list leaves out receives no triggers.
   Panopticon retires it after a few seconds (`no frame received since the
