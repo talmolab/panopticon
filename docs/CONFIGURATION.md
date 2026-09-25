@@ -587,7 +587,7 @@ Text. Default `socket`. Reference rig: `socket`.
   resend settings it discards a frame that lost a packet. `auto` keeps pylon's
   default. USB3 cameras ignore it.
 - Change when: Keep `socket` unless a test on your rig favours another driver.
-- Goes wrong: On the reference rig `filter` lost frames by the thousand
+- Goes wrong: On the reference rig `filter` lost frames
   ([measured](INTERNALS.md#resends-driver-choice-and-flow-control)). Any other
   value is refused when the profile loads. A FLIR profile refuses any value but
   `auto`, and its equivalent is [camera.flir.stream_mode](#cameraflirstream_mode).

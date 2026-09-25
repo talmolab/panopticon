@@ -289,8 +289,8 @@ counts the frames a camera acquired. It equals the trigger count only while the
 camera acquires one frame per trigger. A camera still busy when the next trigger
 arrives ignores that trigger. It acquires no frame and consumes no block ID, so
 from then on its block ID *N* belongs to trigger *N+k*. Its block IDs have no
-gap, its frame count matches the others, and the videos drift apart in time. A
-FLIR camera on its trigger counter shows the ignored trigger as a gap instead
+gap, its frame count matches the others, and the videos drift apart in time.
+On a FLIR camera that uses its trigger counter, the ignored trigger is a gap
 ([FLIR cameras](#flir-cameras)).
 
 The common causes:

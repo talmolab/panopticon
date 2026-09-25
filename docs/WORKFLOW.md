@@ -487,8 +487,8 @@ aniposelib both read the `calibration.toml` this writes.
 A calibration describes the cameras as they were while the board was recorded.
 From the calibration to the last recording of the session, do not move,
 re-aim, refocus or re-mount any camera. If one is bumped, calibrate again
-before you record. No count, plot or warning shows a moved camera. Only the 3D
-output does, and it is wrong.
+before you record. A moved camera changes no frame count and raises no
+warning, and its 3D output is wrong.
 
 ---
 

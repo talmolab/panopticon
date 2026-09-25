@@ -880,10 +880,11 @@ List every pin wired to a laser or LED driver in `stim_safe_pins`, or write
 reference rig's laser pin and protects nothing on other wiring
 ([stim_safe_pins](CONFIGURATION.md#stim_safe_pins)).
 
-List every camera's serial number in `camera_serials`, with cam1 first. A
-missing camera then refuses the open by name, and a device the list does not
-name stays closed. [camera_serials](CONFIGURATION.md#camera_serials) says what
-goes wrong without it.
+List every camera's serial number in `camera_serials`, quoted, in ascending
+text order. The first entry is cam1. A missing camera then refuses the open by
+name, and a device the list does not name stays closed.
+[camera_serials](CONFIGURATION.md#camera_serials) says what goes wrong without
+it.
 
 A profile with a mistake does not load. Panopticon leaves it out of the list and
 names the file and the field in a dialog once the window opens.
