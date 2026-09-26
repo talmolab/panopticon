@@ -9,7 +9,7 @@ job on them (``gui_app.encode_worker.EncodeWorker``, headless):
   uv run python 0_encode.py <acquisition_dir> --fps 100 --encoder x264
 
 ``<acquisition_dir>`` is the directory holding cam1/, cam2/, ... (for example
-``<output_dir>/<date>/<session>/recording``). For each camera:
+``<output_dir>/<date>/<session>/<session>_recording``). For each camera:
 
 - ``stream.h264`` (real-time encode): stream-copied into an mp4, in seconds.
   When the encoder died mid-recording, ``raw_tail.bin`` is encoded and

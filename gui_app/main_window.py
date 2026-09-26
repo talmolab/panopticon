@@ -3856,7 +3856,11 @@ class MainWindow(QMainWindow):
                 n, board_cfg,
                 min_per_cam_shared=p.calibration_min_per_cam_shared,
                 min_edge=p.calibration_min_edge,
-                min_grid_cells=p.calibration_min_grid_cells)
+                min_grid_cells=p.calibration_min_grid_cells,
+                min_connectivity=p.calibration_min_connectivity,
+                min_fill_cells=p.calibration_min_fill_cells,
+                min_board_size=p.calibration_min_board_size,
+                min_tilt_deg=p.calibration_min_tilt_deg)
         except Exception as e:
             print(f"[hud] coverage detector unavailable: {e}", flush=True)
             self._detector = None
@@ -3900,6 +3904,16 @@ class MainWindow(QMainWindow):
                       "keeping the reference until it finishes", flush=True)
                 self._retired_workers.append(worker)
                 worker.finished.connect(lambda w=worker: self._retire_worker(w))
+        if joined and self._detector is not None:
+            # What READY measured, per camera, so its thresholds can be set
+            # from a real take without replaying the videos.
+            try:
+                print("[hud] coverage at the stop ({}):\n{}".format(
+                    "READY" if self._detector.ready else "not READY",
+                    self._detector.summary()), flush=True)
+            except Exception as e:
+                print(f"[hud] could not summarise the coverage: {e}",
+                      flush=True)
         if joined and self._detector is not None and self._detector.codet_frames:
             self._save_codet_frames(self._detector.codet_frames)
         try:
@@ -4045,6 +4059,23 @@ class MainWindow(QMainWindow):
             print(f"[acq] could not write session metadata: {e}", flush=True)
             return
         extra = {}
+        if self._acq_type == "calibration":
+            # Solve reads it to decide whether to put Z = 0 on the board
+            # lying flat at the end of the take.
+            extra["floor_from_final_second"] = bool(
+                self._sidebar.flat_final_second)
+        # The profile's skeleton, for LUC3D, beside the recording's
+        # calibration.toml. A failure is logged and never stops the finalize.
+        try:
+            skeleton = self._config.write_skeleton(self._acq_type)
+        except Exception as e:
+            print(f"[acq] could not copy the skeleton: {e}", flush=True)
+            skeleton = None
+        if skeleton:
+            extra["skeleton"] = skeleton
+            print(f"[acq] skeleton: {skeleton['file']} from "
+                  f"{skeleton['source']} ({skeleton['nodes']} nodes)",
+                  flush=True)
         stats = list(getattr(self._camera_mgr, "last_stream_stats", []) or [])
         if stats:
             extra["camera_stream_stats"] = stats
@@ -4912,6 +4943,16 @@ class MainWindow(QMainWindow):
                 status = status.replace(
                     "Calibration solved",
                     f"Solved {len(cams)} of {len(cams) + dropped} cameras", 1)
+            # Every camera can be "solved" with one of them placed through a
+            # poor link, so the status line names those cameras too.
+            placed = report.get("poorly_placed") or {}
+            if placed:
+                status += f"; unreliable: {', '.join(placed)}"
+            floor = report.get("floor") or {}
+            if floor.get("from"):
+                status += f"; floor from {', '.join(floor['cameras'])}"
+            elif floor.get("skipped"):
+                status += "; floor skipped"
             if msg:
                 QMessageBox.warning(self, "Calibration Warnings", msg[:800])
                 status += " (with warnings)"

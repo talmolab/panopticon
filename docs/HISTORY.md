@@ -626,12 +626,170 @@ Dead ends, do not retry:
   between launches and the sidebar collapses to a camera-only view. A profile
   can be added from any file, the assay and cohort fields are gone, and notes
   is three lines (`3b7d365`).
+- 2026-09-25: A recording's folder is `<mouse1>_<mouse2>_recording` instead
+  of `recording` (`4753a3c`). LUC3D matches the sessions uploaded together by
+  folder name, and every recording had the same one. LUC3D also loads any
+  `*skeleton*.json` at a session's root. A new profile field, `skeleton`,
+  copies a skeleton file there as `skeleton.json`, and the reference profile
+  names the 20-node mouse skeleton.
+- 2026-09-25: READY can also require the co-detection graph's algebraic
+  connectivity, 30 on the reference rig (`4753a3c`). It was measured on the
+  saved `codet_frames.json` files of 2026-09-21, 2026-09-23 and 2026-09-25,
+  with pairs of 20 co-detections as edges. The per-camera counts and the
+  one-group test passed at 220, 259 and 122 s, at a connectivity of 104, 60
+  and 8.7. Connectivity reached 30 at 67, 234 and 130 s, and ended the takes
+  at 125.1, 61.3 and 337.0. So 30 holds back only the weakly joined 2026-09-25
+  graph, by 8 s. The weakest cut was always cams 1, 4, 7 and 9 against the
+  other five. The display names the two sides of the weakest cut while the
+  connectivity is short.
+- 2026-09-25: READY can also apply per-camera view tests after the sample
+  measures of ROS `camera_calibration` (`4753a3c`). They are the cells of a
+  4 x 4 grid that the marker corners reach, the board's size in view and its
+  tilt. They count co-detection ticks only and are off at 0. The coverage at
+  every stop goes to the log, to set them from. The sidebar's Flat final
+  second box, remembered per profile, records a floor request in the
+  calibration's metadata. The HUD ran at 4.0 to 4.6 ticks a second on every
+  calibration from 2026-09-21 to 2026-09-25. The docs said 10 to 20, and now
+  say 4 to 5.
+- 2026-09-25: The 345 s calibration of 2026-09-25 fitted cam5's lens to fx 748
+  at 7.6 px and cam9's to 4125, each from about 487 detections. The lens gives
+  about 1300, and six pairs were poor. Farthest-point sampling picks each
+  camera's 60 views, and it picks the least typical views first, which in a
+  long take are misdetections and pose flips. The solve now judges the views
+  against a reference fit before the pick and leaves out those beyond 3 times
+  the median view's error (`4d8468b`). The reference is whichever of two first
+  fits reprojects the median view closer: one on 120 spread views, one on the
+  old pick. Over the 27 cameras of the 2026-09-21, 2026-09-23 and 2026-09-25
+  takes, the spread fit was dragged off on three (fx 6234, 1824 and 1988) and
+  the pick on two. The other fit reprojected the median view closer each time.
+  Re-solved from copies, 2026-09-25 went from a median pair RMS of 0.95 px
+  with six poor pairs to 0.63 px with all 21 good, and 2026-09-23 stayed at
+  0.74 px. On 2026-09-21 every tree link stayed good, but cam1-cam4 and
+  cam1-cam9, off the tree on 13 and 9 shared views, turned poor. cam1's focal
+  length there is barely observable (60-view subsets fit it anywhere from 1205
+  to 3365). A 2% change in it moves those two stereo fits to basins 41 and 75
+  degrees apart, so the old rule's clean pairs there were luck.
+- 2026-09-25: The re-solve passed its acceptance checks only in part
+  (`4d8468b`). On 2026-09-21, cam1, cam6 and cam9 moved 2.2 to 2.4% from
+  their old focal lengths, against a 2% limit. Their new values lie within
+  the spread of random 60-view fits, and closer than the old ones to a
+  240-view fit. The old picks held misdetections at 88 and 376 px. cam4 moved
+  the other way, to 1404, where the 240-view fit gives 1424 and the old fit
+  gave 1429. On 2026-09-25, four cameras sat more than 5% from the median
+  focal length. The good 2026-09-23 solve fails that test on four cameras
+  too, because the lenses differ. Against its own 2026-09-23 fit, every
+  camera but cam1 is within 2.3%. cam1's weakly determined fit gave 1232
+  against 1411, as the old rule did (1229).
+- 2026-09-25: A multi-view check finds what the pair RMS hides (no code
+  change). Each corner seen by three or more cameras was triangulated from
+  the others and reprojected into the one left out. From the old
+  calibration.toml to the new one, the median error went from 5.9 to 3.2 px on
+  2026-09-25 and from 3.1 to 2.4 px on 2026-09-21. On 2026-09-23 it rose from
+  1.0 to 2.1 px, and on 2026-09-21 cams 1, 4, 7 and 9 rose while the top
+  cameras fell. Most of the 2026-09-23 rise is the tree. cam2 now hangs from
+  cam8 instead of cam3, on pair errors that both round to 0.78 px, and the
+  old lens fits chained along the new tree give 1.8 px. Along either tree,
+  the new lens fits were worse than the old on both good takes. Fitting each
+  lens on every view within the cut, not on the 60-view pick, gave 1.0 px on
+  2026-09-23 and 1.6 px on 2026-09-21. Each such fit took about a minute with
+  LU. The batch was not merged into master, for the maintainer to decide.
+- 2026-09-25: A first fit on 120 views made each camera's lens fit about 7
+  times slower, 64 s against 9 s on 700 synthetic views. OpenCV's default SVD
+  solve grows with the cube of the view count. The first fits solve with
+  `CALIB_USE_LU`. On the 2026-09-25 take the spread fit with LU left out the
+  same views as with SVD, and the camera sections of calibration.toml matched
+  to the last digit. The nine-camera re-solves took 68 to 90 s each
+  (`4d8468b`). On 700 synthetic views, 59 of them scrambled, a first fit on
+  120 took 2.2 s with LU against 111 s with SVD. Both left out every
+  scrambled view, 105 views in all with LU and 106 with SVD.
+- 2026-09-25: The report names every camera it cannot vouch for, as
+  `poorly_placed`, and the worker's summary opens with them. A lens fit above
+  1.5 px or a focal length more than 1.6 times off the other cameras' median
+  counts, and so does the smaller side of each poor tree edge. A solve can
+  read every camera solved with one of them placed through a poor link, and
+  a pair warning reads the same either way (`4d8468b`).
+- 2026-09-25: Flat final second, a sidebar box (`4753a3c`), asks the solve to
+  put Z = 0 on the board lying still at the end of the take (`4d8468b`). Z
+  points towards the cameras, so LUC3D's floor grid lies on the arena floor.
+  On a synthetic take every camera lands within 0.4 mm of its true height
+  above the board. None of the three reference takes was recorded with it, so
+  copies of them were re-solved with it set. 2026-09-25 happened to end with
+  the board lying still in view of the five cameras above the floor. The
+  floor came from cam5, with the cameras 2.0 degrees and 4.8 mm apart, just
+  past the 2 degree warning. The lying board's corners, triangulated in the
+  new frame, sit at Z = 0.9 mm with a standard deviation of 0.5 mm, 14.97 mm
+  apart on the 15 mm board. 2026-09-21 and 2026-09-23 did not end on a lying
+  board, and skipped the step with a warning.
+- 2026-09-25: The floor step's open issues, from the 2026-09-25 tail (no code
+  change). The floor frame comes from the camera with the lowest PnP error.
+  That was the square-on cam5, whose tilt is the least determined: 0.3 px of
+  noise moves its normal by 0.46 degrees RMS, against 0.09 to 0.14 for the
+  oblique cameras. Its normal is 0.80 degrees off the plane through the
+  triangulated corners. Fitting the board to the corners triangulated from
+  every camera that saw it (Umeyama 1991) would level the floor by 0.8
+  degrees. The worst
+  camera, cam2, would then sit 1.36 degrees off, under the warning. Part of
+  the spread is real: cam2 hangs from the bottom camera cam4 in the tree, and
+  its chained pose disagrees with its direct pairs to the top cameras by 0.85
+  to 1.22 degrees. The Z-up vote over every camera centre is fragile with five
+  cameras above the floor and four below. Without two of the top cameras, Z
+  would point away from the cameras that saw the board. Pointing Z towards the
+  cameras that posed the board would hold, since a one-sided board is detected
+  only from its front. The skip message names only the first three cameras,
+  which on 2026-09-21 hid cam8's partial board.
+- 2026-09-25: The reference profile sets the view tests to 7 fill cells, a
+  board size of 0.10 and a tilt of 40 degrees (`07602ec`). A replay of the
+  2026-09-21, 2026-09-23 and 2026-09-25 calibrations through the detector, at
+  three tick phases each, passed every camera, and READY came no later. cam1,
+  the far camera, binds on 2026-09-23 with 8 cells, a fifth-best size of 0.119
+  and a fifth-best tilt of 44.2. One step stricter (8, 0.12 and 45) never
+  reaches READY there. cam1 reaches 40 degrees only on views of 5 to 10
+  markers, whose corner noise adds tilt. With a minimum marker count, its tilt
+  value would drop to about 30. The tests miss the poor 2026-09-25 take. Its
+  board lay still for the first minute, and 40-51% of five cameras' views
+  repeat the view before. A test that skips repeated views would catch it.
+  2026-09-23 itself only just reaches READY: cam1 ends with 112 to 121 paired
+  ticks against 120, by tick phase. In the replay 2026-09-25 never reaches
+  READY, because cam3 never has the board in more than 2 of its 4 grid cells.
+  Each of the 27 videos decoded to as many frames as its `blockids.npy` holds,
+  with block IDs running from 1 with no gap. WORKFLOW.md's coverage figures
+  now come from the 2026-09-23 take.
+- 2026-09-26: The final lens fit takes up to 120 views spread through the
+  take from those within the cut, not the 60-view farthest-point pick
+  (`2cebb39`). It solves with LU from two starts, the reference fit and
+  OpenCV's own guess. It keeps whichever reprojects the median view closer.
+  A fit on every view within the cut took 13.4 minutes on the 724 views of
+  2026-09-25's cam2, so the sample is bounded. From OpenCV's guess alone, a
+  120-view spread put 2026-09-23's cam4 at 1824 against 1424. From the
+  reference alone, a test take's fit fell to 22. The median leave-one-out
+  error went from 3.07 to 1.85 px on 2026-09-21, 1.01 to 0.82 px on
+  2026-09-23 and 5.88 to 1.65 px on 2026-09-25. On 2026-09-25 the error of
+  triangulated board distances fell from 1.01 to 0.084 mm. On 2026-09-23 every
+  camera is within about 0.1 px of the old solve or better. On 2026-09-21 cams
+  4, 7 and 9 stay worse, at 6.5, 6.8 and 3.0 px against 2.6, 2.8 and 1.4 px.
+  All three sit on the weak side of the rig's cut, where cam1 sees the board
+  small and far. A 240-view spread scored within 0.1 px of 120 on every take
+  and took about five times as long. The floor found on 2026-09-25's tail
+  now has normals within 0.48 deg and origins within 2.4 mm, against 2.0 deg
+  and 4.8 mm before. The new calibration.toml of 2026-09-25 and of 2026-09-23
+  went into every recording of its day, with the old files kept aside. With
+  these results the batch merged into master.
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
   them all, so drive the real GUI through repeated acquisitions).
 - Patching the FLIR witness one edge case at a time (each round found another,
   and the conservative rule replaced it).
+- Judging the lens-fit views again against a refit with every view
+  re-admitted each round (it cycles between two fits, as on cam7 of the
+  2026-09-25 take).
+- Starting a poor few-view pair's stereo fit from the pair's PnP-medoid pose
+  (cam1-cam4 and cam1-cam9 of 2026-09-21 went from 134 and 42 px to 172 and
+  171 px).
+- Fitting each lens on every view within the cut in the solve (13.4 minutes
+  on one camera of 724 views, with LU).
+- A final lens fit from one start only (OpenCV's guess put 2026-09-23's cam4
+  at 1824, and a reference that was off took a test take's fit to 22).
 
 ---
 
@@ -668,3 +826,10 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
 - Reading RSS unelevated (wrong values).
 - Validating a fix without driving the real GUI through repeated acquisitions.
 - Patching the FLIR witness edge case by edge case.
+- Re-judging the lens-fit views with every view re-admitted each round (it
+  cycles between two fits).
+- Starting a poor few-view pair's stereo fit from its PnP-medoid pose (made
+  both such pairs worse).
+- A lens fit on every view within the cut (minutes per camera).
+- A final lens fit from one start only (either start can settle on a wrong
+  focal length).

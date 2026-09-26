@@ -150,8 +150,27 @@ def _write_text_atomic(path, text: str) -> None:
 MIN_CORNERS = 6
 #: Detection frames a camera needs before its intrinsics are solved.
 INTRINSICS_MIN_FRAMES = 20
-#: Pose-diverse cap on the frames the intrinsics are fitted on.
+#: Above this many views, a camera's views are judged against a reference fit
+#: before the final fit. At or below it, every view goes straight into one
+#: fit. It is also the size of the pose-diverse pick that one of the two first
+#: fits is fitted on.
 INTRINSICS_MAX_FRAMES = 60
+#: Views, spread evenly through the take, that one of the two first fits is
+#: fitted on before any view is judged (_reference_fit).
+INTRINSICS_FIRST_PASS_FRAMES = 120
+#: Views, spread evenly through the take from those within the cut, that the
+#: final fit is fitted on.
+INTRINSICS_FINAL_FRAMES = 120
+#: A view whose reprojection error under the reference fit exceeds this many
+#: times the median view's (and INTRINSICS_OUTLIER_FLOOR_PX) is left out of
+#: the final fit: a misdetection or a pose-estimate flip, not a pose.
+INTRINSICS_OUTLIER_FACTOR = 3.0
+INTRINSICS_OUTLIER_FLOOR_PX = 1.0
+#: A lens fit worse than this, in pixels, is warned about as unreliable.
+INTRINSICS_RMS_WARN_PX = 1.5
+#: A focal length outside this factor of the other cameras' median is warned
+#: about when three or more cameras are solved.
+INTRINSICS_FX_WARN_FACTOR = 1.6
 
 
 def load_board(path):
@@ -712,6 +731,9 @@ def calibrate_intrinsics(corners_list, ids_list, corner_obj, image_size,
 
     `stats`, if given, is a dict that receives ``degenerate``: the views
     dropped because no homography fits their corners (see _homography_ok).
+    With more than ``max_frames`` views it also receives ``outliers``: the
+    views left out because the reference fit (_reference_fit) reprojects
+    them beyond INTRINSICS_OUTLIER_FACTOR times the median view's error.
     """
     obj_all, img_all = [], []
     degenerate = 0
@@ -732,21 +754,170 @@ def calibrate_intrinsics(corners_list, ids_list, corner_obj, image_size,
     if len(obj_all) < min_frames:
         return None
 
-    if len(obj_all) > max_frames:
-        w, h = image_size
-        K_rough = np.array([[w, 0, w * 0.5], [0, w, h * 0.5], [0, 0, 1]],
-                           dtype=np.float64)
-        poses = _poses_from_pts(obj_all, img_all, K_rough, np.zeros(5))
-        indices = _pose_diverse_sample(poses, max_frames)
-        obj_all = [obj_all[i] for i in indices]
-        img_all = [img_all[i] for i in indices]
-
     flags = (cv2.CALIB_FIX_ASPECT_RATIO
              | cv2.CALIB_FIX_K3
              | cv2.CALIB_ZERO_TANGENT_DIST)
+    if len(obj_all) > max_frames:
+        # RULE: views are judged against a reference fit, and the final fit
+        # leaves out those beyond the cut. REASON: a long take holds
+        # misdetections and pose-estimate flips, and a lens fit that keeps
+        # them can have its focal length pulled off by a factor of two or
+        # more.
+        K0, d0, _poses, errors = _reference_fit(obj_all, img_all, image_size,
+                                                flags, max_frames)
+        finite = errors[np.isfinite(errors)]
+        cut = max(INTRINSICS_OUTLIER_FLOOR_PX,
+                  INTRINSICS_OUTLIER_FACTOR * float(np.median(finite))
+                  if finite.size else INTRINSICS_OUTLIER_FLOOR_PX)
+        keep = [i for i, e in enumerate(errors) if e <= cut]
+        # Too few views within the cut means the reference itself is off, so
+        # every view goes into the final fit and none is counted as left out.
+        if stats is not None:
+            stats["outliers"] = (len(obj_all) - len(keep)
+                                 if len(keep) >= min_frames else 0)
+        if len(keep) >= min_frames:
+            obj_all = [obj_all[i] for i in keep]
+            img_all = [img_all[i] for i in keep]
+        # RULE: the final fit takes INTRINSICS_FINAL_FRAMES views spread
+        # through the take from those within the cut, and solves with LU.
+        # REASON: a farthest-point pick holds the least typical views, and
+        # the lens fit moves with it. The solve chains pairwise poses and
+        # never refines them jointly, so that movement can move the tree to
+        # another pair and double the error of corners triangulated from the
+        # other cameras, while the pair RMS stays the same. A spread sample
+        # stands for the whole take. The solver's cost grows with the cube of
+        # the view count, so a fit on every view within the cut of a long
+        # take runs for many minutes.
+        #
+        # RULE: the final fit runs from two starts, the reference fit and
+        # OpenCV's own guess, and keeps whichever reprojects the median view
+        # within the cut closer. REASON: either start can settle on a
+        # wrong focal length. OpenCV's guess does on some real takes, and a
+        # reference fit that is itself off can lead the fit away from a sound
+        # answer. The median view tells the two apart, as in _reference_fit.
+        sel = _spread(len(obj_all), INTRINSICS_FINAL_FRAMES)
+        obj_sel = [obj_all[i] for i in sel]
+        img_sel = [img_all[i] for i in sel]
+        best, failure = None, None
+        for start in ((K0, d0), None):
+            try:
+                if start is None:
+                    rms, K, dist, _r, _t = cv2.calibrateCamera(
+                        obj_sel, img_sel, image_size, None, None,
+                        flags=flags | cv2.CALIB_USE_LU)
+                else:
+                    rms, K, dist, _r, _t = cv2.calibrateCamera(
+                        obj_sel, img_sel, image_size, start[0].copy(),
+                        start[1].copy(),
+                        flags=(flags | cv2.CALIB_USE_LU
+                               | cv2.CALIB_USE_INTRINSIC_GUESS))
+            except cv2.error as e:
+                failure = e
+                continue
+            if not (np.isfinite(K).all() and np.isfinite(dist).all()):
+                continue
+            median = _median_view_error(obj_all, img_all, K, dist)
+            if best is None or median < best[0]:
+                best = (median, rms, K, dist)
+        if best is None:
+            raise (failure if failure is not None
+                   else cv2.error("no start gave a final lens fit"))
+        return best[1], best[2], best[3], len(sel)
+
     rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(
         obj_all, img_all, image_size, None, None, flags=flags)
     return rms, K, dist, len(obj_all)
+
+
+def _median_view_error(obj_all, img_all, K, dist) -> float:
+    """The median over views of each view's mean reprojection error once
+    posed under ``K, dist`` (a view PnP cannot pose counts as infinite)."""
+    poses = _poses_from_pts(obj_all, img_all, K, dist)
+    return float(np.median([p[2] if p is not None else np.inf for p in poses]))
+
+
+def _spread(n: int, k: int) -> list:
+    """``k`` indices spread evenly over ``range(n)`` (all of them when n <= k)."""
+    if n <= k:
+        return list(range(n))
+    return sorted({int(round(x)) for x in np.linspace(0, n - 1, k)})
+
+
+def _reference_fit(obj_all, img_all, image_size, flags, max_frames):
+    """``(K, dist, poses, errors)``: every view posed under the better of two
+    first fits, with its mean reprojection error (inf when PnP fails).
+
+    RULE: one first fit is on INTRINSICS_FIRST_PASS_FRAMES views spread
+    through the take, the other on the pose-diverse pick of ``max_frames``
+    views under rough intrinsics. The views are judged against the one that
+    reprojects the median view closer. REASON: either can be pulled off by
+    the bad views it holds. A few views that no pose fits drag the spread
+    fit, and the pick's own error filter drops them. Farthest-point sampling
+    favours views that merely look unusual, which drag the pick, and the
+    spread holds few of them. A fit pulled off puts the median view well
+    above a sound fit's: the least median of squares criterion (Rousseeuw,
+    "Least median of squares regression", JASA 79, 1984).
+
+    RULE: both first fits solve with LU. REASON: the solver's cost grows with
+    the cube of the view count, so the default SVD makes a fit on twice the
+    views about eight times slower. A first fit only judges views, and LU
+    leaves out the same ones tens of times faster.
+    """
+    w, h = image_size
+    K_rough = np.array([[w, 0, w * 0.5], [0, w, h * 0.5], [0, 0, 1]],
+                       dtype=np.float64)
+    rough = _poses_from_pts(obj_all, img_all, K_rough, np.zeros(5))
+    best, failure = None, None
+    for sel in (_spread(len(obj_all), INTRINSICS_FIRST_PASS_FRAMES),
+                _pose_diverse_sample(rough, max_frames)):
+        if not sel:
+            continue
+        try:
+            _rms, K0, dist0, _r, _t = cv2.calibrateCamera(
+                [obj_all[i] for i in sel], [img_all[i] for i in sel],
+                image_size, None, None, flags=flags | cv2.CALIB_USE_LU)
+        except cv2.error as e:
+            failure = e
+            continue
+        poses = _poses_from_pts(obj_all, img_all, K0, dist0)
+        errors = np.array([p[2] if p is not None else np.inf for p in poses])
+        # A view PnP cannot pose counts against the fit, as an infinite error.
+        median = float(np.median(errors))
+        if best is None or median < best[0]:
+            best = (median, K0, dist0, poses, errors)
+    if best is None:
+        # Both fits failed: the camera fails, as any OpenCV fit error does.
+        raise (failure if failure is not None
+               else cv2.error("no view set gave a first fit"))
+    return best[1:]
+
+
+def intrinsics_warnings(intrinsics, intrinsic_stats) -> dict:
+    """camera -> why its lens fit looks wrong, for the report and warnings.
+
+    A fit error above INTRINSICS_RMS_WARN_PX, or, with three or more cameras
+    solved, a focal length outside INTRINSICS_FX_WARN_FACTOR of the others'
+    median. A rig that mixes lenses can trip the second on a camera whose fit
+    is sound, so its text says to check it against that camera's lens.
+    """
+    out = {}
+    fxs = {cam: float(K[0, 0]) for cam, (K, _d) in intrinsics.items()}
+    for cam, (K, _d) in intrinsics.items():
+        why = []
+        rms = float(intrinsic_stats.get(cam, {}).get("rms", 0.0))
+        if rms > INTRINSICS_RMS_WARN_PX:
+            why.append("its fit error is {:.1f} px".format(rms))
+        others = [v for c, v in fxs.items() if c != cam]
+        if len(others) >= 2:
+            med = float(np.median(others))
+            fx = fxs[cam]
+            if med > 0 and not (med / INTRINSICS_FX_WARN_FACTOR <= fx
+                                <= med * INTRINSICS_FX_WARN_FACTOR):
+                why.append("its focal length is {:.0f} px against {:.0f} for "
+                           "the other cameras".format(fx, med))
+        if why:
+            out[cam] = "; ".join(why)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -978,6 +1149,279 @@ def chain_extrinsics(cam_names, tree_edges, pairwise, ref_cam):
 
 
 # ---------------------------------------------------------------------------
+# Floor: the board lying flat for the take's final second
+# ---------------------------------------------------------------------------
+
+#: The calibration's session_metadata.json key that asks for the floor step
+#: (the sidebar's "Flat final second" box).
+FLOOR_KEY = "floor_from_final_second"
+#: How far back from each video's end the floor search reads, in seconds.
+FLOOR_TAIL_S = 4.0
+#: How long the board must lie still at the end of its last detected
+#: stretch, in seconds.
+FLOOR_STILL_S = 0.5
+#: Median corner movement over that time, in pixels, that still counts as
+#: still: a board held in a hand moves more, one lying on the floor less.
+FLOOR_STILL_PX = 1.0
+#: Corners a camera must see on the lying board to count towards the floor.
+FLOOR_MIN_CORNERS = 12
+#: How far apart two cameras' views of the lying board may put it before the
+#: solve warns. Each camera poses the board on its own, so the spread is a
+#: direct measure of how well the cameras' poses agree.
+FLOOR_SPREAD_WARN_DEG = 2.0
+FLOOR_SPREAD_WARN_MM = 10.0
+
+
+def floor_requested(calib_dir) -> bool:
+    """Whether this calibration was recorded with "Flat final second"."""
+    try:
+        meta = json.loads((Path(calib_dir) / METADATA_FILENAME).read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(meta.get(FLOOR_KEY))
+
+
+def _corner_detector(board_cfg):
+    """A ``detect(gray) -> (corners (M, 2), ids (M,)) | (None, None)``
+    callable, the same detection the solve runs on every hinted frame."""
+    board, aruco_dict = charuco.make_board(board_cfg)
+    detect_markers = charuco.make_marker_detector(aruco_dict)
+
+    def detect(gray):
+        mc, mi = detect_markers(gray)
+        if mi is None or len(mi) < 2:
+            return None, None
+        _ret, cc, ci = cv2.aruco.interpolateCornersCharuco(mc, mi, gray, board)
+        if ci is None or len(ci) < MIN_CORNERS:
+            return None, None
+        return cc.reshape(-1, 2), ci.ravel()
+    return detect
+
+
+def still_tail(detections, still_frames):
+    """The board's corners averaged over the last ``still_frames`` frames of
+    the final detected stretch, or ``(None, why)``.
+
+    ``detections`` is one ``(corners, ids)`` or ``(None, None)`` per frame, in
+    order. Returns ``((ids, mean_corners, movement_px), None)`` when the board
+    was detected in each of those frames with FLOOR_MIN_CORNERS corners in
+    common and moved at most FLOOR_STILL_PX (the median over corners of each
+    corner's largest distance from its mean).
+    """
+    last = max((i for i, (c, _ids) in enumerate(detections) if c is not None),
+               default=None)
+    if last is None:
+        return None, "the board was not seen at the end of the take"
+    first = last
+    while first > 0 and detections[first - 1][0] is not None:
+        first -= 1
+    if last - first + 1 < still_frames:
+        return None, ("the board was seen for only {} frame(s) at the end "
+                      "({} needed)".format(last - first + 1, still_frames))
+    run = detections[last - still_frames + 1:last + 1]
+    common = set(int(i) for i in run[0][1])
+    for _c, ids in run[1:]:
+        common &= set(int(i) for i in ids)
+    if len(common) < FLOOR_MIN_CORNERS:
+        return None, ("only {} corners stayed in view at the end ({} "
+                      "needed)".format(len(common), FLOOR_MIN_CORNERS))
+    ids = np.array(sorted(common))
+    stack = []
+    for corners, fids in run:
+        pos = {int(i): corners[k] for k, i in enumerate(fids)}
+        stack.append(np.stack([pos[i] for i in ids]))
+    stack = np.stack(stack)                       # (frames, corners, 2)
+    mean = stack.mean(axis=0)
+    movement = float(np.median(np.linalg.norm(stack - mean, axis=2).max(axis=0)))
+    if movement > FLOOR_STILL_PX:
+        return None, ("the board was still moving at the end ({:.1f} px, "
+                      "{:g} px allowed)".format(movement, FLOOR_STILL_PX))
+    return (ids, mean, movement), None
+
+
+def read_tail(video, detect, fps):
+    """``(detections, still_frames)`` for the last FLOOR_TAIL_S of ``video``.
+
+    Raises ValueError for a video that does not open or reports no frame
+    count: the tail is found by seeking from the count, and without one the
+    read would decode and search the whole take.
+    """
+    cap = cv2.VideoCapture(str(video))
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not cap.isOpened() or total <= 0:
+            raise ValueError("could not read its video (opened={}, frames={})"
+                             .format(cap.isOpened(), total))
+        start = max(0, total - int(round(FLOOR_TAIL_S * fps)))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        dets = []
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+            dets.append(detect(gray))
+    finally:
+        cap.release()
+    return dets, max(2, int(round(FLOOR_STILL_S * fps)))
+
+
+def floor_frame(tails, intrinsics, extrinsics, corner_obj):
+    """The board's pose in the solve's world frame, from the cameras that saw
+    it lying still: ``(R, t, info)`` or ``(None, None, why)``.
+
+    ``tails`` maps camera -> ``(ids, mean_corners, movement)``. The camera
+    whose board pose reprojects best sets the frame; ``info`` records every
+    camera used and how far the others' boards disagree with it (the angle
+    between normals, the distance between origins), which says how well the
+    floor was measured. The board's Z axis is turned to point at the cameras.
+    """
+    poses = {}
+    for cam, (ids, mean, _mv) in tails.items():
+        if cam not in intrinsics or cam not in extrinsics:
+            continue
+        K, dist = intrinsics[cam]
+        obj = np.stack([corner_obj[int(i)] for i in ids]).astype(np.float64)
+        ok, rvec, tvec = cv2.solvePnP(obj, mean.astype(np.float64), K, dist)
+        if not ok:
+            continue
+        proj, _ = cv2.projectPoints(obj, rvec, tvec, K, dist)
+        err = float(np.linalg.norm(proj.reshape(-1, 2) - mean, axis=1).mean())
+        R_bc, _ = cv2.Rodrigues(rvec)
+        crv, ctv = extrinsics[cam]
+        R_c, _ = cv2.Rodrigues(np.asarray(crv, np.float64))
+        t_c = np.asarray(ctv, np.float64).reshape(3, 1)
+        R_bw = R_c.T @ R_bc
+        t_bw = R_c.T @ (tvec.reshape(3, 1) - t_c)
+        if not (np.isfinite(R_bw).all() and np.isfinite(t_bw).all()
+                and math.isfinite(err)):
+            continue
+        poses[cam] = (R_bw, t_bw, err, len(ids))
+    if not poses:
+        return None, None, "no camera's view of the lying board could be posed"
+    best = min(poses, key=lambda c: (poses[c][2], -poses[c][3]))
+    R_b, t_b, _err, _n = poses[best]
+    # Up is towards the cameras: flip the board frame about its X axis when
+    # most camera centres sit below the board plane.
+    centres = [(-cv2.Rodrigues(np.asarray(rv, np.float64))[0].T
+                @ np.asarray(tv, np.float64).reshape(3, 1))
+               for rv, tv in extrinsics.values()]
+    heights = [float((R_b.T @ (c - t_b))[2, 0]) for c in centres]
+    if np.median(heights) < 0:
+        R_b = R_b @ np.diag([1.0, -1.0, -1.0])
+    normal = R_b[:, 2]
+    spread_deg, spread_mm = 0.0, 0.0
+    for cam, (Rw, tw, _e, _n) in poses.items():
+        if cam == best:
+            continue
+        ang = math.degrees(math.acos(min(1.0, abs(float(normal @ Rw[:, 2])))))
+        spread_deg = max(spread_deg, ang)
+        spread_mm = max(spread_mm, float(np.linalg.norm(tw - t_b)))
+    info = {"cameras": sorted(poses, key=camera_sort_key), "from": best,
+            "spread_deg": round(spread_deg, 3), "spread_mm": round(spread_mm, 2),
+            "movement_px": round(max(float(tails[c][2]) for c in poses), 3)}
+    return R_b, t_b, info
+
+
+def apply_floor(extrinsics, R_b, t_b):
+    """Re-express every camera's pose in the floor's frame, where the board
+    lying on the floor is Z = 0, Z points up and the origin is its first
+    corner: X_old = R_b X_new + t_b, so R' = R R_b and t' = R t_b + t."""
+    out = {}
+    for cam, (rv, tv) in extrinsics.items():
+        R_c, _ = cv2.Rodrigues(np.asarray(rv, np.float64))
+        t_c = np.asarray(tv, np.float64).reshape(3, 1)
+        R_new = R_c @ R_b
+        t_new = R_c @ t_b + t_c
+        rvec, _ = cv2.Rodrigues(R_new)
+        out[cam] = (rvec.ravel(), t_new.ravel())
+    return out
+
+
+def solve_floor(calib_dir, cam_dirs, active, board_cfg, intrinsics,
+                extrinsics, corner_obj, warnings):
+    """``(extrinsics, floor)``: the poses re-expressed with Z = 0 on the board
+    lying at the end of the take, or unchanged with ``floor["skipped"]``
+    saying why.
+
+    RULE: the floor step never fails the solve. REASON: it is an extra on a
+    calibration that is already good; an unreadable tail, a board still in a
+    hand or an OpenCV error costs the floor, never the cameras' poses.
+    """
+    try:
+        floored, info = _find_floor(calib_dir, cam_dirs, active, board_cfg,
+                                    intrinsics, extrinsics, corner_obj)
+    except Exception as e:
+        floored, info = None, "{}: {}".format(type(e).__name__, e)
+    if floored is None:
+        warn("floor skipped ({}); calibration.toml keeps the reference "
+             "camera's frame".format(info), warnings)
+        return extrinsics, {"skipped": info}
+    print("  floor from {} ({} camera(s); normals agree within {:.2f} deg, "
+          "origins within {:.1f} mm)".format(
+              info["from"], len(info["cameras"]), info["spread_deg"],
+              info["spread_mm"]))
+    if (info["spread_deg"] > FLOOR_SPREAD_WARN_DEG
+            or info["spread_mm"] > FLOOR_SPREAD_WARN_MM):
+        warn("the cameras disagree about where the lying board is (normals "
+             "{:.1f} deg apart, origins {:.0f} mm apart): their poses in "
+             "calibration.toml disagree by as much".format(
+                 info["spread_deg"], info["spread_mm"]), warnings)
+    return floored, info
+
+
+def _find_floor(calib_dir, cam_dirs, active, board_cfg, intrinsics,
+                extrinsics, corner_obj):
+    """The body of ``solve_floor``: ``(new extrinsics, info)``, or
+    ``(None, why)`` when no camera gives the floor."""
+    try:
+        fps = float(json.loads((Path(calib_dir) / METADATA_FILENAME)
+                               .read_text(encoding="utf-8"))
+                    .get("acq_fps") or 30)
+    except (OSError, ValueError):
+        fps = 30.0
+    # A board config the detector cannot build skips the floor here, once,
+    # rather than once per camera.
+    _corner_detector(board_cfg)
+
+    def tail_of(cam_dir):
+        # RULE: one camera's unreadable tail costs that camera only, and each
+        # thread builds its own detector. REASON: the other cameras can still
+        # give the floor, and no OpenCV detector or board object is shared
+        # between threads.
+        try:
+            video = calibration_video(cam_dir)
+            if video is None:
+                return None, "no calibration video"
+            dets, need = read_tail(video, _corner_detector(board_cfg), fps)
+            return still_tail(dets, need)
+        except Exception as e:
+            return None, "{}: {}".format(type(e).__name__, e)
+
+    dirs = [d for d in cam_dirs if d.name in active]
+    # OpenCV releases the GIL to decode and detect, so one thread per camera
+    # reads the tails side by side.
+    with ThreadPoolExecutor(max_workers=max(1, min(len(dirs),
+                                                   os.cpu_count() or 1))) as ex:
+        found = dict(zip((d.name for d in dirs), ex.map(tail_of, dirs)))
+    tails = {cam: tail for cam, (tail, _why) in found.items() if tail is not None}
+    if not tails:
+        why_not = sorted(((cam, why) for cam, (tail, why) in found.items()),
+                         key=lambda kv: camera_sort_key(kv[0]))
+        return None, ("; ".join("{}: {}".format(c, w) for c, w in why_not[:3])
+                      or "no camera saw the board lying still at the end")
+    R_b, t_b, info = floor_frame(tails, intrinsics, extrinsics, corner_obj)
+    if R_b is None:
+        return None, info
+    floored = apply_floor(extrinsics, R_b, t_b)
+    if not all(np.isfinite(rv).all() and np.isfinite(tv).all()
+               for rv, tv in floored.values()):
+        return None, "the floor frame gave a non-finite camera pose"
+    return floored, info
+
+
+# ---------------------------------------------------------------------------
 # Pair quality bands
 # ---------------------------------------------------------------------------
 
@@ -1023,6 +1467,72 @@ def pair_quality_warnings(pairwise) -> list[str]:
             out.append("{}-{}: only {} shared frames ({}+ needed for a "
                        "full-strength tree edge)".format(
                            ca, cb, n, MIN_TREE_FRAMES))
+    return out
+
+
+def _tree_side(tree_edges, a, b):
+    """The cameras on ``b``'s side of the tree edge ``a``-``b``."""
+    adj = defaultdict(list)
+    for x, y in tree_edges:
+        if {x, y} != {a, b}:
+            adj[x].append(y)
+            adj[y].append(x)
+    seen, stack = {b}, [b]
+    while stack:
+        for nb in adj[stack.pop()]:
+            if nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return seen
+
+
+def poorly_placed(active, tree_edges, pairwise, ref):
+    """camera -> ``{"link": "camA-camB", "rms": px}`` for every camera whose
+    position comes through a poor tree link.
+
+    Each camera's pose is chained along the tree, so a poor link misplaces
+    only the cameras on one side of it: the smaller side, whose position
+    relative to the rest runs through that link. On a tie the side without
+    the reference camera is the one named, because the reference is the
+    origin. A camera behind several poor links keeps the worst.
+    """
+    out = {}
+    cams = set(active)
+    for a, b in tree_edges:
+        entry = pair_entry(pairwise, a, b)
+        if entry is None or rms_grade(entry[2]) != "poor":
+            continue
+        side_b = _tree_side(tree_edges, a, b) & cams
+        side_a = cams - side_b
+        if len(side_b) != len(side_a):
+            part = side_b if len(side_b) < len(side_a) else side_a
+        else:
+            part = side_a if ref in side_b else side_b
+        link = "{}-{}".format(*sorted((a, b), key=camera_sort_key))
+        for cam in part:
+            if cam not in out or entry[2] > out[cam]["rms"]:
+                out[cam] = {"link": link, "rms": float(entry[2])}
+    return dict(sorted(out.items(), key=lambda kv: camera_sort_key(kv[0])))
+
+
+def placement_warnings(placed, codetections, k=2):
+    """One warning per poorly placed camera, naming the cameras it shares
+    the most views with, which are the ones to show the board with it."""
+    out = []
+    for cam, row in placed.items():
+        partners = sorted(
+            ((n, b if a == cam else a) for (a, b), n in codetections.items()
+             if cam in (a, b) and (b if a == cam else a) not in placed),
+            key=lambda t: (-t[0], camera_sort_key(t[1])))
+        names = [c for _n, c in partners[:k]]
+        along = (" while {} also see it".format(" or ".join(names))
+                 if names else "")
+        out.append(
+            "{} is placed through a poor link ({}, {:.1f} px), so its "
+            "position in calibration.toml is unreliable; the other cameras' "
+            "positions do not depend on it. Recalibrate with the board close "
+            "to {}, tilted and near the edges of its view{}".format(
+                cam, row["link"], row["rms"], cam, along))
     return out
 
 
@@ -1086,7 +1596,8 @@ def save_reprojection_histogram(path, pair_rms):
 
 def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                  components, dropped, hints_used, skip, warnings,
-                 pairing=None, codetections=None, camera_serials=None):
+                 pairing=None, codetections=None, camera_serials=None,
+                 placed=None):
     """Assemble every quality figure of a solve into one plain dict.
 
     Written verbatim as ``calibration_report.json`` and rendered into the
@@ -1100,7 +1611,10 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
     pairs (``pair_rms_median``). ``pairing`` (``"block_id"`` or
     ``"frame_index"``), ``codetections`` (pair -> views shared before the
     pose-diverse cap) and ``camera_serials`` (name -> serial during the
-    calibration) are recorded when given.
+    calibration) are recorded when given. ``placed`` becomes
+    ``poorly_placed``: camera -> ``{"link", "rms"}`` for every camera whose
+    position runs through a poor tree link, or whose lens fit is suspect
+    (``"link": "lens fit"``).
     """
     tree_rows = []
     for a, b in tree:
@@ -1131,6 +1645,7 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                        for cam, s in intrinsic_stats.items() if cam in active},
         "pairs": pairs,
         "rms_bands_px": {"good_below": RMS_GOOD_PX, "poor_from": RMS_POOR_PX},
+        "poorly_placed": dict(placed or {}),
         "warnings": list(warnings),
     }
     median = median_pair_rms(pairwise, active)
@@ -1376,6 +1891,20 @@ def main():
     active = [c for c in active if c in intrinsics]
     if len(active) < 2:
         fail("NO_INTRINSICS", "fewer than 2 cameras with valid intrinsics")
+    for cam in active:
+        n_out = job_stats.get(cam, {}).get("outliers")
+        if n_out:
+            print("  {}: left out {} view(s) that did not fit its first-pass "
+                  "lens fit".format(cam, n_out))
+    lens = intrinsics_warnings({c: intrinsics[c] for c in active},
+                               intrinsic_stats)
+    lens_warnings = [
+        "{}: lens fit looks wrong ({}), so its intrinsics and every pair with "
+        "it are unreliable. If this camera has the same lens as the others, "
+        "recalibrate with the board close to it, tilted and in the corners "
+        "of its view".format(cam, why) for cam, why in lens.items()]
+    for w in lens_warnings:
+        warn(w, warnings)
 
     # --- Pairwise stereo (parallel — cv2 releases the GIL) ---
     print("\nPairwise stereo...")
@@ -1428,6 +1957,15 @@ def main():
 
     extrinsics = chain_extrinsics(active, tree, pairwise, ref)
 
+    # --- Floor (only when the take was recorded with "Flat final second") ---
+    floor = {"requested": floor_requested(calib_dir)}
+    if floor["requested"]:
+        print("\nFloor (the board lying flat for the final second)...")
+        extrinsics, found = solve_floor(calib_dir, cam_dirs, active, board_cfg,
+                                        intrinsics, extrinsics, corner_obj,
+                                        warnings)
+        floor.update(found)
+
     # --- Quality summary + histogram ---
     print("\nPairwise quality (good < {:g} px, poor from {:g} px):".format(
         RMS_GOOD_PX, RMS_POOR_PX))
@@ -1442,6 +1980,27 @@ def main():
             median, rms_grade(median)))
     for w in pair_quality_warnings(pairwise):
         warn(w, warnings)
+    # RULE: a camera placed through a poor link is named first, as unreliable.
+    # REASON: the other warnings say a pair is poor, which reads the same
+    # whether the pair fixes one camera's position or is merely one of many.
+    # A solve can then report every camera "solved" with one of them placed
+    # several pixels wrong.
+    placed = poorly_placed(active, tree, pairwise, ref)
+    placement = placement_warnings(placed, codetections)
+    for w in placement:
+        print("  WARNING: {}".format(w))
+    # The lens and placement warnings lead, in that order: they name the
+    # cameras whose numbers in calibration.toml are wrong.
+    for w in lens_warnings:
+        warnings.remove(w)
+    warnings[:0] = lens_warnings + placement
+    # A camera the graph step dropped is already in the report's dropped
+    # list, and poorly_placed names only cameras in calibration.toml.
+    for cam in lens:
+        if cam in active:
+            placed.setdefault(cam, {"link": "lens fit", "rms": float(
+                intrinsic_stats[cam]["rms"])})
+    placed = dict(sorted(placed.items(), key=lambda kv: camera_sort_key(kv[0])))
 
     for cam in active:
         keys = all_dets[cam][0]
@@ -1466,7 +2025,9 @@ def main():
     report = build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                           components, dropped, hints_used=bool(hints),
                           skip=args.skip, warnings=warnings, pairing=pairing,
-                          codetections=codetections, camera_serials=serials)
+                          codetections=codetections, camera_serials=serials,
+                          placed=placed)
+    report["floor"] = floor
     out = calib_dir / "calibration.toml"
     write_calibration_toml(out, active, intrinsics, extrinsics, all_sizes,
                            meta=report)
@@ -1478,6 +2039,10 @@ def main():
     print("  {}".format(out))
     print("  REPORT_PATH={}".format(report_path))
     print("  Cameras: {}".format(" ".join(active)))
+    if placed:
+        print("  Unreliable: {}".format(", ".join(
+            "{} ({}, {:.1f} px)".format(c, r["link"], r["rms"])
+            for c, r in placed.items())))
     if report["partial"]:
         n_expected = len(active) + sum(len(v) for v in dropped.values())
         print("  Solved {} of {} cameras; dropped: {}".format(

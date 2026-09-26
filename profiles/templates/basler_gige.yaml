@@ -60,11 +60,16 @@ stim_safe_pins: []                # SITE: every pin wired to a laser or LED driv
 # --- Paths ------------------------------------------------------------------
 output_dir: data                  # SITE: your largest, fastest drive
 board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
+# skeleton: skeletons/mouse.json  # a SLEAP skeleton each recording carries
 
 # --- Calibration coverage ---------------------------------------------------
 calibration_min_per_cam_shared: 120
 calibration_min_edge: 40
 calibration_min_grid_cells: 3     # quarters of each view, of 4
+calibration_min_connectivity: 0   # set from a good calibration's log; 0 is off
+calibration_min_fill_cells: 0     # cells of a 4 x 4 view grid, of 16; 0 is off
+calibration_min_board_size: 0     # board's size in view, 0 to 1; 0 is off
+calibration_min_tilt_deg: 0       # board's tilt to the view; 0 is off
 
 # --- CPU placement (Windows, hybrid CPUs) -----------------------------------
 pin_capture_threads: false        # turn on after a test shows a camera falling behind

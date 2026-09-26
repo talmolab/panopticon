@@ -55,7 +55,9 @@ status 3. Two copies would compete for the cameras, the
 [trigger board](GLOSSARY.md#trigger-board) and the GPU encoder. Use `--force`
 only once you know what the other copy is doing.
 
-A splash screen reads `Loading cameras...` while the window builds.
+While the window builds, a splash screen names each step, from
+`Reading the rig profiles…` to each camera as it opens. The log repeats each
+step on a `[startup]` line.
 
 ### The log
 
@@ -216,9 +218,9 @@ the folder you choose is remembered for that profile, at the next launch and
 when you switch back to it. A profile you have not chosen a folder for uses its
 `output_dir`.
 
-Every session is written as
-`<output>/<date>/<mouse1>_<mouse2>/<calibration|recording>/`. Put the output
-folder on your largest, fastest drive. The disk check at Record measures that
+Every session is written as `<output>/<date>/<mouse1>_<mouse2>/`, with a
+`calibration/` folder and a `<mouse1>_<mouse2>_recording/` folder in it. Put the
+output folder on your largest, fastest drive. The disk check at Record measures that
 drive.
 
 ---
@@ -316,15 +318,50 @@ board, and a blurred board yields no corners.
 The coverage display in the sidebar shows what the cameras have seen. Drag
 the divider on the sidebar's left edge to widen it, and the graph grows with
 it. [OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
-what READY needs, and gives the caption's format. The figures come from a
-six-camera profile, and their captions lack the `groups` segment yours shows.
+what READY needs, and gives the caption's format.
+
+The figures come from a real calibration on the nine-camera reference rig. It
+reached READY 4 minutes 19 seconds into the take.
 
 | | |
 |---|---|
-| ![Coverage graph, nothing detected](images/calib_stage_1_start.png) | ![Coverage graph, partial coverage](images/calib_stage_2_partial.png) |
-| 1. Nothing detected yet. Hold the board where at least two cameras see it. | 2. Two cameras see the board now. Carry it into the corners of each view and where views overlap. |
-| ![Coverage graph, nearly ready](images/calib_stage_3_nearly.png) | ![Coverage graph, READY](images/calib_stage_4_ready.png) |
-| 3. One thin edge is left. Show the board to both of its cameras at once. | 4. READY. Flip Calibrate off, or keep going to add frames. |
+| ![Coverage graph at the start, nothing paired](images/calib_stage_1_start.png) | ![Coverage graph at 0:20, cameras still in groups](images/calib_stage_2_partial.png) |
+| 1. The start. Every camera is its own group. Hold the board where at least two cameras see it. | 2. At 0:20 the caption reads `groups 4/1`, and the orange line lists the groups. Carry the board where their views overlap. |
+| ![Coverage graph at 4:03, one group with a weak link](images/calib_stage_3_nearly.png) | ![Coverage graph, READY](images/calib_stage_4_ready.png) |
+| 3. At 4:03 there is one group, but the link is 20 of 30. Cameras 3 and 7, one on each side, see the board. | 4. READY at 4:19. Flip Calibrate off, or keep going to add frames. |
+
+One tick later, at 4:04, cameras 3 and 7 see the board together again:
+
+![Cameras 3 and 7 see the board at the same moment](images/calib_link_pair.png)
+
+Each camera sees the board small and at a slant, but both see it at the same
+moment. It is the pair's 20th shared tick, the reference rig's
+`calibration_min_edge`, so the pair now joins the graph and the link jumps from
+20 to 30. READY came 16 s later, once camera 1 had 120 paired ticks.
+
+The small 2 x 2 badge on each node is that camera's view cut into quarters. A
+quarter lights green once the centre of the board's markers has been in it.
+The centre is the mean of the marker corners, the red dot below. On the
+reference rig READY needs the centre in at least 3 of the 4 quarters of every
+camera's view, and `grid` gives the count of the camera with the fewest.
+Camera 5 of the same take shows one view in each quarter:
+
+![Four views of camera 5, with the board's centre in each quarter](images/calib_quadrants.png)
+
+The whole board need not fit inside the quarter. Only its centre has to cross
+into it, while the camera still sees at least 5 of its markers. Near a corner
+of the view part of the board may leave the image, and the view still counts.
+
+A profile can also set view tests, as the reference rig's does, and the caption
+then shows `views`. They count only the views a camera shares with another
+camera. `closer` wants the board large in the view, `tilt` wants it turned
+away from square-on, and `edges` wants marker corners out near the edges of
+the view. Camera 5 again:
+
+![Camera 5 with the board close, tilted, and near its edges](images/calib_view_tests.png)
+
+The grid in the last view is the one `edges` counts, 4 x 4 cells. The corners
+of all of a camera's shared views together must reach enough of its 16 cells.
 
 When a count stops climbing, find the one that is stuck:
 
@@ -333,6 +370,11 @@ When a count stops climbing, find the one that is stuck:
 - `groups` above `1/1`: the orange line above the caption lists the groups,
   for example `{1,2,3} {4,5}`. Show the board to one camera of each group at
   the same moment.
+- `link` below its floor: the orange line names the two sides of the weakest
+  link. Hold the board where cameras from both sides see it at once.
+- `views` short: the orange line names the cameras. For `closer`, bring the
+  board near that camera. For `tilt`, tilt the board away from square-on to
+  it. For `edges`, carry the board to the edges and corners of its view.
 - A node that never lights: that camera does not detect the board. Check its
   view, its focus and the board file.
 - `paired` slow for one camera: hold the board where that camera and a
@@ -346,6 +388,25 @@ If the board is too dark to detect, add infrared light first, then raise
 `calibration_exposure_us`. The
 [brightness and contrast sliders](OVERVIEW.md#13-and-14-brightness-and-contrast)
 do not help.
+
+### Put the floor at Z = 0
+
+Tick Flat final second, under Calibrate, to give the calibration a floor. End
+the take with the board lying flat on the floor for at least a second, where
+cameras can see it, then flip Calibrate off. Solve looks at the end of each
+camera's video for the board lying still. It then puts Z = 0 on the board, with
+Z pointing up at the cameras and the origin at the board's first corner. LUC3D
+draws its floor grid on Z = 0, so the grid then lies on the arena floor. Each
+camera that saw the lying board places it on its own. When one places it more
+than 2 degrees or 10 mm from where the best view does, Solve warns, because
+their poses in `calibration.toml` disagree by as much.
+
+When the board was still moving at the end, or no camera saw it, Solve skips the
+step and says why. The calibration then keeps the reference camera's frame.
+Leave the box off on a rig with no flat surface in view, or when your analysis
+sets its own orientation. The box is remembered for each profile.
+
+### Finish
 
 Flip Calibrate off to finish. Panopticon writes `codet_frames.json` beside the
 videos for the solve ([section 6](#6-solve)). The videos are then finalised as
@@ -378,17 +439,20 @@ The solve writes into `calibration/`:
 - `reprojection_error_histogram.png`: the pairwise quality plot. Nothing
   opens it for you.
 
-Solve then copies `calibration.toml` into `recording/`, so each recording
-carries the calibration it was made with. If `recording/calibration.toml`
-exists and differs, Panopticon asks `Replace the recording's calibration?`,
+Solve then copies `calibration.toml` into `<mouse1>_<mouse2>_recording/`, so each
+recording carries the calibration it was made with. If that copy exists and
+differs, Panopticon asks `Replace the recording's calibration?`,
 with No as the default. Answer Yes when you have recalibrated and not recorded
 yet. Answer No when a recording in that folder was made with the calibration
 already there. The new solve then stays in `calibration/`.
 
 | Status bar | Meaning |
 |---|---|
-| `Solved N of M cameras — copied to <path>` | Copied into `recording/`. N below M means the solve dropped cameras |
+| `Solved N of M cameras — copied to <path>` | Copied into `<mouse1>_<mouse2>_recording/`. N below M means the solve dropped cameras |
 | `Solved N of M cameras — kept in calibration/, recording's copy left unchanged` | You answered No |
+| `...; unreliable: camN` | That camera's lens fit or position in `calibration.toml` is wrong. The warnings say why and what to film |
+| `...; floor from camN, camM` | The floor step set Z = 0 from those cameras' views |
+| `...; floor skipped` | The board was still moving or not seen at the end. The warnings say which |
 | `Calibration solved (no toml found to copy)` | Treat it as a failure and read the log |
 | `... (with warnings)` | A `Calibration Warnings` dialog listed problems |
 
@@ -479,11 +543,11 @@ uv run python 1_calibrate.py <session_dir> --board-config configs/boards/<your_b
 your profile names. Add `--excluded-views cam4` to leave a camera out, or
 `--skip 1` to scan every frame. `--skip` counts only when the solve does not
 use `codet_frames.json`, so move that file aside first. A solve by hand writes
-into `calibration/` and copies nothing into `recording/`, so copy
-`calibration.toml` yourself.
+into `calibration/` and copies nothing into `<mouse1>_<mouse2>_recording/`, so
+copy `calibration.toml` yourself.
 
-The solve fits each lens on at most 60 pose-diverse frames, and each pair on
-at most 30, so that it finishes in minutes. For the best calibration, solve
+The solve fits each lens on at most 120 frames spread through the take, and
+each pair on at most 30, so that it finishes in minutes. For the best calibration, solve
 from full videos with a package that does bundle adjustment. sleap-anipose and
 aniposelib both read the `calibration.toml` this writes.
 
@@ -723,7 +787,8 @@ At the start, RAM never warns: a start that does not fit is refused, as above.
 
 ### If the folder already holds data
 
-When the target `recording/` or `calibration/` folder holds a non-empty video,
+When the target `<mouse1>_<mouse2>_recording/` or `calibration/` folder holds a
+non-empty video,
 `raw.bin`, `stream.h264`, `blockids.npy`, `frametimes.npy`, `alignment.npz` or
 `stim_paradigm.json`, Panopticon asks `Overwrite the existing data?`. Cancel is
 the default and leaves everything as it was.
@@ -988,12 +1053,15 @@ the board and switch the laser off.
 ### Paths and names
 
 ```
-<output>/<date>/<mouse1>_<mouse2>/<calibration|recording>/<camN>/
+<output>/<date>/<mouse1>_<mouse2>/calibration/<camN>/
+<output>/<date>/<mouse1>_<mouse2>/<mouse1>_<mouse2>_recording/<camN>/
 ```
 
 The date and the mouse IDs come from the sidebar, and blank mice become `m1`
-and `m2`. `calibration/` and `recording/` sit side by side in one session, so
-one calibration serves the recording beside it. Videos are named
+and `m2`. `calibration/` and the recording folder sit side by side in one
+session, so one calibration serves the recording beside it. The recording
+folder carries the mouse IDs so that recordings uploaded together, to LUC3D
+for example, keep distinct names. Videos are named
 `<date>-<mouse1>_<mouse2>-<camN>-<calibration|recording>.mp4`, for example
 `20260904-m1_m2-cam1-recording.mp4`. The solve finds its videos by
 `calibration` in the name.
@@ -1016,14 +1084,15 @@ In each camera folder:
 | `frametimes_synthesized.json`, `frametimes.orig.npy` | An alignment made the frame times from block IDs. The rate check then skips this camera |
 | `aligned_tmp.mp4` | An alignment in progress |
 
-In the acquisition folder, `calibration/` or `recording/`:
+In the acquisition folder, `calibration/` or `<mouse1>_<mouse2>_recording/`:
 
 | File | What it is |
 |---|---|
 | `session_metadata.json` | This acquisition's metadata ([below](#session_metadatajson)) |
 | `session.log` | The log from arming the cameras to the end of the encode |
 | `WARNINGS.txt` | Written when something went wrong |
-| `calibration.toml` | The solve's result, copied into `recording/` by Solve |
+| `calibration.toml` | The solve's result, copied into the recording folder by Solve |
+| `skeleton.json` | The profile's [skeleton](CONFIGURATION.md#skeleton), which LUC3D loads with the session. Recording only, when the profile names one |
 | `calibration_report.json`, `reprojection_error_histogram.png` | The solve's figures and plot. Calibration only |
 | `codet_frames.json` | The triggers at which two or more cameras saw the board. Calibration only |
 | `stim_paradigm.json`, `stim_paradigm.ino`, `stim_trace.csv` | The paradigm, its sketch and the modelled stimulus per trigger ([section 7](#after-a-stimulated-recording)) |
@@ -1115,13 +1184,15 @@ data/
                 └── frametimes.npy
 ```
 
-Solve also creates `recording/`, holding only the copied `calibration.toml`.
+Solve also creates `m1_m2_recording/`, holding only the copied
+`calibration.toml`.
 
 A stimulated recording in the same session:
 
 ```
-data/20260904/m1_m2/recording/
+data/20260904/m1_m2/m1_m2_recording/
 ├── calibration.toml          copied by Solve
+├── skeleton.json             the profile's skeleton, for LUC3D
 ├── session_metadata.json
 ├── session.log
 ├── stim_paradigm.json

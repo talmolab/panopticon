@@ -123,11 +123,16 @@ stim_safe_pins: []                # SITE: every pin wired to a laser or LED driv
 # --- Paths ------------------------------------------------------------------
 output_dir: data                  # SITE: your largest, fastest drive
 board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
+# skeleton: skeletons/mouse.json  # a SLEAP skeleton each recording carries
 
 # --- Calibration coverage ---------------------------------------------------
 calibration_min_per_cam_shared: 120
 calibration_min_edge: 40
 calibration_min_grid_cells: 3     # quarters of each view, of 4
+calibration_min_connectivity: 0   # set from a good calibration's log; 0 is off
+calibration_min_fill_cells: 0     # cells of a 4 x 4 view grid, of 16; 0 is off
+calibration_min_board_size: 0     # board's size in view, 0 to 1; 0 is off
+calibration_min_tilt_deg: 0       # board's tilt to the view; 0 is off
 
 # --- CPU placement (Windows, hybrid CPUs) -----------------------------------
 pin_capture_threads: false        # turn on after a test shows a camera falling behind
@@ -719,10 +724,25 @@ Text, a path. Default `""`. Reference rig: `configs/boards/charuco_8x8_15mm.yaml
   that describes another board finds no corners (wrong layout) or scales every 3D
   coordinate (wrong `square_length`).
 
+#### `skeleton`
+
+Text, a path. Default `""`. Reference rig: `skeletons/mouse.json`.
+
+- Does: A SLEAP skeleton file, usually in `skeletons/`. Each recording gets a
+  copy named `skeleton.json` at the root of its folder, where LUC3D loads it with
+  the session, and `session_metadata.json` records the source and its hash.
+- Change when: When you label another animal or another set of body parts.
+  Leave it empty to write no skeleton.
+- Goes wrong: A file that is missing, is not JSON, or has no `nodes` and `links`
+  stops the cameras opening, with a message naming the file.
+
 ### Calibration coverage
 
-These three decide when the coverage display shows READY during a calibration
-([OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) gives the rule).
+These decide when the coverage display shows READY during a calibration
+([OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) gives the rule). The
+last four are off at 0. At the end of every calibration, its `session.log` lists
+what each one measured, in the lines after `[hud] coverage at the stop`. Set
+them from a calibration that solved well.
 
 #### `calibration_min_per_cam_shared`
 
@@ -733,7 +753,7 @@ Integer. Default `120`. Reference rig: `120`.
 - Change when: Raise it if calibrations come out marginal. Lower it if waving
   takes too long while the per-pair chart in `reprojection_error_histogram.png`
   stays good.
-- Goes wrong: Too high wastes time in the arena, because the solve uses at most 60
+- Goes wrong: Too high wastes time in the arena, because the solve uses at most 120
   frames per camera for its intrinsics. Too low gives a marginal solve. The loader
   does not check the value.
 
@@ -759,6 +779,55 @@ Integer, 0 to 4. Default `3`. Reference rig: `3`.
   which gives confident but badly conditioned intrinsics.
 - Goes wrong: The loader accepts a value above 4, which no camera can meet, so
   READY never appears.
+
+#### `calibration_min_connectivity`
+
+Number, 0 or more. Default `0`. Reference rig: `30`.
+
+- Does: The least algebraic connectivity the graph of camera pairs must reach.
+  Each pair counts with its shared detections, once it has `calibration_min_edge`
+  of them. The value is 0 while the cameras form two groups, and small while a
+  weak link holds them together. For two groups of a and b cameras joined by c
+  shared detections, it is about c x (a + b) / (a x b). While it is short, the
+  display names the two groups.
+- Change when: Set it when calibrations pass READY with one group of cameras
+  barely linked to the rest. It depends on how many cameras you have and where
+  they point, so take it from a good calibration's log.
+- Goes wrong: Too high, and READY comes late or never. 0 turns the test off.
+
+#### `calibration_min_fill_cells`
+
+Integer, 0 to 16. Default `0`. Reference rig: `7`.
+
+- Does: How many cells of a 4 x 4 grid over its view each camera must see a
+  marker corner in. Only detections shared with another camera count, because
+  the solve reads no other frame.
+- Change when: Set it when a camera's lens fit is poor. The lens fit needs
+  corners out to the edges of the view, where the distortion is.
+- Goes wrong: Too high for a camera whose view the board cannot reach, such as
+  one that sees a wall. READY then never appears. 0 turns the test off.
+
+#### `calibration_min_board_size`
+
+Number, 0 to 1. Default `0`. Reference rig: `0.10`.
+
+- Does: How big the board must look in 5 of each camera's shared detections: the
+  square root of its share of the view. 0.4 is a board covering 16% of the view.
+- Change when: Set it when a camera's focal length comes out wrong. A board that
+  stays small and far away leaves it poorly determined.
+- Goes wrong: Too high for a camera the board cannot come close to. 0 turns the
+  test off.
+
+#### `calibration_min_tilt_deg`
+
+Number, 0 to 89. Default `0`. Reference rig: `40`.
+
+- Does: How far, in degrees, the board must tilt away from square-on in 5 of each
+  camera's shared detections.
+- Change when: Set it when a camera's lens fit is poor. The fit needs tilted views
+  as well as square-on ones.
+- Goes wrong: Too high, and the markers stop being detected before the board
+  tilts that far. 0 turns the test off.
 
 ### CPU placement
 
@@ -1418,6 +1487,7 @@ Single fields:
 | `quality` | Outside 0 to 51 | `the H.264 QP range` |
 | `calibration_exposure_us` | Negative | `must be 0 (keep the recording exposure)` |
 | `thermal_warn_margin_c` | 0 or less | `must be a positive number of degrees C` |
+| `calibration_min_connectivity`, `calibration_min_fill_cells`, `calibration_min_board_size`, `calibration_min_tilt_deg` | Negative, or above 16, 1 and 89 for the last three | `0 turns the test off` |
 | `n_cameras` | Negative | `must be 0 (unchecked) or positive` |
 | `camera_serials` | An empty list | `camera_serials is empty` |
 | `camera_serials` | A serial listed twice | `lists a serial twice` |
@@ -1492,6 +1562,7 @@ The `camera:` block. Messages start with the key, such as `camera.trigger.line`:
 | Cause | What you see |
 |---|---|
 | A Basler profile's `.pfs` is missing | `The profile's camera settings file is missing` |
+| `skeleton` names a missing file, or one that is not a SLEAP skeleton | `The profile's skeleton file` |
 | `camera.flir.sdk_dir` is not a folder | `camera.flir.sdk_dir is not a folder` |
 | `capture_processes` is above 0 | `The profile sets capture_processes` |
 | No camera is found | `No cameras found` |
@@ -1523,8 +1594,8 @@ These mistakes load without a message. Check them yourself.
 - An empty `trigger_pins`, or pins the board does not have.
 - `stim_safe_pins` that includes 0 or 1, or leaves out a pin your laser is on.
 - A `trigger_rate_limit` above the camera's real maximum.
-- A `calibration_min_grid_cells` above 4, and any value of the other coverage
-  thresholds.
+- A `calibration_min_grid_cells` above 4, and any value of
+  `calibration_min_per_cam_shared` or `calibration_min_edge`.
 - A `capture_core_exclude` that leaves no performance core (it falls back to all
   of them).
 - A `serial_port` that names another device, which opening the profile resets

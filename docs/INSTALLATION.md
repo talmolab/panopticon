@@ -1021,8 +1021,9 @@ opens no camera and no serial port, runs no hardware check and flashes nothing.
 It does the same when the remembered profile, or the one `--profile` names,
 does not load.
 
-A splash panel reads *Panopticon / Loading cameras...*, and then the main window
-opens with one live preview pane per camera, free-running at about 30 fps.
+A splash panel names each startup step, camera by camera, and then the main
+window opens with one live preview pane per camera, free-running at about
+30 fps.
 [OVERVIEW.md](OVERVIEW.md) names the controls.
 
 ![The main window at idle on the reference rig: nine live preview panes, with the sidebar on the right](images/main_idle.png)

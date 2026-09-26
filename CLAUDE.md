@@ -119,10 +119,11 @@ checked by hand that no other one holds the hardware.
   keys are spelled only there. It covers the window's geometry and the
   sidebar's width (0 when collapsed), and the session fields except the date.
   It also covers a hand-chosen output folder per profile, the Display sliders,
-  the Stimulation editor's entry fields and the profiles added from a file.
-  Nothing that decides what reaches the trigger board is restored: the
-  editor's canvas and the uploaded sketch stay per launch. A test that builds
-  a sidebar, a window or the editor sets `PANOPTICON_SETTINGS_FILE` first.
+  the Stimulation editor's entry fields, the profiles added from a file and
+  Flat final second per profile. Nothing that decides what reaches the trigger
+  board is restored: the editor's canvas and the uploaded sketch stay per
+  launch. A test that builds a sidebar, a window or the editor sets
+  `PANOPTICON_SETTINGS_FILE` first.
 - Blocking camera work (open, close, reconfigure) runs off the Qt main thread
   through `ui_workers.CallableWorker`. On the main thread the window would stop
   responding. Quitting mid-session abandons the incomplete data and deletes it
@@ -467,6 +468,11 @@ until someone analyses it.
   enough: the board is one-sided, so opposed cameras never co-detect. `READY`
   counts one per camera per co-detection tick, and its thresholds stay at most
   about twice the solver's frame caps.
+- `READY` also needs the graph's algebraic connectivity
+  (`board_detector.spectral_cut`) at `calibration_min_connectivity`, and each
+  view test the profile sets (`view_shape`: fill, board size, tilt). All are off
+  at 0. The view tests count only co-detection ticks, because the hinted solve
+  decodes no other frame. `READY` latches, so every term stays monotone.
 - The solve keeps the largest connected component. Every per-camera figure can
   read satisfied while the graph is several components, and the HUD's
   `groups N/1` shows it.
@@ -479,6 +485,40 @@ until someone analyses it.
   error while fitting one camera fails that camera only.
 - Pair RMS below `RMS_GOOD_PX` (1.5 px) is good, and from `RMS_POOR_PX` (3.0 px)
   up it is poor and warned about.
+- A camera with more than 60 views has them judged against a reference fit.
+  The final lens fit takes `INTRINSICS_FINAL_FRAMES` views spread through the
+  take from those the reference reprojects within `INTRINSICS_OUTLIER_FACTOR`
+  times the median view's error (and at least `INTRINSICS_OUTLIER_FLOOR_PX`),
+  unless fewer than `INTRINSICS_MIN_FRAMES` remain. It solves with
+  `CALIB_USE_LU` from two starts, the reference fit and OpenCV's own guess,
+  and keeps whichever reprojects the median view closer. A long take holds
+  misdetections and pose flips, and farthest-point sampling picks them first:
+  picked from every view, they pulled two reference-rig focal lengths off, by
+  a factor of 1.7 and a factor of 3. A 60-view farthest-point pick of the
+  clean views still moved the lens fits enough to double the triangulated
+  error of the reference rig's best calibration. Either start alone can go
+  wrong: OpenCV's guess put one reference-rig focal length at 1824 against
+  1424, and a reference fit that was itself off took a test take's to 22.
+- The reference is whichever of two first fits reprojects the median view
+  closer (`_reference_fit`): one on 120 views spread through the take, one on
+  the pose-diverse pick. Either can be dragged off by the views it holds. Over 27 reference-rig lens fits, the spread fit was off on
+  three and the pick on two, and the median view chose the sound fit every
+  time. Both first fits solve with `CALIB_USE_LU`, which on 120 views runs
+  about 50 times faster than the default SVD and leaves out the same views,
+  give or take one.
+- Judge a solve by more than its pair RMS. The tree chains pairwise poses with
+  no bundle adjustment, so a small change in one lens fit can move the tree to
+  another pair. On the reference rig that nearly doubled the error of corners
+  triangulated from the other cameras, while the pair RMS stayed the same.
+- The report names every camera it cannot vouch for (`poorly_placed`): a lens
+  fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
+  `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each poor
+  tree edge. The status bar shows them as `unreliable:`.
+- The floor step runs only when the calibration's `session_metadata.json` has
+  `floor_from_final_second` (the sidebar's Flat final second). It puts Z = 0 on
+  the board lying still at the end of the take, with Z towards the cameras.
+  It never fails the solve: a moving board, no view or an error skips it with
+  a warning, and the reference camera's frame stays.
 - The best calibration comes from full videos of every camera (sleap-anipose).
   The GUI's Solve and `1_calibrate.py` fit a subsample: faster, less accurate.
 

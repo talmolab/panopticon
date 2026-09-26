@@ -118,7 +118,9 @@ Solve, Record.
 
 Starts and stops a calibration, and shows the coverage display (12).
 [WORKFLOW.md](WORKFLOW.md#5-calibrate) says what a calibration does to the
-cameras and the board.
+cameras and the board. The Flat final second box under it asks Solve to put
+Z = 0 on the board lying flat at the end of the take
+([WORKFLOW.md](WORKFLOW.md#put-the-floor-at-z--0)).
 
 #### 8. Record
 
@@ -231,9 +233,8 @@ The display counts detection ticks. A tick is one pass of the board detector
 over the latest full-resolution frame of every camera, so a tick is a moment,
 and several recorded frames can pass between two ticks. The pass visits the
 cameras one at a time, and a cluttered scene slows it. The nine-camera
-reference rig typically manages 10 to 20 ticks a second, fewer in a busy
-arena. The log line
-`[hud] coverage ticks/s:` gives the rate.
+reference rig manages 4 to 5 ticks a second, fewer in a busy arena. The log
+line `[hud] coverage ticks/s:` gives the rate.
 
 - A node glows cyan when its camera sees at least 4 board markers in the
   current tick. The glow fades over about 0.4 s.
@@ -243,9 +244,15 @@ arena. The log line
   board has visited, judged by the centre of its markers.
 - The caption reads `<elapsed>  paired <worst>/<target>  grid <worst>/<cells>  groups <n>/1`.
   The two figures are the worst camera's, so they move only when that camera
-  improves.
-- While `groups` reads more than `1/1`, an orange line above the caption lists
-  the groups, for example `{1,2,3} {4,5}`.
+  improves. Once the groups join, a profile with a connectivity floor shows
+  `link <now>/<floor>` in place of `groups`. A profile with view-quality
+  thresholds adds `views <good>/<cameras>`.
+- An orange line above the caption names what holds READY back. While
+  `groups` reads more than `1/1`, it lists the groups, for example
+  `{1,2,3} {4,5}`. While `link` is short, it names the two sides of the weakest
+  link, for example `weakest link {1,4,7,9} to {2,3,5,6,8}`. Then it names the
+  cameras short of each view test, for example `closer 1,3  tilt 3  edges 7`.
+  Those cameras' nodes have an orange rim.
 
 READY appears once all of these hold at the same time:
 
@@ -257,15 +264,27 @@ READY appears once all of these hold at the same time:
 3. The pairs with at least `calibration_min_edge` shared ticks
    (20 on the reference rig) join every camera into one group, directly or
    through a chain of pairs.
+4. That group is joined firmly enough: its
+   [algebraic connectivity](CONFIGURATION.md#calibration_min_connectivity)
+   reaches `calibration_min_connectivity` (30 on the reference rig). A weak
+   link between groups of cameras keeps it low.
+5. Every camera's shared views pass each view test the profile sets. `closer`
+   needs the board big enough in 5 views, `tilt` needs it tilted far enough in
+   5 views, and `edges` needs marker corners in enough cells of a 4 x 4 grid
+   over the view. The reference rig asks for a
+   [board size](CONFIGURATION.md#calibration_min_board_size) of 0.10, a tilt
+   of 40 degrees and 7 of the 16 cells.
 
 The third condition asks for one connected group, because cameras that face each
 other never see the front of the board at the same moment. They join through
 their neighbours, and `groups 1/1` is what lets every camera take part in the
 solve ([WORKFLOW.md](WORKFLOW.md#which-cameras-made-it-into-the-solve)). The
 quadrant condition stops the board being waved in one spot, which gives lens
-models that fit the centre of the image and fail towards its edges. All three
-thresholds are profile fields
-([CONFIGURATION.md](CONFIGURATION.md#calibration_min_per_cam_shared)).
+models that fit the centre of the image and fail towards its edges. The view
+tests go further, because the lens fit needs close, tilted views with corners
+out to the edges. Every threshold is a profile field
+([CONFIGURATION.md](CONFIGURATION.md#calibration_min_per_cam_shared)), and
+conditions 4 and 5 are off at 0.
 
 At READY the graph turns solid white and the caption reads `READY — m:ss`, with
 the timer stopped. Detection goes on, and each further sighting still goes

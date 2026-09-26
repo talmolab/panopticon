@@ -42,7 +42,8 @@ Attach what applies:
   Panopticon folder. Its `[header]` lines at the top describe the software, the computer
   and every camera.
 - For a recording or a calibration, from its folder
-  (`<output_dir>\<date>\<mouse1>_<mouse2>\recording\` or `...\calibration\`):
+  (`<output_dir>\<date>\<mouse1>_<mouse2>\<mouse1>_<mouse2>_recording\` or
+  `...\calibration\`):
   `session.log`, `session_metadata.json`, every `WARNINGS.txt` (also any inside the
   `camN` folders), and any `RETIRED.json`.
 - Your rig profile, `profiles\<name>.yaml`.

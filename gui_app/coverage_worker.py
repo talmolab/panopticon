@@ -7,8 +7,8 @@ the live preview.
 
 The tick rate is BEST EFFORT, not a fixed 30 Hz. Detection runs sequentially
 over the cameras and costs 6-250 ms per camera depending on scene clutter, so
-nine cameras land at typically 10-20 Hz and ~1 Hz when several cameras see a
-cluttered scene. ``interval_ms`` is only a floor on the tick period. The
+nine full-resolution cameras land at a few Hz and ~1 Hz when several cameras
+see a cluttered scene. ``interval_ms`` is only a floor on the tick period. The
 measured rate is published as ``ticks_per_s`` (also on the detector, which is
 what the HUD widget reads) and logged every ``TICK_LOG_S`` seconds so a rig run
 records it.
