@@ -501,11 +501,12 @@ until someone analyses it.
   1424, and a reference fit that was itself off took a test take's to 22.
 - The reference is whichever of two first fits reprojects the median view
   closer (`_reference_fit`): one on 120 views spread through the take, one on
-  the pose-diverse pick. Either can be dragged off by the views it holds. Over 27 reference-rig lens fits, the spread fit was off on
-  three and the pick on two, and the median view chose the sound fit every
-  time. Both first fits solve with `CALIB_USE_LU`, which on 120 views runs
-  about 50 times faster than the default SVD and leaves out the same views,
-  give or take one.
+  the pose-diverse pick. Either can be dragged off by the views it holds.
+  Over 27 reference-rig lens fits, the spread fit was off on three and the
+  pick on two, and the median view chose the sound fit every time. Both first
+  fits solve with `CALIB_USE_LU`, which on 120 views runs about 50 times
+  faster than the default SVD and leaves out the same views, give or take
+  one.
 - Judge a solve by more than its pair RMS. The tree chains pairwise poses with
   no bundle adjustment, so a small change in one lens fit can move the tree to
   another pair. On the reference rig that nearly doubled the error of corners
