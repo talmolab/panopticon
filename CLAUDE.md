@@ -491,17 +491,17 @@ until someone analyses it.
   times the median view's error (and at least `INTRINSICS_OUTLIER_FLOOR_PX`),
   unless fewer than `INTRINSICS_MIN_FRAMES` remain. It solves with
   `CALIB_USE_LU` from two starts, the reference fit and OpenCV's own guess,
-  and keeps the one that reprojects the median view closer. A long take holds
+  and keeps whichever reprojects the median view closer. A long take holds
   misdetections and pose flips, and farthest-point sampling picks them first:
   picked from every view, they pulled two reference-rig focal lengths off, by
   a factor of 1.7 and a factor of 3. A 60-view farthest-point pick of the
   clean views still moved the lens fits enough to double the triangulated
   error of the reference rig's best calibration. Either start alone can go
   wrong: OpenCV's guess put one reference-rig focal length at 1824 against
-  1424, and a reference fit that was itself off led a test take's to 22. The reference is whichever of two first fits reprojects
-  the median view closer (`_reference_fit`): one on 120 views spread through
-  the take, one on the pose-diverse pick. Either can be dragged off by the
-  views it holds. Over 27 reference-rig lens fits, the spread fit was off on
+  1424, and a reference fit that was itself off took a test take's to 22.
+- The reference is whichever of two first fits reprojects the median view
+  closer (`_reference_fit`): one on 120 views spread through the take, one on
+  the pose-diverse pick. Either can be dragged off by the views it holds. Over 27 reference-rig lens fits, the spread fit was off on
   three and the pick on two, and the median view chose the sound fit every
   time. Both first fits solve with `CALIB_USE_LU`, which on 120 views runs
   about 50 times faster than the default SVD and leaves out the same views,

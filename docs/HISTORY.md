@@ -754,6 +754,26 @@ Dead ends, do not retry:
   Each of the 27 videos decoded to as many frames as its `blockids.npy` holds,
   with block IDs running from 1 with no gap. WORKFLOW.md's coverage figures
   now come from the 2026-09-23 take.
+- 2026-09-26: The final lens fit takes up to 120 views spread through the
+  take from those within the cut, not the 60-view farthest-point pick
+  (`2cebb39`). It solves with LU from two starts, the reference fit and
+  OpenCV's own guess. It keeps whichever reprojects the median view closer.
+  A fit on every view within the cut took 13.4 minutes on the 724 views of
+  2026-09-25's cam2, so the sample is bounded. From OpenCV's guess alone, a
+  120-view spread put 2026-09-23's cam4 at 1824 against 1424. From the
+  reference alone, a test take's fit fell to 22. The median leave-one-out
+  error went from 3.07 to 1.85 px on 2026-09-21, 1.01 to 0.82 px on
+  2026-09-23 and 5.88 to 1.65 px on 2026-09-25. On 2026-09-25 the error of
+  triangulated board distances fell from 1.01 to 0.084 mm. On 2026-09-23 every
+  camera is within about 0.1 px of the old solve or better. On 2026-09-21 cams
+  4, 7 and 9 stay worse, at 6.5, 6.8 and 3.0 px against 2.6, 2.8 and 1.4 px.
+  All three sit on the weak side of the rig's cut, where cam1 sees the board
+  small and far. A 240-view spread scored within 0.1 px of 120 on every take
+  and took about five times as long. The floor found on 2026-09-25's tail
+  now has normals within 0.48 deg and origins within 2.4 mm, against 2.0 deg
+  and 4.8 mm before. The new calibration.toml of 2026-09-25 and of 2026-09-23
+  went into every recording of its day, with the old files kept aside. With
+  these results the batch merged into master.
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
@@ -766,6 +786,10 @@ Dead ends, do not retry:
 - Starting a poor few-view pair's stereo fit from the pair's PnP-medoid pose
   (cam1-cam4 and cam1-cam9 of 2026-09-21 went from 134 and 42 px to 172 and
   171 px).
+- Fitting each lens on every view within the cut in the solve (13.4 minutes
+  on one camera of 724 views, with LU).
+- A final lens fit from one start only (OpenCV's guess put 2026-09-23's cam4
+  at 1824, and a reference that was off took a test take's fit to 22).
 
 ---
 
@@ -806,3 +830,6 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
   cycles between two fits).
 - Starting a poor few-view pair's stereo fit from its PnP-medoid pose (made
   both such pairs worse).
+- A lens fit on every view within the cut (minutes per camera).
+- A final lens fit from one start only (either start can settle on a wrong
+  focal length).
