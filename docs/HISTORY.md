@@ -663,6 +663,20 @@ Dead ends, do not retry:
   points towards the cameras, so LUC3D's floor grid lies on the arena floor.
   On a synthetic take every camera lands within 0.4 mm of its true height
   above the board. None of the three reference takes was recorded with it.
+- 2026-09-25: The reference profile sets the view tests to 7 fill cells, a
+  board size of 0.10 and a tilt of 40 degrees (`07602ec`). A replay of the
+  2026-09-21, 2026-09-23 and 2026-09-25 calibrations through the detector, at
+  three tick phases each, passed every camera, and READY came no later. cam1,
+  the far camera, binds on 2026-09-23 with 8 cells, a fifth-best size of 0.119
+  and a fifth-best tilt of 44.2. One step stricter (8, 0.12 and 45) never
+  reaches READY there. cam1 reaches 40 degrees only on views of 5 to 10
+  markers, whose corner noise adds tilt. With a minimum marker count, its tilt
+  value would drop to about 30. The tests miss the poor 2026-09-25 take. Its
+  board lay still for the first minute, and 40-51% of five cameras' views
+  repeat the view before. A test that skips repeated views would catch it.
+  2026-09-23 itself only just reaches READY: cam1 ends with 112 to 121 paired
+  ticks against 120, by tick phase. WORKFLOW.md's coverage figures now come
+  from that take.
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
