@@ -105,6 +105,16 @@ calibration_min_grid_cells: 3
 # carries about 70 co-detections. The two good calibrations passed 30 before
 # the other tests did. A take whose other tests passed at 8.7 waited 8 s more.
 calibration_min_connectivity: 30
+# The view tests: cells of the 4 x 4 fill grid, the board's size, its tilt in
+# degrees. Cam 1, the far camera, is the weakest on every take. In the two good
+# calibrations it reached 8 cells, a fifth-best size of 0.12 and a fifth-best
+# tilt of 44. Each value sits one step below, and neither take reached READY
+# later for them. Cam 1 passes tilt only on small views of few markers, where
+# corner noise adds tilt, so tilt tests the other cameras more than cam 1. None
+# of them catches a board held still, which spoiled the lens fits of one take.
+calibration_min_fill_cells: 7
+calibration_min_board_size: 0.10
+calibration_min_tilt_deg: 40
 
 pfs_path: "configs/mono8_1920x1200.pfs"
 output_dir: "data"

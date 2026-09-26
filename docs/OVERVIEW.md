@@ -271,7 +271,9 @@ READY appears once all of these hold at the same time:
 5. Every camera's shared views pass each view test the profile sets. `closer`
    needs the board big enough in 5 views, `tilt` needs it tilted far enough in
    5 views, and `edges` needs marker corners in enough cells of a 4 x 4 grid
-   over the view. The reference rig sets none of them yet.
+   over the view. The reference rig asks for a
+   [board size](CONFIGURATION.md#calibration_min_board_size) of 0.10, a tilt
+   of 40 degrees and 7 of the 16 cells.
 
 The third condition asks for one connected group, because cameras that face each
 other never see the front of the board at the same moment. They join through

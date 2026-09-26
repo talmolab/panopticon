@@ -318,15 +318,50 @@ board, and a blurred board yields no corners.
 The coverage display in the sidebar shows what the cameras have seen. Drag
 the divider on the sidebar's left edge to widen it, and the graph grows with
 it. [OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
-what READY needs, and gives the caption's format. The figures come from a
-six-camera profile, and their captions lack the `groups` segment yours shows.
+what READY needs, and gives the caption's format.
+
+The figures come from a real calibration on the nine-camera reference rig. It
+reached READY 4 minutes 19 seconds into the take.
 
 | | |
 |---|---|
-| ![Coverage graph, nothing detected](images/calib_stage_1_start.png) | ![Coverage graph, partial coverage](images/calib_stage_2_partial.png) |
-| 1. Nothing detected yet. Hold the board where at least two cameras see it. | 2. Two cameras see the board now. Carry it into the corners of each view and where views overlap. |
-| ![Coverage graph, nearly ready](images/calib_stage_3_nearly.png) | ![Coverage graph, READY](images/calib_stage_4_ready.png) |
-| 3. One thin edge is left. Show the board to both of its cameras at once. | 4. READY. Flip Calibrate off, or keep going to add frames. |
+| ![Coverage graph at the start, nothing paired](images/calib_stage_1_start.png) | ![Coverage graph at 0:20, cameras still in groups](images/calib_stage_2_partial.png) |
+| 1. The start. Every camera is its own group. Hold the board where at least two cameras see it. | 2. At 0:20 the caption reads `groups 4/1`, and the orange line lists the groups. Carry the board where their views overlap. |
+| ![Coverage graph at 4:03, one group with a weak link](images/calib_stage_3_nearly.png) | ![Coverage graph, READY](images/calib_stage_4_ready.png) |
+| 3. At 4:03 there is one group, but the link is 20 of 30. Cameras 3 and 7, one on each side, see the board. | 4. READY at 4:19. Flip Calibrate off, or keep going to add frames. |
+
+One tick later, at 4:04, cameras 3 and 7 see the board together again:
+
+![Cameras 3 and 7 see the board at the same moment](images/calib_link_pair.png)
+
+Each camera sees the board small and at a slant, but both see it at the same
+moment. It is the pair's 20th shared tick, the reference rig's
+`calibration_min_edge`, so the pair now joins the graph and the link jumps from
+20 to 30. READY came 16 s later, once camera 1 had 120 paired ticks.
+
+The small 2 x 2 badge on each node is that camera's view cut into quarters. A
+quarter lights green once the centre of the board's markers has been in it.
+The centre is the mean of the marker corners, the red dot below. On the
+reference rig READY needs the centre in at least 3 of the 4 quarters of every
+camera's view, and `grid` gives the count of the camera with the fewest.
+Camera 5 of the same take shows one view in each quarter:
+
+![Four views of camera 5, with the board's centre in each quarter](images/calib_quadrants.png)
+
+The whole board need not fit inside the quarter. Only its centre has to cross
+into it, while the camera still sees at least 5 of its markers. Near a corner
+of the view part of the board may leave the image, and the view still counts.
+
+A profile can also set view tests, as the reference rig's does, and the caption
+then shows `views`. They count only the views a camera shares with another
+camera. `closer` wants the board large in the view, `tilt` wants it turned
+away from square-on, and `edges` wants marker corners out near the edges of
+the view. Camera 5 again:
+
+![Camera 5 with the board close, tilted, and near its edges](images/calib_view_tests.png)
+
+The grid in the last view is the one `edges` counts, 4 x 4 cells. The corners
+of all of a camera's shared views together must reach enough of its 16 cells.
 
 When a count stops climbing, find the one that is stuck:
 

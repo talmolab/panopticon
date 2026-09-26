@@ -797,7 +797,7 @@ Number, 0 or more. Default `0`. Reference rig: `30`.
 
 #### `calibration_min_fill_cells`
 
-Integer, 0 to 16. Default `0`. Reference rig: not set.
+Integer, 0 to 16. Default `0`. Reference rig: `7`.
 
 - Does: How many cells of a 4 x 4 grid over its view each camera must see a
   marker corner in. Only detections shared with another camera count, because
@@ -809,7 +809,7 @@ Integer, 0 to 16. Default `0`. Reference rig: not set.
 
 #### `calibration_min_board_size`
 
-Number, 0 to 1. Default `0`. Reference rig: not set.
+Number, 0 to 1. Default `0`. Reference rig: `0.10`.
 
 - Does: How big the board must look in 5 of each camera's shared detections: the
   square root of its share of the view. 0.4 is a board covering 16% of the view.
@@ -820,7 +820,7 @@ Number, 0 to 1. Default `0`. Reference rig: not set.
 
 #### `calibration_min_tilt_deg`
 
-Number, 0 to 89. Default `0`. Reference rig: not set.
+Number, 0 to 89. Default `0`. Reference rig: `40`.
 
 - Does: How far, in degrees, the board must tilt away from square-on in 5 of each
   camera's shared detections.
