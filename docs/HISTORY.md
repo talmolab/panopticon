@@ -626,12 +626,52 @@ Dead ends, do not retry:
   between launches and the sidebar collapses to a camera-only view. A profile
   can be added from any file, the assay and cohort fields are gone, and notes
   is three lines (`3b7d365`).
+- 2026-09-25: The 345 s calibration of 2026-09-25 fitted cam5's lens to fx
+  748 at 7.6 px and cam9's to 4125, where the lens gives about 1300, and six
+  pairs were poor. Farthest-point sampling picks each camera's 60 views, and
+  it picks the least typical views first, which in a long take are
+  misdetections and pose flips. The solve now judges the views against a
+  reference fit before the pick and leaves out those beyond 3 times the
+  median view's error (`4d8468b`). The reference is whichever of two first
+  fits reprojects the median view closer: one on 120 spread views, one on
+  the old pick. Over the 27 cameras of the 2026-09-21, 2026-09-23 and
+  2026-09-25 takes, the spread fit was dragged off on three (fx 6234, 1824
+  and 1988) and the pick on two. The other fit reprojected the median view
+  closer each time. Re-solved from copies, 2026-09-25 went from a median pair
+  RMS of 0.95 px with six poor pairs to 0.63 px with all 21 good, and
+  2026-09-23 stayed at 0.74 px. On 2026-09-21 every tree link stayed good,
+  but cam1-cam4 and cam1-cam9, off the tree on 13 and 9 shared views, turned
+  poor. cam1's focal length there is barely observable (60-view subsets fit
+  it anywhere from 1205 to 3365). A 2% change in it moves those two stereo
+  fits to basins 41 and 75 degrees apart, so the old rule's clean pairs there
+  were luck.
+- 2026-09-25: A first fit on 120 views made each camera's lens fit about 7
+  times slower, 64 s against 9 s on 700 synthetic views. OpenCV's default SVD
+  solve grows with the cube of the view count. The first fits solve with
+  `CALIB_USE_LU`. On the 2026-09-25 take the spread fit with LU left out the
+  same views as with SVD, and the camera sections of calibration.toml matched
+  to the last digit. The nine-camera re-solves took 68 to 90 s each
+  (`4d8468b`).
+- 2026-09-25: The report names every camera it cannot vouch for, as
+  `poorly_placed`, and the worker's summary opens with them. A lens fit above
+  1.5 px or a focal length more than 1.6 times off the other cameras' median
+  counts, and so does the smaller side of each poor tree edge. A solve can
+  read every camera solved with one of them placed through a poor link, and
+  a pair warning reads the same either way (`4d8468b`).
+- 2026-09-25: Flat final second, a sidebar box (`4753a3c`), asks the solve to
+  put Z = 0 on the board lying still at the end of the take (`4d8468b`). Z
+  points towards the cameras, so LUC3D's floor grid lies on the arena floor.
+  On a synthetic take every camera lands within 0.4 mm of its true height
+  above the board. None of the three reference takes was recorded with it.
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
   them all, so drive the real GUI through repeated acquisitions).
 - Patching the FLIR witness one edge case at a time (each round found another,
   and the conservative rule replaced it).
+- Judging the lens-fit views again against a refit with every view
+  re-admitted each round (it cycles between two fits, as on cam7 of the
+  2026-09-25 take).
 
 ---
 
@@ -668,3 +708,5 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
 - Reading RSS unelevated (wrong values).
 - Validating a fix without driving the real GUI through repeated acquisitions.
 - Patching the FLIR witness edge case by edge case.
+- Re-judging the lens-fit views with every view re-admitted each round (it
+  cycles between two fits).
