@@ -1506,7 +1506,7 @@ flowchart TD
   D --> F["keep a frame with at least 2 markers<br>and at least 6 corners"]
   F --> ACT{"at least 5 detection frames?"}
   ACT -->|"no"| X["drop the camera"]
-  ACT -->|"yes"| I["Intrinsics per camera:<br>calibrateCamera on up to 60 pose-diverse views"]
+  ACT -->|"yes"| I["Intrinsics per camera:<br>outliers left out, then calibrateCamera<br>on up to 120 views spread through the take"]
   I --> PW["Stereo for every pair, intrinsics fixed,<br>on views shared by trigger number"]
   PW --> G["Keep the largest connected group;<br>Prim's tree over the pairs"]
   G --> CH["Chain pairwise R, T along the tree<br>from the reference camera"]
@@ -1538,8 +1538,10 @@ Stage by stage:
   pinhole guess. Either can be dragged off by the views it holds, and one
   dragged off reprojects the median view worse. A view the reference reprojects
   beyond `INTRINSICS_OUTLIER_FACTOR` times the median view's error is left
-  out. Farthest-point sampling then picks the 60 views that span the board's
-  orientations and positions from the rest. A lens fit above
+  out. The final fit takes up to 120 of the rest, spread evenly through the
+  take. It runs from two starts, the reference fit and OpenCV's own guess, and
+  keeps whichever reprojects the median view closer. It solves with LU,
+  because the solver's cost grows with the cube of the view count. A lens fit above
   `INTRINSICS_RMS_WARN_PX`, or a focal length outside
   `INTRINSICS_FX_WARN_FACTOR` of the other cameras' median, is warned about.
 - Extrinsics. `cv2.stereoCalibrate` with `CALIB_FIX_INTRINSIC` for every pair

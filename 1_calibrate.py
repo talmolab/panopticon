@@ -150,11 +150,17 @@ def _write_text_atomic(path, text: str) -> None:
 MIN_CORNERS = 6
 #: Detection frames a camera needs before its intrinsics are solved.
 INTRINSICS_MIN_FRAMES = 20
-#: Pose-diverse cap on the frames the intrinsics are fitted on.
+#: Above this many views, a camera's views are judged against a reference fit
+#: before the final fit. At or below it, every view goes straight into one
+#: fit. It is also the size of the pose-diverse pick that one of the two first
+#: fits is fitted on.
 INTRINSICS_MAX_FRAMES = 60
 #: Views, spread evenly through the take, that one of the two first fits is
 #: fitted on before any view is judged (_reference_fit).
 INTRINSICS_FIRST_PASS_FRAMES = 120
+#: Views, spread evenly through the take from those within the cut, that the
+#: final fit is fitted on.
+INTRINSICS_FINAL_FRAMES = 120
 #: A view whose reprojection error under the reference fit exceeds this many
 #: times the median view's (and INTRINSICS_OUTLIER_FLOOR_PX) is left out of
 #: the final fit: a misdetection or a pose-estimate flip, not a pose.
@@ -752,38 +758,82 @@ def calibrate_intrinsics(corners_list, ids_list, corner_obj, image_size,
              | cv2.CALIB_FIX_K3
              | cv2.CALIB_ZERO_TANGENT_DIST)
     if len(obj_all) > max_frames:
-        # RULE: views are judged against a reference fit before the
-        # pose-diverse pick, and the pick draws only from the views within
-        # the cut. REASON: the pick is farthest-point sampling, which takes
-        # the poses least like the rest, and the least typical-looking poses
-        # in a long take are misdetections and pose-estimate flips. Picked
-        # from every view, they can pull the focal length off by a factor of
-        # two or more, and a longer take, with more of them, makes that more
-        # likely.
-        _K0, _d0, poses, errors = _reference_fit(obj_all, img_all, image_size,
-                                                 flags, max_frames)
+        # RULE: views are judged against a reference fit, and the final fit
+        # leaves out those beyond the cut. REASON: a long take holds
+        # misdetections and pose-estimate flips, and a lens fit that keeps
+        # them can have its focal length pulled off by a factor of two or
+        # more.
+        K0, d0, _poses, errors = _reference_fit(obj_all, img_all, image_size,
+                                                flags, max_frames)
         finite = errors[np.isfinite(errors)]
         cut = max(INTRINSICS_OUTLIER_FLOOR_PX,
                   INTRINSICS_OUTLIER_FACTOR * float(np.median(finite))
                   if finite.size else INTRINSICS_OUTLIER_FLOOR_PX)
         keep = [i for i, e in enumerate(errors) if e <= cut]
         # Too few views within the cut means the reference itself is off, so
-        # every view goes on to the pick and none is counted as left out.
+        # every view goes into the final fit and none is counted as left out.
         if stats is not None:
             stats["outliers"] = (len(obj_all) - len(keep)
                                  if len(keep) >= min_frames else 0)
         if len(keep) >= min_frames:
             obj_all = [obj_all[i] for i in keep]
             img_all = [img_all[i] for i in keep]
-            poses = [poses[i] for i in keep]
-        if len(obj_all) > max_frames:
-            indices = _pose_diverse_sample(poses, max_frames)
-            obj_all = [obj_all[i] for i in indices]
-            img_all = [img_all[i] for i in indices]
+        # RULE: the final fit takes INTRINSICS_FINAL_FRAMES views spread
+        # through the take from those within the cut, and solves with LU.
+        # REASON: a farthest-point pick holds the least typical views, and
+        # the lens fit moves with it. The solve chains pairwise poses and
+        # never refines them jointly, so that movement can move the tree to
+        # another pair and double the error of corners triangulated from the
+        # other cameras, while the pair RMS stays the same. A spread sample
+        # stands for the whole take. The solver's cost grows with the cube of
+        # the view count, so a fit on every view within the cut of a long
+        # take runs for many minutes.
+        #
+        # RULE: the final fit runs from two starts, the reference fit and
+        # OpenCV's own guess, and keeps whichever reprojects the median view
+        # within the cut closer. REASON: either start can settle on a
+        # wrong focal length. OpenCV's guess does on some real takes, and a
+        # reference fit that is itself off can lead the fit away from a sound
+        # answer. The median view tells the two apart, as in _reference_fit.
+        sel = _spread(len(obj_all), INTRINSICS_FINAL_FRAMES)
+        obj_sel = [obj_all[i] for i in sel]
+        img_sel = [img_all[i] for i in sel]
+        best, failure = None, None
+        for start in ((K0, d0), None):
+            try:
+                if start is None:
+                    rms, K, dist, _r, _t = cv2.calibrateCamera(
+                        obj_sel, img_sel, image_size, None, None,
+                        flags=flags | cv2.CALIB_USE_LU)
+                else:
+                    rms, K, dist, _r, _t = cv2.calibrateCamera(
+                        obj_sel, img_sel, image_size, start[0].copy(),
+                        start[1].copy(),
+                        flags=(flags | cv2.CALIB_USE_LU
+                               | cv2.CALIB_USE_INTRINSIC_GUESS))
+            except cv2.error as e:
+                failure = e
+                continue
+            if not (np.isfinite(K).all() and np.isfinite(dist).all()):
+                continue
+            median = _median_view_error(obj_all, img_all, K, dist)
+            if best is None or median < best[0]:
+                best = (median, rms, K, dist)
+        if best is None:
+            raise (failure if failure is not None
+                   else cv2.error("no start gave a final lens fit"))
+        return best[1], best[2], best[3], len(sel)
 
     rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(
         obj_all, img_all, image_size, None, None, flags=flags)
     return rms, K, dist, len(obj_all)
+
+
+def _median_view_error(obj_all, img_all, K, dist) -> float:
+    """The median over views of each view's mean reprojection error once
+    posed under ``K, dist`` (a view PnP cannot pose counts as infinite)."""
+    poses = _poses_from_pts(obj_all, img_all, K, dist)
+    return float(np.median([p[2] if p is not None else np.inf for p in poses]))
 
 
 def _spread(n: int, k: int) -> list:
@@ -808,11 +858,10 @@ def _reference_fit(obj_all, img_all, image_size, flags, max_frames):
     above a sound fit's: the least median of squares criterion (Rousseeuw,
     "Least median of squares regression", JASA 79, 1984).
 
-    RULE: both first fits solve with LU, the final fit with the default SVD.
-    REASON: the solver's cost grows with the cube of the view count, so the
-    default makes a fit on twice the views about eight times slower. A first
-    fit only judges views, and LU leaves out the same ones tens of times
-    faster.
+    RULE: both first fits solve with LU. REASON: the solver's cost grows with
+    the cube of the view count, so the default SVD makes a fit on twice the
+    views about eight times slower. A first fit only judges views, and LU
+    leaves out the same ones tens of times faster.
     """
     w, h = image_size
     K_rough = np.array([[w, 0, w * 0.5], [0, w, h * 0.5], [0, 0, 1]],

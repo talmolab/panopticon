@@ -632,12 +632,14 @@ class RigProfile:
     # --- Calibration coverage HUD: when has enough board been captured? -------
     # These decide how long someone stands in the arena waving, so they are
     # worth setting against what the solve consumes rather than by feel.
-    # 1_calibrate.py caps intrinsics at 60 pose-diverse frames per camera and
-    # stereo at 30 shared frames per pair; everything beyond those caps is
-    # discarded, contributing only a slightly richer pool to sample from. The
-    # defaults therefore sit at roughly 2x and 1.3x the caps, which is margin;
-    # about 4x and 2.7x the caps makes a many-camera calibration take far
-    # longer than the data can be used for. Raise them if calibrations come
+    # 1_calibrate.py fits intrinsics on at most 120 frames per camera, spread
+    # through the take, and stereo on at most 30 shared frames per pair;
+    # everything beyond those caps only sharpens the outlier cut and the
+    # spread. A camera's co-detection ticks are an upper bound on its views,
+    # because a tick whose corners cannot be interpolated gives none. The
+    # defaults therefore sit at the intrinsics cap and at 1.3x the stereo
+    # cap; about 2x and 2.7x makes a many-camera calibration take far longer
+    # than the data can be used for. Raise them if calibrations come
     # out marginal; the per-pair chart in reprojection_error_histogram.png is
     # the evidence.
     calibration_min_per_cam_shared: int = 120

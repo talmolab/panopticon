@@ -753,7 +753,7 @@ Integer. Default `120`. Reference rig: `120`.
 - Change when: Raise it if calibrations come out marginal. Lower it if waving
   takes too long while the per-pair chart in `reprojection_error_histogram.png`
   stays good.
-- Goes wrong: Too high wastes time in the arena, because the solve uses at most 60
+- Goes wrong: Too high wastes time in the arena, because the solve uses at most 120
   frames per camera for its intrinsics. Too low gives a marginal solve. The loader
   does not check the value.
 

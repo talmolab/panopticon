@@ -80,10 +80,10 @@ calibration_exposure_us: 5000      # 5 ms
 calibration_gain_db: -1            # keep the .pfs gain (6 dB)
 
 # --- Calibration coverage: when to stop waving the board ----------------------
-# 1_calibrate.py uses at most 60 pose-diverse frames per camera for intrinsics
-# and 30 shared frames per pair for stereo, and discards the rest, so these
-# thresholds need about twice those caps and no more; higher makes a nine-camera
-# calibration take far longer than the data can be used for.
+# 1_calibrate.py uses at most 120 frames per camera, spread through the take,
+# for intrinsics and 30 shared frames per pair for stereo, and discards the
+# rest, so these thresholds need about those caps and no more; higher makes a
+# nine-camera calibration take far longer than the data can be used for.
 #
 # Connectivity decides most of the waving time: the pairs must join every camera
 # into one group, which a lower calibration_min_edge helps most.

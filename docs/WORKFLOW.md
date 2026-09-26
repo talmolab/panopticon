@@ -546,8 +546,8 @@ use `codet_frames.json`, so move that file aside first. A solve by hand writes
 into `calibration/` and copies nothing into `<mouse1>_<mouse2>_recording/`, so
 copy `calibration.toml` yourself.
 
-The solve fits each lens on at most 60 pose-diverse frames, and each pair on
-at most 30, so that it finishes in minutes. For the best calibration, solve
+The solve fits each lens on at most 120 frames spread through the take, and
+each pair on at most 30, so that it finishes in minutes. For the best calibration, solve
 from full videos with a package that does bundle adjustment. sleap-anipose and
 aniposelib both read the `calibration.toml` this writes.
 

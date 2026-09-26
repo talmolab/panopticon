@@ -485,14 +485,20 @@ until someone analyses it.
   error while fitting one camera fails that camera only.
 - Pair RMS below `RMS_GOOD_PX` (1.5 px) is good, and from `RMS_POOR_PX` (3.0 px)
   up it is poor and warned about.
-- A camera's lens is fitted on at most 60 views. Above that, the pose-diverse
-  pick draws only from the views a reference fit reprojects within
-  `INTRINSICS_OUTLIER_FACTOR` times the median view's error (and at least
-  `INTRINSICS_OUTLIER_FLOOR_PX`), unless fewer than `INTRINSICS_MIN_FRAMES`
-  remain. Farthest-point sampling picks the views least like the rest, and in
-  a long take those include misdetections and pose flips. Picked from every
-  view, they pulled two reference-rig focal lengths off, by a factor of 1.7
-  and a factor of 3. The reference is whichever of two first fits reprojects
+- A camera with more than 60 views has them judged against a reference fit.
+  The final lens fit takes `INTRINSICS_FINAL_FRAMES` views spread through the
+  take from those the reference reprojects within `INTRINSICS_OUTLIER_FACTOR`
+  times the median view's error (and at least `INTRINSICS_OUTLIER_FLOOR_PX`),
+  unless fewer than `INTRINSICS_MIN_FRAMES` remain. It solves with
+  `CALIB_USE_LU` from two starts, the reference fit and OpenCV's own guess,
+  and keeps the one that reprojects the median view closer. A long take holds
+  misdetections and pose flips, and farthest-point sampling picks them first:
+  picked from every view, they pulled two reference-rig focal lengths off, by
+  a factor of 1.7 and a factor of 3. A 60-view farthest-point pick of the
+  clean views still moved the lens fits enough to double the triangulated
+  error of the reference rig's best calibration. Either start alone can go
+  wrong: OpenCV's guess put one reference-rig focal length at 1824 against
+  1424, and a reference fit that was itself off led a test take's to 22. The reference is whichever of two first fits reprojects
   the median view closer (`_reference_fit`): one on 120 views spread through
   the take, one on the pose-diverse pick. Either can be dragged off by the
   views it holds. Over 27 reference-rig lens fits, the spread fit was off on
