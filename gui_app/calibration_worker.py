@@ -251,6 +251,12 @@ def summarize_report(report: dict) -> str:
         if len(comps) > 1:
             lines.append("  groups: " + "  ".join(
                 "{" + ",".join(c) + "}" for c in comps))
+    placed = report.get("poorly_placed") or {}
+    if placed:
+        if lines:
+            lines.append("")
+        lines.append("UNRELIABLE: {}. The warnings below say why.".format(
+            ", ".join(placed)))
     warnings = report.get("warnings") or []
     if warnings:
         if lines:

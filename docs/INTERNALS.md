@@ -1510,7 +1510,8 @@ flowchart TD
   I --> PW["Stereo for every pair, intrinsics fixed,<br>on views shared by trigger number"]
   PW --> G["Keep the largest connected group;<br>Prim's tree over the pairs"]
   G --> CH["Chain pairwise R, T along the tree<br>from the reference camera"]
-  CH --> T["calibration.toml + calibration_report.json<br>+ reprojection_error_histogram.png"]
+  CH --> FL["Floor, when asked for:<br>Z = 0 on the board lying still at the end"]
+  FL --> T["calibration.toml + calibration_report.json<br>+ reprojection_error_histogram.png"]
 ```
 
 Stage by stage:
@@ -1530,9 +1531,17 @@ Stage by stage:
   `CALIB_FIX_K3` and `CALIB_ZERO_TANGENT_DIST`, on at least 20 usable views. A
   view whose corners fit no homography (a single row or column of the board)
   is skipped, because `calibrateCamera` asserts on it and would end the whole
-  solve. Above 60 views, `solvePnP` against a rough pinhole guess drops the
-  worst 10% by reprojection error, and farthest-point sampling in normalised
-  pose space picks views that span the board's orientations and positions.
+  solve. Above 60 views, the views are first judged against a reference fit.
+  It is whichever of two first fits reprojects the median view closer. One is
+  on 120 views spread through the take. The other is on the views
+  farthest-point sampling picks in normalised pose space under a rough
+  pinhole guess. A few views that no pose fits drag the first, and
+  unusual-looking views drag the second. A view the reference reprojects
+  beyond `INTRINSICS_OUTLIER_FACTOR` times the median view's error is left
+  out. Farthest-point sampling then picks the 60 views that span the board's
+  orientations and positions from the rest. A lens fit above
+  `INTRINSICS_RMS_WARN_PX`, or a focal length outside
+  `INTRINSICS_FX_WARN_FACTOR` of the other cameras' median, is warned about.
 - Extrinsics. `cv2.stereoCalibrate` with `CALIB_FIX_INTRINSIC` for every pair
   with at least 5 shared views of 6 or more common corners, on up to 30
   pose-diverse views. The solve keeps the largest connected group of cameras
@@ -1541,7 +1550,15 @@ Stage by stage:
   views, so a pair seen on few frames joins only when nothing better reaches
   that camera. The pairwise `R, T` are chained along the tree from the
   reference camera (`--ref-camera`, `cam1` by default), which becomes the
-  identity.
+  identity unless the floor step moves the origin.
+- Floor. Only when the calibration's `session_metadata.json` has
+  `floor_from_final_second`. Each camera reads the last 4 s of its video and
+  looks for the board lying still at the end of its last detected stretch.
+  The camera whose pose of the lying board reprojects best sets the frame:
+  Z = 0 on the board, Z towards the cameras, the origin at its first corner.
+  The other cameras' poses of the board measure how far their extrinsics
+  disagree, which is warned about past 2 degrees or 10 mm. A moving board, no
+  view or any error skips the step with a warning, and never fails the solve.
 - Quality. Each pair's stereo RMS is graded good below 1.5 px, worth checking
   from 1.5 to 3 px, and poor from 3 px, which is warned about; the bar chart
   in `reprojection_error_histogram.png` uses the same colours. A pair with no
@@ -1558,8 +1575,12 @@ Stage by stage:
   were). It holds the tree, each pair's RMS, frames, `grade` and
   `codetections`, the bands (`rms_bands_px`) and the median pair RMS. It
   records the pairing rule and the serial each camera name had
-  (`camera_serials`). A solve that drops cameras still exits 0. The window
-  copies the toml beside the recording, and LUC3D reads it.
+  (`camera_serials`). `poorly_placed` names every camera the solve cannot
+  vouch for: one with a suspect lens fit, and the smaller side of each poor
+  tree edge, whose position runs through that edge. `floor` records whether
+  the floor step was asked for and which cameras set it, or why it was
+  skipped. A solve that drops cameras still exits 0. The window copies the
+  toml beside the recording, and LUC3D reads it.
 
 There is no global bundle adjustment. The extrinsics are pairwise stereo
 results chained along a tree, so error accumulates with tree depth. The tree

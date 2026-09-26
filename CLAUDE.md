@@ -486,10 +486,15 @@ until someone analyses it.
 - Pair RMS below `RMS_GOOD_PX` (1.5 px) is good, and from `RMS_POOR_PX` (3.0 px)
   up it is poor and warned about.
 - A camera's lens is fitted on at most 60 views, picked for pose diversity only
-  from the views a first fit on 120 spread views reprojects within
-  `INTRINSICS_OUTLIER_FACTOR` times the median. Farthest-point sampling alone
-  picks the outlier views first, and gives a focal length off by a factor of
-  two while the coverage graph reads full.
+  from the views a reference fit reprojects within `INTRINSICS_OUTLIER_FACTOR`
+  times the median. Farthest-point sampling alone picks the outlier views
+  first, and gives a focal length off by a factor of two while the coverage
+  graph reads full. The reference is whichever of two first fits reprojects
+  the median view closer (`_reference_fit`): one on 120 views spread through
+  the take, one on the pose-diverse pick. A few views that no pose fits drag
+  the first, and unusual-looking views drag the second. Both first fits solve
+  with `CALIB_USE_LU`, which judges the same views tens of times faster than
+  the default SVD.
 - The report names every camera it cannot vouch for (`poorly_placed`): a lens
   fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
   `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each poor
