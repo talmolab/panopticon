@@ -5,6 +5,12 @@ Numbered camera nodes on a ring, with an edge for every pair. A node pulses
 whiteness scale with how many ticks the pair co-detected the board, maxing out
 at the detector's ``optimal_shared``. When the coverage graph is connected and
 every camera is sufficiently covered, the whole graph freezes solid white.
+
+Below the graph, one line gives every READY figure against its threshold, and
+an amber line names the cameras holding READY back: the groups while the graph
+is split, the two sides of its weakest link while the connectivity is short,
+then the cameras short of each view-quality threshold. A node whose views fall
+short has an amber rim.
 """
 import math
 import time
@@ -39,6 +45,11 @@ class CoverageGraphWidget(QWidget):
         self._grid_cells_hit = None
         self._min_grid_cells = 3
         self._components: list[list[int]] = []
+        self._connectivity = 0.0
+        self._min_connectivity = 0.0
+        self._weak_cut: tuple = ([], [])
+        self._view_needs: dict = {}
+        self._view_quality_on = False
         self._start_time = None
         self._elapsed_s = 0.0
 
@@ -52,6 +63,9 @@ class CoverageGraphWidget(QWidget):
         # Reset with the rest of the snapshot so a previous session's group
         # list cannot paint before this session's first tick.
         self._components = []
+        self._connectivity = 0.0
+        self._weak_cut = ([], [])
+        self._view_needs = {}
         self._ready = False
         self._start_time = time.monotonic()
         self._elapsed_s = 0.0
@@ -75,6 +89,11 @@ class CoverageGraphWidget(QWidget):
         self._grid_cells_hit = np.asarray(det.grid_cells_hit, dtype=int).copy()
         self._min_grid_cells = det.MIN_GRID_CELLS
         self._components = [list(c) for c in det.components]
+        self._connectivity = float(det.connectivity)
+        self._min_connectivity = float(det.MIN_CONNECTIVITY)
+        self._weak_cut = (list(det.weak_cut[0]), list(det.weak_cut[1]))
+        self._view_needs = {k: list(v) for k, v in det.view_needs().items()}
+        self._view_quality_on = bool(det.view_quality_on())
         ready_now = bool(det.ready)
         if self._start_time is not None and not ready_now:
             self._elapsed_s = time.monotonic() - self._start_time
@@ -148,13 +167,19 @@ class CoverageGraphWidget(QWidget):
         # --- nodes with camera number + spatial grid badge ---
         node_r = 15.0 * s
         grid_rows, grid_cols = 2, 2
+        short_views = {i for cams in self._view_needs.values() for i in cams}
         for i in range(self._n):
             glow = float(self._glow[i]) if self._glow is not None else 0.0
             if ready:
                 fill, border, txt = QColor(255, 255, 255), QColor(255, 255, 255), QColor(20, 20, 30)
             else:
                 fill = QColor(int(50 + 40 * glow), int(80 + 120 * glow), int(120 + 135 * glow))
-                border = QColor(130, 170, 235) if glow > 0.05 else QColor(70, 90, 130)
+                if glow > 0.05:
+                    border = QColor(130, 170, 235)
+                elif i in short_views:
+                    border = QColor(235, 170, 90)
+                else:
+                    border = QColor(70, 90, 130)
                 txt = QColor(235, 235, 245)
             p.setBrush(QBrush(fill))
             pen = QPen(border)
@@ -193,7 +218,7 @@ class CoverageGraphWidget(QWidget):
         line_h = 16 * text_s
         p.setFont(self._fitting_font(
             p, 9 * text_s, QFont.Bold, w - 4,
-            "0:00  paired 00/00  grid 0/0  groups 0/1"))
+            "0:00  paired 00/00  grid 0/0  link 00/00  views 0/0"))
         if ready:
             p.setPen(QPen(QColor(255, 255, 255)))
             p.drawText(QRectF(0, h - line_h - 2, w, line_h), Qt.AlignCenter,
@@ -202,30 +227,61 @@ class CoverageGraphWidget(QWidget):
             mn = int(self._per_cam.min()) if (self._per_cam is not None and self._n) else 0
             min_grid = int(self._grid_cells_hit.min()) if (self._grid_cells_hit is not None and self._n) else 0
             comps = self._components
+            # A split graph shows its group count; a joined one with a
+            # connectivity floor shows the connectivity against it.
+            if len(comps) > 1 or self._min_connectivity <= 0:
+                graph = f"groups {len(comps)}/1"
+            else:
+                graph = (f"link {int(self._connectivity)}/"
+                         f"{self._min_connectivity:g}")
+            views = ""
+            if self._view_quality_on:
+                good = self._n - len(short_views)
+                views = f"  views {good}/{self._n}"
             p.setPen(QPen(QColor(150, 150, 170)))
             p.drawText(QRectF(0, h - line_h - 2, w, line_h), Qt.AlignCenter,
                        f"{timer_str}  paired {mn}/{self._target}  "
                        f"grid {min_grid}/{self._min_grid_cells}  "
-                       f"groups {len(comps)}/1")
+                       f"{graph}{views}")
 
             # Connectivity is the one blocker the other two numbers cannot show,
             # and the one that decides which cameras survive the solve: it kept
             # a 9-camera session at 4 usable cameras while every per-camera
             # figure read as satisfied. Say which groups exist and which pair is
             # closest to joining them, so it reads as an instruction.
-            if len(comps) > 1:
-                # The group list stays -- it is what caught a nine-camera
-                # session solving only four cameras while every per-camera
-                # number read as satisfied. There is no per-pair "show board to
-                # camX + camY together" instruction here: it repaints every tick
-                # and names a pair the operator is often not working on. `groups
-                # N/1` in the line below carries the same information without
-                # telling the operator what to do.
-                groups = "  ".join(
-                    "{" + ",".join(str(i + 1) for i in sorted(g)) + "}"
-                    for g in comps[:4])
+            hint = self._hint(comps)
+            if hint:
                 p.setPen(QPen(QColor(235, 170, 90)))
-                p.setFont(QFont("Segoe UI", int(round(8 * text_s))))
+                p.setFont(self._fitting_font(p, 8 * text_s, QFont.Normal,
+                                             w - 4, hint))
                 p.drawText(QRectF(0, h - 2 * line_h - 2, w, line_h),
-                           Qt.AlignCenter, groups)
+                           Qt.AlignCenter, hint)
         p.end()
+
+    def _hint(self, comps) -> str:
+        """The amber line: what holds READY back, most basic first.
+
+        RULE: it names groups of cameras, never a pair to show the board to.
+        REASON: it repaints every tick, and a pair it picks is often not the
+        one the operator is working on. The groups while the graph is split
+        caught a nine-camera session solving only four cameras while every
+        per-camera number read as satisfied. The weakest link's two sides
+        come from the graph's spectrum and stay put over a take, so they read
+        as an instruction: show the board where both sides see it.
+        """
+        def group(cams):
+            return "{" + ",".join(str(i + 1) for i in sorted(cams)) + "}"
+
+        if len(comps) > 1:
+            return "  ".join(group(g) for g in comps[:4])
+        weak, rest = self._weak_cut
+        if (self._min_connectivity > 0 and weak and rest
+                and self._connectivity < self._min_connectivity):
+            return f"weakest link {group(weak)} to {group(rest)}"
+        parts = []
+        for key, label in (("closer", "closer"), ("tilted", "tilt"),
+                           ("edges", "edges")):
+            cams = self._view_needs.get(key) or []
+            if cams:
+                parts.append(f"{label} " + ",".join(str(i + 1) for i in cams))
+        return "  ".join(parts)

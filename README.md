@@ -118,10 +118,11 @@ explains every field.
 ## What a session writes
 
 A session is a folder, `<output_dir>/<date>/<mouse1>_<mouse2>/`, holding a
-`calibration/` and a `recording/` folder. Each of those holds one folder per camera
+`calibration/` and a `<mouse1>_<mouse2>_recording/` folder. Each of those holds one folder per camera
 (`cam1/` to `camN/`, with the mp4, `blockids.npy` and `frametimes.npy`), plus
 `session_metadata.json`, `session.log`, and `WARNINGS.txt` when something went wrong.
-The solve writes `calibration.toml` into `calibration/` and copies it into `recording/`.
+The solve writes `calibration.toml` into `calibration/` and copies it into the
+recording folder.
 [WORKFLOW.md](docs/WORKFLOW.md#paths-and-names) lists every file.
 
 ## Documentation

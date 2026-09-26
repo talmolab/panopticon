@@ -1744,7 +1744,7 @@ was programmed to do and every warning sit beside the videos.
       <date>-<session>-camN-calibration.mp4
       frametimes.npy             2 x N: frame numbers, device seconds from frame 1
       blockids.npy               int64 trigger number per frame
-  recording/
+  <session>_recording/
     session_metadata.json, session.log, WARNINGS.txt
     calibration.toml             copied from the solve
     stim_paradigm.json           graph, resolved chains, firmware SHA-256

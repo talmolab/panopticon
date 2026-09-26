@@ -5,7 +5,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLineEdit, QLabel,
     QProgressBar, QFrame, QPushButton, QFileDialog, QSlider, QComboBox,
-    QPlainTextEdit, QMessageBox,
+    QPlainTextEdit, QMessageBox, QCheckBox,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
@@ -229,6 +229,23 @@ class SidebarWidget(QWidget):
 
         layout.addLayout(form)
         layout.addSpacing(12)
+        # "Flat final second": the calibration ends with the board lying flat
+        # on the floor, and Solve puts Z = 0 there. Off where there is no flat
+        # surface or the pipeline sets its own orientation; remembered per
+        # profile. Read when the calibration is saved, so it can be ticked
+        # during the take. Built here because applying a profile sets it; it
+        # is placed under the Calibrate row below.
+        self._floor_box = QCheckBox("Flat final second")
+        self._floor_box.setToolTip(
+            "End the calibration with the board lying flat on the floor for "
+            "a second or two, where cameras can see it.\nSolve then puts "
+            "Z = 0 on the floor, with Z pointing up and the origin at a board "
+            "corner.\nIt skips this when the board was still moving at the "
+            "end.")
+        self._floor_box.setStyleSheet(
+            "QCheckBox { color: #aaa; font-size: 10px; border: none; "
+            "padding-left: 46px; }")
+        self._floor_box.toggled.connect(self._on_floor_box)
         if self._profiles:
             self._apply_profile(self._profiles[0])
 
@@ -275,6 +292,9 @@ class SidebarWidget(QWidget):
         self._run_calib_btn.clicked.connect(self.run_calibration_clicked.emit)
         calib_row.addWidget(self._run_calib_btn)
         layout.addLayout(calib_row)
+
+        # Built above, before the first profile is applied.
+        layout.addWidget(self._floor_box)
 
         layout.addWidget(self._record_toggle)
         # Tooltips and enabled state come from the gates from the first paint.
@@ -375,6 +395,16 @@ class SidebarWidget(QWidget):
         self._contrast_slider.valueChanged.connect(self._schedule_save)
 
     # --- the state kept between launches ---
+    @property
+    def flat_final_second(self) -> bool:
+        """Whether the calibration should end with the board flat (floor)."""
+        return self._floor_box.isChecked()
+
+    def _on_floor_box(self, checked: bool) -> None:
+        if self._shown_name:
+            settings.set_value(settings.KEY_FLOOR_PREFIX + self._shown_name,
+                               bool(checked))
+
     def _on_field_edited(self, name: str) -> None:
         self._user_edited.add(name)
         self._schedule_save()
@@ -651,7 +681,8 @@ class SidebarWidget(QWidget):
         """Show no profile as chosen, without emitting profile_changed.
 
         The dropdown shows its placeholder, the output directory goes back
-        to the default, and the metadata fields the operator has not typed
+        to the default, Flat final second clears, and the metadata fields the
+        operator has not typed
         into are emptied, so the form carries nothing from a profile nobody
         chose. Choosing any entry then emits profile_changed, the first one
         included.
@@ -661,6 +692,9 @@ class SidebarWidget(QWidget):
         self._profile_combo.blockSignals(False)
         self._shown_name = ""
         self._set_output_dir(self._default_output_dir)
+        self._floor_box.blockSignals(True)
+        self._floor_box.setChecked(False)
+        self._floor_box.blockSignals(False)
         for key, field in self._fields.items():
             if key != "date" and key not in self._user_edited:
                 field.setText("")
@@ -674,6 +708,10 @@ class SidebarWidget(QWidget):
         field takes this profile's default, or empties, so the form carries
         nothing from the previous profile's defaults.
         """
+        self._floor_box.blockSignals(True)
+        self._floor_box.setChecked(settings.get_bool(
+            settings.KEY_FLOOR_PREFIX + profile.name, False))
+        self._floor_box.blockSignals(False)
         chosen = settings.get_text(
             settings.KEY_OUTPUT_DIR_PREFIX + profile.name, "")
         if chosen:

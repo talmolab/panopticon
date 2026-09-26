@@ -74,7 +74,7 @@ METADATA_DEFAULT_KEYS = ("experimenter", "assay", "cohort", "cage", "notes")
 
 #: Profile fields that hold a filesystem path. A relative value resolves
 #: against the repository root so a profile works from any working directory.
-_PATH_FIELDS = ("pfs_path", "output_dir", "board_config")
+_PATH_FIELDS = ("pfs_path", "output_dir", "board_config", "skeleton")
 
 #: Element type for list-valued profile fields. Pin and core lists must be
 #: ints because they reach ``pinMode``/affinity masks. ``camera_serials`` is
@@ -598,6 +598,10 @@ class RigProfile:
     pfs_path: str = ""
     output_dir: str = ""
     board_config: str = ""
+    # A SLEAP skeleton file (node-link JSON), usually in skeletons/. Each
+    # recording gets a copy as SKELETON_FILENAME at its folder's root, where
+    # LUC3D loads it with the session. Empty: no skeleton is written.
+    skeleton: str = ""
     # Trigger-board serial port. No code default: the device name is per-host
     # (COMn on Windows, /dev/tty* elsewhere), so a profile must state it and an
     # empty value fails at the first serial open instead of guessing. A
@@ -642,6 +646,20 @@ class RigProfile:
     # This is the criterion that prevents the degenerate intrinsics of a board
     # waved in one spot, and it is cheap to satisfy, so relax it last.
     calibration_min_grid_cells: int = 3
+    # The graph's algebraic connectivity (board_detector.spectral_cut), in
+    # co-detections: a weak bridge between two groups of cameras holds READY
+    # back until it carries enough views. 0 turns the test off; it depends on
+    # the camera count and layout, so each rig sets its own from a good
+    # calibration.
+    calibration_min_connectivity: float = 0.0
+    # View quality per camera, over its co-detection ticks, each off at 0:
+    # the cells of a 4 x 4 image grid a marker corner must reach, the board's
+    # size in view (the square root of its share of the image) and its tilt
+    # to the image plane in degrees, each needed in
+    # BoardDetector.QUALITY_VIEWS ticks.
+    calibration_min_fill_cells: int = 0
+    calibration_min_board_size: float = 0.0
+    calibration_min_tilt_deg: float = 0.0
     # Pin each grab thread to a performance core and raise its priority.
     # On a hybrid CPU (P-cores + E-cores) with many cameras the scheduler has
     # to place most busy threads on E-cores, and picks differently each
@@ -953,6 +971,17 @@ class RigProfile:
             raise ValueError(
                 f"calibration_exposure_us {cal:g} must be 0 (keep the "
                 f"recording exposure) or a positive number of microseconds")
+        # The coverage display's graph and view-quality thresholds. A value
+        # no camera can reach keeps READY from ever showing.
+        for key, hi in (("calibration_min_connectivity", math.inf),
+                        ("calibration_min_fill_cells", 16),
+                        ("calibration_min_board_size", 1.0),
+                        ("calibration_min_tilt_deg", 89.0)):
+            v = getattr(self, key)
+            if not (math.isfinite(v) and 0 <= v <= hi):
+                span = "0 or more" if hi == math.inf else f"0 to {hi:g}"
+                raise ValueError(
+                    f"{key} {v:g} is outside {span}; 0 turns the test off")
         margin = self.thermal_warn_margin_c
         if not (math.isfinite(margin) and margin > 0):
             raise ValueError(
@@ -1177,6 +1206,9 @@ class RigProfile:
         .pfs; a flir profile needs its camera: block and, when it names one,
         its camera.flir.sdk_dir; the simulated backends need nothing.
         """
+        why = skeleton_problem(self.skeleton)
+        if why:
+            return why
         backend = self.camera_backend
         if backend in _PFS_BACKENDS:
             pfs = self.pfs_path
@@ -1465,6 +1497,43 @@ def _camera_identity(camera_info, profile) -> dict:
 
 METADATA_FILENAME = "session_metadata.json"
 
+#: The skeleton's name in a recording's folder. LUC3D loads a .json whose
+#: name holds "skeleton" from the root of the session folder it opens.
+SKELETON_FILENAME = "skeleton.json"
+
+
+def _skeleton_nodes(doc) -> int | None:
+    """How many nodes a SLEAP node-link skeleton lists, or None when ``doc``
+    is not one (a mapping with a ``nodes`` list and a ``links`` list)."""
+    if (not isinstance(doc, dict) or not isinstance(doc.get("nodes"), list)
+            or not isinstance(doc.get("links"), list)):
+        return None
+    return len(doc["nodes"])
+
+
+def skeleton_problem(path: str) -> str | None:
+    """Why the profile's skeleton cannot be used, or None (also when unset).
+
+    RULE: a skeleton the profile names but cannot supply stops the cameras
+    opening, like a missing .pfs. REASON: the file is written into every
+    recording for LUC3D, and a typo that let the rig record would leave a
+    day's sessions without one and nothing on screen to say so."""
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return (f"The profile's skeleton file is missing:\n{path}\n\nSet "
+                f"skeleton in the profile YAML to a file in skeletons/, or "
+                f"leave it empty for no skeleton.")
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return f"The profile's skeleton file cannot be read as JSON:\n{path}\n\n{e}"
+    if _skeleton_nodes(doc) is None:
+        return (f"The profile's skeleton file is not a SLEAP skeleton (a "
+                f"mapping with nodes and links):\n{path}")
+    return None
+
 
 @dataclass
 class SessionConfig:
@@ -1561,7 +1630,23 @@ class SessionConfig:
     def session_dir(self) -> Path:
         return self.base_data_dir / self.date / self.session_id
 
+    #: The folder a recording goes in, under session_dir: RECORDING_DIR_FORMAT
+    #: with the session id, e.g. ``m1_m2_recording``.
+    RECORDING_DIR_FORMAT = "{session_id}_recording"
+
     def video_dir(self, acq_type: str) -> Path:
+        """The acquisition's folder in the session.
+
+        RULE: a recording's folder carries the session id
+        (``<mouse_1>_<mouse_2>_recording``); a calibration's is
+        ``calibration``. REASON: the recording folder is what goes to LUC3D,
+        which matches a session to a folder by the folder's name, so several
+        recordings uploaded side by side each need a name of their own. The
+        calibration folder keeps its fixed name, which the solve
+        (1_calibrate.py) and the calibration copy look for."""
+        if acq_type == "recording":
+            return self.session_dir / self.RECORDING_DIR_FORMAT.format(
+                session_id=self.session_id)
         return self.session_dir / acq_type
 
     def rate_for(self, acq_type: str) -> int:
@@ -1650,6 +1735,29 @@ class SessionConfig:
             meta["acq_type"] = acq_type
             meta["acq_fps"] = self.rate_for(acq_type)
         return meta
+
+    def write_skeleton(self, acq_type: str) -> dict | None:
+        """Copy the profile's skeleton into a recording's folder for LUC3D.
+
+        Returns what session_metadata.json records about it (the source, the
+        file written, its SHA-256 and node count), or None when there is
+        nothing to write: not a recording, or no skeleton in the profile.
+        Raises OSError or ValueError when the file cannot be read or is not a
+        skeleton."""
+        prof = self.profile
+        if acq_type != "recording" or prof is None or not prof.skeleton:
+            return None
+        import hashlib
+        src = Path(prof.skeleton)
+        data = src.read_bytes()
+        nodes = _skeleton_nodes(json.loads(data.decode("utf-8")))
+        if nodes is None:
+            raise ValueError(f"{src} is not a SLEAP skeleton")
+        target = self.video_dir(acq_type)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / SKELETON_FILENAME).write_bytes(data)
+        return {"source": str(src), "file": SKELETON_FILENAME,
+                "sha256": hashlib.sha256(data).hexdigest(), "nodes": nodes}
 
     def save_metadata(self, acq_type: str | None = None, camera_info=None,
                       encoder: str | None = None,

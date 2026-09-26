@@ -1,0 +1,488 @@
+{
+  "directed": true,
+  "graph": {
+    "name": "skeleton",
+    "num_edges_inserted": 19
+  },
+  "links": [
+    {
+      "edge_insert_idx": 0,
+      "key": 0,
+      "source": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "head",
+            1
+          ]
+        }
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "nose",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/reduce": [
+          {
+            "py/type": "sleap.skeleton.EdgeType"
+          },
+          {
+            "py/tuple": [
+              1
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "edge_insert_idx": 1,
+      "key": 0,
+      "source": {
+        "py/id": 1
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "neck",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 2,
+      "key": 0,
+      "source": {
+        "py/id": 1
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "r_ear",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 3,
+      "key": 0,
+      "source": {
+        "py/id": 1
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "l_ear",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 4,
+      "key": 0,
+      "source": {
+        "py/id": 2
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "mouth",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 5,
+      "key": 0,
+      "source": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "tti",
+            1
+          ]
+        }
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "r_haunch",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 6,
+      "key": 0,
+      "source": {
+        "py/id": 8
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "l_haunch",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 7,
+      "key": 0,
+      "source": {
+        "py/id": 8
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "t0",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 8,
+      "key": 0,
+      "source": {
+        "py/id": 8
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "t1",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 9,
+      "key": 0,
+      "source": {
+        "py/id": 8
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "t2",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 10,
+      "key": 0,
+      "source": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "r_shoulder",
+            1
+          ]
+        }
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "r_fpaw",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 11,
+      "key": 0,
+      "source": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "l_shoulder",
+            1
+          ]
+        }
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "l_fpaw",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 12,
+      "key": 0,
+      "source": {
+        "py/id": 9
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "r_bpaw",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 13,
+      "key": 0,
+      "source": {
+        "py/id": 10
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "l_bpaw",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 14,
+      "key": 0,
+      "source": {
+        "py/id": 8
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "trunk",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 15,
+      "key": 0,
+      "source": {
+        "py/id": 8
+      },
+      "target": {
+        "py/object": "sleap.skeleton.Node",
+        "py/state": {
+          "py/tuple": [
+            "tail_tip",
+            1
+          ]
+        }
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 16,
+      "key": 0,
+      "source": {
+        "py/id": 1
+      },
+      "target": {
+        "py/id": 8
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 17,
+      "key": 0,
+      "source": {
+        "py/id": 1
+      },
+      "target": {
+        "py/id": 14
+      },
+      "type": {
+        "py/id": 3
+      }
+    },
+    {
+      "edge_insert_idx": 18,
+      "key": 0,
+      "source": {
+        "py/id": 1
+      },
+      "target": {
+        "py/id": 16
+      },
+      "type": {
+        "py/id": 3
+      }
+    }
+  ],
+  "multigraph": true,
+  "nodes": [
+    {
+      "id": {
+        "py/id": 2
+      }
+    },
+    {
+      "id": {
+        "py/id": 1
+      }
+    },
+    {
+      "id": {
+        "py/id": 4
+      }
+    },
+    {
+      "id": {
+        "py/id": 8
+      }
+    },
+    {
+      "id": {
+        "py/id": 11
+      }
+    },
+    {
+      "id": {
+        "py/id": 12
+      }
+    },
+    {
+      "id": {
+        "py/id": 13
+      }
+    },
+    {
+      "id": {
+        "py/id": 5
+      }
+    },
+    {
+      "id": {
+        "py/id": 6
+      }
+    },
+    {
+      "id": {
+        "py/id": 14
+      }
+    },
+    {
+      "id": {
+        "py/id": 16
+      }
+    },
+    {
+      "id": {
+        "py/id": 15
+      }
+    },
+    {
+      "id": {
+        "py/id": 17
+      }
+    },
+    {
+      "id": {
+        "py/id": 9
+      }
+    },
+    {
+      "id": {
+        "py/id": 10
+      }
+    },
+    {
+      "id": {
+        "py/id": 18
+      }
+    },
+    {
+      "id": {
+        "py/id": 19
+      }
+    },
+    {
+      "id": {
+        "py/id": 7
+      }
+    },
+    {
+      "id": {
+        "py/id": 21
+      }
+    },
+    {
+      "id": {
+        "py/id": 20
+      }
+    }
+  ]
+}

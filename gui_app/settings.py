@@ -54,6 +54,10 @@ KEY_STIM_FIELD_PREFIX = "stim_field/"
 #: Profile files added from outside profiles/ with the dropdown's "Add a
 #: profile from a file" entry, as absolute paths.
 KEY_EXTRA_PROFILES = "extra_profiles"
+#: The "Flat final second" box, per profile: KEY_FLOOR_PREFIX + the profile's
+#: name. A rig with no flat surface, or a pipeline with its own orientation,
+#: leaves it off.
+KEY_FLOOR_PREFIX = "flat_final_second/"
 
 #: Set this to an absolute .ini path to send every value somewhere else.
 #:
@@ -109,6 +113,17 @@ def get_int(key: str, default: int) -> int:
         return int(app_settings().value(key, default, type=int))
     except (TypeError, ValueError):
         return default
+
+
+def get_bool(key: str, default: bool = False) -> bool:
+    """A stored yes/no. The registry and an .ini file both keep a bool as the
+    text "true" or "false", which an int read would turn into its default."""
+    v = app_settings().value(key, None)
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("true", "1", "yes")
 
 
 def get_bytes(key: str):

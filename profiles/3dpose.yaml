@@ -100,10 +100,17 @@ calibration_min_per_cam_shared: 120
 # stable relative pose per pair) has not been measured.
 calibration_min_edge: 20
 calibration_min_grid_cells: 3
+# The co-detection graph's algebraic connectivity. This rig's weakest cut is
+# always the same: cams 1, 4, 7 and 9 against the other five. At 30 that cut
+# carries about 70 co-detections. The two good calibrations passed 30 before
+# the other tests did. A take whose other tests passed at 8.7 waited 8 s more.
+calibration_min_connectivity: 30
 
 pfs_path: "configs/mono8_1920x1200.pfs"
 output_dir: "data"
 board_config: "configs/boards/charuco_8x8_15mm.yaml"
+# The mouse skeleton (20 nodes) each recording carries for LUC3D.
+skeleton: "skeletons/mouse.json"
 
 serial_port: COM3
 # Every pin driven as a camera trigger. The order carries no meaning: the board
