@@ -485,16 +485,25 @@ until someone analyses it.
   error while fitting one camera fails that camera only.
 - Pair RMS below `RMS_GOOD_PX` (1.5 px) is good, and from `RMS_POOR_PX` (3.0 px)
   up it is poor and warned about.
-- A camera's lens is fitted on at most 60 views, picked for pose diversity only
-  from the views a reference fit reprojects within `INTRINSICS_OUTLIER_FACTOR`
-  times the median. Farthest-point sampling alone picks the outlier views
-  first, and gives a focal length off by a factor of two while the coverage
-  graph reads full. The reference is whichever of two first fits reprojects
+- A camera's lens is fitted on at most 60 views. Above that, the pose-diverse
+  pick draws only from the views a reference fit reprojects within
+  `INTRINSICS_OUTLIER_FACTOR` times the median view's error (and at least
+  `INTRINSICS_OUTLIER_FLOOR_PX`), unless fewer than `INTRINSICS_MIN_FRAMES`
+  remain. Farthest-point sampling picks the views least like the rest, and in
+  a long take those include misdetections and pose flips. Picked from every
+  view, they pulled two reference-rig focal lengths off, by a factor of 1.7
+  and a factor of 3. The reference is whichever of two first fits reprojects
   the median view closer (`_reference_fit`): one on 120 views spread through
-  the take, one on the pose-diverse pick. A few views that no pose fits drag
-  the first, and unusual-looking views drag the second. Both first fits solve
-  with `CALIB_USE_LU`, which judges the same views tens of times faster than
-  the default SVD.
+  the take, one on the pose-diverse pick. Either can be dragged off by the
+  views it holds. Over 27 reference-rig lens fits, the spread fit was off on
+  three and the pick on two, and the median view chose the sound fit every
+  time. Both first fits solve with `CALIB_USE_LU`, which on 120 views runs
+  about 50 times faster than the default SVD and leaves out the same views,
+  give or take one.
+- Judge a solve by more than its pair RMS. The tree chains pairwise poses with
+  no bundle adjustment, so a small change in one lens fit can move the tree to
+  another pair. On the reference rig that nearly doubled the error of corners
+  triangulated from the other cameras, while the pair RMS stayed the same.
 - The report names every camera it cannot vouch for (`poorly_placed`): a lens
   fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
   `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each poor

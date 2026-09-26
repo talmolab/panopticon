@@ -1535,8 +1535,8 @@ Stage by stage:
   It is whichever of two first fits reprojects the median view closer. One is
   on 120 views spread through the take. The other is on the views
   farthest-point sampling picks in normalised pose space under a rough
-  pinhole guess. A few views that no pose fits drag the first, and
-  unusual-looking views drag the second. A view the reference reprojects
+  pinhole guess. Either can be dragged off by the views it holds, and one
+  dragged off reprojects the median view worse. A view the reference reprojects
   beyond `INTRINSICS_OUTLIER_FACTOR` times the median view's error is left
   out. Farthest-point sampling then picks the 60 views that span the board's
   orientations and positions from the rest. A lens fit above
