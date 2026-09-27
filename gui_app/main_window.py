@@ -29,7 +29,7 @@ from gui_app import alignment
 from gui_app import logging_setup
 from gui_app import recording_meta
 from gui_app import stim_trace
-from gui_app.calibration_worker import CalibrationWorker
+from gui_app.calibration_worker import CalibrationWorker, recalibration_reasons
 from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
                                     environment_facts, format_report,
                                     installed_encoder, invalidate_nvenc_cache,
@@ -4953,13 +4953,44 @@ class MainWindow(QMainWindow):
                 status += f"; floor from {', '.join(floor['cameras'])}"
             elif floor.get("skipped"):
                 status += "; floor skipped"
-            if msg:
-                QMessageBox.warning(self, "Calibration Warnings", msg[:800])
-                status += " (with warnings)"
+            # Only a finding that recommends recalibrating raises a dialog;
+            # the rest goes to the log and the calibration's session.log
+            # (calibration_worker.recalibration_reasons says which is which).
+            # Without a report nothing can be ruled out, so it asks too.
+            reasons = recalibration_reasons(report) if report else (
+                ["the solve wrote no report"] if msg else [])
+            if reasons:
+                QMessageBox.warning(
+                    self, "Recalibration recommended",
+                    ("Recalibrate: " + "; ".join(reasons) + ".\n\n"
+                     + msg)[:800])
+                status += " — recalibration recommended"
+            elif msg:
+                n = self._note_solve_warnings(config, msg)
+                status += f" ({n} note(s) in session.log)"
             self.statusBar().showMessage(status)
         else:
             QMessageBox.warning(self, "Calibration Failed", msg[:800])
             self.statusBar().showMessage("Calibration failed")
+
+    def _note_solve_warnings(self, config, msg: str) -> int:
+        """Write a sound solve's warnings to the log and to the calibration's
+        session.log, and return how many there are. UI thread."""
+        notes = [line.strip()[2:] for line in msg.splitlines()
+                 if line.strip().startswith("- ")] or [msg.strip()]
+        for note in notes:
+            print(f"[calib] solve note: {note}", flush=True)
+        path = config.video_dir("calibration") / "session.log"
+        try:
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{stamp} [calib] Solve notes (no recalibration "
+                        f"needed):\n")
+                f.writelines(f"  - {note}\n" for note in notes)
+        except OSError as e:
+            print(f"[calib] could not add the solve notes to {path}: {e}",
+                  flush=True)
+        return len(notes)
 
     def _on_snapshot(self):
         if self._camera_mgr.num_cameras == 0:
