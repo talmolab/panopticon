@@ -227,6 +227,35 @@ def _load_report(stdout: str, session_dir: Path) -> dict:
     return {}
 
 
+def recalibration_reasons(report: dict) -> list:
+    """Why a solve that succeeded should be recalibrated, one line per
+    reason, or [] when its calibration.toml can be used as it is.
+
+    RULE: only these findings raise the operator's dialog. REASON: each one
+    leaves a camera missing from calibration.toml, placed where the solve
+    cannot vouch for it, or describing another camera. Every other warning
+    (a pair with few shared views, a poor pair the tree does not use, a
+    skipped floor) leaves every camera's pose sound, so it goes to the log
+    and session.log instead of interrupting."""
+    if not report:
+        return []
+    reasons = []
+    dropped = report.get("dropped") or {}
+    n_dropped = sum(len(v) for v in dropped.values())
+    cams = report.get("cameras") or []
+    if report.get("partial") or n_dropped:
+        reasons.append("solved {} of {} cameras".format(
+            len(cams), len(cams) + n_dropped))
+    placed = report.get("poorly_placed") or {}
+    if placed:
+        reasons.append("unreliable: {}".format(", ".join(placed)))
+    mismatch = report.get("serial_mismatch") or []
+    if mismatch:
+        reasons.append("{} recorded other cameras under the solved "
+                       "names".format(", ".join(mismatch)))
+    return reasons
+
+
 def summarize_report(report: dict) -> str:
     """The operator-facing text for a successful solve, or "" when there is
     nothing to say (all cameras solved, no warnings)."""

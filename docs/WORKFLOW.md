@@ -454,7 +454,8 @@ already there. The new solve then stays in `calibration/`.
 | `...; floor from camN, camM` | The floor step set Z = 0 from those cameras' views |
 | `...; floor skipped` | The board was still moving or not seen at the end. The warnings say which |
 | `Calibration solved (no toml found to copy)` | Treat it as a failure and read the log |
-| `... (with warnings)` | A `Calibration Warnings` dialog listed problems |
+| `... — recalibration recommended` | A `Recalibration recommended` dialog says why. Record the calibration again |
+| `... (N note(s) in session.log)` | The calibration is sound. Its notes are in `calibration/session.log` and the log |
 
 ### Which cameras made it into the solve
 
@@ -470,8 +471,8 @@ The solve drops a camera when:
 The solve also skips single views whose corners fit no homography, such as a
 view of one row of the board, and says how many it skipped per camera.
 
-A solve that drops cameras still succeeds. The `Calibration Warnings` dialog
-then starts with `PARTIAL: solved N of M cameras.` and names each dropped
+A solve that drops cameras still succeeds. The `Recalibration recommended`
+dialog then says `PARTIAL: solved N of M cameras.` and names each dropped
 camera with its reason. The log then names the cameras that went in:
 
 ```
@@ -491,12 +492,22 @@ file it cannot use. Before any solve runs, a missing calibration folder or
 missing videos give a `No Data` dialog, and a missing board file a
 `Missing Board Config` dialog.
 
-The `Calibration Warnings` dialog also warns about:
+The `Recalibration recommended` dialog appears only when the calibration
+should be recorded again:
 
-- a pair whose stereo error is poor, or that shares fewer than 10 frames;
+- a camera was dropped;
+- a camera is unreliable, from a poor lens fit or a poor pair on the chain
+  that places it;
+- another acquisition of the session records a different serial under a
+  camera name, because the calibration then describes other cameras.
+
+Other warnings leave every camera's pose sound. They go to
+`calibration/session.log` and the log, without a dialog:
+
+- a pair whose stereo error is poor but that places no camera, or that
+  shares fewer than 10 frames;
 - a camera with fewer than 30 detection frames;
-- a camera name that another acquisition of the session records with a
-  different serial, because the calibration then describes other cameras.
+- a floor step that was skipped.
 
 ### Reading the pairwise calibration plot
 

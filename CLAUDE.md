@@ -515,6 +515,11 @@ until someone analyses it.
   fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
   `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each poor
   tree edge. The status bar shows them as `unreliable:`.
+- After Solve, only a finding that recommends recalibrating raises a dialog
+  (`calibration_worker.recalibration_reasons`): a dropped camera, an
+  unreliable one, or a serial mismatch (`serial_mismatch` in the report).
+  Every other warning goes to the log and the calibration's `session.log`,
+  the maintainer's choice.
 - The floor step runs only when the calibration's `session_metadata.json` has
   `floor_from_final_second` (the sidebar's Flat final second). It puts Z = 0 on
   the board lying still at the end of the take, with Z towards the cameras.

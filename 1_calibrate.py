@@ -274,7 +274,8 @@ def serial_map_differences(calibration, other, names=None) -> list[str]:
 
 def check_serial_maps(session_dir, calib_dir, serials, active, warnings):
     """Warn for each other acquisition of the session whose serial map
-    differs from the calibration's on a solved camera.
+    differs from the calibration's on a solved camera, and return their
+    names.
 
     The extrinsics describe the physical cameras present during the
     calibration. A camera replaced or re-ordered since then keeps its name,
@@ -282,7 +283,8 @@ def check_serial_maps(session_dir, calib_dir, serials, active, warnings):
     disk to show it.
     """
     if not serials:
-        return
+        return []
+    mismatched = []
     calib_dir = Path(calib_dir).resolve()
     for acq in sorted(Path(session_dir).iterdir()):
         if not acq.is_dir() or acq.resolve() == calib_dir:
@@ -291,6 +293,7 @@ def check_serial_maps(session_dir, calib_dir, serials, active, warnings):
             continue
         diffs = serial_map_differences(serials, camera_serial_map(acq), active)
         if diffs:
+            mismatched.append(acq.name)
             warn("{}/{} records other cameras under names this calibration "
                  "solved ({}). calibration.toml describes the cameras present "
                  "during the calibration, so the extrinsics of those names do "
@@ -298,6 +301,7 @@ def check_serial_maps(session_dir, calib_dir, serials, active, warnings):
                  "profile so each name keeps its camera".format(
                      acq.name, METADATA_FILENAME, "; ".join(diffs), acq.name),
                  warnings)
+    return mismatched
 
 
 # ---------------------------------------------------------------------------
@@ -2010,9 +2014,10 @@ def main():
 
     # --- Camera identity ---
     serials = camera_serial_map(calib_dir)
+    serial_mismatch = []
     if serials:
-        check_serial_maps(args.session_dir, calib_dir, serials, active,
-                          warnings)
+        serial_mismatch = check_serial_maps(args.session_dir, calib_dir,
+                                            serials, active, warnings)
     else:
         notice("calibration/{} records no camera serials, so the report "
                "cannot say which physical camera each name was".format(
@@ -2028,6 +2033,9 @@ def main():
                           codetections=codetections, camera_serials=serials,
                           placed=placed)
     report["floor"] = floor
+    # The acquisitions of this session that recorded other cameras under the
+    # names solved here: calibration_worker.recalibration_reasons reads it.
+    report["serial_mismatch"] = serial_mismatch
     out = calib_dir / "calibration.toml"
     write_calibration_toml(out, active, intrinsics, extrinsics, all_sizes,
                            meta=report)
