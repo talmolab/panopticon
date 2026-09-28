@@ -1684,8 +1684,8 @@ class StimulationWindow(QDialog):
         elif not reclaimed and self._serial_is_shared:
             self._set_status(
                 "Upload successful, but the serial port could not be "
-                "reopened. Record reopens it, which resets the board: key "
-                "off the laser first.", error=True, kind="notice")
+                "reopened. Record reopens it, which resets the board: "
+                "switch off what the stimulation pins drive first.", error=True, kind="notice")
         else:
             self._set_status("Upload successful — press Record to run paradigm.")
 
@@ -1860,7 +1860,7 @@ class StimulationWindow(QDialog):
                 "The trigger board did not accept the stop command.\n\n"
                 "Any stim chain — including a looping one, which never ends on "
                 "its own — may still be driving its pin.\n\n"
-                "Power-cycle the trigger board and key off the laser before "
+                "Power-cycle the trigger board and switch off what the stimulation pins drive before "
                 "continuing.")
         else:
             self._set_status(message)

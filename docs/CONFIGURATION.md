@@ -1460,8 +1460,9 @@ camera's trigger input, and you start and stop it yourself. Panopticon opens no
 serial port. Start from [`external_ttl.yaml`](../profiles/templates/external_ttl.yaml).
 
 - Stimulation needs Panopticon's board, so the Stimulation editor is unavailable.
-- The profile refuses `serial_port`, `trigger_pins` and a non-empty
-  `stim_safe_pins`, because each names a board this mode never opens.
+- The profile refuses `serial_port`, `trigger_pins`, a non-empty
+  `stim_safe_pins`, `board_fqbn` and `board_max_pin`, because each names a
+  board this mode never opens.
 - Panopticon cannot read your source's rate. Set `frame_rate` and
   `calibration_frame_rate` to the rates you run it at. The block-ID rate check
   after each acquisition compares each camera with the acquisition's rate, and
@@ -1570,6 +1571,7 @@ An external trigger source:
 | `serial_port` | `trigger_source is external, so Panopticon opens no serial port` |
 | `trigger_pins` | `your own source drives the cameras' trigger inputs` |
 | A non-empty `stim_safe_pins` | `Stimulation needs trigger_source: board` |
+| `board_fqbn` or `board_max_pin` | `Panopticon never compiles or flashes a board` |
 
 The `camera:` block. Messages start with the key, such as `camera.trigger.line`:
 

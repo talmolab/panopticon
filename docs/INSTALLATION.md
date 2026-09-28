@@ -1320,8 +1320,11 @@ For such a board, set [`board_fqbn`](CONFIGURATION.md#board_fqbn) to its name
 in `arduino-cli`, and [`board_max_pin`](CONFIGURATION.md#board_max_pin) to its
 highest digital pin. `arduino-cli board listall` lists the names of the boards
 each installed core supports. When an upload overruns its time limit,
-Panopticon looks for `avrdude`, the Mega's upload tool. With another board's
-tool it cannot tell whether a write is still running, and its message says so.
+Panopticon waits for the board's flashing tool to finish before it says what
+to do. It knows the tools of the common cores: `avrdude`, `bossac`,
+`esptool`, `picotool`, the Teensy loader, `dfu-util`, `STM32_Programmer_CLI`
+and `openocd`. With another tool it cannot tell whether a write is still
+running, and its message says so.
 
 ![The trigger board wired to the computer, three cameras and a stimulation device](images/trigger_wiring.png)
 
