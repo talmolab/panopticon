@@ -1,4 +1,5 @@
-"""Generate and upload Arduino Mega 2560 combined camera-trigger + stim sketch."""
+"""Generate the combined camera-trigger + stim sketch and upload it to the
+trigger board the profile's board_fqbn names."""
 import math
 import re
 import subprocess
@@ -6,6 +7,9 @@ import tempfile
 import shutil
 from pathlib import Path
 
+#: The arduino-cli board name (FQBN) of the Arduino Mega 2560, the only
+#: trigger board tested. It is the default of the profile's board_fqbn, which
+#: every compile and upload takes.
 FQBN = "arduino:avr:mega"
 
 #: Where arduino-cli might live, in priority order. Overridable with the
@@ -307,11 +311,15 @@ def test_duration_s(blocks: list[dict], edges: list[dict]) -> float | None:
 #: UART RX0/TX0 — the link the GUI talks to the board over.
 RESERVED_SERIAL_PINS = (0, 1)
 
-#: Highest digital pin on the board named by FQBN: the Mega 2560 exposes D0-D53
-#: and A0-A15 as digital 54-69. A higher number compiles, but digitalWrite on a
-#: pin the board lacks does nothing, and the sketch's uint8_t field truncates
-#: anything above 255 onto a different physical pin.
+#: Highest digital pin of the Arduino Mega 2560, the default of the profile's
+#: board_max_pin: the board exposes D0-D53 and A0-A15 as digital 54-69. A
+#: higher number compiles, but digitalWrite on a pin the board lacks does
+#: nothing.
 MEGA_MAX_DIGITAL_PIN = 69
+
+#: Largest pin number the sketch's uint8_t pin field holds. A larger one
+#: truncates onto a different physical pin, so no board's ceiling exceeds it.
+SKETCH_MAX_PIN = 255
 
 #: Widest value the sketch's uint32_t timing fields hold.
 UINT32_MAX = 2**32 - 1
@@ -321,7 +329,8 @@ def forbidden_pin_uses(blocks: list[dict], trigger_pins=(),
                        max_pin: int = MEGA_MAX_DIGITAL_PIN) -> list[tuple[int, str]]:
     """Stim blocks assigned to pins that must never carry a stim waveform.
 
-    A pin outside 2..max_pin is refused because the failure is silent: the
+    max_pin is the profile's board_max_pin, capped at SKETCH_MAX_PIN. A pin
+    outside 2..max_pin is refused because the failure is silent: the
     paradigm "runs", stim_trace.csv labels the frames stimulated, and no pin
     was driven (or, above 255, the wrong pin was). A typo of 530 for 53 is one
     keystroke.
@@ -345,6 +354,7 @@ def forbidden_pin_uses(blocks: list[dict], trigger_pins=(),
     No legitimate paradigm drives either. Returns [(pin, reason), ...].
     """
     trig = {int(p) for p in trigger_pins}
+    max_pin = min(int(max_pin), SKETCH_MAX_PIN)
     out: list[tuple[int, str]] = []
     for pin in sorted({int(b["pin"]) for b in blocks}):
         if pin in trig:
@@ -482,7 +492,8 @@ def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
 
 
 def compile_ino(blocks: list[dict], edges: list[dict],
-                safe_pins, trigger_pins=()) -> str:
+                safe_pins, trigger_pins=(),
+                max_pin: int = MEGA_MAX_DIGITAL_PIN) -> str:
     """Return the .ino source for the combined camera-trigger + stim sketch.
 
     safe_pins is required: it comes from the rig profile's `stim_safe_pins` and
@@ -494,14 +505,16 @@ def compile_ino(blocks: list[dict], edges: list[dict],
     compiled: see forbidden_pin_uses(). Raises ValueError so a graph that would
     corrupt cross-camera alignment can never reach the board. The RX0/TX0 and
     pin-range checks are unconditional; the trigger-pin check needs the
-    profile, so callers that have one MUST pass it.
+    profile, so callers that have one MUST pass it. max_pin is the profile's
+    board_max_pin, the ceiling of the pin-range check, and callers that have
+    a profile pass it for the same reason.
 
     Also raises ValueError for parameter_problems() (numbers the firmware
     would silently execute as something else) and structural_problems()
     (branches or fan-in the chain walker would silently collapse). The editor
     runs the same three checks before Apply/Test/Record to explain the refusal.
     """
-    bad = forbidden_pin_uses(blocks, trigger_pins)
+    bad = forbidden_pin_uses(blocks, trigger_pins, max_pin)
     if bad:
         detail = "; ".join(f"pin {p}: {why}" for p, why in bad)
         raise ValueError(f"stim block on a forbidden pin — {detail}")
@@ -982,28 +995,37 @@ class UploadResult(tuple):
         return result
 
 
-def upload(ino_content: str, port: str, *,
+def _core_of(fqbn: str) -> str:
+    """The ``vendor:arch`` core an arduino-cli board name belongs to, which is
+    what ``arduino-cli core install`` takes."""
+    return ":".join(str(fqbn).split(":")[:2])
+
+
+def upload(ino_content: str, port: str, *, fqbn: str = FQBN,
            compile_timeout_s: float = COMPILE_TIMEOUT_S,
            upload_timeout_s: float = UPLOAD_TIMEOUT_S,
            flash_grace_s: float = FLASH_GRACE_S) -> UploadResult:
-    """Compile and upload the .ino to the Arduino.
+    """Compile the .ino for the board ``fqbn`` names and upload it to ``port``.
 
-    Returns an UploadResult: ``ok, message = upload(...)`` as before, with
-    ``.touched_board`` saying whether a failure may have written the board.
+    ``fqbn`` is the profile's board_fqbn; both arduino-cli commands and the
+    failure messages name it. Returns an UploadResult: ``ok, message =
+    upload(...)`` as before, with ``.touched_board`` saying whether a failure
+    may have written the board.
 
     With port ``"sim"`` nothing is compiled or flashed: the sketch is handed to
     the simulated board when that module is present and reported as accepted
     otherwise, so the GUI's Apply path runs end to end with no hardware.
     """
-    ok, message, stage = _upload(ino_content, port,
+    ok, message, stage = _upload(ino_content, port, fqbn=fqbn,
                                  compile_timeout_s=compile_timeout_s,
                                  upload_timeout_s=upload_timeout_s,
                                  flash_grace_s=flash_grace_s)
     return UploadResult(ok, message, touched_board=ok or stage == "upload")
 
 
-def _upload(ino_content: str, port: str, *, compile_timeout_s: float,
-            upload_timeout_s: float, flash_grace_s: float) -> tuple[bool, str, str]:
+def _upload(ino_content: str, port: str, *, fqbn: str,
+            compile_timeout_s: float, upload_timeout_s: float,
+            flash_grace_s: float) -> tuple[bool, str, str]:
     """upload()'s work. Returns (ok, message, stage the failure happened in)."""
     if is_sim_port(port):
         try:
@@ -1029,19 +1051,20 @@ def _upload(ino_content: str, port: str, *, compile_timeout_s: float,
     stage = "compile"
     try:
         rc, out, err = _run_cli(
-            [str(cli), "compile", "--fqbn", FQBN, str(sketch_dir)], compile_timeout_s)
+            [str(cli), "compile", "--fqbn", fqbn, str(sketch_dir)], compile_timeout_s)
         if rc != 0:
             return False, (
                 f"Compile failed (arduino-cli exit {rc}).\n\n"
                 f"This is a problem with the generated sketch or the toolchain, "
                 f"not with the board — nothing was flashed, so the board still "
                 f"runs whatever it ran before.\n\n"
-                f"If the error mentions a missing core, install it:\n"
-                f"    arduino-cli core install arduino:avr\n\n"
+                f"If the error mentions a missing core, install the one for "
+                f"the profile's board_fqbn ({fqbn}):\n"
+                f"    arduino-cli core install {_core_of(fqbn)}\n\n"
                 f"{err}\n{out}"), stage
         stage = "upload"
         rc, out, err = _run_cli(
-            [str(cli), "upload", "--fqbn", FQBN, "--port", port, str(sketch_dir)],
+            [str(cli), "upload", "--fqbn", fqbn, "--port", port, str(sketch_dir)],
             upload_timeout_s)
         if rc != 0:
             return False, (
@@ -1049,7 +1072,8 @@ def _upload(ino_content: str, port: str, *, compile_timeout_s: float,
                 f"The sketch compiled, so this is the link to the board. Common "
                 f"causes: the port is held by something else (Arduino Serial "
                 f"Monitor, another Panopticon instance), the wrong port is set "
-                f"in the profile, or the board is not an {FQBN}.\n\n"
+                f"in the profile, or the board is not the profile's "
+                f"board_fqbn, {fqbn}.\n\n"
                 f"WARNING: an upload that failed part-way leaves the board's "
                 f"firmware in an UNKNOWN state, which means the stim/laser pin "
                 f"state is also unknown. Power-cycle the board before relying "

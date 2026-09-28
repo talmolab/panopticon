@@ -191,7 +191,10 @@ Flat final second is the small box under Calibrate, left of its words. Tick it
 if you will end the take by laying the calibration board flat on the arena
 floor and holding it still for the last second. Solve then puts the floor at
 height 0 (Z = 0). Leave it unticked otherwise
-([WORKFLOW.md](WORKFLOW.md#put-the-floor-at-z--0)).
+([WORKFLOW.md](WORKFLOW.md#put-the-floor-at-z--0)). A tick shows left of the
+words when the box is on:
+
+![Flat final second ticked, under the Calibrate toggle](images/sidebar_flat_final_second.png)
 
 #### 8. Record
 
@@ -253,20 +256,23 @@ records. Before the next take, check that
 The Display group holds the Brightness (13) and Contrast (14) sliders. The
 progress bar (15), while it is shown, and the state label (16) sit below them.
 
-![The brightness and contrast sliders](images/sidebar_display.png)
+![The brightness and contrast sliders, Brightness dragged right](images/sidebar_display.png)
 
 #### 13 and 14. Brightness and contrast
 
-Both sliders range from -100 to +100 and change only the preview. At 0 the
-handle sits in the middle of its track, as in the picture. The part of the
-track right of the handle has the colour of the background. At 0 the handle
-therefore looks as if it sits at the right end of a short bar, while it is in
-the middle. Drag
-a slider right to
-brighten the preview or raise its contrast, and left for the reverse. The
-recording, the snapshots and the board detection use the camera frames as
-they arrive. If the panes look black, grey or washed out while their frame
-rates count, drag both handles back to the middle.
+The numbers 13 and 14 are the callouts of the annotated window at the top of
+this page. Both sliders range from -100 to +100 and change only the preview.
+The track is blue from its left end to the handle and grey from the handle to
+its right end. At 0 the handle sits in the middle of the track, as Contrast's
+does in the picture, and Brightness there is dragged to the right. Drag a
+slider right to brighten the preview or raise its contrast, and left for the
+reverse. The recording, the snapshots and the board detection use the camera
+frames as they arrive.
+
+The sliders show no number, and nothing resets them. They keep their
+positions between launches, so a slider someone left off-centre stays there at
+the next launch. If the panes look black, grey or washed out while their frame
+rates count, drag both handles until each sits in the middle of its track.
 [WORKFLOW.md](WORKFLOW.md#work-towards-ready) says what to do when the board
 is too dark to detect.
 
@@ -291,6 +297,10 @@ The label at the foot of the sidebar names what Panopticon is doing:
 | `NO TRIGGER` (red) | Your own trigger source sent no pulse, and nothing was recorded |
 | `Choose a profile`, `No profile` (amber) | No profile is open |
 
+Mind the dots. `CALIBRATING...`, with three dots and in purple, is a solve:
+the cameras record nothing, and the arena can be entered. `CALIBRATING`,
+without dots and in blue, is a calibration take.
+
 These texts, in amber, mark blocking operations. During one, every control
 that could start something is disabled and the cursor shows a wait:
 
@@ -306,15 +316,16 @@ that could start something is disabled and the cursor shows a wait:
 | `Updating the stimulus trace...` | Rewriting `stim_trace.csv` after an alignment |
 | `Cancelling…` | Ending a start on your own trigger source that recorded nothing |
 
-A flash writes a new program into the trigger board, and takes about 30 s. The
+A flash writes a new program into the trigger board, and takes about 30 s.
+`Clearing stim firmware…` and the two `Flashing …` states are all flashes. The
 two `Flashing …` states come right after you press Calibrate or Record. Wait
 for them: the acquisition starts when the flash ends, or a dialog says why it
 did not. Do not end Panopticon during a flash
 ([why](WORKFLOW.md#when-the-board-resets)).
 
-While the board is flashed its pins float, and a powered laser driver can read
-that as on. Read the [laser warning](WORKFLOW.md#7-optional-stimulation) before
-your first Calibrate or Record.
+While the board is flashed its pins float for a moment. Read the
+[stimulation warning](WORKFLOW.md#7-optional-stimulation) before a stimulation
+device is wired to the board.
 
 #### 17. Status bar
 
@@ -437,8 +448,8 @@ pin LOW, repeated until the recording stops. The arrow back from the second
 block to the first runs straight behind the forward arrow and across the
 second block. Its status line (9) holds a label written for the picture. For a
 loop with no Ending block the editor leaves that line empty. On the reference
-rig pin 53 is the laser, so this example drives the laser. The picture's
-numbers are the editor's own, and start again at 1.
+rig pin 53 is the stimulation pin. The picture's numbers are the editor's own,
+and start again at 1.
 
 The editor builds an optogenetic stimulation paradigm before a recording. A
 paradigm is a graph of blocks. Each block drives one output pin with one
@@ -446,7 +457,7 @@ square wave for a set time. An arrow means "when this block ends, start that
 one", so a chain runs in sequence, and chains that are not connected run at
 the same time. Every chain starts with the recording's first trigger.
 [WORKFLOW.md](WORKFLOW.md#7-optional-stimulation) covers building, testing and
-checking a paradigm, and gives the laser warning.
+checking a paradigm, and gives the stimulation warning.
 
 #### 1. Canvas
 
@@ -482,7 +493,7 @@ One second of the wave the Freq and PW fields describe
 #### 3. Pin
 
 The output pin. It has no default, and an empty Pin is refused with
-`Enter a pin number.` On the reference rig the laser is on pin 53. Apply,
+`Enter a pin number.` On the reference rig the stimulation pin is 53. Apply,
 Test, Calibrate and Record refuse some pins
 ([WORKFLOW.md](WORKFLOW.md#pins) lists them and says why). Two chains may not
 drive one pin. One chain may use a pin in several blocks, because its blocks run one
@@ -532,9 +543,9 @@ stop succeeded.
 
 #### 10. Test
 
-Runs the paradigm on the board for real, with no camera pins. A laser on the
-paradigm's pin turns on and off as it would in a recording, and no camera is
-triggered or recorded. The button reads Stop Test while
+Runs the paradigm on the board for real, with no camera pins. The paradigm's
+pins switch as they would in a recording, so a device on them runs, and no
+camera is triggered or recorded. The button reads Stop Test while
 a test runs, and the status line counts down (`Testing — 12 s remaining.`). A
 looping test reads `Testing — looping, press Stop Test to end.`, and only Stop
 Test or closing the editor ends it.
@@ -546,7 +557,7 @@ holds the port. [WORKFLOW.md](WORKFLOW.md#when-the-board-resets) lists when a
 Test does reset it. If the board does not confirm the stop, the status line
 reads
 `STOP NOT CONFIRMED — stim may still be running.` and a dialog appears.
-Power-cycle the board and switch the laser off.
+Power-cycle the board.
 
 #### 11. Apply to Arduino
 
@@ -557,7 +568,7 @@ blocking problem. On success the status line reads
 `Upload successful — press Record to run paradigm.`
 [WORKFLOW.md](WORKFLOW.md#when-the-board-resets) says when Panopticon later
 swaps it off the board and back. A failed upload leaves the board's contents
-unknown, and possibly without its [safe-pins guard](GLOSSARY.md#safe-pin). Switch the laser off and
+unknown, and possibly without its [safe-pins guard](GLOSSARY.md#safe-pin).
 Apply again: Record, Calibrate and Test refuse until an Apply succeeds.
 
 Load, Clear and Save share the row. Load and Save read and write the graph as

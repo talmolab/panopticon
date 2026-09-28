@@ -28,8 +28,12 @@ from pathlib import Path
 from gui_app.backends import KNOWN_BACKENDS
 from gui_app.logging_setup import DEFAULT_LOG_LEVEL, LOG_LEVELS
 # One definition of the Serial0 pins, shared with the stimulation compiler, so
-# the trigger-pin refusal and the stim-pin refusal can never disagree.
-from gui_app.stim_compiler import RESERVED_SERIAL_PINS
+# the trigger-pin refusal and the stim-pin refusal can never disagree. The
+# board defaults and the sketch's pin ceiling come from the compiler for the
+# same reason: it is what compiles for the board and checks its pins.
+from gui_app.stim_compiler import (
+    FQBN as DEFAULT_BOARD_FQBN, MEGA_MAX_DIGITAL_PIN as DEFAULT_BOARD_MAX_PIN,
+    RESERVED_SERIAL_PINS, SKETCH_MAX_PIN)
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -61,6 +65,14 @@ NVENC_CONTEXT_MODES = ("shared", "own")
 #: source the operator runs, such as a pulse generator or a DAQ; the host
 #: opens no serial port for it. gui_app/trigger_source.py implements both.
 TRIGGER_SOURCES = ("board", "external")
+
+#: An arduino-cli board name (RigProfile.board_fqbn): vendor:arch:board, with
+#: optional board options after a fourth colon as comma-separated key=value
+#: pairs. arduino-cli refuses anything else at every compile, so the loader
+#: refuses it first, with the form in the message.
+_FQBN_PART = r"[A-Za-z0-9_.\-]+"
+_FQBN = re.compile(rf"{_FQBN_PART}:{_FQBN_PART}:{_FQBN_PART}"
+                   rf"(:{_FQBN_PART}={_FQBN_PART}(,{_FQBN_PART}={_FQBN_PART})*)?")
 
 #: H.264 quantiser range. The encoders pass RigProfile.quality straight
 #: through as the QP, and libx264 clamps a value above the top of the range
@@ -723,6 +735,19 @@ class RigProfile:
     # the stimulation workflow are added automatically; list here anything that
     # must be safe even when no paradigm is loaded.
     stim_safe_pins: list = field(default_factory=lambda: [53])
+    # The trigger board's type, as arduino-cli names it (vendor:arch:board,
+    # its FQBN). Every compile and upload of the sketch names it, so a board
+    # other than the default is a profile edit. Only the Arduino Mega 2560,
+    # the default, is tested; another board runs the sketch when its
+    # arduino-cli core compiles it and it has the pins the profile names.
+    board_fqbn: str = DEFAULT_BOARD_FQBN
+    # The highest pin number the trigger board drives, the ceiling of the
+    # stimulation pin check: a block on a higher pin compiles and drives
+    # nothing, so Apply, Test and Record refuse it. The default is the Mega
+    # 2560's, the only board tested. validate() refuses a value below 2 (pins
+    # 0 and 1 are the serial link) or above stim_compiler.SKETCH_MAX_PIN (the
+    # sketch stores a pin in 8 bits).
+    board_max_pin: int = DEFAULT_BOARD_MAX_PIN
     # Calibration-only exposure/gain. The ChArUco board often needs far more
     # light than the experiment does, especially when the room is dimmed to
     # keep a wireless optostim receiver from triggering. Calibration can afford
@@ -913,6 +938,19 @@ class RigProfile:
                 f"frame rate")
         if len(pins) != len(self.trigger_pins):
             raise ValueError(f"trigger_pins {self.trigger_pins} lists a pin twice")
+        # arduino-cli refuses a malformed board name at every compile, which
+        # an operator first meets as a failed Apply or a failed launch flash.
+        if not (isinstance(self.board_fqbn, str)
+                and _FQBN.fullmatch(self.board_fqbn)):
+            raise ValueError(
+                f"board_fqbn {self.board_fqbn!r} is not an arduino-cli board "
+                f"name: it takes the form vendor:arch:board, such as "
+                f"{DEFAULT_BOARD_FQBN}")
+        if not 2 <= self.board_max_pin <= SKETCH_MAX_PIN:
+            raise ValueError(
+                f"board_max_pin {self.board_max_pin} must be from 2 to "
+                f"{SKETCH_MAX_PIN}: pins 0 and 1 are the board's serial link, "
+                f"and the sketch stores a pin number in 8 bits")
 
         limit = float(self.trigger_rate_limit)
         if limit < 0:

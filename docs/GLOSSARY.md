@@ -29,9 +29,10 @@ the recording if a frame arrives before every camera is armed.
 
 ### Trigger board
 
-Panopticon's default trigger source: an Arduino Mega 2560 on a serial port. Panopticon
-generates the board's firmware and flashes it with `arduino-cli`. The same board runs
-the stimulation [paradigm](#paradigm), so the stimulus and the frames share one clock.
+Panopticon's default trigger source: an Arduino board on a serial port, the Mega 2560
+unless the profile's `board_fqbn` names another. Panopticon generates the board's
+firmware and flashes it with `arduino-cli`. The same board runs the stimulation
+[paradigm](#paradigm), so the stimulus and the frames share one clock.
 
 ### Block ID
 
@@ -367,10 +368,10 @@ calibration runs on it, so a calibration never delivers stimulation.
 ### Safe pin
 
 A trigger-board pin that the firmware drives low as its first action at boot, before
-the serial handshake, so a powered laser driver never reads it as on. The rig profile
-lists these pins in `stim_safe_pins`. While the board resets, before the firmware runs,
-every pin floats: [INSTALLATION.md](INSTALLATION.md#step-8--flash-the-trigger-firmware)
-says what to do about that.
+the serial handshake, so a device wired to it does not read a floating pin as on. The
+rig profile lists these pins in `stim_safe_pins`. While the board resets, before the
+firmware runs, every pin floats for a moment
+([stimulation warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
 
 ## Files, settings and logs
 

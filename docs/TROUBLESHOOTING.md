@@ -60,13 +60,13 @@ Contents:
 | `No profile named <name> loaded (gui.py --profile).` | `--profile` names a profile that is not in `profiles/`, or that did not load. The dialog lists the skipped files. |
 | `The profile this computer opened last, <name>, did not load.` | The remembered profile has an error now. The dialog names the file and the field. Fix it and launch again. |
 | `skipping profile <file>: <reason>` | The profile loader refused this file. It is missing from the list. The reason names the field. [CONFIGURATION.md](CONFIGURATION.md) lists every check the loader makes. |
-| `No rig profile could be loaded from <folder>.` | No file in `profiles/` loads. Copy a template from `profiles/templates/` into `profiles/` and restart. Until a profile loads, the board is left as it is and may still carry a stimulation paradigm, so switch the laser off. |
+| `No rig profile could be loaded from <folder>.` | No file in `profiles/` loads. Copy a template from `profiles/templates/` into `profiles/` and restart. Until a profile loads, the board is left as it is and may still carry a stimulation paradigm, a looping one included. |
 | `The profile's camera settings file is missing:` | `pfs_path` names a file that does not exist. Set it to your `.pfs` in `configs/`. |
 | `The profile has no camera: block.` | A FLIR profile needs its `camera:` block ([FLIR.md](FLIR.md#3-write-the-profile)). |
 | `camera.flir.sdk_dir is not a folder:` | Point it at the Spinnaker install folder, or remove it to search the default places. |
 | `The profile sets capture_processes: <n>.` | Capturing in several processes is experimental, and the window captures in one. Set `capture_processes: 0`. |
 | `A solve is running` | The profile switch was refused, and the list shows the old profile again. Choose the profile again once the calibration solve has finished. |
-| `Firmware upload in progress` | The profile switch, the start or the close was refused during a [flash](OVERVIEW.md#16-state). Try again once the upload reports that it is done. An interrupted flash leaves the board without its laser-safety boot guard. |
+| `Firmware upload in progress` | The profile switch, the start or the close was refused during a [flash](OVERVIEW.md#16-state). Try again once the upload reports that it is done. An interrupted flash leaves the board without its `stim_safe_pins` boot guard. |
 | `The hardware check is running` | The profile switch or the start was refused. Choose the profile, or start, again once the status bar says the check is done. |
 
 ## Opening the cameras
@@ -143,16 +143,16 @@ Calibrate stay disabled while it runs.
 
 ## The trigger board at launch
 
-Read the flashing warning in
-[INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)
-before you connect a laser or LED driver to the board.
+Read the
+[stimulation warning in INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)
+before you connect a stimulation device to the board.
 
 | Message or symptom | Cause and fix |
 |---|---|
-| The laser flashes briefly at launch | The board resets when its port opens and when it is flashed, and its pins float during the reset ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). The laser's own interlock is the only hard gate. |
-| `Could not clear stim firmware` | The board could not be flashed, so it may still carry an earlier paradigm, a looping one included. Fix the cause the message gives, then press **Apply** on an empty Stimulation canvas, or switch the laser off. |
+| A stimulation device switches on briefly at launch | The board resets when its port opens and when it is flashed, and every pin floats for a moment during the reset, before `stim_safe_pins` can hold it low. The device's own wiring decides what it does then ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
+| `Could not clear stim firmware` | The board could not be flashed, so it may still carry an earlier paradigm, a looping one included. Fix the cause the message gives, then press **Apply** on an empty Stimulation canvas before you record. |
 | `arduino-cli was not found` | Install the Arduino IDE or `arduino-cli`, or set `PANOPTICON_ARDUINO_CLI` to its path. The message lists every place searched. Only flashing, Apply and Test need it. |
-| `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next Calibrate, Record or Test opens the port, which resets the board: switch the laser off first ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
+| `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next Calibrate, Record or Test opens the port, which resets the board and floats its pins for a moment ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `trigger board reports sketch <id>, not the recording-only <id>; flashing` | The board ran another sketch, and Panopticon flashes the recording-only one. |
 | `trigger board still reports sketch <id>; not flashing again this launch` | The board kept reporting another sketch after one flash. Check `serial_port` names the right board, then Apply an empty canvas. |
 | `trigger board reported no sketch identity` | The board runs firmware that does not report its identity. Apply an empty canvas to flash Panopticon's sketch. |
@@ -182,7 +182,7 @@ preview.
 | `Raw capture will write <n> GiB/s.` | Use a drive rated for that sustained rate, or split the cameras across drives. |
 | `Overwrite the existing data?` | The folder holds an earlier acquisition. **Yes** deletes it, except `calibration.toml`, once the board's port is claimed, even if the start is then refused. To keep it, choose **Cancel** and change the metadata. |
 | `Overwrite the existing data?`, with an external trigger source | **Yes** sets the earlier acquisition aside until the first trigger, and puts it back if the start ends before then. |
-| `Serial port <port> could not be opened, so no triggers would be sent.` | Something holds the port (the Arduino Serial Monitor, another program), or `serial_port` names the wrong port. Close it and start again. That start opens the port, which resets the board: switch the laser off first ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
+| `Serial port <port> could not be opened, so no triggers would be sent.` | Something holds the port (the Arduino Serial Monitor, another program), or `serial_port` names the wrong port. Close it and start again. That start opens the port, which resets the board and floats its pins for a moment ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
 | `Could not create the session directories` | The output folder cannot be written. Check it and start again. |
 | `Stop the stimulation test first` | A stimulation test drives the board. Stop it in the editor. |
 | `Cannot record with this stim workflow` | The canvas has a pin conflict, a forbidden pin or a loop with no start, or it does not compile. The message says which ([Stimulation](#stimulation)). |
@@ -190,8 +190,8 @@ preview.
 | `Apply the edited paradigm first` | The canvas changed since the last Apply, so the board would run the old paradigm. Press **Apply**, or undo the edit. |
 | `Apply the empty canvas first` | The canvas is empty and the board still carries the paradigm Applied earlier this session. Press **Apply** to clear the board. |
 | `Stimulation needs the trigger board` | The profile uses `trigger_source: external`, which has no board to run a paradigm. Use a profile with `trigger_source: board`. |
-| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which resets the board. Switch the laser off before that start ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
-| `The trigger board could not be flashed with the <kind> firmware` | Nothing started. Switch the laser off, check the board and the port, and retry. |
+| `The trigger board is running sketch <id>, not the <kind> sketch this` | The board reported another sketch. The start was rolled back. Start again: Panopticon flashes the right sketch first, which resets the board and floats its pins for a moment ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
+| `The trigger board could not be flashed with the <kind> firmware` | Nothing started. Check the board and the port, and retry. |
 | `had not armed after <n> s, so the trigger board was not started` | A camera that arms after the board starts would pair every frame with the wrong trigger. Arming fills each camera's frame ring, so memory pressure is the usual cause: close other programs, or lower `kick_max_lag` or `max_num_buffer`. |
 | `had not armed after <n> s, so you were not asked to start your trigger source.` | The same, with `trigger_source: external`. |
 | `Frames arrived before the trigger board was started:` | Something already triggers these cameras: the board still running from an earlier start, another source on their trigger line, or a camera not in trigger mode. Check the wiring and the camera settings. |
@@ -217,7 +217,7 @@ Most of these appear in the status bar.
 | `s BEHIND REAL TIME (<cam>). Frames will be lost when the buffer pool fills. Stop and investigate.` | The same, by more than a second. Stop and check that camera. |
 | `EVERY CAMERA IS RETIRED: nothing is being recorded. Stop the recording.` | Stop, and read the retirement reasons in the log. |
 | `NO FRAMES from <cams> for <n> s` | Those cameras have delivered nothing for that long. Check their trigger cables and network links. |
-| `NO FRAMES FROM ANY CAMERA for <n> s: the trigger board may have stopped.` | The trigger source stopped, or the network to every camera. A `No frames from any camera` dialog says whether the board's serial link still answers. On a profile with `stim_safe_pins` it also says to check the laser: do so. |
+| `NO FRAMES FROM ANY CAMERA for <n> s: the trigger board may have stopped.` | The trigger source stopped, or the network to every camera. A `No frames from any camera` dialog says whether the board's serial link still answers. On a profile with `stim_safe_pins` it also says that a board without power leaves those pins undriven. |
 | `CAMERA TEMPERATURE: <cam> <t> C` | The camera is near its shutdown temperature, or in its over-temperature state. Check its airflow and mount ([INSTALLATION.md](INSTALLATION.md#camera-temperature)). |
 | One camera's pane shows about half the trigger rate | Exposure over the ceiling, or a 2.5 Gbit/s link ([The network](#the-network)). The camera ignores every second trigger. See [the out-of-sync section](#the-recording-looks-fine-but-the-views-are-out-of-sync). |
 | `Waiting for the first trigger: start your trigger source now` | `trigger_source: external`: start your source. |
@@ -256,7 +256,7 @@ after the encode, and its rows go to the same file.
 | `its grab thread was still receiving frames <n> s after the trigger board was told to stop` | The board may still be triggering, or the camera was not in trigger mode. |
 | `CAMERA(S) FAILED:` | In the status line: those cameras produced no usable video. Their source files are kept (`raw.bin` or `stream.h264`, `encode_error.log`) in their folders. |
 | `Recording did not finish cleanly` | Saving failed, for example on a full disk. The capture files are kept and not encoded. Do not record into that folder again. Once the cause is fixed, `uv run python 0_encode.py "<folder>"` encodes them. |
-| `Trigger board did not confirm the stop` | The board may still be triggering, and a looping paradigm never ends on its own. Power-cycle the board and switch the laser off. |
+| `Trigger board did not confirm the stop` | The board may still be triggering, and a looping paradigm never ends on its own. Power-cycle the board. |
 | `The block-ID rate check could not run on this recording` | A camera that ignored triggers would not be found. Run `uv run python 2_align.py <recording folder>` to check it. |
 | `real-time encode uses the host upload, not the configured pinned upload` | The pinned GPU upload was not available for this camera. The video is the same, and the grab threads could fall behind. The log's `[nvenc]` lines say why. |
 | `reached <t> C during this acquisition` | The camera ran hot. Check its airflow and mount before the next recording. This message reaches `WARNINGS.txt` only when the recording lost frames. Otherwise only the status bar and the log show it. |
@@ -429,8 +429,8 @@ to read the pairwise plot.
 | Message or symptom | Cause and fix |
 |---|---|
 | `arduino-cli was not found, so the stim firmware cannot be compiled or uploaded.` | Install the Arduino IDE, or put `arduino-cli` on `PATH`, or set `PANOPTICON_ARDUINO_CLI`. |
-| `Compile failed (arduino-cli exit <n>).` | Nothing was flashed, so the board runs what it ran before. For a missing core: `arduino-cli core install arduino:avr`. |
-| `Upload failed on <port> (arduino-cli exit <n>).` | The port is held by something else, `serial_port` is wrong, or the board is not a Mega. An upload that failed part-way leaves the board's firmware, its laser-pin boot guard included, unknown. Power-cycle the board. |
+| `Compile failed (arduino-cli exit <n>).` | Nothing was flashed, so the board runs what it ran before. For a missing core, the message names the command that installs it, `arduino-cli core install arduino:avr` for a Mega. |
+| `Upload failed on <port> (arduino-cli exit <n>).` | The port is held by something else, `serial_port` is wrong, or the board is not the one `board_fqbn` names. An upload that failed part-way leaves the board's firmware, its `stim_safe_pins` boot guard included, unknown. Power-cycle the board. |
 | `s after the upload timed out. Do NOT power-cycle the board while it runs` | The flashing tool still runs. Wait for it to exit, then power-cycle the board and Apply again. |
 | `Something else is using the serial port` | An acquisition or a flash holds the port. Wait, or stop the acquisition. |
 | `block(s) form a loop with no starting block, so they would never run.` | Select one block of the loop and tick **Starting**. |
@@ -440,7 +440,7 @@ to read the pairwise plot.
 | `100% duty — constant ON, not <n> Hz` | The pulse width is at least the period, so the pin never returns low. Fix the numbers, or keep it for a constant output. |
 | `The last Apply FAILED, so the board does not carry this paradigm.` | Press **Apply** again and let it succeed. |
 | `The trigger board did not acknowledge the start command, so the paradigm would not run.` | From Test. Check the board is connected and runs Panopticon's sketch. |
-| `STOP NOT CONFIRMED — stim may still be running.` | The board did not accept the stop, and a looping chain never ends on its own. Power-cycle the board and switch the laser off. |
+| `STOP NOT CONFIRMED — stim may still be running.` | The board did not accept the stop, and a looping chain never ends on its own. Power-cycle the board. |
 | The paradigm did not run | It was probably never applied. Editing the canvas changes nothing until **Apply**. `matches_uploaded_firmware` in `stim_paradigm.json` records whether the canvas matched the flash. |
 | A paradigm ran that nobody chose | The launch flash should prevent it. Look for `Could not clear stim firmware` at launch. Firmware survives closing Panopticon. |
 | `[teensy] no ack — reopening port to force a board reset` | Once is normal: the start is retried after a reset. The reset floats the board's pins during that start ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |

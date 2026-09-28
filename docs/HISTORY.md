@@ -462,7 +462,7 @@ Dead ends, do not retry:
 
 ---
 
-## 9. The drop fix, FLIR and the review fixes (22-25 September 2026)
+## 9. The drop fix, FLIR and the review fixes (22-28 September 2026)
 
 - 2026-09-22: Backend contract: optional members are read with `getattr`, and
   the Basler exposure-ceiling formula lives in the backend (`1ec1db0`). Each
@@ -774,6 +774,36 @@ Dead ends, do not retry:
   and 4.8 mm before. The new calibration.toml of 2026-09-25 and of 2026-09-23
   went into every recording of its day, with the old files kept aside. With
   these results the batch merged into master.
+- 2026-09-28: The trigger board's type is a profile setting, `board_fqbn`,
+  with its highest pin in `board_max_pin` (`03d837d`). The maintainer allowed
+  the code to keep calling the board teensy, provided it works with most
+  stimulation boards and the docs give a schematic. Every compile, upload and
+  pin check reads the two fields, in both main-window flashes and in the
+  stimulation editor. Their defaults are the Mega 2560's, the only board
+  tested, so a profile that sets neither behaves as before. The pin default
+  stays 69 and not 53, because pins 54 to 69 are the Mega's A0 to A15 and 53
+  would refuse them. The loader refuses a ceiling above 255, since the sketch
+  stores a pin number in 8 bits.
+- 2026-09-28: The pages follow three decisions of the maintainer (`03d837d`).
+  Panopticon's responsibility ends at the trigger board's TTL outputs, so no
+  page gives a laser procedure: no switch-off steps, power supply, interlock
+  or beam block. One alert, the same on INSTALLATION.md step 8 and WORKFLOW.md
+  section 7, says whose the device is and that every pin floats at a reset.
+  It also says what `stim_safe_pins` holds low, and that a paradigm reaches
+  the board only through Apply. INSTALLATION.md assumes the rig is cabled and
+  wired, and drops connector pinouts, wire colours and switch menus. It gains
+  a list of what a trigger board needs and a wiring schematic. The Display
+  sliders' groove turned grey, so a moved slider reads at a glance, and the
+  Display screenshot was retaken.
+- 2026-09-28: A novice read-through of INSTALLATION.md, WORKFLOW.md and
+  OVERVIEW.md reported 4 blockers and 16 confusing passages (`03d837d`). The
+  pages now define a floating pin, say how to make the pin list and give a
+  row for a wired rig new to Panopticon. They say what each
+  `configure_nic.ps1 -Check` warning needs, how to end a take for the floor
+  step, and that Test drives the pin for real. Requests outside the decisions were left out: switch-off
+  steps for a device, the switches' addresses and a photo of the reference
+  board. Renaming the solve's `CALIBRATING...` label would be a code change,
+  so OVERVIEW.md points out its three dots instead.
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed

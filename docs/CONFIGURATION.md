@@ -121,6 +121,8 @@ trigger_source: board             # board | external
 serial_port: COM3                 # SITE: Device Manager > Ports (COM & LPT)
 trigger_pins: [2, 4, 6, 8]        # SITE: every pin wired to a camera trigger input
 stim_safe_pins: []                # SITE: every pin wired to a laser or LED driver
+# board_fqbn: arduino:avr:mega    # the Mega 2560, the only board tested
+# board_max_pin: 69               # the Mega's highest digital pin (A15)
 
 # --- Paths ------------------------------------------------------------------
 output_dir: data                  # SITE: your largest, fastest drive
@@ -200,10 +202,11 @@ the frame size and the frame rate to its camera.
    `uv run probe_flir.py --list` prints two lines to paste. Set `n_cameras` and
    `camera_serials`: quoted, in ascending order as text.
 6. Wire the trigger and declare it: `serial_port`, every pin that drives a camera
-   in `trigger_pins`, and every pin wired to a laser or LED driver in
+   in `trigger_pins`, and every pin wired to a stimulation device in
    `stim_safe_pins` (or `[]`). With a trigger source of your own, set
    `trigger_source: external` and leave those three out
-   ([Your own TTL source](#your-own-ttl-source)).
+   ([Your own TTL source](#your-own-ttl-source)). On a board other than the Mega
+   2560, also set [board_fqbn](#board_fqbn) and [board_max_pin](#board_max_pin).
 7. Leave `encoder: auto`, `realtime_encode: true` and `realtime_kick: true`.
 8. Size memory. Start with `kick_max_lag: 240` and `max_num_buffer` at least that,
    and check the [RAM](#ram) total against the computer. Raise either only after a
@@ -215,10 +218,9 @@ the frame size and the frame rate to its camera.
     coverage thresholds at their defaults for the first calibration.
 11. Leave the four CPU placement fields at their defaults unless the CPU is a
     hybrid Intel part and a test recording shows a camera falling behind.
-12. Switch the laser off or block the beam, then open the profile with
-    `uv run gui.py --profile NAME`. Opening it resets the board on
-    [serial_port](#serial_port), which floats every pin
-    ([laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
+12. Open the profile with `uv run gui.py --profile NAME`. Opening it resets the
+    board on [serial_port](#serial_port), which floats every pin for a moment
+    ([stimulation warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
     A profile that fails the [loader's checks](#what-the-loader-checks-and-what-it-does-not)
     is not in the dropdown.
 13. Record a one-minute test. Check that every camera's video has the same number
@@ -654,9 +656,8 @@ Text. Default `""`. Reference rig: `COM3`.
   Ports (COM & LPT)). `sim` selects the simulated board. Opening the profile
   resets the device on this port and, unless it already carries it, programs it
   with the recording-only sketch: camera triggers and no stimulation. Every pin
-  floats during the reset
-  ([laser warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)). Switch
-  the laser off or block the beam before you open the profile.
+  floats for a moment during the reset
+  ([stimulation warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
 - Change when: For every new computer or board.
 - Goes wrong: A wrong port resets whatever device is on it, and can reprogram
   it, so check the port before you open the profile. Left empty, nothing is
@@ -686,18 +687,52 @@ List of integers. Default `[2, 4, 6, 8, 10, 12]`. Reference rig: `[2, 4, 6, 8, 1
 List of integers. Default `[53]`. Reference rig: `[53]`.
 
 - Does: Pins the board's sketch drives low as its first step after every reset,
-  before it waits for Panopticon, so a laser or LED driver wired there does not
-  read a floating pin as on. Pins a stimulation paradigm uses are added to the
-  list.
+  before it waits for Panopticon. A stimulation device wired there, such as a
+  laser or LED driver, then does not read a floating pin as on. Pins a
+  stimulation paradigm uses are added to the list.
 - Change when: List every pin your stimulation hardware is wired to, or `[]` if
   there is none.
-- Goes wrong: The default `[53]` is the reference rig's laser pin and protects
-  nothing on other wiring. A stimulus pin missing from the list floats while the
-  board waits for Panopticon, and a powered laser driver reads that as on. Every
-  pin still floats for about a second during the reset itself: read the warning in
+- Goes wrong: The default `[53]` is the reference rig's stimulation pin and
+  protects nothing on other wiring. A stimulation pin missing from the list
+  floats while the board waits for Panopticon, and a device on it can read that
+  as on. Every pin still floats for a moment during the reset itself, before the
+  sketch runs
+  ([stimulation warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
+  The loader refuses a pin also in `trigger_pins`, but not pins 0 or 1. An
+  external-source profile refuses a non-empty list.
+
+#### `board_fqbn`
+
+Text. Default `arduino:avr:mega`. Reference rig: not set.
+
+- Does: The trigger board's type, as `arduino-cli` names it: `vendor:arch:board`,
+  with any board options after a fourth colon. Every compile and upload of the
+  sketch uses it. Only the Arduino Mega 2560 (`arduino:avr:mega`) is tested.
+- Change when: Your trigger board is another board that `arduino-cli` programs.
+  Install its core first, as
   [INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)
-  before you connect a laser. The loader refuses a pin also in `trigger_pins`, but
-  not pins 0 or 1. An external-source profile refuses a non-empty list.
+  does for the Mega, and set [board_max_pin](#board_max_pin) with it.
+  [The trigger board](INSTALLATION.md#the-trigger-board) lists what the board
+  needs.
+- Goes wrong: A type that does not match the board on `serial_port` usually fails
+  the upload, and the message names the type the profile gives. The loader refuses
+  a value that is not of the form `vendor:arch:board`. An external-source profile
+  ignores the field.
+
+#### `board_max_pin`
+
+Integer. Default `69`. Reference rig: not set.
+
+- Does: The highest pin number the trigger board has. Apply, Test and Record
+  refuse a stimulation block on a higher pin. The default is the Mega 2560's:
+  pins 54 to 69 are its analog pins A0 to A15, used as digital pins.
+- Change when: With [board_fqbn](#board_fqbn), to the highest digital pin of your
+  board.
+- Goes wrong: A value above the board's highest pin lets a block on a pin the
+  board lacks compile, and that pin drives nothing. The loader refuses a value
+  below 2 or above 255: pins 0 and 1 are the serial link, and the sketch stores a
+  pin number in 8 bits. `trigger_pins` and `stim_safe_pins` are not checked
+  against it.
 
 ### Paths
 
@@ -1400,13 +1435,18 @@ triggers a camera from software. The profile's
 
 ### Panopticon's trigger board
 
-The default, `trigger_source: board`. The board is an Arduino Mega 2560 running a
-sketch Panopticon generates from the profile, and it also runs stimulation. The
-profile names it with [serial_port](#serial_port),
-[trigger_pins](#trigger_pins) and [stim_safe_pins](#stim_safe_pins).
+The default, `trigger_source: board`. The board is an Arduino Mega 2560, or
+another board that [board_fqbn](#board_fqbn) names, running a sketch Panopticon
+generates from the profile. It also runs stimulation. Only the Mega 2560 is
+tested. The profile names the board with [serial_port](#serial_port),
+[trigger_pins](#trigger_pins), [stim_safe_pins](#stim_safe_pins),
+[board_fqbn](#board_fqbn) and [board_max_pin](#board_max_pin).
 [INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)
-covers installing `arduino-cli` and flashing, and
-[INSTALLATION.md](INSTALLATION.md#wiring-the-trigger-line) covers wiring.
+covers installing `arduino-cli` and flashing,
+[The trigger board](INSTALLATION.md#the-trigger-board) lists what another board
+needs and draws the wiring, and
+[INSTALLATION.md](INSTALLATION.md#wiring-the-trigger-line) gives the wiring
+rules.
 
 Panopticon starts the board only once every camera is armed, and the board
 acknowledges each start. A stimulation paradigm reaches the board only through
@@ -1482,6 +1522,8 @@ Single fields:
 | `nvenc_context` | Not `shared` or `own` | `nvenc_context` and `is not one of` |
 | `trigger_pins` | Includes 0 or 1 | `are the Serial0 link` |
 | `trigger_pins` | Lists a pin twice | `lists a pin twice` |
+| `board_fqbn` | Not of the form `vendor:arch:board` | `is not an arduino-cli board name` |
+| `board_max_pin` | Below 2 or above 255 | `must be from 2 to 255` |
 | `trigger_rate_limit` | Negative | `must be 0 (off) or positive` |
 | `frame_rate`, `calibration_frame_rate` | 0 or less | `must be positive` |
 | `frame_width`, `frame_height`, `kick_max_lag`, `max_num_buffer`, `encode_parallel` | 0 or less | `must be positive` |
@@ -1594,7 +1636,11 @@ These mistakes load without a message. Check them yourself.
 
 - Two profiles with the same `name`, or an empty `name`.
 - An empty `trigger_pins`, or pins the board does not have.
-- `stim_safe_pins` that includes 0 or 1, or leaves out a pin your laser is on.
+- A `board_fqbn` or `board_max_pin` that is not your board's. A `board_max_pin`
+  above the board's highest pin lets a stimulation block on a pin it lacks compile
+  and drive nothing.
+- `stim_safe_pins` that includes 0 or 1, or leaves out a pin a stimulation device
+  is on.
 - A `trigger_rate_limit` above the camera's real maximum.
 - A `calibration_min_grid_cells` above 4, and any value of
   `calibration_min_per_cam_shared` or `calibration_min_edge`.
@@ -1622,8 +1668,8 @@ already recorded or measured.
   the serial order without it).
 - Test on the rig before you rely on a change to `kick_max_lag`, `max_num_buffer`,
   `trigger_rate_limit`, `frame_rate`, the exposure, `gige_driver`, the `gev_`
-  fields, the CPU placement fields, `nvenc_upload`, `nvenc_context` or anything in
-  `camera.flir`. A one-minute recording shows most problems (step 13 of
+  fields, the CPU placement fields, `nvenc_upload`, `nvenc_context`, `board_fqbn`
+  or anything in `camera.flir`. A one-minute recording shows most problems (step 13 of
   [Configure a new rig](#configure-a-new-rig-step-by-step)).
 - `metadata_defaults`, `output_dir`, `quality`, `log_level`,
   `thermal_warn_margin_c` and the coverage thresholds change nothing already

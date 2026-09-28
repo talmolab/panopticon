@@ -936,16 +936,18 @@ class WaveformPreview(QWidget):
 class _UploadWorker(QThread):
     done = pyqtSignal(bool, str)
 
-    def __init__(self, ino: str, port: str, parent=None):
+    def __init__(self, ino: str, port: str, fqbn: str = stim_compiler.FQBN,
+                 parent=None):
         # Parented to the window so the QThread is owned by Qt, not by the
         # single Python reference the done slot drops; a QThread destroyed
         # while its thread is still winding down aborts the process.
         super().__init__(parent)
         self.ino = ino          # kept so the window can record what got flashed
         self._port = port
+        self._fqbn = fqbn
 
     def run(self):
-        result = stim_compiler.upload(self.ino, self._port)
+        result = stim_compiler.upload(self.ino, self._port, fqbn=self._fqbn)
         # Read by the done slot, which runs after this assignment: a failure
         # that may have written the flash leaves the board's contents unknown.
         self.touched_board = getattr(result, "touched_board", True)
@@ -999,6 +1001,9 @@ class StimulationWindow(QDialog):
                  get_safe_pins: Callable[[], list] = lambda: list(
                      STANDALONE_SAFE_LOW_PINS),
                  get_trigger_pins: Callable[[], list] = lambda: [],
+                 get_board_fqbn: Callable[[], str] = lambda: stim_compiler.FQBN,
+                 get_max_pin: Callable[[], int] = lambda: (
+                     stim_compiler.MEGA_MAX_DIGITAL_PIN),
                  get_serial: Callable[[], object] | None = None,
                  release_serial: Callable[[], None] = lambda: None,
                  on_applied: Callable[[str], None] = lambda ino: None,
@@ -1024,6 +1029,11 @@ class StimulationWindow(QDialog):
         # silently break cross-camera block-ID alignment. Defaults to empty so a
         # bare editor still works, but main_window MUST pass the profile's pins.
         self._get_trigger_pins = get_trigger_pins
+        # The profile's board_fqbn and board_max_pin: the board every Apply
+        # compiles for and uploads to, and the ceiling of the pin check. The
+        # defaults are the Mega 2560's, for an editor opened on its own.
+        self._get_board_fqbn = get_board_fqbn
+        self._get_max_pin    = get_max_pin
         # The main window's shared link, or None for an editor opened on its
         # own. A shared link that cannot be opened is reported, never replaced
         # by a private one: a second controller would reset the board for the
@@ -1289,7 +1299,8 @@ class StimulationWindow(QDialog):
     def _compile(self) -> str:
         blocks, edges = self._canvas.get_workflow()
         return stim_compiler.compile_ino(blocks, edges, self._get_safe_pins(),
-                                         self._get_trigger_pins())
+                                         self._get_trigger_pins(),
+                                         self._get_max_pin())
 
     def _blocking_problem(self) -> str | None:
         """Reason this workflow must not be uploaded or run, or None."""
@@ -1302,7 +1313,8 @@ class StimulationWindow(QDialog):
         # rather than a traceback. This is the only known way to silently break
         # the rig's core assumption that block ID N is the same instant on every
         # camera, so it blocks Apply, Test and Record.
-        bad = stim_compiler.forbidden_pin_uses(blocks, self._get_trigger_pins())
+        bad = stim_compiler.forbidden_pin_uses(blocks, self._get_trigger_pins(),
+                                               self._get_max_pin())
         if bad:
             return "\n\n".join(
                 [f"Pin {p} cannot carry a stim waveform: {why}." for p, why in bad]
@@ -1428,12 +1440,14 @@ class StimulationWindow(QDialog):
         window swapped onto the board.
         """
         blocks, edges = self._canvas.get_workflow()
-        # Must pass trigger_pins, same as _compile(). Otherwise the two compile
-        # calls disagree: this one succeeds on a forbidden-pin graph while
-        # firmware_source() raises, so stim_paradigm.json gets written and the
-        # .ino beside it does not — a half-described session.
+        # Must pass trigger_pins and the pin ceiling, same as _compile().
+        # Otherwise the two compile calls disagree: this one succeeds on a
+        # forbidden-pin graph while firmware_source() raises, so
+        # stim_paradigm.json gets written and the .ino beside it does not — a
+        # half-described session.
         ino = stim_compiler.compile_ino(blocks, edges, self._get_safe_pins(),
-                                        self._get_trigger_pins())
+                                        self._get_trigger_pins(),
+                                        self._get_max_pin())
         reference = flashed_source if flashed_source is not None \
             else self._uploaded_ino
         matches = None if reference is None else (ino == reference)
@@ -1604,7 +1618,8 @@ class StimulationWindow(QDialog):
         # arduino-cli needs the serial port to itself. NOT reopened lazily —
         # _on_upload_done retakes it immediately; see the comment there.
         self._release_serial()
-        self._upload_worker = _UploadWorker(ino, self._get_port(), parent=self)
+        self._upload_worker = _UploadWorker(ino, self._get_port(),
+                                            self._get_board_fqbn(), parent=self)
         self._upload_worker.done.connect(self._on_upload_done)
         self._upload_worker.start()
         self.uploading_changed.emit(True)
