@@ -341,8 +341,12 @@ class SidebarWidget(QWidget):
         display_label.setStyleSheet("color: #dcdcdc; border: none;")
         layout.addWidget(display_label)
 
+        # The groove is a grey well lighter than the sidebar's background, so
+        # the empty part right of the handle shows and the handle's position
+        # reads at a glance. A groove the background's own colour hides the
+        # empty part, and every position looks like the maximum.
         slider_style = (
-            "QSlider::groove:horizontal { background: #1a1a2e; height: 4px; border-radius: 2px; }"
+            "QSlider::groove:horizontal { background: #5a5a78; height: 4px; border-radius: 2px; }"
             "QSlider::handle:horizontal { background: #5078c8; width: 12px; margin: -4px 0; border-radius: 6px; }"
             "QSlider::sub-page:horizontal { background: #5078c8; border-radius: 2px; }"
         )

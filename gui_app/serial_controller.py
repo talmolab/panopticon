@@ -1,8 +1,8 @@
 """Serial controller for the camera-trigger / stim board.
 
-The board is an Arduino Mega 2560 (see stim_compiler.FQBN), not a Teensy — the
-class name is legacy from campy and is kept because tests, probe scripts and
-main_window all refer to it.
+The board is the one the profile's board_fqbn names, an Arduino Mega 2560 by
+default (stim_compiler.FQBN), and not a Teensy — the class name is legacy from
+campy and is kept because tests, probe scripts and main_window all refer to it.
 """
 import re
 import threading

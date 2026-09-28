@@ -60,7 +60,8 @@ What that means for you:
 - FLIR cameras, GigE or USB3, each with a Mono8 pixel format and a hardware
   trigger input.
 - A hardware TTL trigger. The default is Panopticon's trigger board: an Arduino
-  Mega 2560 that Panopticon programs through `arduino-cli`. A pulse generator or
+  board that Panopticon programs through `arduino-cli`, the Mega 2560 unless the
+  profile's `board_fqbn` names another. A pulse generator or
   DAQ of your own also works ([Use your own trigger source](#use-your-own-trigger-source)).
 - The Spinnaker SDK 4.x. PySpin, Spinnaker's Python package, is not needed.
 
@@ -149,7 +150,7 @@ sweep uses a shipped Basler profile until Panopticon has opened yours.
 
 Skip this part if you use your own trigger source.
 
-Install the Arduino IDE (which includes `arduino-cli`) and the Mega's board
+Install the Arduino IDE (which includes `arduino-cli`) and the board's
 support, as [INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)
 describes. Panopticon generates the board's sketch and uploads it when it opens
 a profile, so there is nothing to upload by hand. Note the board's COM port
@@ -166,11 +167,10 @@ when one pin can drive several cameras.
 
 Connect nothing but cameras to the board while you bring the rig up, and keep
 `stim_safe_pins: []` in the profile. The probe and Panopticon reset the board
-whenever they open its port, and the board's pins float for about a second
-during a reset. If a laser or LED driver is wired to the board, read the
-flashing warning in
-[INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)
-first.
+whenever they open its port, and the board's pins float for a moment during a
+reset. Before you wire a stimulation device to the board, read the
+stimulation warning in
+[INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware).
 
 A FLIR trigger input is either opto-isolated or non-isolated, and the two are
 grounded differently:

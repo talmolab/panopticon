@@ -10,6 +10,14 @@ the sizing formulas. The messages Panopticon prints, with their causes and
 fixes, are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). A FLIR rig follows
 [FLIR.md](FLIR.md) for its install and first test.
 
+This guide assumes the rig is built. The cameras are cabled and powered, and
+each camera's trigger input is wired to a pin of the trigger board. Each
+network switch either already holds the settings that
+[Configure the switches](#configure-the-switches) lists, or you can open its
+settings page to set them. Cameras, their I/O connectors and switches vary
+between labs, so their own manuals cover the wiring and the switch's menus.
+This page says what Panopticon needs from them, and how its tools check it.
+
 ## Before you start
 
 Find your case in the table, and do the parts it names.
@@ -17,10 +25,14 @@ Find your case in the table, and do the parts it names.
 | You want to | Do |
 |---|---|
 | Try Panopticon with no cameras | Steps 1, 3 and 4 of [section 2](#2-install-the-software), then [Without any cameras](#without-any-cameras) |
+| Set up Panopticon on a rig that is built and wired but has never run it | [Wiring the trigger line](#wiring-the-trigger-line) for the pin list, every step of section 2 in order, then section 3 |
 | Set up a new computer for a rig that already works | Steps 1 to 5 (step 5 says which parts), step 7 with the old computer's profile and `.pfs` file, steps 8 to 10, [section 3](#3-verify-it-works) |
 | Build a copy of the reference rig | Buy the parts in [The reference rig](#the-reference-rig), then every step of section 2 in order, then section 3 |
 | Build a new rig | [Section 1](#1-what-the-rig-needs), every step of section 2 in order, then [section 3](#3-verify-it-works) |
 | Build a rig with FLIR cameras | Section 1, steps 1, 3 and 4, then [FLIR.md](FLIR.md) from its Spinnaker install onward |
+
+On this page, a rig that already works is one that has recorded with
+Panopticon before.
 
 Several steps differ between the two kinds of camera.
 [GigE](GLOSSARY.md#gige-vision) cameras plug into a network switch with an
@@ -32,8 +44,9 @@ Have these at hand:
 - a Windows account that can run PowerShell as Administrator
 - an internet connection, for the downloads
 - each camera's serial number, printed on its label (step 7)
-- each camera's data sheet, for the pins of its I/O connector
-  ([Wiring the trigger line](#wiring-the-trigger-line))
+- a list of which board pin drives which camera, and which pin drives each
+  stimulation device ([Set up the board](#set-up-the-board) says how to make
+  one)
 - the trigger board and its USB cable (step 8)
 
 Each step says what to type or click, what you should see, and what to do if
@@ -78,12 +91,13 @@ against one known-good point.
 | RAM | 63.4 GiB |
 | GPU | NVIDIA RTX 5080, 12 concurrent NVENC sessions |
 | Cameras | 9 Basler a2A1920-165g5m (5 GigE), 1920x1200 Mono8 at 100 fps |
-| Network | 3 NETGEAR MS510TXM switches, 3 cameras each on ports 5 to 7, the host uplink on port 8, one 10 GbE host port per switch |
-| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins fanned out across nine cameras, laser on pin 53 |
+| Network | 3 managed multi-gigabit switches (NETGEAR MS510TXM), 3 cameras each, one 10 GbE host port per switch |
+| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins fanned out across nine cameras, stimulation on pin 53 |
 | OS | Windows 11 |
 
-Names in code font, such as `trigger_pins`, are fields of the rig's profile,
-the settings file you write in [step 7](#step-7--write-the-rig-profile).
+Text in code font is typed or read exactly as written. The lower-case names
+with underscores, such as `trigger_pins`, are fields of the rig's profile, the
+settings file you write in [step 7](#step-7--write-the-rig-profile).
 
 ### What sets the load
 
@@ -172,7 +186,7 @@ that count.
 
 | Source | Profile | Stimulation |
 |---|---|---|
-| Panopticon's trigger board, an Arduino Mega 2560 | `trigger_source: board` (the default), `serial_port`, `trigger_pins` | Runs on the same board |
+| Panopticon's trigger board, an Arduino Mega 2560 or a board like it ([The trigger board](#the-trigger-board)) | `trigger_source: board` (the default), `serial_port`, `trigger_pins` | Runs on the same board |
 | Your own TTL source, such as a pulse generator or a DAQ | `trigger_source: external` | Not available |
 
 Panopticon programs its board itself, through `arduino-cli`
@@ -186,61 +200,41 @@ camera receives a frame before every camera is armed
 A wiring mistake cannot be repaired after the recording: a camera that misses
 triggers records views that are not simultaneous with the others.
 
-Wire each camera's trigger input to a pin listed in the profile's
-`trigger_pins`, or to your own source's output. The input sits on the camera's
-I/O connector, the socket its power and I/O cable plugs into. The camera's data
-sheet gives the pinout: which pin, and which wire colour of the maker's I/O
-cable, carries which signal. On the reference rig each camera's I/O cable
-carries four wires that matter:
+Which pin of a camera's I/O connector is its trigger input, and which is that
+input's ground, differs between models, and the camera's data sheet gives both.
+[The trigger board](#the-trigger-board) draws the wiring as a whole. Panopticon
+needs:
 
-| Signal on the camera | Where it goes |
-|---|---|
-| Power in (12 V on the reference rig) | The 12 V supply's positive terminal |
-| Power ground | The 12 V supply's negative terminal |
-| `Line1`, the trigger input | The board pin that triggers this camera |
-| Opto ground, the trigger input's own ground | A GND pin of the board |
+- Each camera's trigger input on a pin listed in the profile's `trigger_pins`,
+  or on your own source's output.
+  - On a Basler camera the input is `Line1`. Panopticon sets
+    `TriggerSource=Line1` and `TriggerActivation=RisingEdge` when an
+    acquisition starts.
+  - On a FLIR camera the profile's `camera.trigger.line` names the input.
+    FLIR.md's [Wire the trigger](FLIR.md#2-wire-the-trigger) covers
+    opto-isolated and non-isolated inputs.
+- A common ground: the board's GND joined to each trigger input's own ground,
+  or to one ground point they all share. An opto-isolated input has a ground of
+  its own, the opto ground, separate from the camera's power ground.
+- A signal each input accepts. A Mega drives 5 V. An opto-isolated input is
+  driven by current. The camera's I/O documentation gives its switching
+  threshold and the current it draws.
 
-An opto-isolated input, such as `Line1` on these cameras, is a small light
-and sensor inside the camera. Current through the light switches the input,
-and it keeps the camera's electronics apart from the board's. Its ground, the
-opto ground, is therefore separate from the power ground.
-
-- On a Basler camera the input is `Line1`. Panopticon sets
-  `TriggerSource=Line1` and `TriggerActivation=RisingEdge` when an acquisition
-  starts.
-- On a FLIR camera the profile's `camera.trigger.line` names the input.
-  FLIR.md's [Wire the trigger](FLIR.md#2-wire-the-trigger) covers opto-isolated
-  and non-isolated inputs.
-
-The Mega's pin numbers are printed on the board beside its sockets. Digital
-pins 0 to 13 sit along one long edge, 14 to 21 beside them, and 22 to 53 in the
-double row at the far end. Sockets marked GND are ground. Which pins to use on
-a Mega:
+The pin numbers are printed on the board beside its sockets, and sockets marked
+GND are ground. Which pins to use:
 
 | Pins | Rule |
 |---|---|
 | `0` and `1` | Never. They carry the serial link that configures the board. The profile loader refuses them in `trigger_pins`. |
-| A pin wired to a laser or LED | Never. It belongs in `stim_safe_pins`, and the loader refuses a pin listed in both. |
-| `14` to `19` | Avoid. They are the board's extra serial ports. Panopticon's firmware does not use them, so they work as outputs. |
+| A pin wired to a stimulation device | Never. It belongs in `stim_safe_pins`, and the loader refuses a pin listed in both. |
+| `14` to `19` on a Mega | The Mega's extra serial ports, which Panopticon's firmware leaves free, so they work. Use them last, and leave existing wiring on them as it is. |
+| `A0` to `A15` on a Mega | Digital pins too. Write them as `54` to `69` in the profile and in the editor's Pin field. |
 
 The stimulation editor refuses a stimulation block on a camera's trigger pin,
 because the extra edges would advance that camera's block IDs and break the
 alignment. Any other digital pin works. Write down which pin drives which
 camera, because you will need the list when one camera stops triggering. The
 profile lists the pins but not which camera is on each.
-
-Each camera also needs:
-
-- A common ground. Run a ground wire from the board to the ground pin of each
-  camera's I/O connector (the opto ground, for an opto-isolated input), or to
-  one ground point they all share.
-- Power, which does not come from the trigger line. Depending on the model it
-  comes over Power over Ethernet from the switch, or from a supply wired to the
-  I/O connector. The reference rig's cameras take 12 V through the I/O
-  connector.
-- A signal its input accepts. A Mega drives 5 V. An opto-isolated input is
-  driven by current. The camera's I/O documentation gives its switching
-  threshold and the current it draws.
 
 The board's sketch, the program it runs ([step 8](#step-8--flash-the-trigger-firmware)),
 writes every pin in `trigger_pins` in one loop with interrupts off,
@@ -323,10 +317,9 @@ behind its own switch, and each switch has its own 10 GbE port on the host.
 
 A switch's camera ports have to run at the camera's link speed: a switch with
 1 GbE access ports holds a 5 Gbit/s camera to 1 Gbit/s. Multi-gigabit switches
-often split their ports into speed blocks. The reference rig's NETGEAR MS510TXM
-has four 100M/1G/2.5G ports and four 1/2.5/5/10G ports. Put every camera and
-the uplink in the fast block, and read the negotiated speed of each port in the
-switch's web interface.
+often split their ports into speed blocks. Put every camera and the uplink on
+ports that run at the camera's speed, and check the speed each port negotiated,
+as the switch's manual describes.
 
 The reference camera settings send 9000-byte packets
 ([jumbo frames](GLOSSARY.md#jumbo-frames)). Every device in the path has to
@@ -502,10 +495,17 @@ back. Right-click pastes.
 
 Some steps need PowerShell as Administrator, also called an elevated
 PowerShell. Press the Windows key, type `powershell`, right-click
-*Windows PowerShell* in the results and choose *Run as administrator*. The
-window's title then says *Administrator*. An Administrator window starts in
-`C:\Windows\system32`, so a command that runs a script from the repository
-needs `cd $HOME\Desktop\panopticon` first (step 3).
+*Windows PowerShell* in the results and choose *Run as administrator*. Windows
+asks `Do you want to allow this app to make changes to your device?`. Press
+Yes. The window's title then says *Administrator*. An Administrator window
+starts in `C:\Windows\system32`, so a command that runs a script from the
+repository needs `cd $HOME\Desktop\panopticon` first (step 3).
+
+If Windows asks for another account's password instead, the window runs as
+that account, and `$HOME` is that account's folder. In such a window, type
+your own folder in full, as in `cd C:\Users\you\Desktop\panopticon`. With no
+administrator password at all, ask your IT staff before you start, because
+several installers on this page need one too.
 
 This page runs Panopticon's scripts as `uv run <script>.py`, for example
 `uv run gui.py`. `uv run python gui.py` does the same thing.
@@ -584,7 +584,21 @@ Expected: one line such as `git version 2.54.0.windows.1`. If PowerShell says
 3. Close PowerShell, open a new one, and run `git --version` again.
 
 Clone the repository wherever you like. This page uses the Desktop to keep the
-paths short:
+paths short. First check where Windows keeps your Desktop:
+
+```powershell
+[Environment]::GetFolderPath('Desktop')
+```
+
+It prints a path such as `C:\Users\you\Desktop`. On many Windows 11 computers
+OneDrive keeps the Desktop, and the path then reads
+`C:\Users\you\OneDrive\Desktop`. Keep the code out of OneDrive, which would
+sync thousands of files as uv installs them. If the path contains `OneDrive`,
+run `cd $HOME` in place of `cd $HOME\Desktop` below. Then read
+`$HOME\panopticon` wherever this page says `$HOME\Desktop\panopticon`, and
+`C:\Users\you\panopticon` for `C:\Users\you\Desktop\panopticon`.
+
+Then clone:
 
 ```powershell
 cd $HOME\Desktop
@@ -608,12 +622,6 @@ run all three lines again.
 After the last `cd`, the prompt reads `PS C:\Users\you\Desktop\panopticon>`.
 Every later command runs from there. In a new window, go back with
 `cd $HOME\Desktop\panopticon`.
-
-On many Windows 11 computers OneDrive keeps the Desktop, and File Explorer then
-shows it as `C:\Users\you\OneDrive\Desktop`. Keep the code out of OneDrive,
-which would sync thousands of files as uv installs them. Run `cd $HOME` in
-place of `cd $HOME\Desktop`, and read `C:\Users\you\panopticon` wherever this
-page says `C:\Users\you\Desktop\panopticon`.
 
 ### Step 4 — install the Python dependencies
 
@@ -701,40 +709,32 @@ A GigE camera streams only when all of these hold:
   it, or gets no frames from it.
 - The adapter is set up for the traffic the camera sends.
 
-USB3 cameras skip this step, apart from the cabling below.
+USB3 cameras skip this step.
 
 On a new computer for a rig that already works, the switches and the cameras
 keep their settings. Set up only this computer's side:
 
-1. [Cable and power the rig](#cable-and-power-the-rig), and
+1. [Check the cabling](#check-the-cabling), and
    [find the adapter names](#find-the-adapter-names).
 2. Run `uv run probe_network.py` ([Check the network](#check-the-network)). It
    lists which adapter hears which cameras, and the cameras' addresses.
-3. Give each adapter the `.2` address on its cameras' subnet, with the
-   `New-NetIPAddress` and `Set-NetIPInterface` lines of item 6 in
-   [Configure the switches](#configure-the-switches). Skip its first line,
-   `Remove-NetIPAddress`, which removes an address this computer never had.
+3. [Give the adapters their addresses](#give-the-adapters-their-addresses).
 4. [Configure the host adapters](#configure-the-host-adapters).
 5. [Let the traffic through the firewall](#let-the-traffic-through-the-firewall).
 6. [Check the network](#check-the-network) again.
 
-#### Cable and power the rig
+#### Check the cabling
 
-1. Plug each camera's network cable into a camera port of its switch. On the
-   reference rig's MS510TXM switches the cameras use ports 5 to 7, in the fast
-   block ([The host port and the switches](#the-host-port-and-the-switches)).
-2. Plug each switch's uplink, port 8 on the reference rig, into one of the
-   computer's camera network ports. One switch goes to one port.
-3. Plug in each camera's I/O cable: its power, and its trigger input wired to a
-   board pin ([Wiring the trigger line](#wiring-the-trigger-line)). A USB3
-   camera takes its power over its USB cable.
-4. Plug the trigger board into a USB port of this computer.
-5. Switch on the switches and the cameras' power supply.
+A switch's uplink is the one cable from that switch to this computer.
+Panopticon needs each uplink in a camera network port of its own on this
+computer, one switch to one port
+([The host port and the switches](#the-host-port-and-the-switches)). The camera
+ports are usually on an add-in network card.
 
-What you should see: the link light of each cabled switch port comes on, and
-each camera's status light comes on. Once the adapters are listed below, each
-camera port reads `Up`. A port that stays `Disconnected` has a loose cable or a
-switch without power.
+What you should see, with the switches and the cameras powered: the link light
+of each cabled switch port is on, and so is each camera's status light. Once
+the adapters are listed below, each camera port reads `Up`. A port that stays
+`Disconnected` has a loose cable or a switch without power.
 
 #### Find the adapter names
 
@@ -761,6 +761,10 @@ The Name column holds the names the commands take. A camera port reads `Up`
 once its switch is cabled and powered, at the port's speed. Put your own names
 in place of `Ethernet 3` in every command below.
 
+Leave the port that connects this computer to your building network, and
+Wi-Fi, out of every command in this step. An address from this step, or DHCP
+turned off, on that port cuts the computer off the building network.
+
 The ports look alike, so find which one each switch is cabled to. Unplug one
 switch's uplink cable and run the command again. The port that changes to
 `Disconnected` is that switch's. Plug the cable back in, repeat for each switch,
@@ -777,11 +781,11 @@ switch stops answering.
 
 The reference rig, nine cameras behind three switches:
 
-| Subnet | Host adapter | Switch management | Cameras |
-|---|---|---|---|
-| `192.168.3.0/24` | Ethernet 4 at `.2` | `.240` | `.3` `.4` `.5` |
-| `192.168.4.0/24` | Ethernet 5 at `.2` | `.240` | `.3` `.4` `.5` |
-| `192.168.5.0/24` | Ethernet 3 at `.2` | `.250` | `.3` `.4` `.5` |
+| Subnet | Host adapter | Cameras |
+|---|---|---|
+| `192.168.3.0/24` | Ethernet 4 at `.2` | `.3` `.4` `.5` |
+| `192.168.4.0/24` | Ethernet 5 at `.2` | `.3` `.4` `.5` |
+| `192.168.5.0/24` | Ethernet 3 at `.2` | `.3` `.4` `.5` |
 
 Panopticon names the cameras `cam1` to `camN` by their serial numbers, sorted
 as text across every switch
@@ -801,9 +805,12 @@ order matters). The reference rig's plan, with each camera's name:
 | cam9 | 42019425 | `192.168.5.5` | Ethernet 3 |
 
 To make your own plan, give each switch a subnet and each camera behind it an
-address from `.3` upward. Write the plan down with each camera's serial number
-and name, so a camera on the wrong switch or with the wrong address is easy to
-spot.
+address from `.3` upward. You can reuse the reference rig's subnets:
+`192.168.3.0/24` for the first switch, `192.168.4.0/24` for the second, and so
+on. Run `ipconfig` first. If an address it lists for the building network or
+Wi-Fi starts with one of those subnets, give that switch another number. Write
+the plan down with each camera's serial number and name, so a camera on the
+wrong switch or with the wrong address is easy to spot.
 
 With a single switch, pylon can assign every address. From an elevated
 PowerShell:
@@ -818,8 +825,9 @@ moderation, receive descriptors). The host-adapter settings below replace
 those. It does not configure the switch, and it does not let you choose which
 camera gets which address, so plan the addresses by hand once you have more
 than one switch. `auto-all` replaces only
-[Give the cameras their addresses](#give-the-cameras-their-addresses) and the
-adapter's address. Still set the switch's ports as in
+[Give the cameras their addresses](#give-the-cameras-their-addresses) and
+[Give the adapters their addresses](#give-the-adapters-their-addresses). Still
+set the switch's ports as in
 [Configure the switches](#configure-the-switches), then do
 [Configure the host adapters](#configure-the-host-adapters), the firewall rule
 and [Check the network](#check-the-network).
@@ -831,8 +839,13 @@ plan after any change of cabling.
 #### Configure the switches
 
 A managed switch at its default settings passes discovery, pylon Viewer's
-device list and `ping`, and drops every image packet. Set these on every port in
-use, the uplink to the host included:
+device list and `ping`, and drops every image packet. A managed switch has a
+settings page, which usually opens in a web browser. Its manual gives the
+page's address, its first password and how a computer reaches it. If someone
+else set up the switches, ask them whether the settings below are saved on
+every port in use.
+
+Set these on every port in use, the uplink to the host included:
 
 | Setting | Value | Why |
 |---|---|---|
@@ -853,85 +866,36 @@ counters. `Resend_Request_Count` in
 the thousands with `Buffer_Underrun_Count` at 0 means loss in the network, and
 flow control is the first thing to check.
 
-Worked example on a NETGEAR MS510TXM (other managed switches differ in their
-menu names):
+Save the settings in the switch, as its manual describes, so a power cycle
+keeps them. A switch reset to its factory settings, or a new one, starts at
+1500-byte frames. No Panopticon tool reads a switch's settings.
+[Test the network with the profile](#test-the-network-with-the-profile) shows
+a port that does not pass 9000-byte packets. The resend counts above show a
+port without flow control.
 
-1. A switch fresh from the factory asks the network for an address (DHCP), and
-   falls back to `192.168.0.239` with mask `255.255.255.0` when nothing answers,
-   which is the normal case on a camera network. To reach it, give its adapter a
-   temporary address from an elevated PowerShell:
-   ```powershell
-   New-NetIPAddress -InterfaceAlias "Ethernet 3" -IPAddress 192.168.0.100 -PrefixLength 24
-   ```
-2. Browse to `http://192.168.0.239` and log in as `admin`. On a switch fresh
-   from the factory the first page asks you to set the admin password. If it
-   asks for a password you never set, try the one printed on the switch's
-   label. Write the password down: the only recovery is a factory reset (hold
-   the reset button about 10 s), which returns the switch to `192.168.0.239`.
-   If the page does not load, the switch may still be waiting for an answer to
-   its address request. Wait a minute and reload.
-3. Under *Switching > Ports > Port Configuration*, set *Maximum Frame Size* to
-   9216 and *Flow Control* to *Symmetric* on every port in use. Firmware
-   versions label the frame size as "Frame Size", "MTU" or "Jumbo". Apply the
-   change before you leave the page.
-4. Disable Energy Efficient Ethernet and storm control on the same ports. Their
-   pages sit under different menus in different firmware versions, so look for
-   menu entries named Green Ethernet (or EEE) and Storm Control.
-5. Under *System > Management > IP Configuration*, set the protocol to
-   *Static*. The fields stay greyed out until you do. Give the switch an address
-   on its camera subnet (the reference rig uses `.240` or `.250`), the mask
-   `255.255.255.0` and the gateway `0.0.0.0`, because a camera network has no
-   router. Applying it ends your browser session, because the switch has moved
-   subnet.
-6. Remove the temporary address and give the adapter its real one:
-   ```powershell
-   Remove-NetIPAddress -InterfaceAlias "Ethernet 3" -IPAddress 192.168.0.100 -Confirm:$false
-   New-NetIPAddress   -InterfaceAlias "Ethernet 3" -IPAddress 192.168.5.2 -PrefixLength 24
-   Set-NetIPInterface -InterfaceAlias "Ethernet 3" -Dhcp Disabled
-   ```
-7. Browse to the switch's new address and check that the settings survived.
-   Choose *Maintenance > Save Configuration*, or a power cycle brings the old
-   settings back.
+#### Give the adapters their addresses
 
-Repeat for each switch, one subnet each. Put a `192.168.0.x` address on only one
-adapter at a time, or Windows has two routes to that subnet and picks one
-arbitrarily. With each switch's management address on its own camera subnet,
-every web interface stays reachable, and you can open them side by side to
-compare settings.
-
-##### Finding a switch whose address you have lost
-
-Sweep its camera subnet from the host and look for an address that is neither
-the adapter nor a camera:
+Give each camera port of this computer the `.2` address on its switch's subnet,
+and turn off DHCP on it. From an elevated PowerShell, with your own adapter
+name and subnet:
 
 ```powershell
-$subnet = "192.168.5"
-$probes = 1..254 | ForEach-Object {
-    [pscustomobject]@{
-        IP   = "$subnet.$_"
-        Ping = (New-Object System.Net.NetworkInformation.Ping).SendPingAsync("$subnet.$_", 250)
-    }
-}
-[System.Threading.Tasks.Task]::WaitAll($probes.Ping)
-$probes | Where-Object { $_.Ping.Result.Status -eq 'Success' } |
-          ForEach-Object { "ALIVE $($_.IP)" }
+New-NetIPAddress   -InterfaceAlias "Ethernet 3" -IPAddress 192.168.5.2 -PrefixLength 24
+Set-NetIPInterface -InterfaceAlias "Ethernet 3" -Dhcp Disabled
 ```
 
-The pings go out together, and the sweep takes about a second in the Windows
-PowerShell that ships with Windows. Then tell the switch from the cameras by
-the first half of each MAC address (the hardware address fixed in every
-device), from `arp -a`: Basler cameras start with
-`00-30-53`, and the reference rig's switches with `28-94-01`. A web interface
-answers `200` to:
+`New-NetIPAddress` prints two blocks that list the address, and
+`Set-NetIPInterface` prints nothing. An error that the address or object
+already exists means the port holds that address already, which is fine.
+Repeat for each camera port.
+
+`Get-NetIPAddress -InterfaceAlias "Ethernet 3"` shows the addresses a port
+holds. To remove one it should not hold, such as an address from an earlier
+plan, put that address in place of `192.168.9.2`:
 
 ```powershell
-(Invoke-WebRequest -UseBasicParsing -Uri http://<ip>/ -TimeoutSec 3).StatusCode
+Remove-NetIPAddress -InterfaceAlias "Ethernet 3" -IPAddress 192.168.9.2 -Confirm:$false
 ```
-
-NETGEAR's discovery protocol does not work on this model: on the reference rig
-it got no reply from a switch that was answering on its web address at the same
-moment. If the sweep finds nothing, the switch has no address on that subnet,
-and a factory reset is the way back in.
 
 #### Configure the host adapters
 
@@ -976,8 +940,10 @@ that reads RSS, `Get-NetAdapterRss` included, needs elevation too.
 powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Check
 ```
 
-For each WARN, set that property as in the table above and run the check
-again.
+For a WARN on receive descriptors or interrupt moderation, set that property
+as in the table above and run the check again. A WARN on RSS that says
+`not judged` means the window was not elevated. One that reads `enabled=False`
+needs `Enable-NetAdapterRss -Name "Ethernet 3"` from an elevated PowerShell.
 
 After the first launch (step 9), add `-CaptureCores` with the core list the
 window logs on its `[rig] capture core pool` line, and the check also judges
@@ -987,9 +953,16 @@ whether the adapters' DPCs land on the capture cores:
 powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Check -CaptureCores 10,11,12,13
 ```
 
+Without `-CaptureCores` the DPC line reads INFO and judges nothing. With it, a
+WARN on DPC affinity says that nothing keeps the DPCs off the capture cores.
+It needs no change on a first install. The script never moves DPCs, and the
+profile's `capture_core_exclude` keeps the capture threads off the cores that
+carry them ([CPU](#cpu)).
+
 Without `-Check` the script sets the RSS queue count, and its defaults restore
 the vendor's placement (one queue, every processor). On the reference rig four
-queues changed nothing measurable, so treat it as an experiment:
+queues changed nothing measurable. Skip this on a first install. It is for
+testing one change at a time on a rig that already works:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Ports "Ethernet 3,Ethernet 4,Ethernet 5" -WhatIf
@@ -1208,20 +1181,26 @@ Each value marked `SITE` comes from your rig:
 - `trigger_rate_limit`: the camera's maximum frame rate, from its data sheet.
   It is the 165 in the a2A1920-165g5m's name
   ([trigger_rate_limit](CONFIGURATION.md#trigger_rate_limit)).
-- `serial_port` and `trigger_pins`: leave these for step 8, which finds them.
-- `stim_safe_pins`: every pin wired to a laser or LED driver (below).
+- `serial_port`: leave it for step 8, which finds the board's port.
+- `trigger_pins`: the board pins wired to the cameras' trigger inputs, from
+  your pin list. Step 8 says how to make the list, and you can fill in the
+  field then.
+- `stim_safe_pins`: every pin wired to a stimulation device (below).
 - `output_dir`: where sessions go (below).
 - `board_config`: the file that describes your printed calibration board.
   Keep `configs/boards/charuco_8x8_15mm.yaml` for a copy of the reference
   rig's board ([Board config](CONFIGURATION.md#board-config)).
 - `metadata_defaults`: your lab's defaults for the sidebar's fields.
 
-The template sets `stim_safe_pins: []`, which holds no pin low. If a laser or
-LED driver is wired to the board, put its pin in the list, as in
+The template sets `stim_safe_pins: []`, which holds no pin low. If a
+stimulation device is wired to the board, put its pin in the list, as in
 `stim_safe_pins: [53]` on the reference wiring. The board holds those pins low
-from boot. A profile with no `stim_safe_pins` line uses the default, and the
-default, `[53]`, is the reference rig's laser pin and protects nothing on
-other wiring ([stim_safe_pins](CONFIGURATION.md#stim_safe_pins)).
+from the first line of its sketch, and step 8 says what that leaves uncovered.
+A profile with no `stim_safe_pins` line uses the default, and the
+default, `[53]`, is the reference rig's stimulation pin and protects nothing on
+other wiring ([stim_safe_pins](CONFIGURATION.md#stim_safe_pins)). A trigger
+board other than the Mega 2560 also sets `board_fqbn` and `board_max_pin`
+([The trigger board](#the-trigger-board)).
 
 Put `output_dir` on the largest, fastest drive. Write a Windows path with
 forward slashes, as in `output_dir: D:/panopticon_data`, and never inside
@@ -1274,7 +1253,7 @@ Skip this step if the profile sets `trigger_source: external`.
 
 Flashing is writing a new program into the board's memory. You do not flash
 anything yourself in this step. Panopticon flashes the board at the first
-launch, in step 9. This step wires the board, lists its pins in
+launch, in step 9. This step checks the board and its wiring, lists its pins in
 the profile, installs the tool Panopticon flashes with, and finds the board's
 port.
 
@@ -1287,19 +1266,23 @@ triggers, plus the boot guard that drives every `stim_safe_pins` pin low.
 Panopticon flashes it for you.
 
 > [!WARNING]
-> Flashing resets the trigger board, and the laser driver input floats during
-> the reset. Switch the laser off or block the beam before you launch
-> Panopticon, before Apply, and, while a paradigm is Applied, before each
-> Calibrate and each Record that follows a calibration.
+> Panopticon's responsibility ends at the trigger board's TTL outputs. What you
+> connect to a stimulation pin, and making that device safe, is your lab's
+> responsibility, for a laser, an LED or any other device. Every pin of the
+> board floats for a moment whenever the board resets or is flashed.
+> `stim_safe_pins` holds the listed pins low from the first line of the sketch.
+> A stimulation paradigm reaches the board only through Apply, or a Test of a
+> changed canvas.
 
+[When the board resets](WORKFLOW.md#when-the-board-resets) lists every case.
 During a flash the board runs its bootloader, the small program that takes in
-a new sketch. No sketch runs then, so every pin floats, and a powered laser
-driver can read that as on. The boot guard cannot help, because it runs only
-once the sketch starts. A pulldown resistor is
-no general answer either: a driver input with a stiff internal pullup needs a
-resistor too low for the board's per-pin current limit. The laser's own
-interlock is the only hard gate. [WORKFLOW.md](WORKFLOW.md) says when a session
-flashes the board.
+a new sketch. No sketch runs then, so every pin floats. The boot guard cannot
+help, because it runs only once the sketch starts.
+
+A floating pin is driven neither LOW nor HIGH, so a device wired to it may
+read it as on. Every launch opens the board's port and resets it, the first
+launch in step 9 included. Before that first launch, agree with whoever is in
+charge of each wired stimulation device how it stays safe while the pins float.
 
 At launch, and when you switch to a profile on another serial port, Panopticon
 builds the recording-only sketch and compares it with the one this computer
@@ -1312,24 +1295,67 @@ the session.
 
 A switch between profiles on the same port flashes nothing. If their
 `trigger_pins` or `stim_safe_pins` differ, the first Calibrate or Record flashes
-the board, so switch the laser off before that start too. Until that flash the
-board keeps the previous profile's boot guard, which may leave this profile's
-laser pin undriven.
+the board. Until that flash the board keeps the previous profile's boot guard,
+which may leave this profile's stimulation pins undriven.
 
-To set it up:
+#### The trigger board
 
-1. Wire every camera's trigger input to a board pin, with a common ground
-   ([Wiring the trigger line](#wiring-the-trigger-line)).
-2. List every pin that drives a camera in the profile's `trigger_pins`. The pin
+The Arduino Mega 2560 is the tested board, and the default. The sketch
+Panopticon generates is plain Arduino code, which `arduino-cli` compiles and
+uploads, so another Arduino-compatible board can take the Mega's place. It
+needs:
+
+- An `arduino-cli` core, the package that compiles and uploads for its board
+  family, such as `arduino:avr` for the Mega.
+- 5 V logic, or a level shifter on its outputs, when the camera and
+  stimulation inputs need 5 V. A 3.3 V board's high level can fall below an
+  input's switching threshold.
+- A digital pin for every pin in `trigger_pins` and `stim_safe_pins`. Pins 0
+  and 1 are refused on every board.
+- A USB serial port that either restarts the sketch when Panopticon opens it,
+  as the Mega's does, or leaves the running sketch to answer the `RDY`
+  handshake. Panopticon waits for that answer at every start.
+
+For such a board, set [`board_fqbn`](CONFIGURATION.md#board_fqbn) to its name
+in `arduino-cli`, and [`board_max_pin`](CONFIGURATION.md#board_max_pin) to its
+highest digital pin. `arduino-cli board listall` lists the names of the boards
+each installed core supports. When an upload overruns its time limit,
+Panopticon looks for `avrdude`, the Mega's upload tool. With another board's
+tool it cannot tell whether a write is still running, and its message says so.
+
+![The trigger board wired to the computer, three cameras and a stimulation device](images/trigger_wiring.png)
+
+Everything right of the dashed line varies by lab: the cameras' I/O
+connectors, the camera network and the stimulation device.
+
+The log calls the trigger board `teensy`, and tags its lines `[teensy]`,
+whatever board it is.
+
+#### Set up the board
+
+1. Make the pin list, if the rig came without one. Follow each wire from its
+   board socket to where it ends: a camera's I/O cable, a stimulation device or
+   a ground. Write the socket's number beside the camera's serial number, or
+   beside the device's name. If the wires are bundled or covered, ask whoever
+   wired the rig for the list. Do not unplug wires to find out.
+2. Check the ground ([Wiring the trigger line](#wiring-the-trigger-line)). At
+   least one wire leaves a socket marked GND and joins the cameras' trigger
+   grounds, and the stimulation device's ground too, as in the diagram above.
+   If you cannot trace it, ask whoever wired the rig, and do not rewire it
+   yourself.
+3. List every pin that drives a camera in the profile's `trigger_pins`, and
+   every pin that drives a stimulation device in `stim_safe_pins`. The pin
    count equals the camera count only if you wired one pin per camera, and
-   nothing checks the two against each other.
-3. Install the Arduino IDE from <https://www.arduino.cc/en/software>, which
+   nothing checks the two against each other. A camera on a pin the list
+   leaves out receives no triggers, and the test recording in
+   [section 3](#with-real-cameras) shows it.
+4. Install the Arduino IDE from <https://www.arduino.cc/en/software>, which
    includes `arduino-cli`, or `arduino-cli` on its own.
-4. Install the board support once, for a Mega:
+5. Install the board support once, for a Mega:
    `arduino-cli core install arduino:avr`. It downloads the Mega's support
-   files, or reports that they are already installed. Another board class
-   needs its own core, and the `FQBN` (the board type's name in `arduino-cli`)
-   in `gui_app/stim_compiler.py` changed to match.
+   files, or reports that they are already installed. Another board needs its
+   own core, and `board_fqbn` and `board_max_pin` in the profile
+   ([The trigger board](#the-trigger-board)).
 
    If PowerShell says `The term 'arduino-cli' is not recognized`, you have the
    Arduino IDE's copy, which PowerShell does not find by name. Run it by its
@@ -1339,15 +1365,20 @@ To set it up:
    & "C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" core install arduino:avr
    ```
 
-   An IDE installed for your account alone keeps it under
-   `$env:LOCALAPPDATA\Programs\Arduino IDE` instead. Panopticon searches both
-   folders itself.
-5. If `arduino-cli` is somewhere unusual, set `PANOPTICON_ARDUINO_CLI` to its
+   If that path is not found, the IDE was installed for your account alone,
+   and its copy is under your own folder:
+
+   ```powershell
+   & "$env:LOCALAPPDATA\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" core install arduino:avr
+   ```
+
+   Panopticon searches both folders itself.
+6. If `arduino-cli` is somewhere unusual, set `PANOPTICON_ARDUINO_CLI` to its
    full path. Panopticon looks at `PANOPTICON_ARDUINO_CLI`, then `PATH`, then the
    Arduino IDE's install folders. To set the variable, press the Windows key,
    type `environment variables`, open *Edit environment variables for your
    account*, press *New*, and give the name and the path.
-6. Close the Arduino IDE's Serial Monitor. It holds the port, and flashing and
+7. Close the Arduino IDE's Serial Monitor. It holds the port, and flashing and
    recording both need it.
 
 Then find the board's port, the name Windows gives the USB connection, for
@@ -1357,9 +1388,15 @@ Then find the board's port, the name Windows gives the USB connection, for
    plugged in yet.
 2. Right-click the Start button and choose *Device Manager*. Open
    *Ports (COM & LPT)*. On the reference rig the board is listed as
-   `Arduino Mega 2560 (COM3)`, and `COM3` is what `serial_port` takes.
+   `Arduino Mega 2560 (COM3)`, and `COM3` is what `serial_port` takes. A board
+   that is not a genuine Arduino may be listed as `USB-SERIAL CH340 (COM4)` or
+   `USB Serial Device (COM4)` instead.
 3. To be sure which entry is the board, unplug its cable and watch the entry
    disappear, then plug it back in.
+
+The board's model is printed on the board itself. A board other than a Mega
+2560 needs `board_fqbn` and `board_max_pin`
+([The trigger board](#the-trigger-board)).
 
 PowerShell lists the port names too, without saying which device is which:
 
@@ -1378,8 +1415,10 @@ The first time Panopticon opens your profile (step 9) the log shows:
 [acq] board flashed with the recording-only sketch; stim is off until you Apply one
 ```
 
-The sidebar shows `Clearing stim firmware…` while the board flashes
-([how long](OVERVIEW.md#16-state)). On later launches the flash is skipped:
+These lines appear at the first launch on every computer, with a new board
+too, and need no action. The sidebar shows `Clearing stim firmware…` while the
+board flashes ([how long](OVERVIEW.md#16-state)). On later launches the flash
+is skipped:
 
 ```
 [acq] board already carries the recording-only sketch (no stim); skipping flash
@@ -1397,8 +1436,9 @@ Before you open the profile:
 - Check that its `serial_port` names Panopticon's trigger board. Opening the
   profile resets the device on that port, and the first time it also flashes
   the recording-only sketch onto it.
-- Switch the laser off or block the beam
-  ([the warning in step 8](#step-8--flash-the-trigger-firmware) says why).
+- With a stimulation device wired to the board, read
+  [the warning in step 8](#step-8--flash-the-trigger-firmware) first. The
+  launch resets the board, and every pin floats for a moment.
 - Close pylon Viewer, SpinView and any other program that holds the cameras.
 
 Then launch, and compare each screen with the pictures:
@@ -1498,8 +1538,9 @@ starts with the time, to the millisecond, and the thread that printed it:
 2026-09-03 19:17:38.951 [MainThread] [acq] opening teensy on COM3
 ```
 
-The log calls the trigger board `teensy`, whatever board it is. Each camera's
-grab thread is named from 0, so `grab0` is cam1, `grab1` is cam2, and so on.
+`teensy` in the last line is the trigger board
+([The trigger board](#the-trigger-board)). Each camera's grab thread is named
+from 0, so `grab0` is cam1, `grab1` is cam2, and so on.
 
 Check in that output:
 
@@ -1601,8 +1642,8 @@ under names of your own stay as they are.
 2. Work out whether you need another host port and switch
    ([The host port and the switches](#the-host-port-and-the-switches)). Keeping
    the same number of cameras per port keeps the load on each port unchanged.
-3. Give a new switch its own subnet, as in step 5: the adapter at `.2`, the
-   cameras from `.3`, and a management address on the same subnet.
+3. Give a new switch its own subnet, as in step 5: the adapter at `.2` and the
+   cameras from `.3`.
 4. Configure the new switch and the new adapter as in step 5. Neither inherits
    the settings of your working ports: the switch starts at 1500-byte frames,
    and the adapter with Energy Efficient Ethernet on.

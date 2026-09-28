@@ -56,6 +56,8 @@ trigger_source: board             # board | external
 serial_port: COM3                 # SITE: Device Manager > Ports (COM & LPT)
 trigger_pins: [2, 4, 6, 8]        # SITE: every pin wired to a camera trigger input
 stim_safe_pins: []                # SITE: every pin wired to a laser or LED driver
+# board_fqbn: arduino:avr:mega    # the Mega 2560, the only board tested
+# board_max_pin: 69               # the Mega's highest digital pin (A15)
 
 # --- Paths ------------------------------------------------------------------
 output_dir: data                  # SITE: your largest, fastest drive

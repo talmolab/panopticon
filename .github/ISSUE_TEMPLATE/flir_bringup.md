@@ -40,7 +40,7 @@ here and ask for another way to send them.
 
 ## Trigger
 
-- Trigger source: Panopticon's board (Arduino Mega 2560), or your own (make and model):
+- Trigger source: Panopticon's board (its `board_fqbn`, or Arduino Mega 2560 if unset), or your own (make and model):
 - For each camera, the input line and the connector pins it is wired to, and where its ground goes:
 - Opto-isolated or non-isolated input:
 - Pull-up resistors and cable lengths, if any:

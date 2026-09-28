@@ -40,7 +40,8 @@ cameras are matched by that number.
 
 A trigger source drives a TTL line into every camera's trigger input, so every
 camera exposes on the same edge. By default the source is Panopticon's trigger
-board, an Arduino Mega 2560 that also runs stimulation; a pulse generator or a
+board, which also runs stimulation: an Arduino Mega 2560, or the board the
+profile's `board_fqbn` names. A pulse generator or a
 DAQ can take its place
 ([An external trigger source](#an-external-trigger-source)). Each camera
 streams its frames to the host over GigE or USB3, and one grab thread per
@@ -52,7 +53,7 @@ At stop, each camera's H.264 stream is wrapped into an mp4 by stream copy.
 flowchart LR
   HOST["Host: serial config + RDY ack<br>(board only)"] --> SRC["Trigger source<br>board or external TTL"]
   SRC -->|"TTL to each trigger input"| CAMS["N cameras<br>Mono8, hardware-triggered"]
-  SRC -->|"stim pin, board only"| LASER["Laser driver"]
+  SRC -->|"stim pin, board only"| STIM["Stimulation device<br>(the lab's)"]
   CAMS -->|"GigE or USB3"| POOL["Driver buffer pool<br>max_num_buffer per camera"]
   POOL --> GRAB["Grab thread per camera<br>retrieve, copy, submit, release"]
   GRAB --> COORD["FrameSyncCoordinator<br>release only what every camera has"]
@@ -154,7 +155,7 @@ That makes `stim_trace.csv` exact: a frame's time is
 `t = (unwrapped_blockid - 1) / fps`, and the stimulus model is evaluated at
 that `t`.
 
-These rules protect the timing and the laser:
+These rules protect the timing and the stimulation pins:
 
 - `updateStim()` does no floating-point arithmetic. It runs inside the trigger
   busy-wait, and an AVR float divide takes about 30 µs, enough to blunt the
@@ -169,19 +170,17 @@ These rules protect the timing and the laser:
 - The pins in [`stim_safe_pins`](CONFIGURATION.md#stim_safe_pins) are set to
   OUTPUT and driven LOW by `allStimLow()`, the first statement of `setup()`,
   before `Serial.begin()`. `setup()` then waits for the host's configuration,
-  and a pin set any later floats for that whole wait. A powered laser driver
-  reads a floating modulation input as on. Inside `allStimLow()`,
+  and a pin set any later floats for that whole wait. A device on a floating
+  pin can read it as on. Inside `allStimLow()`,
   `pinMode()` comes before `digitalWrite()`, because writing LOW to a pin
   still set as INPUT only turns off its pull-up and leaves it floating.
 - Software cannot cover the board's reset. During the reset and the
   bootloader wait every pin is high-impedance, because the sketch is not
-  running. Only a hardware interlock gates the laser then. A pull-down
-  resistor is no substitute on the reference rig's laser driver: its internal
-  pull-up is so stiff that a resistor strong enough to beat it would exceed
-  the Arduino's 20 mA per-pin limit.
+  running. What a device on a pin does then is up to the device and its
+  wiring.
 
-The operating rule that follows from the last two is the
-[laser warning](WORKFLOW.md#7-optional-stimulation).
+The operator's side of the last two is the
+[stimulation warning](WORKFLOW.md#7-optional-stimulation).
 
 ### The serial protocol
 
@@ -252,7 +251,7 @@ input), and a start after a forced reopen adds the reset and bootloader wait.
 
 The stop is confirmed too. The reconfigure branch is what ends a paradigm, and
 a looping stimulation chain never ends by itself, so an unconfirmed stop can
-leave a laser driven while the window reads IDLE. `stop_triggers()` sends the
+leave a stimulation pin driven while the window reads IDLE. `stop_triggers()` sends the
 configuration with `fps = -1`, waits up to `STOP_ACK_TIMEOUT` (3 s) for
 `RDY <n_pins> 0`, and returns False when it does not come; the caller then
 shows a dialog. Firmware that has never sent RDY is exempt. The wait also
@@ -827,7 +826,7 @@ These cases leave the ladder:
   windows and re-arms at the third, which clears a shared transport stall. A
   camera with no frame keeps waiting. On the board path the window raises one
   alarm per silence that names the board and, on a profile with stimulation
-  pins, the laser, because a board without power leaves its pins undriven.
+  pins, those pins, because a board without power leaves them undriven.
 
 Retiring is the way out in every other case. In kick-out mode the coordinator
 waits for every camera, so a camera that stops publishing would force-drop
@@ -2044,7 +2043,7 @@ profile fields ([CONFIGURATION.md](CONFIGURATION.md)).
 | `glow_threshold`, `edge_threshold` | 4, 5 | `board_detector.py` | Markers that light a node, and that count for an edge |
 | `optimal_shared` | 200 | `board_detector.py` | Where a coverage edge reads as full |
 | `RESERVED_SERIAL_PINS` | 0, 1 | `stim_compiler.py` | The board's serial pins, refused for triggers and stimulation |
-| `FQBN` | `arduino:avr:mega` | `stim_compiler.py` | The arduino-cli board target |
+| `FQBN` | `arduino:avr:mega` | `stim_compiler.py` | The default of the profile's [board_fqbn](CONFIGURATION.md#board_fqbn), the board every compile and upload names |
 
 ### Probes
 

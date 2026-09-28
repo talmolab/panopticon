@@ -3544,8 +3544,9 @@ class MainWindow(QMainWindow):
             self._reset_toggles()
             return False
         self._begin_busy(f"Flashing {label} firmware…")
-        port = self._profile.serial_port
-        self._fw_op = CallableWorker(lambda: stim_compiler.upload(want, port))
+        port, fqbn = self._profile.serial_port, self._profile.board_fqbn
+        self._fw_op = CallableWorker(
+            lambda: stim_compiler.upload(want, port, fqbn=fqbn))
 
         def done(result):
             self._end_busy()
@@ -3685,8 +3686,9 @@ class MainWindow(QMainWindow):
         print("[acq] board may carry a stim paradigm from a previous session — "
               "flashing the recording-only sketch", flush=True)
         self._begin_busy("Clearing stim firmware…")
-        port = self._profile.serial_port
-        self._fw_op = CallableWorker(lambda: stim_compiler.upload(blank, port))
+        port, fqbn = self._profile.serial_port, self._profile.board_fqbn
+        self._fw_op = CallableWorker(
+            lambda: stim_compiler.upload(blank, port, fqbn=fqbn))
         self._fw_op.done.connect(self._on_clean_firmware_done)
         self._fw_op.start()
 
@@ -5095,6 +5097,10 @@ class MainWindow(QMainWindow):
                 board_taken=self._board_taken_from_test,
                 get_safe_pins=lambda: self._profile.stim_safe_pins,
                 get_trigger_pins=lambda: self._profile.trigger_pins,
+                # The board the editor compiles for, uploads to and checks
+                # pins against: the profile's, which a switch can change.
+                get_board_fqbn=lambda: self._profile.board_fqbn,
+                get_max_pin=lambda: self._profile.board_max_pin,
                 # The editor reclaims on the UI thread after every Apply and at
                 # Test, so one attempt: each failed open waits a second, and the
                 # start worker keeps its own retry count.

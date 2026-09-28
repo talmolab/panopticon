@@ -290,8 +290,8 @@ about what only a rig can answer:
 - exposure, gain, illumination and image content: a simulated frame is a flat
   field with one byte of identity in its corner, so a calibration on it solves
   nothing;
-- the trigger board's electrical behaviour, the laser interlock, and the reset
-  window in which every pin floats;
+- the trigger board's electrical behaviour, the stimulation device, and the
+  reset window in which every pin floats;
 - start-up timing: a simulated camera whose `retrieve()` begins before the
   board runs waits out its whole timeout. Its first frame can then arrive up to
   one retrieve timeout late (200 ms, which is 100 triggers at `speed` 5), and a

@@ -28,7 +28,7 @@ New here? Read [INSTALLATION.md](docs/INSTALLATION.md), then
   aniposelib's format.
 - Compiles an optogenetic stimulation paradigm into the trigger board's firmware, and
   writes `stim_trace.csv`: for every frame, the stimulus the paradigm was set to
-  deliver. The file is modelled from the firmware and cannot show that the laser fired.
+  deliver. The file is modelled from the firmware and cannot show that the device fired.
 
 The videos and the calibration open in [LUC3D](https://talmolab.github.io/luc3d/), a
 browser-based tool for multi-view pose annotation
@@ -43,7 +43,7 @@ browser-based tool for multi-view pose annotation
 | Basler cameras | Supported, GigE and USB3, through Basler's pylon SDK. |
 | FLIR cameras | In testing, GigE and USB3, through Teledyne's Spinnaker SDK: [docs/FLIR.md](docs/FLIR.md). |
 | Camera settings | Mono8, the same frame size on every camera, and a hardware trigger input on each. |
-| Trigger | A hardware TTL signal. By default, an Arduino Mega 2560 that Panopticon programs. |
+| Trigger | A hardware TTL signal. By default, an Arduino Mega 2560 that Panopticon programs, or [another Arduino board](docs/INSTALLATION.md#the-trigger-board). |
 | Network (GigE) | Links sized to the pixel rate, and jumbo frames on every adapter and switch port. |
 
 More cameras need a more capable GPU. The driver caps how many NVENC sessions run at
@@ -97,11 +97,11 @@ acquisition, and repeats the note when the acquisition ends.
    launches need only `uv run gui.py`. A launch with no profile chosen opens no camera
    and no serial port until you choose one in the sidebar.
 
-Before step 4, switch the laser off or block the beam, and check that the profile's
-`serial_port` names the trigger board. Opening the profile resets the device on that
-port, and reprograms it unless Panopticon last programmed it with the same firmware.
-Every pin of the board floats during the reset, a laser driver's included
-([laser warning in INSTALLATION.md, step 8](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware)).
+Before step 4, check that the profile's `serial_port` names the trigger board. Opening
+the profile resets the device on that port, and reprograms it unless Panopticon last
+programmed it with the same firmware. Every pin of the board floats for a moment during
+the reset. Before you wire a stimulation device to the board, read the
+[stimulation warning in INSTALLATION.md, step 8](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware).
 
 ### Settings to change first
 
@@ -112,7 +112,7 @@ Every pin of the board floats during the reset, a laser driver's included
 | [`camera_serials`](docs/CONFIGURATION.md#camera_serials), [`n_cameras`](docs/CONFIGURATION.md#n_cameras) | Every camera's serial number, quoted, in ascending order, and how many cameras must be present. |
 | [`frame_rate`](docs/CONFIGURATION.md#frame_rate) | The recording trigger rate. Keep exposure under the [exposure ceiling](docs/CONFIGURATION.md#exposure-ceiling). |
 | [`serial_port`](docs/CONFIGURATION.md#serial_port), [`trigger_pins`](docs/CONFIGURATION.md#trigger_pins) | The trigger board's port, and every pin wired to a camera. A camera on an unlisted pin gets no triggers. |
-| [`stim_safe_pins`](docs/CONFIGURATION.md#stim_safe_pins) | Every pin wired to a laser or LED driver, held low from boot. |
+| [`stim_safe_pins`](docs/CONFIGURATION.md#stim_safe_pins) | Every pin wired to a stimulation device, held low from the first line of the sketch. |
 | [`output_dir`](docs/CONFIGURATION.md#output_dir) | Where sessions go. Use your largest, fastest drive. |
 | [`metadata_defaults`](docs/CONFIGURATION.md#metadata_defaults) | Your lab's defaults for the sidebar, saved with every session. A copied profile carries another lab's names. |
 

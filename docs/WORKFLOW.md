@@ -19,8 +19,8 @@ rig. The pictures were taken on the reference rig.
 
 A session runs through these sections in order:
 
-- [1. Launch](#1-launch): switch the laser off, start Panopticon, and wait until every
-  pane shows live video.
+- [1. Launch](#1-launch): start Panopticon, and wait until every pane shows live
+  video.
 - [2. Choose a profile](#2-choose-a-profile): pick your rig in the dropdown, once per
   computer.
 - [3. Set the output directory](#3-set-the-output-directory): choose the folder that
@@ -43,24 +43,23 @@ coloured word at the bottom right of the window, `IDLE` at rest. The status bar
 is the line of text along the bottom left. The
 [trigger board](GLOSSARY.md#trigger-board) runs a small program, its sketch or
 firmware, and flashing means writing a new one onto it
-([how long](OVERVIEW.md#16-state)).
+([how long](OVERVIEW.md#16-state)). Launching resets the board, and every pin
+floats for a moment while it resets
+([what that means for a stimulation device](#7-optional-stimulation)).
 
-1. On a rig with a laser, switch the laser off first. Launching resets the
-   trigger board, and a powered laser can fire while it resets
-   ([why](#when-the-board-resets)).
-2. Double-click the Panopticon shortcut on the desktop, or `_launch.bat` in the
+1. Double-click the Panopticon shortcut on the desktop, or `_launch.bat` in the
    repository folder if there is no shortcut. The repository folder is the
    folder that holds Panopticon's code. If you followed
    [INSTALLATION.md step 3](INSTALLATION.md#step-3--get-the-code), it is
    `C:\Users\you\Desktop\panopticon`, with your own user name in place of
    `you`.
-3. A splash screen names each step, from `Reading the rig profiles…` to each
+2. A splash screen names each step, from `Reading the rig profiles…` to each
    camera as it opens. Wait. On the reference rig the window opens after about
    17 s.
 
    ![The splash screen naming the step under way](images/launch_splash.png)
 
-4. The window opens, and each camera's pane fills with live video. The status
+3. The window opens, and each camera's pane fills with live video. The status
    bar reads
    `Checking hardware: Record and Calibrate are available once it reports`,
    and Record and Calibrate stay grey until then. The state label may read
@@ -68,13 +67,13 @@ firmware, and flashing means writing a new one onto it
 
    ![The window while the launch hardware check runs](images/launch_checking_hardware.png)
 
-5. If a `Hardware Check` dialog appears, read it
+4. If a `Hardware Check` dialog appears, read it
    ([What happens at launch](#what-happens-at-launch) lists what it reports),
    then press OK. It stops nothing.
 
    ![A Hardware Check dialog with one warning](images/hardware_check_warning.png)
 
-6. Check that the window looks like [A good launch](#a-good-launch).
+5. Check that the window looks like [A good launch](#a-good-launch).
 
 If a `Panopticon is already running` message appears instead, Panopticon is
 open already. Find its window on the taskbar and use that one.
@@ -184,8 +183,7 @@ Panopticon at launch:
    this computer's record says the board already carries the recording-only
    sketch. If the flash fails, a `Could not clear stim firmware` dialog says the
    board may still carry a paradigm, possibly a looping one. Open Stimulation and
-   press Apply with an empty canvas before you record, or switch the laser
-   off.
+   press Apply with an empty canvas before you record.
 4. Opens the board's serial port and holds it until you quit. Opening the
    port resets the board. Panopticon then asks the board which sketch it
    runs, and reflashes it once if the answer is not the recording-only sketch.
@@ -201,7 +199,7 @@ profile in the dropdown at the top of the sidebar ([section 2](#2-choose-a-profi
 
 If no profile loads at all, a `No rig profile` dialog appears instead, and
 Record and Calibrate stay disabled. The board has not been cleared then and
-may still carry a paradigm. Switch the laser off, fix the profile the dialog
+may still carry a paradigm, a looping one included. Fix the profile the dialog
 names, and start Panopticon again.
 
 ---
@@ -369,8 +367,9 @@ before 4.6 (`board_legacy: true`).
 1. Check that the state label reads `IDLE`, and that Date, Mouse 1 and Mouse 2
    name this session.
 2. On the reference rig, tick Flat final second, the small box left of those
-   words under Calibrate, before you start. It asks Solve to put the floor at
-   Z = 0 ([Put the floor at Z = 0](#put-the-floor-at-z--0)).
+   words under Calibrate, before you start. A tick appears in the box. It asks
+   Solve to put the floor at Z = 0, and the take then ends with the board lying
+   still on the floor ([Put the floor at Z = 0](#put-the-floor-at-z--0)).
 3. Flip Calibrate on. The state label reads `Checking capacity…` and
    `Starting...` for a moment, then `CALIBRATING`. Each pane's frame rate reads
    `calibration_frame_rate` (30 fps on the reference rig), and the coverage
@@ -514,30 +513,55 @@ do not help.
 
 ### Put the floor at Z = 0
 
-Tick Flat final second, under Calibrate, to give the calibration a floor. End
-the take with the board lying flat on the floor for at least a second, where
-cameras can see it, then flip Calibrate off. Solve looks at the end of each
-camera's video for the board lying still. It then puts Z = 0 on the board, with
-Z pointing up at the cameras and the origin at the board's first corner. LUC3D,
-the 3D labelling tool, draws its floor grid on Z = 0, so the grid then lies on
-the arena floor. Each camera that saw the lying board places it on its own. When
-one places it more than 2 degrees or 10 mm from where the best view does, Solve
-warns, because their poses in `calibration.toml` disagree by as much.
+Tick Flat final second, under Calibrate, to give the calibration a floor. A
+tick appears in the box when it is on. Tick it when the board can lie flat on
+the arena floor where two or more cameras see it, and leave it off where it
+cannot. On the reference rig, tick it unless the rig's owner says otherwise.
+The box is read when the take is saved, so a tick at any time before you flip
+Calibrate off counts for that take. The box is remembered for each profile.
+
+![Flat final second ticked, under the Calibrate toggle](images/sidebar_flat_final_second.png)
+
+End the take like this:
+
+1. Lay the board flat on the arena floor, printed side up, where two or more
+   cameras see it.
+2. Let go, and step out of the cameras' view without touching the board.
+3. Flip Calibrate off.
+
+The board must not move from step 1 to step 3. Solve reads the last 4 s of each
+camera's video and looks for the board lying still at the end. A camera that
+cannot see the board then only drops out of the floor step, and the others
+still give the floor.
+
+Solve then puts Z = 0 on the board, with Z pointing up at the cameras. The
+origin is at the board's first corner, and it sets only where X and Y start.
+LUC3D, the 3D labelling tool, draws its floor grid on Z = 0, so the grid then
+lies on the arena floor. Each camera that saw the lying board places it on its
+own. When one places it more than 2 degrees or 10 mm from where the best view
+does, Solve warns, because their poses in `calibration.toml` disagree by as
+much.
 
 When the board was still moving at the end, or no camera saw it, Solve skips the
 step and says why. The calibration then keeps the reference camera's frame.
-Leave the box off on a rig with no flat surface in view. On the reference rig,
-tick it unless the rig's owner says otherwise. The box is remembered for each
-profile.
+Both messages go to the log and the calibration's `session.log`, and a skip
+ends the status bar's message with `floor skipped` ([section 6](#6-solve)).
+Neither opens a dialog. Only the findings that raise the
+`Recalibration recommended` dialog call for a new take
+([Which cameras made it into the solve](#which-cameras-made-it-into-the-solve)).
+The floor comes only from the end of a take, so to get one after a skip,
+calibrate again and end with the board lying still.
 
 ### Finish
 
 1. Flip Calibrate off. The state label reads `Finishing…` while the cameras
-   stop and the capture is saved. Calibrate, Record, Solve and Snapshot stay
-   grey until it ends, and the Calibrate toggle stays drawn in the on position
-   ([how long](OVERVIEW.md#16-state)). Do not flip it again.
+   stop and the capture is saved ([how long](OVERVIEW.md#16-state)).
+   Calibrate, Record, Solve and Snapshot stay grey until it ends.
 
    ![The window just after Calibrate is off](images/calibrate_finishing.png)
+
+   The Calibrate toggle stays drawn on, greyed, until the files are written.
+   Do not flip it again.
 
 2. Wait for `IDLE`. The state label may read `ENCODING` on the way, with
    `Encoding k/N` in the sidebar. The status bar then reads
@@ -748,25 +772,19 @@ aniposelib both read the `calibration.toml` this writes.
 Skip this section when the session has no optogenetic stimulation.
 
 > [!WARNING]
-> Flashing resets the trigger board, and the laser driver input floats during
-> the reset. Switch the laser off or block the beam before you launch
-> Panopticon, before Apply, and, while a paradigm is Applied, before each
-> Calibrate and each Record that follows a calibration.
+> Panopticon's responsibility ends at the trigger board's TTL outputs. What you
+> connect to a stimulation pin, and making that device safe, is your lab's
+> responsibility, for a laser, an LED or any other device. Every pin of the
+> board floats for a moment whenever the board resets or is flashed.
+> `stim_safe_pins` holds the listed pins low from the first line of the sketch.
+> A stimulation paradigm reaches the board only through Apply, or a Test of a
+> changed canvas.
 
-Choosing a profile on a new computer, or switching to a profile on another
-serial port, flashes the board too. Fit the laser's own interlock if you need
-a hard gate. On the reference rig the laser runs from a CNI PSU-III power
-supply, and you switch the laser off there.
-
-The board can also reset at the other moments
-[When the board resets](#when-the-board-resets) lists. One routine covers them
-all:
-
-1. Keep the laser off from launch until the state label reads `RECORDING`.
-2. Switch the laser on once `RECORDING` shows. Start every paradigm with a
-   baseline block, at 0 Hz, long enough for this.
-3. Switch the laser off again when you stop the recording, and before the next
-   Calibrate, Apply or Test.
+[When the board resets](#when-the-board-resets) lists every case. A floating
+pin is driven neither LOW nor HIGH, so a device wired to it may read it as on.
+Panopticon cannot know what is wired to a pin, so the device's own wiring
+decides what it does while its input floats. Agree with whoever is in charge of
+the device how it stays safe at those moments.
 
 Set up stimulation after calibrating and before recording, so that Record
 starts without a flash. Open the editor with the Stimulation button.
@@ -774,19 +792,24 @@ starts without a flash. Open the editor with the Stimulation button.
 
 ![The stimulation editor](images/stim_clean.png)
 
-The picture shows a two-block loop on pin 53. The red dot marks the block the
-loop starts from, and the faded block is one that does not start a chain
+The picture shows a two-block loop on pin 53. The arrow back from the second
+block to the first runs along the same line as the forward arrow, through the
+second block. The red dot marks the block the loop starts from. The faded block
+is one that does not start a chain, and it still runs when an arrow reaches it
 ([OVERVIEW.md](OVERVIEW.md#1-canvas) explains each mark).
 
 ### Pins
 
 The trigger board's numbered sockets are its pins. A digital output pin is
-either at 0 V (LOW) or at 5 V (HIGH), which a TTL input reads as off or on.
-The number you type into Pin is the number printed beside the socket. Nothing
-in the software knows what is wired to a pin, so a wrong number drives the
-wrong device. On the reference rig pin 53 drives the laser driver's modulation
-input. If a driver has a TTL/analog switch, use TTL, because analog mode maps
-0-5 V onto output power.
+either LOW, at 0 V, or HIGH, at the board's logic voltage (5 V on the Mega
+2560), which a TTL input reads as off or on. The number you type into Pin is
+the number printed beside the socket. Nothing in the software knows what is
+wired to a pin, so a wrong number drives the wrong device. On the reference rig
+pin 53 is the stimulation pin. Your rig's stimulation pins should be listed in
+its profile's `stim_safe_pins`. Open the profile in Notepad to read them
+([INSTALLATION.md step 7](INSTALLATION.md#step-7--write-the-rig-profile)). If
+that list is empty, or you are unsure, ask the rig's owner before you use a
+pin.
 
 A stimulation block cannot use a camera trigger pin, one of the profile's
 `trigger_pins` (`[2, 4, 6, 8, 10, 12]` on the reference rig). Extra edges on a
@@ -800,20 +823,24 @@ camera would break cross-camera block-ID alignment.
 ```
 
 Pins 0 and 1 carry the board's serial link and are refused too, as is a pin
-the board does not have.
+above the profile's [`board_max_pin`](CONFIGURATION.md#board_max_pin), the
+board's highest.
 
 ### Build a paradigm
 
 [OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) says what blocks and arrows
 mean, and describes each field and button and the rules a graph must follow.
 
-1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block. The block
-   appears on the canvas.
+1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block. PW is the
+   pulse width, how long each pulse stays HIGH, and Dur is how long the block
+   runs. The block appears on the canvas.
 2. To connect two blocks, drag from one of the dots on the first block's edge
    to a dot on the next block. An arrow joins them.
-3. For a pause, add a block at [0 Hz](OVERVIEW.md#4-freq-hz). For a loop,
-   tick [Starting](OVERVIEW.md#7-starting) on one of its blocks. To stop the
-   recording when a block finishes, tick [Ending](OVERVIEW.md#8-ending) on it.
+3. For a pause, add a block at [0 Hz](OVERVIEW.md#4-freq-hz). Starting and
+   Ending apply to the selected block, so click a block on the canvas first,
+   then tick the box. For a loop, tick [Starting](OVERVIEW.md#7-starting) on one
+   of its blocks. To stop the recording when a block finishes, tick
+   [Ending](OVERVIEW.md#8-ending) on it.
 4. Read the preview's caption before you press Apply to Arduino (Apply, from
    here on). A pulse as long as its period
    or longer holds the pin HIGH for the whole block
@@ -825,26 +852,30 @@ mean, and describes each field and button and the rules a graph must follow.
 
 This paradigm gives a 5-minute baseline, 30 s of 20 Hz stimulation and a
 5-minute post-period, and stops the recording at the end. It is three blocks
-on pin 53, joined in one chain:
+on pin 53, joined in one chain. Put your own stimulation pin in place of 53.
 
 1. 0 Hz, 0 ms, 300 s: the baseline. The sequence starts with the first
    trigger, so a baseline is a block at 0 Hz.
 2. 20 Hz, 10 ms, 30 s: 20 pulses a second, 10 ms each, at 20% duty.
 3. 0 Hz, 0 ms, 300 s, with Ending ticked.
 
-The status line then reads `Recording will stop 630 s after start.` Then:
+Join block 1 to block 2, and block 2 to block 3, with arrows. Leave Starting
+unticked: block 1 has no incoming arrow, so the chain starts there. The status
+line then reads `Recording will stop 630 s after start.`
 
-1. With the laser off, press [Test](OVERVIEW.md#10-test). A Test of a canvas
-   that changed since the last upload flashes the board first. The editor's
-   status line then counts down the test, and a sync LED
-   wired to pin 53, if you have one, follows the paradigm. The test runs the
-   whole paradigm, 630 s here, so press Stop Test once you have seen it start.
-   A copy with short baselines, saved under another name, is quicker to test.
-2. With the laser still off, press Apply and wait for
+Test drives the pin for real, so whatever is wired to it runs, a laser
+included. A Test of a canvas that changed since the last upload flashes the
+board first, and every pin floats during the flash
+([When the board resets](#when-the-board-resets)). Then:
+
+1. Press [Test](OVERVIEW.md#10-test). The editor's status line counts down the
+   test, and a sync LED wired to the pin, if you have one, follows the
+   paradigm. The test runs the whole paradigm, 630 s here, so press Stop Test
+   once you have seen it start. A copy with short baselines, saved under
+   another name, is quicker to test.
+2. Press Apply and wait for
    `Upload successful — press Record to run paradigm.`
 3. Close the editor or leave it open, and press Record ([section 8](#8-record)).
-   Switch the laser on once the state label reads `RECORDING`, during the
-   baseline.
 
 ### Apply, then Record
 
@@ -877,6 +908,7 @@ whenever the serial port is opened or the board is flashed:
 - at launch, and when you choose a profile on a new computer or one on another
   port;
 - at every Apply;
+- at a Test that uploads a changed canvas first;
 - before an acquisition that needs the other sketch. Panopticon holds two
   sketches per launch, recording-only and recording plus stimulation, and
   swaps them itself. After an Apply, a calibration flashes the recording-only
@@ -896,10 +928,9 @@ whenever the serial port is opened or the board is flashed:
   `[teensy] no ack — reopening port to force a board reset`.
 
 A failed flash refuses the acquisition, because the board's contents are then
-unknown. The dialog says to switch the laser off and check the board.
-Panopticon refuses to close during a flash, because an interrupted upload can
-leave the board without its safe-pins guard, and then the laser pin floats at
-the next power-up. For the same reason, do not end Panopticon from Task
+unknown. Panopticon refuses to close during a flash, because an interrupted
+upload can leave the board without its safe-pins guard, and then the
+stimulation pins float at the next power-up. For the same reason, do not end Panopticon from Task
 Manager during a flash: while the sidebar reads `Clearing stim firmware…` or a
 `Flashing …` state, or the editor reads `Compiling + uploading… (~30 s)`.
 
@@ -909,17 +940,18 @@ A recording with blocks on the canvas also writes, beside the videos:
 
 - `stim_paradigm.json`: the paradigm as it stood when the recording started,
   the sketch's hash and `matches_uploaded_firmware`. Read that field first.
-  `true` means the file describes the sketch the board ran, and Record starts
-  only when it is. A file that reads `false` (the canvas differed from the
-  sketch) or `null` (nothing was uploaded) does not describe what the board
-  ran.
+  `true` means the file describes the sketch the board ran. A recording made
+  in this window always reads `true`, because Record refuses to start
+  otherwise. A folder written by an earlier version of Panopticon can read
+  `false` (the canvas differed from the sketch) or `null` (nothing was
+  uploaded), and its file then does not describe what the board ran.
 - `stim_paradigm.ino`: the sketch's source.
 - `stim_trace.csv`: one row per trigger, with the stimulus the paradigm should
   have delivered at that trigger ([section 10](#stim_tracecsv)).
 
 `stim_trace.csv` is computed from block IDs, as `t = (blockid - 1) / fps`. It
-is a model: it cannot know whether the laser was on, the interlock in or the
-beam blocked. For evidence that the laser fired, put its sync LED in a
+is a model: it cannot know what the device on the pin did. For evidence that
+the device fired, put a light that follows it, such as a sync LED, in a
 camera's view. At 100 fps with a 3 ms exposure a camera resolves when a train
 starts and stops, and a 20 Hz train aliases against the frame rate.
 Pulse-level evidence needs a photodiode on a spare board input.
@@ -931,9 +963,8 @@ Pulse-level evidence needs a photodiode on a spare board input.
 1. Put the animals in the arena and close it.
 2. If the session uses a paradigm, check that it is Applied
    ([Apply, then Record](#apply-then-record)). While a paradigm is Applied, a
-   Record that follows a calibration flashes the board first, so keep the laser
-   off until the state label reads `RECORDING`
-   ([laser warning](#7-optional-stimulation)).
+   Record that follows a calibration flashes the board first, and every pin
+   floats for a moment ([stimulation warning](#7-optional-stimulation)).
 3. Flip Record on. The state label reads `Checking capacity…`.
 4. If `Overwrite the existing data?` appears, read
    [If the folder already holds data](#if-the-folder-already-holds-data) before
@@ -1013,8 +1044,7 @@ When a camera stops delivering, the status bar reads:
 - `NO FRAMES from camN for S s`: one camera.
 - `NO FRAMES FROM ANY CAMERA for S s: the trigger board may have stopped.`,
   with a `No frames from any camera` dialog. Check the board and its USB cable.
-  On a rig with stimulation pins, check the laser too, because a board without
-  power leaves those pins undriven.
+  A board without power leaves its stimulation pins undriven.
 
 A camera near its shutdown temperature puts `CAMERA TEMPERATURE: camN T C ...`
 at the start of the status bar. The alert fires `thermal_warn_margin_c` below
@@ -1043,9 +1073,9 @@ each step of [section 9](#9-after-you-stop). Panopticon sends the
 board a stop and keeps the serial port open, so the next recording does not
 reset the board. If the board does not confirm the stop, a
 `Trigger board did not confirm the stop` dialog appears. The board may still
-be triggering, and a looping paradigm may still drive its pin. Switch the laser
-off, then power-cycle the board: unplug its USB cable, and its power supply if
-it has one, wait 5 s, and plug it back in.
+be triggering, and a looping paradigm may still drive its pin. Power-cycle the
+board: unplug its USB cable, and its power supply if it has one, wait 5 s, and
+plug it back in.
 
 ### The checks before the start
 
@@ -1158,10 +1188,12 @@ before the first pulse, so a recording, or a calibration at
 
 ## 9. After you stop
 
-The state label names each step as it runs. The first is `Finishing…`, and
-the Record toggle stays drawn in the on position until it ends:
+The state label names each step as it runs. The first is `Finishing…`:
 
 ![The window just after Record is off](images/record_finishing.png)
+
+The Record toggle stays drawn on, greyed, until the files are written. Do not
+flip it again.
 
 `Finishing…`: the encoders drain and the cameras return to free-run preview.
 Panopticon writes each camera's `blockids.npy` and `frametimes.npy`, the
@@ -1315,7 +1347,7 @@ during a firmware flash.
 Quitting sends the board a stop whenever Panopticon holds its serial port. If
 the board does not confirm it, the `Trigger board did not confirm the stop`
 dialog of [Stopping](#stopping) appears before the window closes. Power-cycle
-the board and switch the laser off.
+the board as [Stopping](#stopping) describes.
 
 ### The next animals
 
@@ -1333,8 +1365,8 @@ prompt, and the file stays.
 
 ### When you are done
 
-At `IDLE`, close the window. It closes without asking. Switch the laser off,
-and copy the session folders to wherever your lab keeps its data.
+At `IDLE`, close the window. It closes without asking. Copy the session
+folders to wherever your lab keeps its data.
 
 ---
 
