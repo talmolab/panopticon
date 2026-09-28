@@ -378,7 +378,12 @@ until someone analyses it.
   the bitstream with the host path's. The launch preflight runs it when the
   profile asks for `nvenc_upload: pinned` and NVENC is available, at launch and
   after a profile switch, at the recording's frame size. Any answer but True
-  means record with the host upload. The process's one pinned warm-up encode
+  means record with the host upload. The check first asks whether every stall
+  still held the stream at its rewrite. An attempt where one had ended decides
+  nothing, because the copy then reads the inverse picture on a sound build
+  too. It repeats on a fresh encoder with a stall `_CHECK_STALL_GROWTH` times
+  longer, up to `_CHECK_ATTEMPTS` attempts. A busy host at launch delays the
+  rewrite past a 20 ms stall. The process's one pinned warm-up encode
   (`nvenc._warm_pinned`) decides for the whole process: if it fails, every
   later encoder gets the host upload (`upload_stats()["pinned_disabled"]`). A
   pinned setup failure falls back to the host upload for that encoder only,
