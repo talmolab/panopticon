@@ -812,6 +812,12 @@ Dead ends, do not retry:
   times longer, up to 3 attempts. Under three GIL-holding threads, 20 of 20
   checks needed the retry and all 20 passed. Under twelve, even 320 ms stalls
   ended early and the check chose the host upload, as it should.
+- 2026-09-28: The trigger board's messages and limits follow the maintainer's
+  line that Panopticon's part ends at the board's TTL outputs (`64786b1`).
+  Dialogs say to switch off what the stimulation pins drive, not to key off a
+  laser. An external-trigger profile refuses `board_fqbn` and `board_max_pin`.
+  After an upload timeout Panopticon waits for the flashing tool of each
+  common arduino-cli core, not only avrdude, and never kills one at quit.
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
