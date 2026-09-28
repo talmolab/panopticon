@@ -889,7 +889,8 @@ class MainWindow(QMainWindow):
                   "there is no serial port to reach it on and no pin list to "
                   "drive low, so the launch-time stim-clearing flash does not "
                   "run and the board may still carry a paradigm from a "
-                  "previous session. Key off the laser, load a profile, then "
+                  "previous session. Switch off what the stimulation pins drive, "
+                  "load a profile, then "
                   "start Panopticon again.")
             return
         if warnings:
@@ -1262,7 +1263,8 @@ class MainWindow(QMainWindow):
             self._raise_source_alarm(worst)
             return (f"NO FRAMES FROM ANY CAMERA for {worst:.0f} s: the trigger "
                     f"board may have stopped. Check the board, its USB cable"
-                    + (" and the laser" if self._profile.stim_safe_pins
+                    + (" and what its stimulation pins drive"
+                       if self._profile.stim_safe_pins
                        else "") + ".")
         # The silence is over (or never started), so the next one alarms.
         self._source_alarm_raised = False
@@ -1318,9 +1320,9 @@ class MainWindow(QMainWindow):
                     f"board was unplugged, reset, or lost power.")
         pins = list(self._profile.stim_safe_pins or [])
         laser = (f"\n\nA board without power leaves its stimulation pins "
-                 f"{', '.join(str(p) for p in pins)} undriven, and a laser "
-                 f"driver can read an undriven input as on. Check the laser "
-                 f"now." if pins else "")
+                 f"{', '.join(str(p) for p in pins)} undriven, and a "
+                 f"stimulation device can read an undriven input as on. Check "
+                 f"what those pins drive now." if pins else "")
         text = (f"No camera has received a frame for {silent_s:.0f} s.\n\n"
                 f"{link} No camera is retired while all of them are silent. "
                 f"If the silence lasts, each camera re-arms its stream, which "
@@ -1545,7 +1547,7 @@ class MainWindow(QMainWindow):
                 "It may still be triggering, and any stim paradigm — including "
                 "a looping one, which never ends on its own — may still be "
                 "driving its pin.\n\n"
-                "Power-cycle the trigger board and key off the laser.")
+                "Power-cycle the trigger board and switch off what the stimulation pins drive.")
         except Exception:
             pass       # a dialog failure must not mask the printed warning
         return False
@@ -1803,7 +1805,8 @@ class MainWindow(QMainWindow):
         return ("Apply the empty canvas first",
                 "The canvas is empty, but the paradigm Applied earlier this "
                 "session is still what this recording would put on the "
-                "board, so the laser would fire through a recording with no "
+                "board, so its stimulation would run through a recording "
+                "with no "
                 "stim_paradigm.json or stim_trace.csv.\n\nPress Apply in the "
                 "Stimulation editor to clear the board, or Load the paradigm "
                 "back onto the canvas.")
@@ -3573,8 +3576,8 @@ class MainWindow(QMainWindow):
                     self, f"Cannot start the {acq_type}",
                     f"The trigger board could not be flashed with the {label} "
                     f"firmware, so what it is running is unknown. The "
-                    f"{acq_type} has not been started.\n\nKey off the laser and "
-                    f"check the board, then retry."
+                    f"{acq_type} has not been started.\n\nSwitch off what the "
+                    f"stimulation pins drive and check the board, then retry."
                     + ("" if reclaimed else
                        " The serial port could not be reopened either, so "
                        "the next start reopens it, which resets the board.")
@@ -3590,7 +3593,7 @@ class MainWindow(QMainWindow):
                 # here because nothing else would say why the board resets.
                 note = (f"Flashed the {label} sketch, but the serial port could "
                         f"not be reopened. The {acq_type} reopens it as it "
-                        f"starts, which resets the board: key off the laser.")
+                        f"starts, which resets the board: switch off what the stimulation pins drive.")
                 print(f"[acq] {note}", flush=True)
                 self.statusBar().showMessage(note)
             settings.set_board_sketch_hint(want_sha)
@@ -3717,7 +3720,7 @@ class MainWindow(QMainWindow):
                 "still be carrying a stimulation paradigm from a previous "
                 "session — including one that loops and never ends.\n\n"
                 "Open Stimulation and press Apply (an empty canvas is fine) "
-                "before recording, or key off the laser.\n\n" + msg)
+                "before recording, or switch off what the stimulation pins drive.\n\n" + msg)
         self._warm_serial()
 
     def _warm_serial(self):
@@ -3817,7 +3820,7 @@ class MainWindow(QMainWindow):
                 message += ("\n\nWARNING: the trigger board did not accept the stop "
                             "command. It may still be triggering and any stim "
                             "paradigm may still be running. Power-cycle the board "
-                            "and key off the laser before continuing.")
+                            "and switch off what the stimulation pins drive before continuing.")
         result = {"ok": False, "title": "Could not start the acquisition",
                   "message": message}
         try:
@@ -5196,7 +5199,8 @@ class MainWindow(QMainWindow):
                 self, "Firmware upload in progress",
                 "The trigger board is being flashed (~30 s).\n\nPanopticon "
                 "will not close until it finishes: interrupting the upload "
-                "leaves the board with no laser-safety boot guard.\n\nClose "
+                "leaves the board with no stimulation-pin boot guard.\n\n"
+                "Close "
                 "again once the upload reports that it is done.")
             event.ignore()
             return
@@ -5341,14 +5345,14 @@ class MainWindow(QMainWindow):
         # Kill child processes (ffmpeg remux/encode, the uv-run solve): unblocks
         # the workers and unlocks output files so they can be removed.
         #
-        # NEVER kill the firmware toolchain. avrdude interrupted mid-write
-        # leaves the Mega with a half-programmed flash, which means no
-        # allStimLow() boot guard — so the laser pin floats on the next
-        # power-up, which a powered driver reads as ON. A stranded arduino-cli
+        # NEVER kill the firmware toolchain. A flashing tool interrupted
+        # mid-write leaves the board with a half-programmed flash, which means
+        # no allStimLow() boot guard, so the stimulation pins float on the next
+        # power-up, which a powered stimulation device can read as on. A stranded arduino-cli
         # is a far smaller problem than that: it finishes on its own in ~30 s,
         # and _workers_running() already refuses to reach this path silently
         # while an upload is in flight.
-        _FIRMWARE_PROCS = ("avrdude", "arduino-cli")
+        _FIRMWARE_PROCS = stim_compiler.FLASH_TOOL_NAMES + ("arduino-cli",)
         try:
             import psutil
             for child in psutil.Process().children(recursive=True):
@@ -5358,7 +5362,8 @@ class MainWindow(QMainWindow):
                     name = ""
                 if any(p in name for p in _FIRMWARE_PROCS):
                     print(f"[quit] leaving {name} alone: killing it mid-write "
-                          f"would strip the board's laser-safety boot guard",
+                          f"would strip the board's stimulation-pin boot "
+                          f"guard",
                           flush=True)
                     continue
                 try:

@@ -871,11 +871,21 @@ def sketch_sha(ino_content: str) -> str:
 #: Seconds allowed for `arduino-cli compile` and `arduino-cli upload`.
 COMPILE_TIMEOUT_S = 120.0
 UPLOAD_TIMEOUT_S = 60.0
-#: After an upload timeout, how long to wait for the flashing tool (avrdude, a
+#: After an upload timeout, how long to wait for the flashing tool (a
 #: grandchild of arduino-cli) to exit before giving up on it.
 FLASH_GRACE_S = 90.0
-#: Process names of the tool that actually writes the board's flash.
-FLASH_TOOL_NAMES = ("avrdude",)
+#: Process names of the tools that write a board's flash for arduino-cli, per
+#: core: avrdude (AVR: Mega, Uno, Nano, Leonardo), bossac (SAM and SAMD: Due,
+#: Zero, the Nano 33 boards), esptool (ESP32, ESP8266), picotool (RP2040),
+#: teensy_post_compile and teensy_reboot (Teensy), dfu-util and
+#: STM32_Programmer_CLI (STM32, Uno R4) and openocd. Matched case-blind as
+#: a part of the process name, so "esptool.exe" and "python esptool" both
+#: count. RULE: every name here is waited for after a timeout and never
+#: killed at quit. REASON: a flash stopped mid-write leaves the board without
+#: its stimulation-pin boot guard.
+FLASH_TOOL_NAMES = ("avrdude", "bossac", "esptool", "picotool",
+                    "teensy_post_compile", "teensy_reboot", "teensy_loader_cli",
+                    "dfu-util", "stm32_programmer_cli", "openocd")
 
 #: Port name that selects the simulated board (gui_app.backends.sim_board).
 SIM_PORT = "sim"
@@ -906,6 +916,12 @@ def _run_cli(cmd: list[str], timeout: float) -> tuple[int, str, str]:
     return proc.returncode, out or "", err or ""
 
 
+def flash_tool_of(process_name: str) -> str | None:
+    """The FLASH_TOOL_NAMES entry a process name holds, or None."""
+    name = (process_name or "").lower()
+    return next((n for n in FLASH_TOOL_NAMES if n in name), None)
+
+
 def _flash_children(pid: int) -> list:
     """Live descendants of `pid` that are the flashing tool, or [] when psutil
     is unavailable or the process is already gone."""
@@ -920,7 +936,7 @@ def _flash_children(pid: int) -> list:
     out = []
     for k in kids:
         try:
-            if any(n in k.name().lower() for n in FLASH_TOOL_NAMES):
+            if flash_tool_of(k.name()):
                 out.append(k)
         except Exception:
             continue
@@ -931,9 +947,10 @@ def _wait_for_flash_children(children, grace_s: float) -> list:
     """Block until every child exits or grace_s passes. Returns the children
     still running.
 
-    The flashing tool is waited for, never killed: interrupting avrdude
-    mid-write leaves the Mega with a half-programmed flash and therefore no
-    allStimLow() boot guard, so the laser pin floats on the next power-up.
+    The flashing tool is waited for, never killed: interrupting it
+    mid-write leaves the board with a half-programmed flash and therefore no
+    allStimLow() boot guard, so the stimulation pins float on the next
+    power-up.
     """
     import time
     deadline = time.monotonic() + grace_s
@@ -952,9 +969,20 @@ def _wait_for_flash_children(children, grace_s: float) -> list:
 
 
 def _settle_timed_out_upload(proc, grace_s: float) -> str:
-    """After `arduino-cli upload` overran its budget: let avrdude finish, then
-    stop arduino-cli, and say what the operator may safely do next."""
+    """After `arduino-cli upload` overran its budget: let the flashing tool
+    finish, then stop arduino-cli, and say what the operator may safely do
+    next."""
     kids = _flash_children(proc.pid)
+
+    def tools(procs):
+        names = set()
+        for k in procs:
+            try:
+                names.add(flash_tool_of(k.name()) or "the flashing tool")
+            except Exception:
+                names.add("the flashing tool")
+        return ", ".join(sorted(names)) or "the flashing tool"
+    found = tools(kids)
     still = _wait_for_flash_children(kids, grace_s)
     try:
         proc.kill()
@@ -962,15 +990,17 @@ def _settle_timed_out_upload(proc, grace_s: float) -> str:
     except Exception:
         pass
     if still:
-        return (f"{FLASH_TOOL_NAMES[0]} is STILL RUNNING {grace_s:.0f} s after the "
+        return (f"{tools(still)} is STILL RUNNING {grace_s:.0f} s after the "
                 f"upload timed out. Do NOT power-cycle the board while it runs: "
                 f"interrupting a write leaves a half-programmed flash with no "
-                f"laser-pin boot guard. Wait for it to exit (Task Manager), then "
+                f"stimulation-pin boot guard. Wait for it to exit (Task "
+                f"Manager), then "
                 f"power-cycle the board and Apply again.")
     if kids:
-        return (f"{FLASH_TOOL_NAMES[0]} finished after the upload timed out, so "
+        return (f"{found} finished after the upload timed out, so "
                 f"no write was interrupted, but the board's firmware — including "
-                f"the laser-pin boot guard — is unverified. Power-cycle the board "
+                f"the stimulation-pin boot guard — is unverified. Power-cycle "
+                f"the board "
                 f"and Apply again.")
     return ("No flashing tool was found running. The board's firmware may have "
             "been partially written and is in an unknown state; wait 30 s in "
@@ -1075,8 +1105,8 @@ def _upload(ino_content: str, port: str, *, fqbn: str,
                 f"in the profile, or the board is not the profile's "
                 f"board_fqbn, {fqbn}.\n\n"
                 f"WARNING: an upload that failed part-way leaves the board's "
-                f"firmware in an UNKNOWN state, which means the stim/laser pin "
-                f"state is also unknown. Power-cycle the board before relying "
+                f"firmware in an UNKNOWN state, which means the stimulation "
+                f"pins' state is also unknown. Power-cycle the board before relying "
                 f"on it.\n\n"
                 f"{err}\n{out}"), stage
         return (True, "Upload successful — Arduino will restart and wait for "

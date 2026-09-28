@@ -397,7 +397,7 @@ class TeensyController:
         except (serial.SerialException, OSError) as e:
             print(f"[teensy] STOP WRITE FAILED: {e} — the board may still be "
                   f"triggering and any stim paradigm may still be running. "
-                  f"Power-cycle the board and key off the laser.", flush=True)
+                  f"Power-cycle the board and switch off what the stimulation pins drive.", flush=True)
             return False
         print(f"[teensy] sent stop: {cmd!r}", flush=True)
         if not self._speaks_rdy:
@@ -409,7 +409,7 @@ class TeensyController:
             return True
         print("[teensy] STOP NOT CONFIRMED: the board speaks RDY but did not ack "
               "the stop — it may still be triggering and any stim paradigm may "
-              "still be running. Power-cycle the board and key off the laser.",
+              "still be running. Power-cycle the board and switch off what the stimulation pins drive.",
               flush=True)
         return False
 

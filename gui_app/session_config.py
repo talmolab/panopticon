@@ -1149,8 +1149,8 @@ class RigProfile:
         With an external source Panopticon opens no serial port, so it can
         neither clear a board's stimulation sketch at launch nor stand the
         board down at quit. A profile that still names the board's port, its
-        trigger pins or its stimulation pins reads as if Panopticon did both,
-        so each is refused with what to do instead. A stim_safe_pins the file
+        trigger pins, its stimulation pins or its type reads as if Panopticon
+        did both, so each is refused with what to do instead. A stim_safe_pins the file
         leaves out is not refused: its code default names no board the
         profile describes.
         """
@@ -1180,6 +1180,12 @@ class RigProfile:
                 f"external and Panopticon never opens the board, so nothing "
                 f"holds them low. Stimulation needs trigger_source: board. "
                 f"Remove stim_safe_pins, or set it to [].")
+        for key in ("board_fqbn", "board_max_pin"):
+            if self._given(key):
+                raise ValueError(
+                    f"{key} describes Panopticon's trigger board, but "
+                    f"trigger_source is external, so Panopticon never "
+                    f"compiles or flashes a board. Remove {key}.")
 
     def _validate_capture_processes(self) -> None:
         n = self.capture_processes

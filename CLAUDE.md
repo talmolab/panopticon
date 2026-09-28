@@ -262,8 +262,8 @@ until someone analyses it.
   barrier and refuses the recording if any camera retrieved a frame before the
   operator is asked to start the source. A source already running during arming
   gives each camera a different first pulse. This mode opens no serial port,
-  refuses `serial_port`, `trigger_pins` and a non-empty `stim_safe_pins`, and
-  runs no stimulation.
+  refuses `serial_port`, `trigger_pins`, a non-empty `stim_safe_pins`,
+  `board_fqbn` and `board_max_pin`, and runs no stimulation.
 - A stall must not end the session. A recording camera re-arms after 25
   consecutive timeouts (`STALL_TIMEOUTS`, about 5 s), up to 5 times
   (`MAX_REARMS`). StartGrabbing restarts the block-ID counter, so
