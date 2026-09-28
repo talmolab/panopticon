@@ -804,6 +804,14 @@ Dead ends, do not retry:
   steps for a device, the switches' addresses and a photo of the reference
   board. Renaming the solve's `CALIBRATING...` label would be a code change,
   so OVERVIEW.md points out its three dots instead.
+- 2026-09-28: The NVENC launch check no longer fails a sound library when a
+  stall ends early (`e2ee22a`). On a relaunch during the docs capture, one of
+  15 stalls ended before its rewrite, the bitstream differed, and the check
+  blamed PyNvVideoCodec. That session recorded with the host upload. The
+  check now asks first whether every stall held, and repeats with a stall 4
+  times longer, up to 3 attempts. Under three GIL-holding threads, 20 of 20
+  checks needed the retry and all 20 passed. Under twelve, even 320 ms stalls
+  ended early and the check chose the host upload, as it should.
 
 Dead ends, do not retry:
 - Validating a fix with headless probes and suites alone (the ring leak passed
