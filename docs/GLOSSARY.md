@@ -1,5 +1,7 @@
 # Glossary
 
+Previous: [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Next: [FLIR.md](FLIR.md).
+
 The terms the Panopticon documentation uses, grouped by topic. Other pages link a
 term's first use to its entry here.
 
@@ -192,6 +194,13 @@ encoded after the session, at hundreds of times the disk rate of H.264
 
 ## Network and camera settings
 
+### GigE Vision
+
+The standard that network machine-vision cameras follow. A GigE camera plugs into a
+network switch with an Ethernet cable, and the switch plugs into the computer. A USB3
+Vision camera plugs into the computer with a USB cable instead. The reference rig's
+cameras are 5 Gbit/s GigE cameras.
+
 ### GVSP
 
 GigE Vision Streaming Protocol, the UDP protocol GigE cameras send frames over. One
@@ -289,7 +298,14 @@ does not have to scan whole videos.
 
 What the calibration coverage display shows once every camera has enough views of
 the board, shared with other cameras and spread over its own view.
-[OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) gives the three conditions.
+[OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) gives the conditions.
+
+### Solve
+
+The step after a calibration that works out each camera's lens and its position
+relative to the other cameras, from the views of the board the calibration recorded.
+The sidebar's Solve button runs it and writes `calibration.toml`
+([WORKFLOW.md](WORKFLOW.md#6-solve)).
 
 ### Intrinsics
 

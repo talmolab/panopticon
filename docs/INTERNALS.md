@@ -1,5 +1,8 @@
 # How Panopticon works
 
+Previous: [CPU_ENCODE.md](CPU_ENCODE.md). Next: [HISTORY.md](HISTORY.md), the
+dated record of decisions and measurements.
+
 This page describes the mechanisms: how a hardware trigger becomes a frame,
 how the frames of N cameras stay aligned, and how they reach disk. Read it to
 change the code, to port it to other hardware, or to find out why a recording

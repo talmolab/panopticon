@@ -1,48 +1,113 @@
 # A session, end to end
 
-A session is one visit to the rig. You launch Panopticon, choose the rig's
-profile and the output folder, describe the animals, calibrate, solve the
-calibration, optionally load a stimulation
-[paradigm](GLOSSARY.md#paradigm), and record.
+Previous: [OVERVIEW.md](OVERVIEW.md).
 
-[OVERVIEW.md](OVERVIEW.md) describes each control of the window.
-[INSTALLATION.md](INSTALLATION.md) covers building and wiring a rig, and
-[CONFIGURATION.md](CONFIGURATION.md) every setting of a profile.
+A session is one visit to the rig. You launch Panopticon, choose the rig's
+[profile](GLOSSARY.md#rig-profile) and the output folder, describe the animals,
+calibrate, solve the calibration, optionally load a stimulation
+[paradigm](GLOSSARY.md#paradigm), and record. Each step below says what to do, what
+you should see, and what to do if you see something else.
+
+[CONFIGURATION.md](CONFIGURATION.md) describes every setting of a profile.
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists the messages Panopticon shows,
 with their causes and fixes, and [GLOSSARY.md](GLOSSARY.md) defines terms such
 as [block ID](GLOSSARY.md#block-id) and [kick-out](GLOSSARY.md#kick-out).
 
 The page is written for a rig of N cameras. A value marked "on the reference
 rig" comes from `profiles/3dpose.yaml`, which describes one nine-camera Basler
-rig.
+rig. The pictures were taken on the reference rig.
 
-- [1. Launch](#1-launch)
-- [2. Choose a profile](#2-choose-a-profile)
-- [3. Set the output directory](#3-set-the-output-directory)
-- [4. Fill in the metadata](#4-fill-in-the-metadata)
-- [5. Calibrate](#5-calibrate)
-- [6. Solve](#6-solve)
-- [7. Optional: stimulation](#7-optional-stimulation)
-- [8. Record](#8-record)
-- [9. After you stop](#9-after-you-stop)
-- [10. What the session leaves on disk](#10-what-the-session-leaves-on-disk)
+A session runs through these sections in order:
+
+- [1. Launch](#1-launch): switch the laser off, start Panopticon, and wait until every
+  pane shows live video.
+- [2. Choose a profile](#2-choose-a-profile): pick your rig in the dropdown, once per
+  computer.
+- [3. Set the output directory](#3-set-the-output-directory): choose the folder that
+  sessions go into.
+- [4. Fill in the metadata](#4-fill-in-the-metadata): type the date and the mouse IDs.
+- [5. Calibrate](#5-calibrate): carry the board through the arena until READY, then stop.
+- [6. Solve](#6-solve): press Solve and read the result in the status bar.
+- [7. Optional: stimulation](#7-optional-stimulation): build a paradigm and Apply it.
+- [8. Record](#8-record): flip Record on, watch the status bar, and flip it off.
+- [9. After you stop](#9-after-you-stop): wait for `IDLE`, then check the session.
+- [10. What the session leaves on disk](#10-what-the-session-leaves-on-disk): the
+  folders and files, for reference.
 
 ---
 
 ## 1. Launch
 
-Start Panopticon from the desktop shortcut, `_launch.bat` or a terminal:
+Two places in the window come up at every step. The state label is the
+coloured word at the bottom right of the window, `IDLE` at rest. The status bar
+is the line of text along the bottom left. The
+[trigger board](GLOSSARY.md#trigger-board) runs a small program, its sketch or
+firmware, and flashing means writing a new one onto it
+([how long](OVERVIEW.md#16-state)).
 
-- Double-click the desktop shortcut, if `make_shortcut.ps1` has made one. It
-  opens no console window. It also installs no new dependency, so after an
-  update that changes `pyproject.toml`, run `uv sync` once or use
-  `_launch.bat`.
-- Double-click `_launch.bat` in the repository folder. It runs
-  `uv run python gui.py`, which first installs any dependency that
-  `pyproject.toml` has gained. Its console stays open if Panopticon exits with
-  an error.
-- Run `uv run gui.py` in a terminal in the repository folder. The log then
-  appears in the terminal as it is written.
+1. On a rig with a laser, switch the laser off first. Launching resets the
+   trigger board, and a powered laser can fire while it resets
+   ([why](#when-the-board-resets)).
+2. Double-click the Panopticon shortcut on the desktop, or `_launch.bat` in the
+   repository folder if there is no shortcut. The repository folder is the
+   folder that holds Panopticon's code. If you followed
+   [INSTALLATION.md step 3](INSTALLATION.md#step-3--get-the-code), it is
+   `C:\Users\you\Desktop\panopticon`, with your own user name in place of
+   `you`.
+3. A splash screen names each step, from `Reading the rig profiles…` to each
+   camera as it opens. Wait. On the reference rig the window opens after about
+   17 s.
+
+   ![The splash screen naming the step under way](images/launch_splash.png)
+
+4. The window opens, and each camera's pane fills with live video. The status
+   bar reads
+   `Checking hardware: Record and Calibrate are available once it reports`,
+   and Record and Calibrate stay grey until then. The state label may read
+   `Clearing stim firmware…` while the board is flashed. Wait for it.
+
+   ![The window while the launch hardware check runs](images/launch_checking_hardware.png)
+
+5. If a `Hardware Check` dialog appears, read it
+   ([What happens at launch](#what-happens-at-launch) lists what it reports),
+   then press OK. It stops nothing.
+
+   ![A Hardware Check dialog with one warning](images/hardware_check_warning.png)
+
+6. Check that the window looks like [A good launch](#a-good-launch).
+
+If a `Panopticon is already running` message appears instead, Panopticon is
+open already. Find its window on the taskbar and use that one.
+
+### A good launch
+
+When the launch has finished, the window looks like this:
+
+![Panopticon at idle, every pane live](images/main_idle.png)
+
+Every camera has a live pane, and each pane's frame rate reads the
+[idle preview rate](OVERVIEW.md#1-camera-grid). The state label at the bottom
+right reads `IDLE`, and the status bar reads
+`Hardware check done: encoding with <encoder>`.
+
+If a pane is missing or black, fix that before anything else.
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#opening-the-cameras) explains the messages
+a camera open can show. If one pane's rate reads well below the others, see
+[Frame rate](OVERVIEW.md#3-frame-rate).
+
+### Ways to launch
+
+Panopticon starts from any of these:
+
+- The desktop shortcut, if `make_shortcut.ps1` has made one. It opens no
+  console window. It also installs no new dependency, so after an update that
+  changes `pyproject.toml`, run `uv sync` once or use `_launch.bat`
+  ([INSTALLATION.md](INSTALLATION.md#updating-panopticon)).
+- `_launch.bat` in the repository folder. It runs `uv run python gui.py`, which
+  first installs any dependency that `pyproject.toml` has gained. Its console
+  stays open if Panopticon exits with an error.
+- `uv run gui.py` in a terminal in the repository folder. The log then appears
+  in the terminal as it is written.
 
 The terminal and `_launch.bat` pass options on
 (`.\_launch.bat --profile <name>` in the repository folder), and the shortcut
@@ -51,13 +116,8 @@ remembers it for later launches. `--force` starts a second copy of Panopticon.
 
 Only one copy runs at a time. A second launch, or a launch while one of
 Panopticon's probes runs, shows `Panopticon is already running` and exits with
-status 3. Two copies would compete for the cameras, the
-[trigger board](GLOSSARY.md#trigger-board) and the GPU encoder. Use `--force`
-only once you know what the other copy is doing.
-
-While the window builds, a splash screen names each step, from
-`Reading the rig profiles…` to each camera as it opens. The log repeats each
-step on a `[startup]` line.
+status 3. Two copies would compete for the cameras, the trigger board and the
+GPU encoder. Use `--force` only once you know what the other copy is doing.
 
 ### The log
 
@@ -69,6 +129,7 @@ millisecond, and the name of the thread that printed it:
 2026-09-24 10:15:02.481 [MainThread] [acq] profile: 3dpose
 ```
 
+The log also repeats each step of the splash screen on a `[startup]` line.
 Near the top, the log holds a header of `[header]` lines. It describes the
 computer: the Panopticon version and git commit, Python, Windows, the CPU,
 RAM, the GPU and NVIDIA driver, the
@@ -91,9 +152,11 @@ Quote the launch log and the acquisition's `session.log`
 With a profile remembered on this computer, or named with `--profile`,
 Panopticon at launch:
 
-1. Opens the profile's cameras and starts the preview.
+1. Opens the profile's cameras and starts the preview. Each camera's pane
+   fills with live video.
 2. Checks the hardware in the background. The status bar reads
-   `Checking hardware: Record and Calibrate are available once it reports`.
+   `Checking hardware: Record and Calibrate are available once it reports`,
+   and Record and Calibrate stay grey until then.
    The check measures the output drive, probes how many NVENC sessions the
    GPU driver grants, times a libx264 encode and picks the encoder. A
    `Hardware Check` dialog lists any problem it finds, for example:
@@ -105,17 +168,22 @@ Panopticon at launch:
    - an encoder choice that will refuse the next Record;
    - a check that could not finish.
 
-   Read the dialog. It stops nothing. The status bar then reads
-   `Hardware check done: encoding with <encoder>`.
+   Read the dialog, then press OK. It stops nothing. The status bar then reads
+   `Hardware check done: encoding with <encoder>`. Look each finding up in
+   [The hardware check](TROUBLESHOOTING.md#the-hardware-check) before you
+   record. A finding that names the encoder or NVENC can mean Record will be
+   refused. A low-disk finding means choosing another output folder
+   ([section 3](#3-set-the-output-directory)). The example above says that the
+   pinned upload check failed, and the session encodes with the host upload.
 3. Puts the trigger board back to the
    [recording-only sketch](GLOSSARY.md#recording-only-sketch), which
-   triggers the cameras and drives no stimulation pin. A paradigm lives in
+   triggers the cameras and drives no stimulation pin. The state label reads
+   `Clearing stim firmware…` while it flashes. A paradigm lives in
    the board's flash memory and survives quitting, a power cycle and an
    unplugged cable. So Panopticon reflashes the board at every launch, unless
    this computer's record says the board already carries the recording-only
-   sketch. The sidebar reads `Clearing stim firmware…` while it flashes. If
-   the flash fails, a `Could not clear stim firmware` dialog says the board
-   may still carry a paradigm, possibly a looping one. Open Stimulation and
+   sketch. If the flash fails, a `Could not clear stim firmware` dialog says the
+   board may still carry a paradigm, possibly a looping one. Open Stimulation and
    press Apply with an empty canvas before you record, or switch the laser
    off.
 4. Opens the board's serial port and holds it until you quit. Opening the
@@ -125,47 +193,44 @@ Panopticon at launch:
 Stimulation stays off until you Apply a paradigm in this launch
 ([section 7](#7-optional-stimulation)).
 
-Resetting and flashing the board leave its pins floating for a moment, and a
-powered laser driver can read a floating input as on. On a rig with a laser,
-read the [laser warning](#7-optional-stimulation) before you launch.
-
 On a computer where Panopticon has not opened a profile yet, the window opens
 no camera and no serial port, runs no hardware check and programs no board.
 The same holds when the remembered profile, or the one `--profile` names, does
-not load. A `Choose your rig's profile` dialog says why. Choose the profile in
-the dropdown at the top of the sidebar ([section 2](#2-choose-a-profile)).
+not load. A `Choose your rig's profile` dialog says why. Press OK, then choose the
+profile in the dropdown at the top of the sidebar ([section 2](#2-choose-a-profile)).
 
 If no profile loads at all, a `No rig profile` dialog appears instead, and
 Record and Calibrate stay disabled. The board has not been cleared then and
 may still carry a paradigm. Switch the laser off, fix the profile the dialog
 names, and start Panopticon again.
 
-### A good launch
-
-![Panopticon at idle](images/main_idle.png)
-
-Every camera has a live pane, and each pane's frame rate reads the
-[idle preview rate](OVERVIEW.md#1-camera-grid). The state label at the bottom
-right reads `IDLE`.
-
-If a pane is missing or black, fix that before anything else.
-[TROUBLESHOOTING.md](TROUBLESHOOTING.md) explains the messages a camera open
-can show.
-
 ---
 
 ## 2. Choose a profile
 
+If the box under Metadata, at the top of the sidebar, reads your rig's profile
+name (`3dpose` on the reference rig) and every pane is live, skip to
+[section 3](#3-set-the-output-directory).
+
 A profile is one YAML file in `profiles/` that describes one rig: its cameras,
 frame rates, trigger board and pins, encoder and output folder.
 [CONFIGURATION.md](CONFIGURATION.md) describes every field and has templates
-to start from. The dropdown at the top of the sidebar lists every profile that
-loaded. A file that fails to load is left out, and after the window opens a
-`Rig profiles` dialog names the file and the field at fault.
+to start from.
 
-Choosing a profile closes the cameras and opens the new profile's, while the
-sidebar reads `Switching cameras…`. Panopticon remembers the choice on this
-computer and opens it at the next launch.
+1. Click the box under Metadata, at the top of the sidebar. It is a dropdown,
+   and its list opens with every profile that loaded
+   ([OVERVIEW.md](OVERVIEW.md#4-profile) shows it open).
+2. Click your rig's profile. The state label reads `Switching cameras…` while
+   Panopticon closes the cameras and opens the new profile's.
+3. Wait for `IDLE`. The panes then show the new profile's cameras, as in
+   [A good launch](#a-good-launch).
+
+If your profile is not in the list, it did not load. A file that fails to load is
+left out, and after the window opens a `Rig profiles` dialog names the file and
+the field at fault.
+
+Panopticon remembers the choice on this computer and opens it at the next
+launch.
 
 When the new profile names a different serial port, Panopticon sends the old
 board a stop and closes its link. The new board then gets the launch sequence,
@@ -212,20 +277,35 @@ recording follows [Your own trigger source](#your-own-trigger-source).
 
 ## 3. Set the output directory
 
-The button under the dropdown shows the folder that sessions are written
-under. Click it to choose another folder. Choose the profile first, because
-the folder you choose is remembered for that profile, at the next launch and
-when you switch back to it. A profile you have not chosen a folder for uses its
-`output_dir`.
+The output button is the box that shows a folder path, under the profile box. It
+shows the folder that sessions are written under. Choose the profile first,
+because the folder you choose is remembered for that profile, at the next launch
+and when you switch back to it. A profile you have not chosen a folder for uses
+its `output_dir`.
+
+1. Click the output button. A `Select Output Directory` dialog opens.
+2. Go to the folder, click it once, and click Select Folder. The button then
+   shows the new path.
+
+Cancel in the dialog leaves the folder as it was.
 
 Every session is written as `<output>/<date>/<mouse1>_<mouse2>/`, with a
 `calibration/` folder and a `<mouse1>_<mouse2>_recording/` folder in it. Put the
 output folder on your largest, fastest drive. The disk check at Record measures that
-drive.
+drive. The reference rig writes to the `data` folder in the repository.
 
 ---
 
 ## 4. Fill in the metadata
+
+The session fields sit under the output button, in the sidebar's Metadata group
+([OVERVIEW.md](OVERVIEW.md#metadata) shows them filled in).
+
+1. Click Date and type the session's date as `YYYYMMDD`, or leave today's.
+2. Type the animals' IDs in Mouse 1 and Mouse 2. For one animal, leave Mouse 2
+   blank, and the folder is named `<mouse1>_m2`.
+3. Replace Experimenter with your initials, and check Cage and Notes. They hold
+   what was typed last on this computer.
 
 | Field | Default | Used for |
 |---|---|---|
@@ -238,11 +318,12 @@ With Date `20260904` and both mice blank, the session folder is
 `<output>/20260904/m1_m2/`, and cam1's recording is
 `20260904-m1_m2-cam1-recording.mp4`.
 
-The reference rig's profile fills in Experimenter `IT`. Put your own values in
-your profile's `metadata_defaults`, because whatever a field holds when an
-acquisition ends goes into `session_metadata.json`. Assay and cohort have no
-field: the profile's `metadata_defaults` writes them into
-`session_metadata.json` as they are (the reference rig's assay is
+The reference rig's profile fills in Experimenter `IT`. Whatever a field holds
+when an acquisition ends goes into `session_metadata.json`, so change a value
+that is not yours. A rig's owner sets the defaults in the profile's
+`metadata_defaults` ([CONFIGURATION.md](CONFIGURATION.md#metadata_defaults)).
+Assay and cohort have no field: the profile's `metadata_defaults` writes them
+into `session_metadata.json` as they are (the reference rig's assay is
 `open_field`). Switching profiles fills in only the fields you have not typed
 into, and what you typed, except the date, is back at the next launch.
 
@@ -267,18 +348,78 @@ Snapshot saves into `<session>/snapshots/<date>_<HHMMSS>/`.
 A calibration records a [ChArUco board](GLOSSARY.md#charuco-board) carried
 through the arena. The solve ([section 6](#6-solve)) turns it into each
 camera's lens model and the cameras' positions relative to each other.
+Calibrate with no animal in the arena.
 
 ### Check the board first
+
+Count the squares on your calibration board and measure one with a ruler
+before you calibrate. The reference rig's board is 8 squares by 8, each 15 mm
+across. If your count or size differs, stop and ask the rig's owner: the
+profile describes another board.
 
 The coverage display and the solve read the board's description from the file
 the profile's `board_config` names. On the reference rig that is
 `configs/boards/charuco_8x8_15mm.yaml`: 8 × 8 squares of 15.0 mm, 10.0 mm
 markers from the 4×4 dictionary of 1000, printed in the layout OpenCV used
-before 4.6 (`board_legacy: true`). Count the squares on your board and
-measure one before you calibrate.
+before 4.6 (`board_legacy: true`).
+[CONFIGURATION.md](CONFIGURATION.md#board_config) describes the board file.
+
+### Start
+
+1. Check that the state label reads `IDLE`, and that Date, Mouse 1 and Mouse 2
+   name this session.
+2. On the reference rig, tick Flat final second, the small box left of those
+   words under Calibrate, before you start. It asks Solve to put the floor at
+   Z = 0 ([Put the floor at Z = 0](#put-the-floor-at-z--0)).
+3. Flip Calibrate on. The state label reads `Checking capacity…` and
+   `Starting...` for a moment, then `CALIBRATING`. Each pane's frame rate reads
+   `calibration_frame_rate` (30 fps on the reference rig), and the coverage
+   display opens in the sidebar, under Stimulation. On the reference rig that
+   is also the idle rate, so check the state label and the coverage display to
+   see that the calibration started.
+
+   ![Calibrate on, with the coverage display open](images/calibrate_running.png)
+
+   The coverage display has one numbered node per camera. At the start of a
+   take its caption counts nothing yet, as in the picture. Each count reads
+   have/need, for the camera furthest behind. `groups 9/1` means the cameras
+   still form nine separate groups, which must join into one.
+4. If `Overwrite the existing data?` appears, the `calibration/` folder already
+   holds a take. Yes deletes it
+   ([If the folder already holds data](#if-the-folder-already-holds-data)).
+   Answer Yes to replace a take you do not want, and Cancel to keep it.
+5. If the state label reads `Flashing recording-only firmware…` first, wait.
+   The calibration starts when the flash ends
+   ([When the board resets](#when-the-board-resets)).
+6. If no coverage display appears, the calibration still records.
+   [OVERVIEW.md](OVERVIEW.md#12-coverage-display) lists what hides it.
+7. If a dialog refuses the start, it comes from one of the
+   [checks before the start](#the-checks-before-the-start).
+
+A calibration is an acquisition, so the checks under [Record](#8-record) run
+for it as well. A calibration always runs under the recording-only sketch. If a
+paradigm is on the board, Panopticon first flashes the recording-only sketch
+(`Flashing recording-only firmware…`). A calibration therefore
+never runs stimulation while you stand in the arena.
+
+The cameras switch to triggered mode at `calibration_frame_rate`. The profile's
+`calibration_exposure_us` and `calibration_gain_db` replace the recording
+exposure and gain for this acquisition only. An exposure of 0 or a gain of -1
+keeps the recording value, and the reference rig keeps its recording gain this
+way. Panopticon caps the exposure at 90% of the exposure ceiling at the
+calibration rate. When it does, the camera's exposure line in the log says
+`CLAMPED` ([CONFIGURATION.md](CONFIGURATION.md#calibration_exposure_us)). The
+next recording uses the exposure from the camera settings again. The reference
+rig calibrates with a longer exposure than it records with, so its panes look
+brighter while it calibrates.
+
+Move the board slowly and pause at each pose. A long exposure blurs a moving
+board, and a blurred board yields no corners.
+
+### If the board does not match its file
 
 The coverage display counts board markers only, so it catches only some
-mismatches:
+mismatches between the printed board and its file:
 
 - A board printed from another dictionary than `marker_bits` and `dict_size`
   name can give no detections at all. The coverage display then stays dark.
@@ -289,35 +430,12 @@ mismatches:
   reconstruction at the wrong scale, because every reprojection error is the
   same at any scale.
 
-[CONFIGURATION.md](CONFIGURATION.md#board_config) describes the board file.
-
-### Start
-
-A calibration is an acquisition, so the checks under [Record](#8-record) run
-for it as well. They include the prompt when the `calibration/` folder already
-holds data. A calibration always runs under the recording-only sketch. If a
-paradigm is on the board, Panopticon first flashes the recording-only sketch
-(`Flashing recording-only firmware…`). A calibration therefore
-never runs stimulation while you stand in the arena.
-
-Flip Calibrate on. The cameras switch to triggered mode at
-`calibration_frame_rate` (30 fps on the reference rig). The profile's
-`calibration_exposure_us` and `calibration_gain_db` replace the recording
-exposure and gain for this acquisition only. An exposure of 0 or a gain of -1
-keeps the recording value, and the reference rig keeps its recording gain this
-way. Panopticon caps the exposure at 90% of the exposure ceiling at the
-calibration rate. When it does, the camera's exposure line in the log says
-`CLAMPED` ([CONFIGURATION.md](CONFIGURATION.md#calibration_exposure_us)). The
-next recording uses the exposure from the camera settings again.
-
-Move the board slowly and pause at each pose. A long exposure blurs a moving
-board, and a blurred board yields no corners.
-
 ### Work towards READY
 
 The coverage display in the sidebar shows what the cameras have seen. Drag
 the divider on the sidebar's left edge to widen it, and the graph grows with
-it. [OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
+it ([OVERVIEW.md](OVERVIEW.md#the-sidebars-width)).
+[OVERVIEW.md](OVERVIEW.md#the-calibration-coverage-hud) explains each mark and
 what READY needs, and gives the caption's format.
 
 The figures come from a real calibration on the nine-camera reference rig. It
@@ -329,6 +447,11 @@ reached READY 4 minutes 19 seconds into the take.
 | 1. The start. Every camera is its own group. Hold the board where at least two cameras see it. | 2. At 0:20 the caption reads `groups 4/1`, and the orange line lists the groups. Carry the board where their views overlap. |
 | ![Coverage graph at 4:03, one group with a weak link](images/calib_stage_3_nearly.png) | ![Coverage graph, READY](images/calib_stage_4_ready.png) |
 | 3. At 4:03 there is one group, but the link is 20 of 30. Cameras 3 and 7, one on each side, see the board. | 4. READY at 4:19. Flip Calibrate off, or keep going to add frames. |
+
+A tick is one pass of the board detector over every camera's latest frame, 4
+to 5 a second on the reference rig. A node glows cyan while its camera sees
+the board. The orange line lists at most 4 groups, so at the start it names
+only 4 of the cameras.
 
 One tick later, at 4:04, cameras 3 and 7 see the board together again:
 
@@ -395,34 +518,90 @@ Tick Flat final second, under Calibrate, to give the calibration a floor. End
 the take with the board lying flat on the floor for at least a second, where
 cameras can see it, then flip Calibrate off. Solve looks at the end of each
 camera's video for the board lying still. It then puts Z = 0 on the board, with
-Z pointing up at the cameras and the origin at the board's first corner. LUC3D
-draws its floor grid on Z = 0, so the grid then lies on the arena floor. Each
-camera that saw the lying board places it on its own. When one places it more
-than 2 degrees or 10 mm from where the best view does, Solve warns, because
-their poses in `calibration.toml` disagree by as much.
+Z pointing up at the cameras and the origin at the board's first corner. LUC3D,
+the 3D labelling tool, draws its floor grid on Z = 0, so the grid then lies on
+the arena floor. Each camera that saw the lying board places it on its own. When
+one places it more than 2 degrees or 10 mm from where the best view does, Solve
+warns, because their poses in `calibration.toml` disagree by as much.
 
 When the board was still moving at the end, or no camera saw it, Solve skips the
 step and says why. The calibration then keeps the reference camera's frame.
-Leave the box off on a rig with no flat surface in view, or when your analysis
-sets its own orientation. The box is remembered for each profile.
+Leave the box off on a rig with no flat surface in view. On the reference rig,
+tick it unless the rig's owner says otherwise. The box is remembered for each
+profile.
 
 ### Finish
 
-Flip Calibrate off to finish. Panopticon writes `codet_frames.json` beside the
-videos for the solve ([section 6](#6-solve)). The videos are then finalised as
-for a recording ([section 9](#9-after-you-stop)).
+1. Flip Calibrate off. The state label reads `Finishing…` while the cameras
+   stop and the capture is saved. Calibrate, Record, Solve and Snapshot stay
+   grey until it ends, and the Calibrate toggle stays drawn in the on position
+   ([how long](OVERVIEW.md#16-state)). Do not flip it again.
+
+   ![The window just after Calibrate is off](images/calibrate_finishing.png)
+
+2. Wait for `IDLE`. The state label may read `ENCODING` on the way, with
+   `Encoding k/N` in the sidebar. The status bar then reads
+   `Calibration encoded: F frames, R fps`, and each pane is back at the idle
+   preview rate.
+
+   ![The window once the calibration is written](images/calibrate_stopped.png)
+
+   [Check the session](#check-the-session) says how to read the frame count.
+
+Panopticon writes `codet_frames.json` beside the videos for the solve
+([section 6](#6-solve)) when two or more cameras saw the board together. The
+videos are then finalised as for a recording ([section 9](#9-after-you-stop)).
+
+### Keep the cameras still
+
+A calibration describes the cameras as they were while the board was recorded.
+From the calibration to the last recording of the session, do not move,
+re-aim, refocus or re-mount any camera. If one is bumped, calibrate again
+before you record. A moved camera changes no frame count and raises no
+warning, and its 3D output is wrong.
 
 ---
 
 ## 6. Solve
 
-With the state at `IDLE`, press Solve. Solve runs `1_calibrate.py` with
-Panopticon's own Python on the calibration of the session the fields name,
-using the profile's `board_config`. It takes a few minutes. The
-[state label](OVERVIEW.md#16-state) shows the solve, and progress goes to the
-status bar and the log. Solve gives up after 30 minutes.
-[OVERVIEW.md](OVERVIEW.md#controls-that-hide-and-controls-that-disable) lists
-the controls that stay disabled until it ends.
+The [solve](GLOSSARY.md#solve) works out each camera's lens and position from
+the calibration you just took.
+
+1. Wait for the state label to read `IDLE`. Check that Date, Mouse 1 and Mouse 2
+   still name the session you calibrated, because Solve reads the calibration
+   from the folder those fields name.
+2. Press Solve. The [state label](OVERVIEW.md#16-state) turns purple and shows
+   the same word as a calibration. No camera captures while the solve runs, and
+   nothing is recorded. Calibrate, Record and Solve turn grey. The status bar
+   reads `Solving calibration...`, then the solve's progress, such as
+   `Using co-detection hints (...)`.
+
+   ![The window while Solve runs](images/solve_running.png)
+
+   This solve and the next picture ran on an earlier calibration of the same
+   rig, so Date reads 20260927.
+
+3. Wait. On the reference rig a solve of nine cameras took about a minute and
+   a half. Solve gives up after 30 minutes.
+   [OVERVIEW.md](OVERVIEW.md#controls-that-hide-and-controls-that-disable) lists
+   the controls that stay disabled until it ends.
+4. When it ends, the state label reads `IDLE` and the status bar reads
+   `Solved N of M cameras — copied to <path>`. N equal to M means every camera
+   is placed. A lower N, or a `Recalibration recommended` dialog, calls for a new
+   take ([Which cameras made it into the solve](#which-cameras-made-it-into-the-solve)).
+
+   ![The status bar once Solve has finished](images/solve_done.png)
+
+   In the picture every camera is placed, and the status bar ends with the
+   count of notes the solve wrote to `session.log`. The table below reads each
+   ending.
+5. Open `reprojection_error_histogram.png` in the session's `calibration/`
+   folder. Every bar should be green
+   ([Reading the pairwise calibration plot](#reading-the-pairwise-calibration-plot)).
+
+Solve runs `1_calibrate.py` with Panopticon's own Python on the calibration of
+the session the fields name, using the profile's `board_config`. The log gets
+the same progress as the status bar.
 
 `codet_frames.json` lists the triggers at which two or more cameras saw the
 board. When it matches the videos, the solve decodes only those frames.
@@ -562,14 +741,6 @@ each pair on at most 30, so that it finishes in minutes. For the best calibratio
 from full videos with a package that does bundle adjustment. sleap-anipose and
 aniposelib both read the `calibration.toml` this writes.
 
-### Keep the cameras still
-
-A calibration describes the cameras as they were while the board was recorded.
-From the calibration to the last recording of the session, do not move,
-re-aim, refocus or re-mount any camera. If one is bumped, calibrate again
-before you record. A moved camera changes no frame count and raises no
-warning, and its 3D output is wrong.
-
 ---
 
 ## 7. Optional: stimulation
@@ -584,13 +755,28 @@ Skip this section when the session has no optogenetic stimulation.
 
 Choosing a profile on a new computer, or switching to a profile on another
 serial port, flashes the board too. Fit the laser's own interlock if you need
-a hard gate.
+a hard gate. On the reference rig the laser runs from a CNI PSU-III power
+supply, and you switch the laser off there.
+
+The board can also reset at the other moments
+[When the board resets](#when-the-board-resets) lists. One routine covers them
+all:
+
+1. Keep the laser off from launch until the state label reads `RECORDING`.
+2. Switch the laser on once `RECORDING` shows. Start every paradigm with a
+   baseline block, at 0 Hz, long enough for this.
+3. Switch the laser off again when you stop the recording, and before the next
+   Calibrate, Apply or Test.
 
 Set up stimulation after calibrating and before recording, so that Record
 starts without a flash. Open the editor with the Stimulation button.
 [OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) names each of its controls.
 
 ![The stimulation editor](images/stim_clean.png)
+
+The picture shows a two-block loop on pin 53. The red dot marks the block the
+loop starts from, and the faded block is one that does not start a chain
+([OVERVIEW.md](OVERVIEW.md#1-canvas) explains each mark).
 
 ### Pins
 
@@ -615,6 +801,70 @@ camera would break cross-camera block-ID alignment.
 
 Pins 0 and 1 carry the board's serial link and are refused too, as is a pin
 the board does not have.
+
+### Build a paradigm
+
+[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) says what blocks and arrows
+mean, and describes each field and button and the rules a graph must follow.
+
+1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block. The block
+   appears on the canvas.
+2. To connect two blocks, drag from one of the dots on the first block's edge
+   to a dot on the next block. An arrow joins them.
+3. For a pause, add a block at [0 Hz](OVERVIEW.md#4-freq-hz). For a loop,
+   tick [Starting](OVERVIEW.md#7-starting) on one of its blocks. To stop the
+   recording when a block finishes, tick [Ending](OVERVIEW.md#8-ending) on it.
+4. Read the preview's caption before you press Apply to Arduino (Apply, from
+   here on). A pulse as long as its period
+   or longer holds the pin HIGH for the whole block
+   ([the waveform preview](OVERVIEW.md#the-waveform-preview)).
+5. Save the graph if you will use it again
+   ([Load and Save](OVERVIEW.md#11-apply-to-arduino)).
+
+### A worked paradigm
+
+This paradigm gives a 5-minute baseline, 30 s of 20 Hz stimulation and a
+5-minute post-period, and stops the recording at the end. It is three blocks
+on pin 53, joined in one chain:
+
+1. 0 Hz, 0 ms, 300 s: the baseline. The sequence starts with the first
+   trigger, so a baseline is a block at 0 Hz.
+2. 20 Hz, 10 ms, 30 s: 20 pulses a second, 10 ms each, at 20% duty.
+3. 0 Hz, 0 ms, 300 s, with Ending ticked.
+
+The status line then reads `Recording will stop 630 s after start.` Then:
+
+1. With the laser off, press [Test](OVERVIEW.md#10-test). A Test of a canvas
+   that changed since the last upload flashes the board first. The editor's
+   status line then counts down the test, and a sync LED
+   wired to pin 53, if you have one, follows the paradigm. The test runs the
+   whole paradigm, 630 s here, so press Stop Test once you have seen it start.
+   A copy with short baselines, saved under another name, is quicker to test.
+2. With the laser still off, press Apply and wait for
+   `Upload successful — press Record to run paradigm.`
+3. Close the editor or leave it open, and press Record ([section 8](#8-record)).
+   Switch the laser on once the state label reads `RECORDING`, during the
+   baseline.
+
+### Apply, then Record
+
+The paradigm is compiled into the board's sketch. Nothing you draw reaches the
+board until Apply compiles and uploads it. Record then
+sends its usual start command, and the board runs the paradigm from the first
+trigger on its own clock.
+
+Record refuses to start when the canvas and the board would disagree:
+
+| Dialog | Cause |
+|---|---|
+| `Apply the stimulation paradigm first` | The canvas holds a paradigm that was never Applied in this launch |
+| `Apply the edited paradigm first` | The canvas changed after the last Apply |
+| `Apply the empty canvas first` | The canvas is empty, but the board would still run the paradigm Applied earlier |
+| `Cannot record with this stim workflow` | A failed Apply, an upload in progress, or a graph problem the editor shows in red, such as a forbidden pin |
+| `Stop the stimulation test first` | A Test is running |
+
+The last two refuse Calibrate as well. To reuse a saved paradigm in a later
+launch, Load it and press Apply.
 
 ### When the board resets
 
@@ -653,58 +903,6 @@ the next power-up. For the same reason, do not end Panopticon from Task
 Manager during a flash: while the sidebar reads `Clearing stim firmware…` or a
 `Flashing …` state, or the editor reads `Compiling + uploading… (~30 s)`.
 
-### Apply, then Record
-
-The paradigm is compiled into the board's sketch. Nothing you draw reaches the
-board until Apply compiles and uploads it. Record then
-sends its usual start command, and the board runs the paradigm from the first
-trigger on its own clock.
-
-Record refuses to start when the canvas and the board would disagree:
-
-| Dialog | Cause |
-|---|---|
-| `Apply the stimulation paradigm first` | The canvas holds a paradigm that was never Applied in this launch |
-| `Apply the edited paradigm first` | The canvas changed after the last Apply |
-| `Apply the empty canvas first` | The canvas is empty, but the board would still run the paradigm Applied earlier |
-| `Cannot record with this stim workflow` | A failed Apply, an upload in progress, or a graph problem the editor shows in red, such as a forbidden pin |
-| `Stop the stimulation test first` | A Test is running |
-
-The last two refuse Calibrate as well. To reuse a saved paradigm in a later
-launch, Load it and press Apply.
-
-### Build a paradigm
-
-[OVERVIEW.md](OVERVIEW.md#the-stimulation-editor) says what blocks and arrows
-mean, and describes each field and button and the rules a graph must follow.
-
-1. Type Pin, Freq (Hz), PW (ms) and Dur (s), and press Create Block.
-2. Drag from a port on one block to a port on another to connect them.
-3. For a pause, add a block at [0 Hz](OVERVIEW.md#4-freq-hz). For a loop,
-   tick [Starting](OVERVIEW.md#7-starting) on one of its blocks. To stop the
-   recording when a block finishes, tick [Ending](OVERVIEW.md#8-ending) on it.
-4. Read the preview's caption before you Apply. A pulse as long as its period
-   or longer holds the pin HIGH for the whole block
-   ([the waveform preview](OVERVIEW.md#the-waveform-preview)).
-5. Save the graph if you will use it again
-   ([Load and Save](OVERVIEW.md#11-apply-to-arduino)).
-
-### A worked paradigm
-
-This paradigm gives a 5-minute baseline, 30 s of 20 Hz stimulation and a
-5-minute post-period, and stops the recording at the end. It is three blocks
-on pin 53, joined in one chain:
-
-1. 0 Hz, 0 ms, 300 s: the baseline. The sequence starts with the first
-   trigger, so a baseline is a block at 0 Hz.
-2. 20 Hz, 10 ms, 30 s: 20 pulses a second, 10 ms each, at 20% duty.
-3. 0 Hz, 0 ms, 300 s, with Ending ticked.
-
-The status line then reads `Recording will stop 630 s after start.` Press
-[Test](OVERVIEW.md#10-test) with the beam blocked, and watch the paradigm run
-once without recording. Then press Apply, wait for
-`Upload successful — press Record to run paradigm.`, and press Record.
-
 ### After a stimulated recording
 
 A recording with blocks on the canvas also writes, beside the videos:
@@ -730,8 +928,129 @@ Pulse-level evidence needs a photodiode on a spare board input.
 
 ## 8. Record
 
-Flip Record on. Panopticon runs these checks in order, and each one can refuse
-the start before anything is recorded:
+1. Put the animals in the arena and close it.
+2. If the session uses a paradigm, check that it is Applied
+   ([Apply, then Record](#apply-then-record)). While a paradigm is Applied, a
+   Record that follows a calibration flashes the board first, so keep the laser
+   off until the state label reads `RECORDING`
+   ([laser warning](#7-optional-stimulation)).
+3. Flip Record on. The state label reads `Checking capacity…`.
+4. If `Overwrite the existing data?` appears, read
+   [If the folder already holds data](#if-the-folder-already-holds-data) before
+   you answer. If a `Proceed?` dialog asks `Start anyway?`, read its reason
+   ([Capacity](#capacity)).
+5. The state label reads `Starting...`, then `RECORDING`. The Record toggle turns
+   red and Calibrate turns grey. Each pane's frame rate reads the trigger rate,
+   100 fps on the reference rig, and the status bar starts with `Capture healthy`.
+
+   ![Record on, every pane at the trigger rate](images/record_running.png)
+
+6. If a dialog refuses the start instead,
+   [The checks before the start](#the-checks-before-the-start) says which check
+   it came from. Nothing has been recorded.
+7. Watch the status bar while it records ([While it records](#while-it-records)).
+   Flip Record off to stop ([Stopping](#stopping)).
+
+### If the folder already holds data
+
+When the target `<mouse1>_<mouse2>_recording/` or `calibration/` folder holds a
+non-empty video,
+`raw.bin`, `stream.h264`, `blockids.npy`, `frametimes.npy`, `alignment.npz` or
+`stim_paradigm.json`, Panopticon asks `Overwrite the existing data?`. Cancel is
+the default and leaves everything as it was.
+
+> [!WARNING]
+> Yes deletes that folder, all of it except `calibration.toml`, once Panopticon
+> holds the trigger board's serial port. A start refused after that point,
+> such as a camera that does not arm or a board that does not acknowledge,
+> has already deleted the old data, and nothing brings it back. To keep an
+> earlier take, change Date, Mouse 1 or Mouse 2 first, or copy the folder
+> elsewhere.
+
+Panopticon deletes the whole folder so that no file of the old take sits
+beside the new one. A camera that recorded nothing would otherwise keep the
+old take's video and block IDs under the same names, and the alignment would
+mix two takes. `calibration.toml` stays because Solve copied it there for the
+session. In `calibration/` that means the previous solve's `calibration.toml`
+stays until the next Solve replaces it.
+
+The prompt concerns the acquisition folder only. The session folder, its
+`snapshots/` and the other acquisition's folder stay as they are.
+
+With `trigger_source: external`, the old folder is moved aside into a hidden
+folder beside it, and deleted only when the first trigger arrives. A start
+that ends before then puts it back.
+
+### While it records
+
+The state label reads `RECORDING`. Each pane's frame rate should read
+the trigger rate, 100 fps on the reference rig. One pane at about half the
+rate usually means that camera's exposure is over the ceiling
+([CONFIGURATION.md](CONFIGURATION.md#trigger_rate_limit)).
+
+With real-time kick-out (`realtime_kick: true`, the default), Panopticon
+drops every trigger that some camera missed while it records, so every video
+holds the same triggers. The status bar reports
+[capture health](OVERVIEW.md#17-status-bar). In kick-out it
+counts how many triggers the slowest camera is behind the fastest, against a
+cap of `kick_max_lag` (480 on the reference rig).
+
+| Status bar | Meaning |
+|---|---|
+| `Capture healthy — every camera within N trigger(s) of the leader` | Every camera is within a quarter of the cap |
+| `CAPTURE FALLING BEHIND: camN is N triggers behind the leader (cap C). Close other applications.` | Within three quarters of the cap. Nothing is lost yet |
+| `camN IS N TRIGGERS BEHIND THE LEADER (cap C): frames every camera captured are being dropped. Stop and investigate.` | Three quarters of the cap or more. At the cap, triggers are dropped from every camera. Stop, and look the message up in TROUBLESHOOTING.md |
+| `... RETIRED: camN` | That camera was [retired](GLOSSARY.md#retirement), and the others stay aligned |
+| `EVERY CAMERA IS RETIRED: nothing is being recorded. Stop the recording.` | Stop now |
+
+With kick-out off, the status bar reports how late the slowest camera's frames
+arrive. It reads `Capture healthy — keeping up with the trigger (max lag N ms)`
+below 0.25 s, `CAPTURE FALLING BEHIND: camN is S s behind real time and growing.`
+below 1 s, and `CAPTURE S s BEHIND REAL TIME (camN).` beyond that.
+
+When a camera stops delivering, the status bar reads:
+
+- `NO FRAMES from camN for S s`: one camera.
+- `NO FRAMES FROM ANY CAMERA for S s: the trigger board may have stopped.`,
+  with a `No frames from any camera` dialog. Check the board and its USB cable.
+  On a rig with stimulation pins, check the laser too, because a board without
+  power leaves those pins undriven.
+
+A camera near its shutdown temperature puts `CAMERA TEMPERATURE: camN T C ...`
+at the start of the status bar. The alert fires `thermal_warn_margin_c` below
+the shutdown temperature the camera reports (at 79 °C on the reference rig's
+cameras, which shut down at 81 °C), and whenever a camera reports its own
+over-temperature state.
+[CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) says how a camera that
+reports no shutdown temperature is judged. The log then says once how it is
+judged (`[acq] thermal watch: camN reports no shutdown temperature ...`), or
+that it cannot be watched
+(`[acq] thermal watch: camN reports neither a shutdown temperature nor a temperature status ...`).
+
+When the alert appears, stop the recording at a point that suits the
+experiment, and let the cameras cool before the next take. A camera that
+reaches its shutdown temperature stops sending frames.
+
+The warning reaches `WARNINGS.txt` when the recording lost frames, and always
+when a camera reached its shutdown point. `camera_thermals` in
+`session_metadata.json` records each camera's temperatures. Read `temp_max_c`
+there, because the current temperature falls as soon as the load comes off.
+
+### Stopping
+
+Flip Record off, or let a block marked Ending flip it. The state label then names
+each step of [section 9](#9-after-you-stop). Panopticon sends the
+board a stop and keeps the serial port open, so the next recording does not
+reset the board. If the board does not confirm the stop, a
+`Trigger board did not confirm the stop` dialog appears. The board may still
+be triggering, and a looping paradigm may still drive its pin. Switch the laser
+off, then power-cycle the board: unplug its USB cable, and its power supply if
+it has one, wait 5 s, and plug it back in.
+
+### The checks before the start
+
+When you flip Record on, Panopticon runs these checks in order, and each one can
+refuse the start before anything is recorded:
 
 1. The stimulation editor: a Test running, a failed Apply, or a canvas the
    board does not carry ([section 7](#apply-then-record)).
@@ -784,109 +1103,29 @@ open. These refuse the start:
 - `encoder: raw` with `realtime_encode: true`
   ([CONFIGURATION.md](CONFIGURATION.md#encoder)).
 
-These warn, in a `Proceed?` dialog that asks `Start anyway?`:
+These warn, in a `Proceed?` dialog that asks `Start anyway?`. Nothing has been
+recorded yet, so No is always safe:
 
-- a disk that may be too small for a 10-minute recording (`Disk may be short`
-  or `Disk is tight`);
-- an NVENC session cap that could not be probed;
-- encoding on the CPU with libx264, because NVENC granted too few sessions or
-  because the CPU's speed was never measured;
-- raw capture (`realtime_encode: false`) that writes faster than 1.5 GiB/s, or
-  whose encode after the stop has to run on the CPU.
+- A disk that may be too small for a 10-minute recording (`Disk may be short`
+  or `Disk is tight`). Press No, then free space or choose a folder on a larger
+  drive ([section 3](#3-set-the-output-directory)). Yes suits only a take you
+  know is short.
+- An NVENC session cap that could not be probed. Press No, and read the
+  hardware check's report in the log
+  ([The hardware check](TROUBLESHOOTING.md#the-hardware-check)).
+- Encoding on the CPU with libx264, because NVENC granted too few sessions or
+  because the CPU's speed was never measured. Yes records, and the CPU encoder
+  competes with capture for cores ([CPU_ENCODE.md](CPU_ENCODE.md)). On a rig
+  that normally encodes on the GPU, press No and ask the rig's owner.
+- Raw capture (`realtime_encode: false`) that writes faster than 1.5 GiB/s, or
+  whose encode after the stop has to run on the CPU. Yes suits a drive rated
+  for that rate ([INSTALLATION.md](INSTALLATION.md#disk)).
 
 At the start, RAM never warns: a start that does not fit is refused, as above.
 
-### If the folder already holds data
-
-When the target `<mouse1>_<mouse2>_recording/` or `calibration/` folder holds a
-non-empty video,
-`raw.bin`, `stream.h264`, `blockids.npy`, `frametimes.npy`, `alignment.npz` or
-`stim_paradigm.json`, Panopticon asks `Overwrite the existing data?`. Cancel is
-the default and leaves everything as it was.
-
-> [!WARNING]
-> Yes deletes that folder, all of it except `calibration.toml`, once Panopticon
-> holds the trigger board's serial port. A start refused after that point,
-> such as a camera that does not arm or a board that does not acknowledge,
-> has already deleted the old data, and nothing brings it back. To keep an
-> earlier take, change Date, Mouse 1 or Mouse 2 first, or copy the folder
-> elsewhere.
-
-Panopticon deletes the whole folder so that no file of the old take sits
-beside the new one. A camera that recorded nothing would otherwise keep the
-old take's video and block IDs under the same names, and the alignment would
-mix two takes. `calibration.toml` stays because Solve copied it there for the
-session. In `calibration/` that means the previous solve's `calibration.toml`
-stays until the next Solve replaces it.
-
-The prompt concerns the acquisition folder only. The session folder, its
-`snapshots/` and the other acquisition's folder stay as they are.
-
-With `trigger_source: external`, the old folder is moved aside into a hidden
-folder beside it, and deleted only when the first trigger arrives. A start
-that ends before then puts it back.
-
-### While it records
-
-The state label reads `RECORDING`. Each pane's frame rate should read
-the trigger rate, 100 fps on the reference rig. One pane at about half the
-rate usually means that camera's exposure is over the ceiling
-([CONFIGURATION.md](CONFIGURATION.md#trigger_rate_limit)).
-
-With real-time kick-out (`realtime_kick: true`, the default), Panopticon
-drops every trigger that some camera missed while it records, so every video
-holds the same triggers. The status bar reports
-[capture health](OVERVIEW.md#17-status-bar). In kick-out it
-counts how many triggers the slowest camera is behind the fastest, against a
-cap of `kick_max_lag` (480 on the reference rig).
-
-| Status bar | Meaning |
-|---|---|
-| `Capture healthy — every camera within N trigger(s) of the leader` | Every camera is within a quarter of the cap |
-| `CAPTURE FALLING BEHIND: camN is N triggers behind the leader (cap C). Close other applications.` | Within three quarters of the cap. Nothing is lost yet |
-| `camN IS N TRIGGERS BEHIND THE LEADER (cap C): frames every camera captured are being dropped. Stop and investigate.` | Three quarters of the cap or more. At the cap, triggers are dropped from every camera |
-| `... RETIRED: camN` | That camera was retired, and the others stay aligned |
-| `EVERY CAMERA IS RETIRED: nothing is being recorded. Stop the recording.` | Stop now |
-
-With kick-out off, the status bar reports how late the slowest camera's frames
-arrive. It reads `Capture healthy — keeping up with the trigger (max lag N ms)`
-below 0.25 s, `CAPTURE FALLING BEHIND: camN is S s behind real time and growing.`
-below 1 s, and `CAPTURE S s BEHIND REAL TIME (camN).` beyond that.
-
-When a camera stops delivering, the status bar reads:
-
-- `NO FRAMES from camN for S s`: one camera.
-- `NO FRAMES FROM ANY CAMERA for S s: the trigger board may have stopped.`,
-  with a `No frames from any camera` dialog. Check the board and its USB cable.
-  On a rig with stimulation pins, check the laser too, because a board without
-  power leaves those pins undriven.
-
-A camera near its shutdown temperature puts `CAMERA TEMPERATURE: camN T C ...`
-at the start of the status bar. The alert fires `thermal_warn_margin_c` below
-the shutdown temperature the camera reports (at 79 °C on the reference rig's
-cameras, which shut down at 81 °C), and whenever a camera reports its own
-over-temperature state.
-[CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) says how a camera that
-reports no shutdown temperature is judged. The log then says once how it is
-judged (`[acq] thermal watch: camN reports no shutdown temperature ...`), or
-that it cannot be watched
-(`[acq] thermal watch: camN reports neither a shutdown temperature nor a temperature status ...`).
-
-The warning reaches `WARNINGS.txt` when the recording lost frames, and always
-when a camera reached its shutdown point. `camera_thermals` in
-`session_metadata.json` records each camera's temperatures. Read `temp_max_c`
-there, because the current temperature falls as soon as the load comes off.
-
-### Stopping
-
-Flip Record off, or let a block marked Ending flip it. Panopticon sends the
-board a stop and keeps the serial port open, so the next recording does not
-reset the board. If the board does not confirm the stop, a
-`Trigger board did not confirm the stop` dialog appears. The board may still
-be triggering, and a looping paradigm may still drive its pin. Power-cycle the
-board and switch the laser off.
-
 ### Your own trigger source
+
+Skip this unless your profile sets `trigger_source: external`.
 
 With `trigger_source: external`, a pulse generator or DAQ that you run
 triggers the cameras, and Panopticon opens no serial port
@@ -919,7 +1158,10 @@ before the first pulse, so a recording, or a calibration at
 
 ## 9. After you stop
 
-The state label names each step as it runs.
+The state label names each step as it runs. The first is `Finishing…`, and
+the Record toggle stays drawn in the on position until it ends:
+
+![The window just after Record is off](images/record_finishing.png)
 
 `Finishing…`: the encoders drain and the cameras return to free-run preview.
 Panopticon writes each camera's `blockids.npy` and `frametimes.npy`, the
@@ -952,7 +1194,38 @@ What follows depends on the mode:
   A dialog says why, and [Check the block IDs](#check-the-block-ids) gives the
   options.
 
-`IDLE`: the session is complete.
+`IDLE`: the session is complete. Wait for `IDLE` before the next acquisition.
+
+### Check the session
+
+Check the session before the animal goes back, while the rig is still set up:
+
+1. The status bar reads `Recording encoded: F frames, R fps`. One frame count
+   means every camera kept the same number. A range (`F1-F2 frames`) means
+   they did not. `k CAMERA(S) FAILED: camN` names cameras with no usable
+   video. The rate comes from the cameras' own timestamps.
+
+   ![The status bar once the recording is written](images/record_stopped.png)
+
+2. No `WARNINGS.txt` anywhere under the acquisition folder. When the take has
+   warnings, the status bar ends with their count and the file's path, such as
+   `| 1 warning in <folder>\WARNINGS.txt`. No count means none. To be sure,
+   open the recording folder in File Explorer and type `WARNINGS` in its
+   search box ([Warnings](#warnings)).
+3. When step 1 or 2 shows a problem, the block IDs
+   ([Check the block IDs](#check-the-block-ids)). Panopticon already ran the
+   block-ID rate check when the recording stopped, and wrote any finding to
+   `WARNINGS.txt`.
+4. One frame of each video. Open an mp4 and check that the animal is neither
+   black nor blown out, which the preview cannot show
+   ([OVERVIEW.md](OVERVIEW.md#1-camera-grid) says how it differs from a
+   recording).
+   For more light, add infrared illumination first, then exposure, then gain
+   ([CONFIGURATION.md](CONFIGURATION.md#pfs_path)).
+5. After a stimulated recording, the stimulation files
+   ([section 7](#after-a-stimulated-recording)).
+
+A clean session ends with no dialog.
 
 ### Warnings
 
@@ -981,33 +1254,20 @@ deleted. Do not start another recording into that folder. Once the cause is
 fixed, `uv run python 0_encode.py "<folder>"` turns them into mp4s. The cameras
 are closed. Switch profile and back, or restart Panopticon, to reopen them.
 
-### Check the session
-
-Check the session before the animal goes back, while the rig is still set up:
-
-1. The status bar reads `Recording encoded: F frames, R fps`. One frame count
-   means every camera kept the same number. A range (`F1-F2 frames`) means
-   they did not. `k CAMERA(S) FAILED: camN` names cameras with no usable
-   video. The rate comes from the cameras' own timestamps.
-2. No `WARNINGS.txt` anywhere under the acquisition folder.
-3. The block IDs ([Check the block IDs](#check-the-block-ids)).
-4. One frame of each video. Open an mp4 and check that the animal is neither
-   black nor blown out, which the preview cannot show
-   ([OVERVIEW.md](OVERVIEW.md#1-camera-grid) says how it differs from a
-   recording).
-   For more light, add infrared illumination first, then exposure, then gain
-   ([CONFIGURATION.md](CONFIGURATION.md#pfs_path)).
-5. After a stimulated recording, the stimulation files
-   ([section 7](#after-a-stimulated-recording)).
-
-A clean session ends with no dialog.
-
 ### Check the block IDs
 
-`blockids.npy` holds each frame's trigger number. Check the recording with:
+`blockids.npy` holds each frame's trigger number. To check a recording:
+
+1. In File Explorer, open the session folder. Hold Shift, right-click the
+   `<mouse1>_<mouse2>_recording` folder and choose Copy as path. Windows copies
+   the path with quotes around it.
+2. Open PowerShell in the repository folder: in File Explorer, open that
+   folder, click the address bar, type `powershell` and press Enter.
+3. Type the command below. In place of `"<recording folder>"`, press Ctrl+V to
+   paste the path, then press Enter.
 
 ```
-uv run python 2_align.py <recording folder>
+uv run python 2_align.py "<recording folder>"
 ```
 
 It reads the frame rate from the acquisition's `session_metadata.json`, and
@@ -1056,6 +1316,25 @@ Quitting sends the board a stop whenever Panopticon holds its serial port. If
 the board does not confirm it, the `Trigger board did not confirm the stop`
 dialog of [Stopping](#stopping) appears before the window closes. Power-cycle
 the board and switch the laser off.
+
+### The next animals
+
+Changing Mouse 1 or Mouse 2 starts a new session folder, with no calibration
+in it. For the next animals, either:
+
+- calibrate again, then Solve and Record as above; or
+- if no camera has moved since the last calibration, copy `calibration.toml`
+  from the first session's `calibration/` folder into the new
+  `<mouse1>_<mouse2>_recording/` folder, then Record. Create that folder in
+  File Explorer if it does not exist yet.
+
+Recording into a folder that holds only `calibration.toml` raises no overwrite
+prompt, and the file stays.
+
+### When you are done
+
+At `IDLE`, close the window. It closes without asking. Switch the laser off,
+and copy the session folders to wherever your lab keeps its data.
 
 ---
 
@@ -1170,54 +1449,63 @@ An `aligned/` folder beside a clean recording usually means someone ran
 `2_align.py` to check it. Its `alignment.json` then reads `replaced: false`
 with every `dropped` at 0.
 
-### Two example sessions
+### An example session
 
-A calibration-only session on N cameras:
-
-```
-data/
-└── 20260904/
-    └── m1_m2/
-        ├── session_metadata.json
-        ├── snapshots/
-        │   └── 20260904_101500/
-        │       └── cam1.png … camN.png
-        └── calibration/
-            ├── session_metadata.json
-            ├── session.log
-            ├── codet_frames.json
-            ├── calibration.toml
-            ├── calibration_report.json
-            ├── reprojection_error_histogram.png
-            └── cam1/ … camN/
-                ├── 20260904-m1_m2-camK-calibration.mp4
-                ├── blockids.npy
-                └── frametimes.npy
-```
-
-Solve also creates `m1_m2_recording/`, holding only the copied
-`calibration.toml`.
-
-A stimulated recording in the same session:
+A session on the reference rig, recorded with Mouse 1 `demo1` and Mouse 2 `demo2`,
+with one calibration, one recording and one snapshot:
 
 ```
-data/20260904/m1_m2/m1_m2_recording/
-├── calibration.toml          copied by Solve
-├── skeleton.json             the profile's skeleton, for LUC3D
-├── session_metadata.json
-├── session.log
-├── stim_paradigm.json
-├── stim_paradigm.ino
-├── stim_trace.csv
-└── cam1/ … camN/
-    ├── 20260904-m1_m2-camK-recording.mp4
-    ├── blockids.npy
-    └── frametimes.npy
+demo1_demo2/
+├── calibration/
+│   ├── cam1/
+│   │   ├── 20260928-demo1_demo2-cam1-calibration.mp4
+│   │   ├── blockids.npy
+│   │   └── frametimes.npy
+│   ├── cam2/ … cam9/
+│   ├── session.log
+│   └── session_metadata.json
+├── demo1_demo2_recording/
+│   ├── cam1/
+│   │   ├── 20260928-demo1_demo2-cam1-recording.mp4
+│   │   ├── blockids.npy
+│   │   └── frametimes.npy
+│   ├── cam2/ … cam9/
+│   ├── session.log
+│   ├── session_metadata.json
+│   └── skeleton.json
+├── snapshots/
+│   └── 20260928_095215/
+│       └── cam1.png … cam9.png
+└── session_metadata.json
 ```
 
-A clean take has no `WARNINGS.txt`, and no `stream.h264` or `raw.bin` left
-behind. A take whose cameras kept different frames without kick-out also has
-`aligned/`, and so does one checked later with `2_align.py`.
+`cam2/ … cam9/` stands for the other camera folders, which hold the same files
+as `cam1/`. The calibration saw no board, so it has no `codet_frames.json`, and it
+was not solved. The recording ran with an empty canvas, so it has no
+stimulation files.
+
+A solved calibration on the same rig also holds the solve's files. Solve has
+created the recording folder to hold its copy of `calibration.toml`:
+
+```
+demo1_demo2/
+├── calibration/
+│   ├── cam1/ … cam9/
+│   ├── calibration.toml
+│   ├── calibration_report.json
+│   ├── codet_frames.json
+│   ├── reprojection_error_histogram.png
+│   ├── session.log
+│   └── session_metadata.json
+└── demo1_demo2_recording/
+    └── calibration.toml
+```
+
+A stimulated recording also holds `stim_paradigm.json`, `stim_paradigm.ino` and
+`stim_trace.csv` beside its `session.log`. A clean take has no `WARNINGS.txt`,
+and no `stream.h264` or `raw.bin` left behind. A take whose cameras kept
+different frames without kick-out also has `aligned/`, and so does one checked
+later with `2_align.py`.
 
 ### The command-line tools
 
@@ -1236,5 +1524,6 @@ For FLIR cameras, `probe_flir.py` tests each camera before a first recording
 
 ---
 
-For every message Panopticon shows, with its cause and fix, see
+Next: [CONFIGURATION.md](CONFIGURATION.md) describes every setting of a
+profile. When Panopticon shows a message, look it up in
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

@@ -1,5 +1,7 @@
 # Configuration
 
+Previous: [WORKFLOW.md](WORKFLOW.md). Next: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 A Panopticon rig is described by one YAML file in `profiles/`, the rig profile.
 This page lists every setting a profile can hold, what each one does, when to
 change it and what happens when it is wrong. It also covers the camera settings

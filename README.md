@@ -12,6 +12,9 @@ support is in testing.
 
 ![The main window with nine cameras in live preview](docs/images/main_idle.png)
 
+New here? Read [INSTALLATION.md](docs/INSTALLATION.md), then
+[OVERVIEW.md](docs/OVERVIEW.md), then [WORKFLOW.md](docs/WORKFLOW.md).
+
 ## What it does
 
 - Fires every camera from one TTL [trigger](docs/GLOSSARY.md#trigger).
@@ -65,7 +68,8 @@ any value above 0.
 
 The `sim` profile runs three simulated cameras and a simulated trigger board, so
 preview, Calibrate, Record and the stimulation editor's Apply all work with no hardware
-and no camera SDK. In PowerShell, with [uv](https://docs.astral.sh/uv/) and Git:
+and no camera SDK. In PowerShell, with uv and Git installed
+([INSTALLATION.md](docs/INSTALLATION.md#2-install-the-software) shows how):
 
 ```powershell
 git clone https://github.com/talmolab/panopticon.git
@@ -86,8 +90,9 @@ acquisition, and repeats the note when the acquisition ends.
    ([INSTALLATION.md](docs/INSTALLATION.md#2-install-the-software); FLIR cameras:
    [FLIR.md](docs/FLIR.md#1-install)).
 2. Clone the repository and run `uv sync`.
-3. Copy the closest template from `profiles/templates/` into `profiles/`, set its
-   `name`, and edit it ([CONFIGURATION.md](docs/CONFIGURATION.md)).
+3. Write your rig's profile, the YAML file that describes it. Copy the closest template
+   from `profiles/templates/` into `profiles/`, set its `name`, and edit it
+   ([INSTALLATION.md step 7](docs/INSTALLATION.md#step-7--write-the-rig-profile), [CONFIGURATION.md](docs/CONFIGURATION.md)).
 4. Run `uv run gui.py --profile <name>`. Panopticon remembers the profile, so later
    launches need only `uv run gui.py`. A launch with no profile chosen opens no camera
    and no serial port until you choose one in the sidebar.
@@ -127,19 +132,21 @@ recording folder.
 
 ## Documentation
 
-| Page | What it covers |
+Read the first three pages in order. The others are reference pages.
+
+| Page | When to read it |
 |---|---|
-| [INSTALLATION.md](docs/INSTALLATION.md) | Sizing the hardware, building the network, installing, the first launch |
-| [CONFIGURATION.md](docs/CONFIGURATION.md) | Every profile field, the templates, and setting up a new rig step by step |
-| [FLIR.md](docs/FLIR.md) | FLIR cameras: install, wiring, profile, the diagnostic probe, what to send back |
-| [WORKFLOW.md](docs/WORKFLOW.md) | A session from start to finish: calibrate, solve, record, check the result |
-| [OVERVIEW.md](docs/OVERVIEW.md) | Every control in the window, the calibration coverage display, the stimulation editor |
-| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | The messages Panopticon shows, with their causes and fixes |
-| [SIMULATION.md](docs/SIMULATION.md) | The simulated rig and its fault settings |
-| [CPU_ENCODE.md](docs/CPU_ENCODE.md) | The libx264 encoder |
-| [INTERNALS.md](docs/INTERNALS.md) | How capture, alignment, encoding and calibration work, and adding a camera backend |
-| [GLOSSARY.md](docs/GLOSSARY.md) | The terms these pages use |
-| [HISTORY.md](docs/HISTORY.md) | Dated decisions, measurements and dead ends |
+| [INSTALLATION.md](docs/INSTALLATION.md) | Once per computer, and to build or extend a rig: the hardware, the install, the first launch |
+| [OVERVIEW.md](docs/OVERVIEW.md) | Before your first session: every control in the window |
+| [WORKFLOW.md](docs/WORKFLOW.md) | At every session: calibrate, solve, record and check the result, step by step |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | When you write or change a profile: every field and the templates |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | When Panopticon shows a message you do not understand |
+| [GLOSSARY.md](docs/GLOSSARY.md) | When a term is new to you |
+| [FLIR.md](docs/FLIR.md) | FLIR cameras only. It replaces parts of INSTALLATION.md |
+| [SIMULATION.md](docs/SIMULATION.md) | To try Panopticon, or develop it, without hardware |
+| [CPU_ENCODE.md](docs/CPU_ENCODE.md) | When the GPU grants too few NVENC sessions and the CPU encodes |
+| [INTERNALS.md](docs/INTERNALS.md) | For maintainers: how capture, alignment, encoding and calibration work |
+| [HISTORY.md](docs/HISTORY.md) | For maintainers: dated decisions, measurements and dead ends |
 
 ## Contributing, bug reports and citing
 

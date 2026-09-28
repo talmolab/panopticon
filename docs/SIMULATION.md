@@ -1,5 +1,7 @@
 # The simulated rig
 
+Previous: [FLIR.md](FLIR.md). Next: [CPU_ENCODE.md](CPU_ENCODE.md).
+
 Panopticon runs with no cameras, no trigger board, no camera SDK and no NVIDIA
 GPU. The `sim` profile replaces the camera backend with
 `gui_app/backends/sim.py` and the serial port with
