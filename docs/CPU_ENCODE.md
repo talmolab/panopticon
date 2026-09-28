@@ -1,5 +1,7 @@
 # CPU H.264 encoding (libx264)
 
+Previous: [SIMULATION.md](SIMULATION.md). Next: [INTERNALS.md](INTERNALS.md), for maintainers.
+
 Panopticon encodes in real time with NVENC, on the GPU. This page covers the
 other real-time encoder: `gui_app/cpu_encode.py`, which encodes with libx264 in
 one `ffmpeg` child process per camera. It is the fallback for a machine whose

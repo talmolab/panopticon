@@ -1,5 +1,7 @@
 # Troubleshooting
 
+Previous: [CONFIGURATION.md](CONFIGURATION.md). Next: [GLOSSARY.md](GLOSSARY.md).
+
 This page lists the messages Panopticon prints, with what each means and what to
 do. Search the page for a few words of your message. The quoted text is what
 Panopticon prints, with `<...>` in place of the parts that change, such as a

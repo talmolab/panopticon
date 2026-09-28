@@ -1,5 +1,7 @@
 # FLIR cameras
 
+Previous: [GLOSSARY.md](GLOSSARY.md). Next: [SIMULATION.md](SIMULATION.md).
+
 Panopticon runs FLIR (Teledyne) machine-vision cameras, GigE or USB3, through
 Teledyne's Spinnaker SDK. This page takes a FLIR rig from installation to a first
 test recording, and says what to send back to the maintainers.
@@ -91,7 +93,11 @@ Panopticon looks for the library in `C:\Program Files\Teledyne\Spinnaker`, where
 Spinnaker 4.x installs, and in the folders older SDKs used (`FLIR Systems` and
 `Point Grey Research` under `C:\Program Files`), then on `PATH`. If your SDK is
 elsewhere, set `camera.flir.sdk_dir` in the profile, or the
-`PANOPTICON_SPINNAKER_DIR` environment variable, to its install folder.
+`PANOPTICON_SPINNAKER_DIR` environment variable, to its install folder. That
+folder may also be `bin64\vs2015` inside the install, which holds
+`SpinnakerC_v140.dll`. Do not add that folder to `PATH`: it also holds Qt
+libraries that would replace PyQt5's, and Panopticon never adds it itself. The
+library is 64-bit, so Panopticon needs a 64-bit Python, which uv installs.
 
 Panopticon's binding follows the Spinnaker 4.x C headers. An SDK that lacks a
 function Panopticon calls is refused when the library loads, and the message
