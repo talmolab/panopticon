@@ -850,10 +850,14 @@ def _create_pinned(width, height, qp, fps, preset, tuning, notes, context):
     return _create_session(width, height, qp, fps, preset, tuning, notes)
 
 
-#: How long the launch check holds the encoder's stream before each Encode.
-#: It must outlast one Encode call plus one frame copy at the recording's
-#: frame size. A stall too short makes the check fail, never pass.
+#: How long the launch check first holds the encoder's stream before each
+#: Encode. It must outlast one Encode call plus one frame copy at the
+#: recording's frame size. A stall too short shows nothing, never a pass.
 _CHECK_STALL_MS = 20
+#: Attempts the launch check makes, each with a stall _CHECK_STALL_GROWTH
+#: times longer than the last, while a stall ends before its rewrite.
+_CHECK_ATTEMPTS = 3
+_CHECK_STALL_GROWTH = 4
 
 
 def pinned_upload_matches_host(width: int, height: int,
@@ -887,9 +891,11 @@ def pinned_upload_matches_host(width: int, height: int,
     encode of the reference pictures. A copy queued anywhere else has read
     the inverse by then. The encoder has one staging buffer, so each Encode
     also waits on the previous upload's event; without that wait it would
-    overwrite a rewrite before the upload read it. It holds one NVENC
-    session at a time, and its run time grows with the frame size and
-    ``frames``.
+    overwrite a rewrite before the upload read it. An attempt in which a
+    stall ended before its rewrite decides nothing, and the check repeats on
+    a fresh encoder with a longer stall, up to _CHECK_ATTEMPTS times. It
+    holds one NVENC session at a time, and its run time grows with the frame
+    size, ``frames`` and the attempts it needs.
     """
     if context not in CONTEXT_MODES:
         raise ValueError(f"nvenc context must be one of {CONTEXT_MODES}, "
@@ -927,19 +933,47 @@ def pinned_upload_matches_host(width: int, height: int,
         finally:
             del host
             gc.collect()
-        try:
-            pinned = _build_pinned(w, h, 21, 100, "P3", "low_latency", None,
-                                   context, log=False, buffers=1)
-        except (_PinnedSetupError, NvencUnavailable) as e:
-            print(f"[nvenc] pinned upload check could not run ({where}): {e}",
-                  flush=True)
-            return None
-        try:
-            ok, why = _stalled_encode(pinned, frames, frame, reference, want)
-        except Exception as e:
-            # The pinned encoder exists but cannot encode, so every real
-            # pinned encoder would fail on its first frame.
-            ok, why = False, f"the pinned encoder failed to encode: {e}"
+        # RULE: an attempt whose stall ended before a rewrite shows nothing,
+        # and the check tries again with a longer stall; only a covered
+        # attempt decides. REASON: the rewrite runs once Encode has returned,
+        # and a busy host (the preview and the grab threads starting beside
+        # the check) can delay it past the stall. The copy then reads the
+        # inverse picture even on a sound build, so the bitstream differs
+        # for a reason that says nothing about the library.
+        stall_ms = _CHECK_STALL_MS
+        ok, why = None, ""
+        for attempt in range(1, _CHECK_ATTEMPTS + 1):
+            try:
+                pinned = _build_pinned(w, h, 21, 100, "P3", "low_latency",
+                                       None, context, log=False, buffers=1)
+            except (_PinnedSetupError, NvencUnavailable) as e:
+                print(f"[nvenc] pinned upload check could not run ({where}): "
+                      f"{e}", flush=True)
+                return None
+            try:
+                ok, why = _stalled_encode(pinned, frames, frame, reference,
+                                          want, stall_ms)
+            except Exception as e:
+                # The pinned encoder exists but cannot encode, so every real
+                # pinned encoder would fail on its first frame.
+                ok, why = False, f"the pinned encoder failed to encode: {e}"
+            finally:
+                pinned.Close()
+                pinned = None
+                gc.collect()
+            if ok is not None:
+                break
+            if attempt < _CHECK_ATTEMPTS:
+                print(f"[nvenc] pinned upload check inconclusive ({where}): "
+                      f"{why}; trying again with a "
+                      f"{stall_ms * _CHECK_STALL_GROWTH} ms stall", flush=True)
+                stall_ms *= _CHECK_STALL_GROWTH
+        if ok is None:
+            ok, why = False, (f"the stall ended before a rewrite on all "
+                              f"{_CHECK_ATTEMPTS} attempts, up to {stall_ms} "
+                              f"ms, or the upload events report completion "
+                              f"without waiting, so the ordering was not "
+                              f"shown ({why})")
         if ok:
             print(f"[nvenc] pinned upload check passed ({where}): {why}",
                   flush=True)
@@ -953,8 +987,11 @@ def pinned_upload_matches_host(width: int, height: int,
         gc.collect()
 
 
-def _stalled_encode(enc, frames, frame, reference, want):
-    """The pinned half of pinned_upload_matches_host: (verdict, reason)."""
+def _stalled_encode(enc, frames, frame, reference, want, stall_ms):
+    """The pinned half of pinned_upload_matches_host: (verdict, reason).
+
+    The verdict is None when a stall ended before its rewrite: the attempt
+    then shows nothing either way."""
     drv, ev, ysize = enc._drv, enc._events[0], enc._ysize
     got = []
     frame[:ysize] = reference(0)
@@ -965,7 +1002,7 @@ def _stalled_encode(enc, frames, frame, reference, want):
         np.invert(pic, out=frame[:ysize])
         drv.ctx_push(enc._ctx)
         try:
-            drv.stream_stall(enc._stream, _CHECK_STALL_MS)
+            drv.stream_stall(enc._stream, stall_ms)
         finally:
             drv.ctx_pop()
         got.append(bytes(enc.Encode(frame)))
@@ -980,18 +1017,21 @@ def _stalled_encode(enc, frames, frame, reference, want):
     got.append(bytes(enc.EndEncode()))
     stalled = frames - 1
     same = b"".join(got) == b"".join(want)
-    detail = (f"{stalled} stalled frames, the stall still held the stream "
-              f"after {covered} of {stalled} rewrites, {enc.event_waits} "
-              f"upload waits")
+    detail = (f"{stalled} stalled frames of {stall_ms} ms, the stall still "
+              f"held the stream after {covered} of {stalled} rewrites, "
+              f"{enc.event_waits} upload waits")
+    # Coverage first: a rewrite made after its stall ended leaves the copy
+    # reading the inverse picture on a sound build too, so a bitstream that
+    # differs then proves nothing.
+    if covered != stalled:
+        return None, (f"the stall had ended before {stalled - covered} "
+                      f"rewrite(s) ({detail})")
     if not same:
         return False, (f"the pinned bitstream differs from the host path's. A "
                        f"staging buffer was read before its rewrite, because "
                        f"PyNvVideoCodec does not copy on the encoder's stream, "
                        f"or it was overwritten before its upload, because the "
                        f"event waits did not hold ({detail})")
-    if covered != stalled:
-        return False, (f"the stall had ended before the rewrite, so the "
-                       f"ordering was not shown ({detail})")
     return True, f"the library copies on the encoder's stream ({detail})"
 
 
