@@ -5,71 +5,49 @@
 
 <p align="center">Hardware-triggered multi-camera video for 3D animal pose estimation.</p>
 
-Panopticon records many cameras at once from one hardware trigger, and encodes their
-video on the GPU as it records. Every camera's video holds the same triggers, so frame N
-is the same instant in every view. It runs on Windows with Basler cameras, and FLIR
-support is in testing.
+Panopticon records video from many machine-vision cameras at once. One hardware trigger fires every camera, so frame N is the same instant in every view, and the GPU encodes the video while it records. It also records and solves the ChArUco calibration that 3D pose estimation needs, and it can run optogenetic stimulation from the same trigger board.
+
+It runs on Windows with Basler cameras, and FLIR support is in testing ([FLIR.md](docs/FLIR.md)).
 
 ![The main window with nine cameras in live preview](docs/images/main_idle.png)
 
-New here? Read [INSTALLATION.md](docs/INSTALLATION.md), then
-[OVERVIEW.md](docs/OVERVIEW.md), then [WORKFLOW.md](docs/WORKFLOW.md).
-
 ## What it does
 
-- Fires every camera from one TTL [trigger](docs/GLOSSARY.md#trigger).
-- Records each frame's [block ID](docs/GLOSSARY.md#block-id) and keeps only the triggers
-  every camera captured ([kick-out](docs/GLOSSARY.md#kick-out)), so the videos come out
-  aligned.
-- Encodes H.264 on the GPU with [NVENC](docs/GLOSSARY.md#nvenc) during the recording.
-- Checks each recording for a camera that ignored triggers, and writes what it finds to
-  `WARNINGS.txt`.
-- Records and solves a ChArUco calibration, and writes `calibration.toml` in
-  aniposelib's format.
-- Compiles an optogenetic stimulation paradigm into the trigger board's firmware, and
-  writes `stim_trace.csv`: for every frame, the stimulus the paradigm was set to
-  deliver. The file is modelled from the firmware and cannot show that the device fired.
+- Fires every camera from one TTL trigger.
+- Keeps only the triggers every camera caught ([kick-out](docs/GLOSSARY.md#kick-out)), so the videos come out aligned frame for frame.
+- Encodes H.264 on the GPU with NVENC as it records.
+- Checks every recording for a camera that ignored triggers, and writes what it finds to `WARNINGS.txt`.
+- Records and solves a ChArUco calibration, and writes `calibration.toml` in aniposelib's format.
+- Runs optogenetic stimulation from the trigger board, and writes `stim_trace.csv`: the stimulus it was set to deliver on each frame.
 
-The videos and the calibration open in [LUC3D](https://talmolab.github.io/luc3d/), a
-browser-based tool for multi-view pose annotation
-([repository](https://github.com/talmolab/luc3d), [docs](https://talmolab.github.io/luc3d-docs/)).
+The videos and the calibration open in [LUC3D](https://talmolab.github.io/luc3d/), a browser-based tool for multi-view pose annotation ([repository](https://github.com/talmolab/luc3d), [docs](https://talmolab.github.io/luc3d-docs/)).
 
-## Requirements
+## Getting started
 
-| Part | What Panopticon needs |
+New here? Read these pages in order:
+
+1. [**Installation**](docs/INSTALLATION.md): set up the computer and the rig, and launch Panopticon for the first time. You'll do this once per computer.
+2. [**Overview**](docs/OVERVIEW.md): a tour of every control in the window.
+3. [**Workflow**](docs/WORKFLOW.md): a whole session, step by step, from calibrating to checking the recording.
+
+The rest are reference pages, for when you need them:
+
+| Page | Read it when |
 |---|---|
-| Computer | 64-bit Windows. CPU, RAM and disk scale with camera count and frame rate. |
-| GPU | An NVIDIA GPU with NVENC. Each camera takes one encode session. |
-| Basler cameras | Supported, GigE and USB3, through Basler's pylon SDK. |
-| FLIR cameras | In testing, GigE and USB3, through Teledyne's Spinnaker SDK: [docs/FLIR.md](docs/FLIR.md). |
-| Camera settings | Mono8, the same frame size on every camera, and a hardware trigger input on each. |
-| Trigger | A hardware TTL signal. By default, an Arduino Mega 2560 that Panopticon programs, or [another Arduino board](docs/INSTALLATION.md#the-trigger-board). |
-| Network (GigE) | Links sized to the pixel rate, and jumbo frames on every adapter and switch port. |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | You write or change a rig profile |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Panopticon shows a message you don't understand |
+| [GLOSSARY.md](docs/GLOSSARY.md) | A term is new to you |
+| [FLIR.md](docs/FLIR.md) | You have FLIR cameras. It replaces parts of the installation |
+| [SIMULATION.md](docs/SIMULATION.md) | You want to try or develop Panopticon without hardware |
+| [CPU_ENCODE.md](docs/CPU_ENCODE.md) | The GPU can't encode every camera, and the CPU takes over |
+| [INTERNALS.md](docs/INTERNALS.md) | You maintain Panopticon, and want to know how capture, alignment, encoding and calibration work |
+| [HISTORY.md](docs/HISTORY.md) | You maintain Panopticon, and want the dated decisions, measurements and dead ends |
 
-More cameras need a more capable GPU. The driver caps how many NVENC sessions run at
-once, and that cap often limits the camera count, so Panopticon measures it before it
-records. When the GPU grants too few sessions, `encoder: auto` encodes on the CPU with
-libx264 if a benchmark at launch shows the CPU keeps up, and refuses to record if not.
-[INSTALLATION.md](docs/INSTALLATION.md) sizes the GPU, network, RAM and disk.
+## Quick start
 
-The trigger board also runs stimulation. A pulse generator or DAQ of your own can
-trigger the cameras instead (`trigger_source: external`), without stimulation.
+### Try it without hardware
 
-## Status
-
-Panopticon is beta software. The performance figures in these docs come from one
-reference rig, which runs nine Basler 5GigE cameras at 1920x1200 and 100 fps.
-[HISTORY.md](docs/HISTORY.md) records the measurements and the decisions behind them.
-The FLIR backend has run only against a simulated Spinnaker library. Capture in
-several worker processes (`capture_processes`) is experimental, and the window refuses
-any value above 0.
-
-## Try it without hardware
-
-The `sim` profile runs three simulated cameras and a simulated trigger board, so
-preview, Calibrate, Record and the stimulation editor's Apply all work with no hardware
-and no camera SDK. In PowerShell, with uv and Git installed
-([INSTALLATION.md](docs/INSTALLATION.md#2-install-the-software) shows how):
+You don't need a single camera to try Panopticon. The `sim` profile runs three simulated cameras and a simulated trigger board, so the preview, **Calibrate**, **Record** and the stimulation editor all work without a camera SDK. In PowerShell, with uv and Git installed ([how](docs/INSTALLATION.md#2-install-the-software)):
 
 ```powershell
 git clone https://github.com/talmolab/panopticon.git
@@ -78,97 +56,48 @@ uv sync --no-group rig
 uv run --no-group rig gui.py --profile sim
 ```
 
-`--no-group rig` leaves out pypylon and the NVENC bindings, and a plain `uv run` would
-install them again. With the rig group left out, the simulated rig encodes on the CPU
-with libx264. Panopticon says so in a dialog at launch, asks you to confirm before each
-acquisition, and repeats the note when the acquisition ends.
-[SIMULATION.md](docs/SIMULATION.md) describes the simulated rig.
+`--no-group rig` leaves out the camera and GPU packages, so the simulated rig encodes on the CPU instead, and Panopticon will remind you of that. Keep the flag on every `uv run`, or uv installs those packages again. [SIMULATION.md](docs/SIMULATION.md) shows you around.
 
-## Quick start on a real rig
+### On a real rig
 
-1. Install uv, Git, your cameras' SDK and `arduino-cli`
-   ([INSTALLATION.md](docs/INSTALLATION.md#2-install-the-software); FLIR cameras:
-   [FLIR.md](docs/FLIR.md#1-install)).
-2. Clone the repository and run `uv sync`.
-3. Write your rig's profile, the YAML file that describes it. Copy the closest template
-   from `profiles/templates/` into `profiles/`, set its `name`, and edit it
-   ([INSTALLATION.md step 7](docs/INSTALLATION.md#step-7--write-the-rig-profile), [CONFIGURATION.md](docs/CONFIGURATION.md)).
-4. Run `uv run gui.py --profile <name>`. Panopticon remembers the profile, so later
-   launches need only `uv run gui.py`. A launch with no profile chosen opens no camera
-   and no serial port until you choose one in the sidebar.
+1. Install uv, Git, your cameras' SDK and `arduino-cli`, then clone the repository and run `uv sync` ([INSTALLATION.md](docs/INSTALLATION.md#2-install-the-software), or [FLIR.md](docs/FLIR.md#1-install) for FLIR cameras).
+2. Copy the closest template from `profiles/templates/` into `profiles/`, give it a `name`, and fill in your rig ([step 7](docs/INSTALLATION.md#step-7--write-the-rig-profile)).
+3. Check that the profile's `serial_port` names the trigger board, then run `uv run gui.py --profile <name>`. Panopticon remembers the profile, so after that `uv run gui.py` is enough.
 
-Before step 4, check that the profile's `serial_port` names the trigger board. Opening
-the profile resets the device on that port, and reprograms it unless Panopticon last
-programmed it with the same firmware. Every pin of the board floats for a moment during
-the reset. Before you wire a stimulation device to the board, read the
-[stimulation warning in INSTALLATION.md, step 8](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware).
+> [!WARNING]
+> Opening a profile resets the trigger board on its `serial_port`, and every pin of the board floats briefly while it resets. Read the [stimulation warning](docs/INSTALLATION.md#step-8--flash-the-trigger-firmware) before you wire a stimulation device to the board.
 
-### Settings to change first
+## Requirements
 
-| Profile field | What to set |
+| Part | What Panopticon needs |
 |---|---|
-| [`name`](docs/CONFIGURATION.md#name) | The name shown in the profile dropdown and given to `--profile`. |
-| [`camera_backend`](docs/CONFIGURATION.md#camera_backend), [`pfs_path`](docs/CONFIGURATION.md#pfs_path), [`camera`](docs/CONFIGURATION.md#camera) | `basler` with a `.pfs` settings file, or `flir` with a `camera:` block. `sim` and `flir_sim` are simulated. |
-| [`camera_serials`](docs/CONFIGURATION.md#camera_serials), [`n_cameras`](docs/CONFIGURATION.md#n_cameras) | Every camera's serial number, quoted, in ascending order, and how many cameras must be present. |
-| [`frame_rate`](docs/CONFIGURATION.md#frame_rate) | The recording trigger rate. Keep exposure under the [exposure ceiling](docs/CONFIGURATION.md#exposure-ceiling). |
-| [`serial_port`](docs/CONFIGURATION.md#serial_port), [`trigger_pins`](docs/CONFIGURATION.md#trigger_pins) | The trigger board's port, and every pin wired to a camera. A camera on an unlisted pin gets no triggers. |
-| [`stim_safe_pins`](docs/CONFIGURATION.md#stim_safe_pins) | Every pin wired to a stimulation device, held low from the first line of the sketch. |
-| [`output_dir`](docs/CONFIGURATION.md#output_dir) | Where sessions go. Use your largest, fastest drive. |
-| [`metadata_defaults`](docs/CONFIGURATION.md#metadata_defaults) | Your lab's defaults for the sidebar, saved with every session. A copied profile carries another lab's names. |
+| Computer | 64-bit Windows. CPU, RAM and disk scale with the camera count and frame rate. |
+| GPU | An NVIDIA GPU with NVENC, and one encode session per camera |
+| Cameras | Basler, GigE or USB3, through pylon. FLIR, GigE or USB3, through Spinnaker, is in testing. |
+| Camera settings | Mono8, the same frame size on every camera, and a hardware trigger input on each |
+| Trigger | A TTL signal. By default, an Arduino Mega 2560 that Panopticon programs, or [another Arduino board](docs/INSTALLATION.md#the-trigger-board). |
+| Network (GigE) | Links sized to the pixel rate, and jumbo frames on every adapter and switch port |
 
-Set `camera_serials` on any rig whose calibration you keep
-([why](docs/CONFIGURATION.md#camera_serials)). [CONFIGURATION.md](docs/CONFIGURATION.md)
-explains every field.
+The NVIDIA driver limits how many cameras one GPU can encode at once, and that's often what sets the camera count, so Panopticon checks the limit every time it launches. If the GPU comes up short, `encoder: auto` encodes on the CPU with libx264 instead, as long as the CPU can keep up. You can also trigger the cameras from your own pulse generator or DAQ (`trigger_source: external`), though stimulation isn't available then. [Section 1 of the installation guide](docs/INSTALLATION.md#1-what-the-rig-needs) helps you size the GPU, network, RAM and disk.
+
+## Status
+
+Panopticon is beta software. The performance figures in these docs all come from our rig: nine Basler 5GigE cameras at 1920x1200 and 100 fps. [HISTORY.md](docs/HISTORY.md) has the measurements and the decisions behind them. The FLIR backend has only run against a simulated Spinnaker library so far. Capture in worker processes (`capture_processes`) is experimental, and the window doesn't allow it yet.
 
 ## What a session writes
 
-A session is a folder, `<output_dir>/<date>/<mouse1>_<mouse2>/`, holding a
-`calibration/` and a `<mouse1>_<mouse2>_recording/` folder. Each of those holds one folder per camera
-(`cam1/` to `camN/`, with the mp4, `blockids.npy` and `frametimes.npy`), plus
-`session_metadata.json`, `session.log`, and `WARNINGS.txt` when something went wrong.
-The solve writes `calibration.toml` into `calibration/` and copies it into the
-recording folder.
-[WORKFLOW.md](docs/WORKFLOW.md#paths-and-names) lists every file.
-
-## Documentation
-
-Read the first three pages in order. The others are reference pages.
-
-| Page | When to read it |
-|---|---|
-| [INSTALLATION.md](docs/INSTALLATION.md) | Once per computer, and to build or extend a rig: the hardware, the install, the first launch |
-| [OVERVIEW.md](docs/OVERVIEW.md) | Before your first session: every control in the window |
-| [WORKFLOW.md](docs/WORKFLOW.md) | At every session: calibrate, solve, record and check the result, step by step |
-| [CONFIGURATION.md](docs/CONFIGURATION.md) | When you write or change a profile: every field and the templates |
-| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | When Panopticon shows a message you do not understand |
-| [GLOSSARY.md](docs/GLOSSARY.md) | When a term is new to you |
-| [FLIR.md](docs/FLIR.md) | FLIR cameras only. It replaces parts of INSTALLATION.md |
-| [SIMULATION.md](docs/SIMULATION.md) | To try Panopticon, or develop it, without hardware |
-| [CPU_ENCODE.md](docs/CPU_ENCODE.md) | When the GPU grants too few NVENC sessions and the CPU encodes |
-| [INTERNALS.md](docs/INTERNALS.md) | For maintainers: how capture, alignment, encoding and calibration work |
-| [HISTORY.md](docs/HISTORY.md) | For maintainers: dated decisions, measurements and dead ends |
+Each session is a folder, `<output_dir>/<date>/<mouse1>_<mouse2>/`, holding a calibration folder and a recording folder. Each of those has a folder per camera, with its mp4 and block IDs, plus `session_metadata.json`, `session.log`, and `WARNINGS.txt` when something went wrong. [WORKFLOW.md](docs/WORKFLOW.md#paths-and-names) lists every file.
 
 ## Contributing, bug reports and citing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, testing and the rig run that a change
-to the capture path needs. Report a problem with the
-[bug report template](https://github.com/talmolab/panopticon/issues/new?template=bug_report.md),
-and FLIR results with the
-[FLIR bring-up template](https://github.com/talmolab/panopticon/issues/new?template=flir_bringup.md).
-To cite Panopticon, use [CITATION.cff](CITATION.cff) or GitHub's "Cite this repository"
-button.
+We'd love your help. [CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the testing, and the rig run that a change to the capture path needs. Found a problem? Open an issue with the [bug report template](https://github.com/talmolab/panopticon/issues/new?template=bug_report.md). Tried Panopticon with FLIR cameras? Tell us how it went with the [FLIR bring-up template](https://github.com/talmolab/panopticon/issues/new?template=flir_bringup.md).
+
+To cite Panopticon, use [CITATION.cff](CITATION.cff) or GitHub's **Cite this repository** button.
 
 ## Credits and licence
 
-Isaac Tang (author and maintainer), Kay Tye and Talmo Pereira, of the Tye Lab and the
-Talmo Lab at the Salk Institute.
+Isaac Tang (author and maintainer), Kay Tye and Talmo Pereira, of the Tye Lab and the Talmo Lab at the Salk Institute.
 
-Panopticon grew out of [campy](https://github.com/ksseverson57/campy) by Kyle Severson
-(MIT licence). The trigger firmware and the raw-capture approach descend from campy, and
-no campy code remains. The Spinnaker C prototype table in `gui_app/backends/_spinc.py`
-extends one from [octacam](https://github.com/NeLy-EPFL/octacam) (Ramdya Lab, EPFL, MIT
-licence), whose notice that file keeps. LUC3D is by Eric Leonardis, Salk Institute.
+Panopticon grew out of [campy](https://github.com/ksseverson57/campy) by Kyle Severson (MIT licence). The trigger firmware and the raw-capture approach descend from campy, though no campy code remains. The Spinnaker C prototype table in `gui_app/backends/_spinc.py` extends one from [octacam](https://github.com/NeLy-EPFL/octacam) (Ramdya Lab, EPFL, MIT licence), whose notice that file keeps. LUC3D is by Eric Leonardis, Salk Institute.
 
-Panopticon is licensed under the GNU General Public License, version 3 only
-(`GPL-3.0-only`), the terms PyQt5 requires of a program built on it. The full text is in
-[LICENSE](LICENSE). The MIT licence of the octacam table is compatible with it.
+Panopticon is licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`), the terms PyQt5 requires of a program built on it. The full text is in [LICENSE](LICENSE), and the MIT licence of the octacam table is compatible with it.

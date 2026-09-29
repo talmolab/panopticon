@@ -101,8 +101,19 @@ its reason.
   its keyframes come from the encoder's GOP.
 - Commit messages say what changed and why in plain words, and name the checks that
   verified it.
-- Documentation states each fact once, in the page where a reader acts on it, and links
-  to it from anywhere else.
+
+## Writing documentation
+
+The pages follow the voice of the [SLEAP docs](https://sleap.ai/): "we" and "let's" for
+a walkthrough, "you" for what the reader does, and UI names in bold (**Calibrate**,
+**File** → **Save**). Keep steps short and numbered, one action each, with a screenshot
+where it helps. A quick, plain reason is welcome; the deeper story goes in a footnote or
+a GitHub alert (`> [!TIP]`, `> [!NOTE]`, and `> [!WARNING]` only when it matters). End
+each page with a "Next up" link.
+
+However a page is worded, it has to agree with the code. A message it quotes in code
+format is one Panopticon prints, and every number, default and file name it gives is the
+code's.
 
 ## Reporting a problem
 

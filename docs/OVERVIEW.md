@@ -1,441 +1,375 @@
-# Overview: the interface
+# Overview: a tour of the window
 
-Previous: [INSTALLATION.md](INSTALLATION.md).
+Before we record anything, let's take a quick tour of Panopticon. It helps to have it
+open beside you, so if it isn't running yet, start it from the desktop shortcut you
+made during [installation](INSTALLATION.md#step-10--desktop-shortcut).
 
-Panopticon has two windows. The main window is where you preview the cameras,
-calibrate and record. The stimulation editor opens from it and builds the
-optogenetic [paradigms](GLOSSARY.md#paradigm) the
-[trigger board](GLOSSARY.md#trigger-board) runs. This page names each control,
-says what it shows, and says where to look when it shows something else.
-[GLOSSARY.md](GLOSSARY.md) defines the terms it uses.
+Panopticon has two windows. The **main window** is where we preview the cameras,
+calibrate and record. The **stimulation editor** opens from it, and it's where you
+build the optogenetic [paradigms](GLOSSARY.md#paradigm) that the
+[trigger board](GLOSSARY.md#trigger-board) plays during a recording.
 
-Read it with Panopticon open beside you. Start it with the desktop shortcut
-([INSTALLATION.md step 10](INSTALLATION.md#step-10--desktop-shortcut)). The
-first picture numbers every control of the main window, and each numbered
-heading below describes one of them. Each group of controls also has a picture
-of its own, taken on the reference rig.
-
-Your window may not look like the first picture yet. On a computer where no
-profile has been chosen, the grid is empty and the state label (16) reads
-`Choose a profile`: pick your rig's profile in the dropdown (4) first. The
-window then opens the cameras and checks the hardware. Calibrate and Record
-stay grey until the status bar (17) reads
-`Hardware check done: encoding with <encoder>`.
-
----
+> [!NOTE]
+> The first time you open Panopticon on a new computer, the camera grid is empty and
+> the sidebar reads **Choose a profile**. Pick your rig's profile from the dropdown
+> ([4](#4-profile)) and Panopticon will open the cameras and check the hardware.
+> **Calibrate** and **Record** stay greyed out until the status bar says
+> `Hardware check done: encoding with <encoder>`.
 
 ## The main window
 
 ![The Panopticon main window with numbered callouts](images/ui_annotated.png)
 
-The figure shows every control at once. In use, the coverage display (12)
-appears only during a calibration and the progress bar (15) only while videos
-are finalised. Their values in the picture, and the status bar's message, are
-examples set up for it. Callout 9 marks the Solve button, to the right of
-Calibrate. Three panes in the picture read above 30 fps, which (3) explains.
+The cameras fill the left of the window. On the right, the **sidebar** holds the
+**Metadata**, **Acquisition** and **Display** controls, with the state label at the
+bottom, and the status bar runs along the bottom of the window. We staged this picture
+so that everything shows at once. Normally you'll only see the coverage display (12)
+during a calibration, and the progress bar (15) while the videos are being finished.
 
-The camera grid fills the left of the window, and the sidebar fills the right.
-The sidebar holds the Metadata, Acquisition and Display groups, with the state
-label at its foot. The status bar is the line of text along the bottom of the
-window. Every other setting is in the [rig profile](GLOSSARY.md#rig-profile), the
-YAML file that describes your rig ([CONFIGURATION.md](CONFIGURATION.md) lists
-its fields). The first launch opens the window at about 80% of the screen
-height, shaped to fit the camera grid.
+Anything you can't set in the window, from the camera settings to the trigger pins,
+lives in the [rig profile](GLOSSARY.md#rig-profile), a YAML file that describes your
+rig. [CONFIGURATION](CONFIGURATION.md) goes through it.
 
-Each later launch puts back what you left:
-
-- the window's position and size, and the sidebar's width, collapsed included;
-- the session fields, except the date, which follows the calendar;
-- a folder chosen with the output button, for each profile;
-- the Display sliders;
-- the Stimulation editor's pin, frequency, pulse width and duration fields.
-
-The editor's canvas is not restored, and nothing reaches the trigger board
-until Apply.
+> [!TIP]
+> Panopticon remembers how you left it: the window and sidebar sizes, the session
+> fields, each profile's output folder and **Flat final second**, any profile you added
+> from a file, the **Display** sliders and the stimulation editor's fields. Two things
+> start fresh at every launch. The **Date** is set to today, and the editor's canvas is
+> empty, so nothing reaches the trigger board until you **Apply** it.
 
 ### Preview
 
 #### 1. Camera grid
 
-Live video from every open camera. The grid has as many rows as the square
-root of the camera count, rounded down, and as many columns as it then needs.
-That puts 4 cameras in 2 × 2, 6 in two rows of three, 9 in 3 × 3. The preview
-is shown at reduced size and refreshes a few times a second, so it never slows
-the capture. It freezes on its last frame during a blocking operation, and
-[State](#16-state) (16) lists those operations and how long they take.
+The grid shows live video from every camera, laid out to fit: 4 cameras in 2 × 2, 6 in
+two rows of three, and 9 in 3 × 3.
 
-| State | Cameras | Frames the preview gets |
-|---|---|---|
-| Idle | free-running at 30 fps | every frame |
-| Calibrating | triggered at `calibration_frame_rate` (30 fps on the reference rig) | every frame |
-| Recording | triggered at `frame_rate` (100 fps on the reference rig) | every 10th frame |
+At rest, the cameras free-run at 30 fps and you see every frame. During a calibration
+or a recording they follow the trigger board instead, and while recording the preview
+shows every 10th frame. The preview is shrunk and drawn at its own pace, so it never
+slows the capture down.[^preview]
 
-In detail, the preview shows each frame downsampled 3× per axis, so
-1920 × 1200 becomes 640 × 400. It repaints every 33 × N / 6 ms for N cameras,
-at least 33 ms and at most 100 ms apart, which keeps display work away from
-capture.
+While one of the jobs listed under [State](#16-state) runs, the preview freezes on its
+last frame. Don't worry, it picks up again when the job's done.
 
 #### 2. Camera pane
 
-Each pane carries its camera's name, `cam1` to `camN`, in its top-left corner.
-[WORKFLOW.md](WORKFLOW.md#camera-names) explains how names are assigned and
-where they are used. Double-click a pane to fill the grid with that camera. The
-sidebar and the status bar stay as they were.
+Each pane shows its camera's name in the top-left corner: `cam1`, `cam2` and so on.
+[Choose a profile](WORKFLOW.md#2-choose-a-profile) explains where the names come from.
+
+Double-click a pane to fill the grid with that one camera, which is handy for checking
+focus or framing. Double-click it again to go back. The other cameras keep capturing
+while they're hidden.
 
 ![One camera enlarged by a double-click](images/window_camera_zoomed.png)
 
-Double-click the pane again to go back to the grid. The zoom changes only the
-preview, and the hidden cameras go on capturing. A pane that stays black is
-covered in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#opening-the-cameras).
+If a pane stays black, have a look at
+[Opening the cameras](TROUBLESHOOTING.md#opening-the-cameras).
 
 #### 3. Frame rate
 
-The camera's delivered frame rate over its last ten frames, refreshed every
-tenth repaint (1): about three times a second up to six cameras, and twice a
-second on the nine-camera reference rig. It should match the camera rate that
-the table under (1) gives for the current state, so at rest every pane reads
-about 30 fps. During a recording it shows the camera's rate, 100 fps on the
-reference rig, and not the preview's.
+The green number at the bottom-left of each pane is the rate that camera is actually
+delivering, averaged over its last ten frames. At rest, every pane should read about
+30 fps. During a recording it shows the camera's rate, not the preview's, so on our rig
+it reads about 100 fps.
 
-The label times those ten frames as the computer takes them in. A pane that
-catches up after a moment when the computer was busy reads above its rate for
-a refresh or two, as three panes do in the first picture.
-One pane reading low while the others are right is usually the first sign of
-trouble with that camera's link or trigger.
-[TROUBLESHOOTING.md](TROUBLESHOOTING.md#during-an-acquisition) says what to
-check.
+A pane that jumps high for a refresh or two, like the 67 and 69 fps in the picture at
+the top, is just catching up after the computer was busy. What's worth a closer look is
+one pane reading *low* while the others look fine. It's usually the first sign of
+trouble with that camera's cable or trigger, and
+[During an acquisition](TROUBLESHOOTING.md#during-an-acquisition) says what to check.
 
 ### Metadata
 
-The Metadata group holds the profile dropdown (4), the output directory button
-(5) and the session fields (6). The picture shows it filled in with example
-values.
+The **Metadata** group is where you tell Panopticon which rig this is, where to save,
+and who's being recorded.
 
 ![The Metadata group filled in with example values](images/sidebar_metadata.png)
 
 #### 4. Profile
 
-Chooses the rig profile ([CONFIGURATION.md](CONFIGURATION.md)). Click the
-dropdown to open its list: every profile in `profiles/` by its `name`, then
-`Add a profile from a file…`. The list opens over the top of the sidebar.
+The dropdown at the top picks the rig profile. Click it to see every profile in the
+`profiles/` folder, with **Add a profile from a file…** at the bottom:
 
 ![The profile dropdown open](images/sidebar_profile_dropdown.png)
 
-On the reference rig choose `3dpose`. `3dface` is the other rig that shares
-this software, and `sim` runs simulated cameras for practice
-([SIMULATION.md](SIMULATION.md)). A computer shows the profiles in its own
-`profiles/` folder, so yours may list other names.
+On our rig, choose **3dpose**. **3dface** is the other rig that shares this software,
+and **sim** runs [simulated cameras](SIMULATION.md) so you can practise. Your own list
+may look different. If your profile lives outside `profiles/`, pick it with
+**Add a profile from a file…** and it'll stay in the list from then on.
 
-Click a name to switch to that profile. While it switches, the state label (16)
-reads `Switching cameras…`. It returns to `IDLE` once the new profile's cameras
-show in the grid. [WORKFLOW.md](WORKFLOW.md#2-choose-a-profile) says what a
-switch does to the cameras and the trigger board. On a computer with no
-remembered profile the dropdown shows `Choose a profile`. Its last entry,
-`Add a profile from a file…`, opens a file dialog for a profile kept outside
-`profiles/`, switches to it and lists it at every later launch
-([CONFIGURATION.md](CONFIGURATION.md#where-settings-live)).
+When you pick a profile, the state label reads **Switching cameras…** while the
+cameras close and reopen, then goes back to **IDLE**. A switch can also stop or flash
+the trigger board, and [Choose a profile](WORKFLOW.md#2-choose-a-profile) explains
+when.
 
-The dropdown is disabled from the start of an acquisition until its videos
-are finalised, during a solve, and during a blocking operation (16). A switch
-during an editor upload, a stimulation Test or the hardware check is refused
-with a dialog that says what to wait for.
+The list won't switch while Panopticon is uploading a paradigm, running a stimulation
+**Test** or checking the hardware. A dialog tells you what it's waiting for, and you
+can switch once that's done.
 
 #### 5. Output directory
 
-The folder that sessions are written under. The button shows the path
-shortened in the middle, with the full path as its tooltip, so hover over the
-button to read it. Click the button to choose another folder in the
-`Select Output Directory` dialog. The button then shows the new path.
-[WORKFLOW.md](WORKFLOW.md#3-set-the-output-directory) says which folder a
-profile starts with. The folder in the pictures is a test folder. The
-reference rig's sessions go to the `data` folder in the repository.
+The button under the dropdown shows where your sessions are saved. Long paths get
+shortened in the middle, so hover over the button to see the whole thing. Click it to
+pick another folder in the **Select Output Directory** dialog, and Panopticon will
+remember your choice for this profile.
+
+On our rig, sessions go to the repository's `data` folder, though the pictures here
+were taken with a test folder.
 
 #### 6. Session fields
 
-Date, Mouse 1, Mouse 2, Experimenter, Cage and Notes, which is three lines
-tall.
-[WORKFLOW.md](WORKFLOW.md#4-fill-in-the-metadata) says what each one feeds,
-gives the defaults and lists the checks.
+**Date**, **Mouse 1**, **Mouse 2**, **Experimenter**, **Cage** and **Notes** describe
+the session. The date and the two mouse fields also name the session's folder, so
+everything from one session lands in one place. There's more on each field in
+[Fill in the metadata](WORKFLOW.md#4-fill-in-the-metadata).
 
 ### Acquisition
 
-The Acquisition group holds Calibrate (7), with Solve (9) beside it and the
-Flat final second box under it. Record (8), Snapshot (10) and Stimulation (11)
-follow. In the picture both toggles are off, with the knob at the left.
+The **Acquisition** group has the controls you'll use most.
 
 ![The Acquisition group at rest](images/sidebar_acquisition.png)
 
-Calibrate and Record are toggles, switches with a round knob. Click a toggle,
-or its label, once to start. Its knob slides right and its track fills with
-colour, blue for Calibrate and red for Record. Click it again to stop.
-[WORKFLOW.md](WORKFLOW.md) calls this flipping the toggle on and off. While one
-toggle is on, the other is greyed out and disabled. Solve, Snapshot and
-Stimulation are buttons. A typical session goes Calibrate, Solve, Record.
+**Calibrate** and **Record** are toggles. Click one to start: its knob slides to the
+right and the track fills with colour, blue for **Calibrate** and red for **Record**.
+Click it again to stop. While one toggle is on, the other is greyed out. **Solve**,
+**Snapshot** and **Stimulation** are ordinary buttons.
+
+A typical session goes **Calibrate**, **Solve**, **Record**.
 
 #### 7. Calibrate
 
-Starts and stops a calibration, and shows the coverage display (12). While
-Calibrate is on, carry the printed calibration board, a
-[ChArUco board](GLOSSARY.md#charuco-board), through every camera's view. Flip
-Calibrate off once the coverage display reads READY.
-[WORKFLOW.md](WORKFLOW.md#5-calibrate) walks through a take and says what a
-calibration does to the cameras and the trigger board.
+Flip **Calibrate** on and carry the [ChArUco board](GLOSSARY.md#charuco-board)
+through every camera's view until the coverage display reads **READY**, then flip it
+off. The [calibration walkthrough](WORKFLOW.md#5-calibrate) takes you through a whole
+take.
 
-After the click the state label (16) reads `Checking capacity…`, then
-`Starting...`, then `CALIBRATING` in blue. If a paradigm is on the board, a
-`Flashing …` state comes first and the preview freezes for about 30 s: wait,
-and do not close Panopticon. After the second click it reads `Finishing…`,
-then `ENCODING` with the progress bar (15), then `IDLE`.
+Once it's on, the state label reads **Checking capacity…**, **Starting...** and then
+**CALIBRATING** in blue. When you flip it off, you'll see **Finishing…**, then
+**ENCODING** while the progress bar fills, and finally **IDLE**.
 
-Flat final second is the small box under Calibrate, left of its words. Tick it
-if you will end the take by laying the calibration board flat on the arena
-floor and holding it still for the last second. Solve then puts the floor at
-height 0 (Z = 0). Leave it unticked otherwise
-([WORKFLOW.md](WORKFLOW.md#put-the-floor-at-z--0)). A tick shows left of the
-words when the box is on:
+If you'll end the take by laying the board flat on the arena floor for a second or
+two, tick the small **Flat final second** box under the toggle:
 
 ![Flat final second ticked, under the Calibrate toggle](images/sidebar_flat_final_second.png)
 
+**Solve** will then put the floor at Z = 0.
+
+> [!NOTE]
+> If there's a stimulation paradigm on the trigger board, Panopticon first swaps it
+> for the recording-only sketch. The state label reads
+> **Flashing recording-only firmware…** for about 30 s. Leave Panopticon open until
+> it's done.
+
 #### 8. Record
 
-Starts and stops a recording at `frame_rate`. Checks run first, and any of
-them can refuse the start. [WORKFLOW.md](WORKFLOW.md#8-record) lists them,
-including the prompt before data already in the target folder is deleted. A
-recording also stops by itself when a stimulation block marked Ending
-finishes.
+Flip **Record** on to start a recording at the profile's `frame_rate`. Panopticon
+runs a few checks first, and if one fails, a dialog tells you why
+([Starting an acquisition](TROUBLESHOOTING.md#starting-an-acquisition) lists them).
+The [recording walkthrough](WORKFLOW.md#8-record) covers the question you'll get if
+the session folder already holds data.
 
-After the click the state label runs through the same states as for
-Calibrate, and then reads `RECORDING` in red. After the second click it reads
-`Finishing…`, `ENCODING` and then `IDLE`.
+The state label goes through the same steps as for **Calibrate**, then reads
+**RECORDING** in red. Flip it off and you'll see **Finishing…**, **ENCODING** and
+**IDLE** again. If your paradigm has an [**Ending**](#8-ending) block, the recording
+also stops by itself when that block finishes.
 
 #### 9. Solve
 
-Solve works out each camera's lens and position from the calibration you just
-took ([solve](GLOSSARY.md#solve)). It reads the calibration in the session
-folder that Date, Mouse 1 and Mouse 2 point to, so leave those fields as they
-were for the calibration. While it runs the state label reads `CALIBRATING...`
-in purple, close to a calibration's blue, and no camera captures. When it
-finishes, the status bar shows the result.
-[WORKFLOW.md](WORKFLOW.md#6-solve) says what it reads and writes.
+**Solve** turns the calibration you just took into a model of every camera's lens and
+position. It reads the calibration from the session folder that **Date**, **Mouse 1**
+and **Mouse 2** point to, so leave those as they were for the calibration.
+
+While it runs, the state label reads **CALIBRATING...** in purple and the cameras
+don't capture. When it's done, the status bar shows the result, and
+[Solve](WORKFLOW.md#6-solve) covers what to look for.
 
 #### 10. Snapshot
 
-Saves one full-resolution PNG per camera into the session folder
-([WORKFLOW.md](WORKFLOW.md#4-fill-in-the-metadata)). The status bar reads
-`Snapshot: saving N cameras…`, and then confirms
-`Snapshot: saved k/N cameras → <folder>`.
+**Snapshot** saves one full-resolution PNG from every camera into the session's
+`snapshots/` folder. The status bar reads `Snapshot: saving N cameras…`, then
+`Snapshot: saved k/N cameras → <folder>`:
 
 ![The status bar after a snapshot](images/snapshot_saved.png)
 
-A camera that sent no frame is named at the end of the message, after
-`no frame from:`. Snapshots come from the full frame, so the brightness and
-contrast sliders do not affect them. Use them to judge focus, which the
-downsampled preview hides.
+Snapshots are great for judging focus, which the shrunken preview hides. They're taken
+from the full frame, so the **Display** sliders don't change them. If a camera sent no
+frame, the message ends with `no frame from:` and the camera's name.
 
 #### 11. Stimulation
 
-Opens the stimulation editor ([below](#the-stimulation-editor)). The editor is
-not modal, so it can stay open beside the main window. The button stays live
-while other controls are busy. It does not open the editor before a profile
-is chosen, or on a profile with `trigger_source: external`, which has no
-trigger board to run a paradigm on.
+**Stimulation** opens the [stimulation editor](#the-stimulation-editor). The editor
+can stay open beside the main window, and the button keeps working while the other
+controls are busy.
+
+The editor needs a trigger board to play on, so before you've chosen a profile, or on
+a profile with `trigger_source: external`, the button just shows a dialog saying why.
 
 #### 12. Coverage display
 
-Appears in this slot during a calibration
-([below](#the-calibration-coverage-hud)). It stays hidden when OpenCV is
-missing, when the profile's `board_config` file does not exist, and when the
-file cannot be used (the log says `[hud] coverage detector unavailable`). The
-log is the console window and the launch's file in `logs\`
-([WORKFLOW.md](WORKFLOW.md#the-log) says where). The calibration still
-records. Before the next take, check that
-[`board_config`](CONFIGURATION.md#board_config) names your board's file.
+During a calibration, the coverage display shows up here and tells you whether you
+have enough views of the board. We'll look at it more closely
+[below](#the-calibration-coverage-hud).
+
+> [!NOTE]
+> If it doesn't appear, the calibration still records, but Panopticon couldn't set up
+> its board detector. Either the profile's
+> [`board_config`](CONFIGURATION.md#board_config) file is missing or can't be used, or
+> OpenCV isn't installed. Check that `board_config` names your board's file before the
+> next take.
 
 ### Display
 
-The Display group holds the Brightness (13) and Contrast (14) sliders. The
-progress bar (15), while it is shown, and the state label (16) sit below them.
+The **Display** group has two sliders. The progress bar and the state label sit below
+them.
 
 ![The brightness and contrast sliders, Brightness dragged right](images/sidebar_display.png)
 
 #### 13 and 14. Brightness and contrast
 
-The numbers 13 and 14 are the callouts of the annotated window at the top of
-this page. Both sliders range from -100 to +100 and change only the preview.
-The track is blue from its left end to the handle and grey from the handle to
-its right end. At 0 the handle sits in the middle of the track, as Contrast's
-does in the picture, and Brightness there is dragged to the right. Drag a
-slider right to brighten the preview or raise its contrast, and left for the
-reverse. The recording, the snapshots and the board detection use the camera
-frames as they arrive.
+Drag **Brightness** to the right to brighten the preview, and **Contrast** to the right
+to raise its contrast. Left does the opposite, and the middle leaves the preview
+untouched. Only the preview changes: the recording, the snapshots and the board
+detection all use the frames as they arrive.
 
-The sliders show no number, and nothing resets them. They keep their
-positions between launches, so a slider someone left off-centre stays there at
-the next launch. If the panes look black, grey or washed out while their frame
-rates count, drag both handles until each sits in the middle of its track.
-[WORKFLOW.md](WORKFLOW.md#work-towards-ready) says what to do when the board
-is too dark to detect.
+> [!TIP]
+> The sliders keep their positions between launches and show no number. If the panes
+> look black, grey or washed out while their frame rates look normal, drag both
+> handles back to the middle.
 
 #### 15. Progress
 
-Shown while the videos are finalised (`Encoding k/N`) or aligned
-(`Aligning k/N`), where N is the number of cameras.
-[WORKFLOW.md](WORKFLOW.md#9-after-you-stop) says what each step does.
+The progress bar appears after a stop, while Panopticon finishes the videos
+(**Encoding k/N**) or lines them up by trigger (**Aligning k/N**), where N is the
+number of cameras.
 
 #### 16. State
 
-The label at the foot of the sidebar names what Panopticon is doing:
+The label at the bottom of the sidebar tells you what Panopticon is doing right now:
 
-| Text | Meaning |
+| Label | What's happening |
 |---|---|
-| `IDLE` (grey) | Nothing running. The cameras are in free-run preview |
-| `CALIBRATING` (blue) | A calibration is running |
-| `RECORDING` (red) | A recording is running |
-| `ENCODING`, `ALIGNING` (amber) | Finalising the videos after a stop |
-| `CALIBRATING...` (purple) | A solve is running. No camera captures |
-| `WAITING FOR TRIGGER`, `STOP YOUR TRIGGER SOURCE` (amber) | Your own trigger source: start it, or stop it, now |
-| `NO TRIGGER` (red) | Your own trigger source sent no pulse, and nothing was recorded |
-| `Choose a profile`, `No profile` (amber) | No profile is open |
+| **IDLE** (grey) | Nothing is running, and the cameras are in free-run preview |
+| **CALIBRATING** (blue) | A calibration is recording |
+| **RECORDING** (red) | A recording is running |
+| **ENCODING**, **ALIGNING** (amber) | Panopticon is finishing the videos after a stop |
+| **CALIBRATING...** (purple) | A solve is running, and no camera is capturing |
+| **WAITING FOR TRIGGER**, **STOP YOUR TRIGGER SOURCE** (amber) | You're using [your own trigger source](WORKFLOW.md#your-own-trigger-source): start it, or stop it, now |
+| **NO TRIGGER** (red) | Your own trigger source sent no pulse, so nothing was recorded |
+| **Choose a profile**, **No profile** (amber) | No profile is open yet |
 
-Mind the dots. `CALIBRATING...`, with three dots and in purple, is a solve:
-the cameras record nothing, and the arena can be entered. `CALIBRATING`,
-without dots and in blue, is a calibration take.
+> [!TIP]
+> Mind the dots! **CALIBRATING...** with three dots, in purple, is a solve. The
+> cameras aren't recording and it's fine to walk into the arena. **CALIBRATING**
+> without dots, in blue, is a calibration take.
 
-These texts, in amber, mark blocking operations. During one, every control
-that could start something is disabled and the cursor shows a wait:
+Some jobs make you wait. While one runs, the label names it in amber, anything that
+could start something else is greyed out, and the cursor shows that Panopticon is
+busy:
 
-| Text | Operation |
+| Label | What Panopticon is doing |
 |---|---|
-| `Switching cameras…` | Closing the cameras and opening the new profile's, a second or two |
-| `Clearing stim firmware…` | The launch flash to the [recording-only sketch](GLOSSARY.md#recording-only-sketch) |
-| `Flashing recording-only firmware…` | Before a calibration, when a paradigm was on the board |
-| `Flashing recording + stimulation firmware…` | Before a recording, putting the Applied paradigm back |
-| `Checking capacity…` | The capacity checks at Calibrate or Record |
-| `Starting...` | Arming the cameras and starting the trigger board |
-| `Finishing…` | Stopping the cameras and saving the capture, a second or two |
-| `Updating the stimulus trace...` | Rewriting `stim_trace.csv` after an alignment |
-| `Cancelling…` | Ending a start on your own trigger source that recorded nothing |
+| **Switching cameras…** | Closing the cameras and opening the new profile's |
+| **Clearing stim firmware…** | At launch, loading the [recording-only sketch](GLOSSARY.md#recording-only-sketch) onto a board that may still carry a paradigm |
+| **Flashing recording-only firmware…** | Taking the paradigm off the board before a calibration |
+| **Flashing recording + stimulation firmware…** | Putting the paradigm you applied back on before a recording |
+| **Checking capacity…** | Making sure the computer has the memory and encoders for the acquisition |
+| **Starting...** | Arming the cameras and starting the trigger board |
+| **Finishing…** | Stopping the cameras and saving the capture |
+| **Updating the stimulus trace...** | Rewriting `stim_trace.csv` after an alignment |
+| **Cancelling…** | Backing out of a start on your own trigger source that recorded nothing |
 
-A flash writes a new program into the trigger board, and takes about 30 s.
-`Clearing stim firmware…` and the two `Flashing …` states are all flashes. The
-two `Flashing …` states come right after you press Calibrate or Record. Wait
-for them: the acquisition starts when the flash ends, or a dialog says why it
-did not. Do not end Panopticon during a flash
-([why](WORKFLOW.md#when-the-board-resets)).
+The **Clearing** and **Flashing** jobs load a new program onto the trigger board,
+which takes about 30 s. The **Flashing** ones happen right after you press
+**Calibrate** or **Record**, and the acquisition starts as soon as the flash is done.
 
-While the board is flashed its pins float for a moment. Read the
-[stimulation warning](WORKFLOW.md#7-optional-stimulation) before a stimulation
-device is wired to the board.
+> [!WARNING]
+> Panopticon won't close while the board is being flashed, and don't end it from Task
+> Manager then either. [When the board resets](WORKFLOW.md#when-the-board-resets)
+> explains why, and what it means for anything wired to the board.
 
 #### 17. Status bar
 
-The line of text along the bottom of the window. It carries the hardware
-check's progress, snapshot results, the solve's progress and the encode
-summary after a stop. During a recording it reports capture health each time
-the frame-rate labels (3) refresh.
-[WORKFLOW.md](WORKFLOW.md#while-it-records) lists the messages.
+The line along the bottom of the window keeps you posted: the hardware check,
+snapshot results, the solve's progress, and a summary of the encode after each stop.
+During a recording it reports on the capture every time the frame rates refresh, like
+the `Capture healthy — keeping up with the trigger (max lag 3 ms)` in the picture at
+the top. We go through the messages you might see in
+[the recording walkthrough](WORKFLOW.md#8-record).
 
 ### The sidebar's width
 
-The sidebar opens 260 px wide, its narrowest. A thin divider runs down its left
-edge, between the sidebar and the cameras, and it lights up when the pointer is
-over it. Drag the divider left to widen the sidebar, up to 900 px.
+The sidebar starts out as narrow as it goes. Drag the thin divider on its left edge to
+widen it. Once it's wide enough, the metadata fields sit two to a row, which gives the
+coverage display more room during a calibration:
 
-Drag the divider to the right as far as it goes, and the sidebar collapses. The
-camera grid then fills the window above the status bar.
+![A wide sidebar during a calibration](images/window_sidebar_wide.png)
+
+The panes look brighter here because the cameras switch to the profile's calibration
+exposure for the take.
+
+Drag the divider all the way to the right and the sidebar folds away, leaving the
+whole window to the cameras:
 
 ![The window with the sidebar dragged shut](images/window_sidebar_collapsed.png)
 
-To get the sidebar back, point at the thin strip at the window's right edge
-until it lights up, then drag it left.
-
-At about twice its opening width, 520 px, the metadata fields sit two to a
-row, and Notes spans the full width. During a calibration the coverage display
-(12) takes the height that saves, so a wide sidebar gives a larger graph. The
-picture shows a sidebar 640 px wide during a calibration. The panes look
-brighter than at rest because the cameras use the profile's calibration
-exposure during a calibration.
-
-![A wide sidebar during a calibration](images/window_sidebar_wide.png)
+To get it back, drag the thin strip on the window's right edge to the left. It lights
+up when your pointer finds it.
 
 ---
 
 ## The calibration coverage HUD
 
-The coverage display shows, while you hold the calibration board
-([ChArUco board](GLOSSARY.md#charuco-board)), whether the calibration has
-enough views. It opens in the sidebar when you flip Calibrate on, and a
-[wider sidebar](#the-sidebars-width) gives a larger graph. Each camera is a
-numbered node on a ring, with an edge between every pair. A node shows what one
-camera sees. An edge shows what two cameras have seen at the same moment, which
-is what the stereo solve needs.
-[WORKFLOW.md](WORKFLOW.md#work-towards-ready) shows the display at four stages
-and says what to do at each. On a first calibration, follow it there, and come
-back here for the detail.
+While you carry the board around during a calibration, the coverage display tells you
+whether you've collected enough views for a good solve. Each camera is a numbered
+node on a ring, with a line between every pair.
 
-The display counts detection ticks. A tick is one pass of the board detector
-over the latest full-resolution frame of every camera, so a tick is a moment,
-and several recorded frames can pass between two ticks. The pass visits the
-cameras one at a time, and a cluttered scene slows it. The nine-camera
-reference rig manages 4 to 5 ticks a second, fewer in a busy arena. The log
-line `[hud] coverage ticks/s:` gives the rate.
+![The coverage display partway through a take](images/calib_stage_2_partial.png)
 
-- A node glows cyan when its camera sees at least 4 board markers in the
-  current tick. The glow fades over about 0.4 s.
-- An edge thickens and whitens as the pair collects ticks in which both
-  cameras saw at least 5 markers. It saturates at 200 such ticks.
-- The 2 × 2 badge on each node shows which quadrants of that camera's view the
-  board has visited, judged by the centre of its markers.
-- The caption reads `<elapsed>  paired <worst>/<target>  grid <worst>/<cells>  groups <n>/1`.
-  The two figures are the worst camera's, so they move only when that camera
-  improves. Once the groups join, a profile with a connectivity floor shows
-  `link <now>/<floor>` in place of `groups`. A profile with view-quality
-  thresholds adds `views <good>/<cameras>`.
-- An orange line above the caption names what holds READY back. While
-  `groups` reads more than `1/1`, it lists the groups, for example
-  `{1,2,3} {4,5}`, at most four of them. While `link` is short, it names the
-  two sides of the weakest link, for example
-  `weakest link {1,4,7,9} to {2,3,5,6,8}`. Then it names the
-  cameras short of each view test, for example `closer 1,3  tilt 3  edges 7`.
-  Those cameras' nodes have an orange rim.
+- A camera's node **lights up** when it sees 4 or more of the board's markers, and
+  the glow fades over about 0.4 s once the board leaves.
+- The line between two cameras **thickens and whitens** as they see the board
+  together, with 5 or more markers in each view. It's at full strength after 200
+  such ticks.[^tick]
+- The little 2 × 2 grid on each node shows which **quarters** of that camera's view
+  the board has visited.
+- The caption keeps score. `paired` and `grid` show how the worst camera is doing
+  against its target, and `groups` counts separate groups of cameras, which you want
+  at `1/1`. Some profiles add `link` and `views`.
+- The **orange line** tells you what's holding READY back. While the cameras are
+  split, it lists the groups, as in the picture. After that it names the weakest link
+  between two halves of the rig, and last of all the cameras whose views need to be
+  `closer`, have more `tilt`, or reach the `edges`. Those cameras get an orange rim.
 
-READY appears once all of these hold at the same time:
+When it's all covered, the graph turns white and the caption reads `READY — m:ss`,
+with the timer stopped. You can flip **Calibrate** off from then on, or keep going:
+every extra view gives the solve one more to choose from. The
+[calibration walkthrough](WORKFLOW.md#5-calibrate) shows the display filling in over
+a real take.
 
-1. Every camera has at least `calibration_min_per_cam_shared`
-   [co-detection](GLOSSARY.md#co-detection) ticks (120 on the reference rig),
-   in which it and at least one other camera saw the board.
-2. Every camera has seen the board in at least `calibration_min_grid_cells` of
-   its four quadrants, 3 on the reference rig.
-3. The pairs with at least `calibration_min_edge` shared ticks
-   (20 on the reference rig) join every camera into one group, directly or
-   through a chain of pairs.
-4. That group is joined firmly enough: its
-   [algebraic connectivity](CONFIGURATION.md#calibration_min_connectivity)
-   reaches `calibration_min_connectivity` (30 on the reference rig). A weak
-   link between groups of cameras keeps it low.
-5. Every camera's shared views pass each view test the profile sets. `closer`
-   needs the board big enough in 5 views, `tilt` needs it tilted far enough in
-   5 views, and `edges` needs marker corners in enough cells of a 4 x 4 grid
-   over the view. The reference rig asks for a
-   [board size](CONFIGURATION.md#calibration_min_board_size) of 0.10, a tilt
-   of 40 degrees and 7 of the 16 cells.
+### What READY needs
 
-The third condition asks for one connected group, because cameras that face each
-other never see the front of the board at the same moment. They join through
-their neighbours, and `groups 1/1` is what lets every camera take part in the
-solve ([WORKFLOW.md](WORKFLOW.md#which-cameras-made-it-into-the-solve)). The
-quadrant condition stops the board being waved in one spot, which gives lens
-models that fit the centre of the image and fail towards its edges. The view
-tests go further, because the lens fit needs close, tilted views with corners
-out to the edges. Every threshold is a profile field
-([CONFIGURATION.md](CONFIGURATION.md#calibration_min_per_cam_shared)), and
-conditions 4 and 5 are off at 0.
+READY needs all of these at once. Each is a
+[profile setting](CONFIGURATION.md#calibration_min_per_cam_shared), and the numbers
+here are our rig's. A profile can switch the last two off by setting them to 0.
 
-At READY the graph turns solid white and the caption reads `READY — m:ss`, with
-the timer stopped. You can flip Calibrate off once READY shows. Detection goes
-on if you carry on, and each further sighting still goes into the solve's list
-of frames ([WORKFLOW.md](WORKFLOW.md#6-solve)). A longer take gives the solve
-more views to choose from, and is optional.
+1. **paired**: each camera has shared the board with another camera on 120 ticks
+   (`calibration_min_per_cam_shared`).
+2. **grid**: each camera has seen it in 3 of its four quarters
+   (`calibration_min_grid_cells`).
+3. **groups**: the pairs that have shared 20 ticks (`calibration_min_edge`) link every
+   camera into one group, directly or through other cameras.
+4. **link**: the group is well knit, meaning its algebraic connectivity reaches 30
+   (`calibration_min_connectivity`). One weak link between two halves of the rig
+   keeps it low.
+5. **views**: each camera's shared views pass the view tests. `closer` wants a board
+   size of 0.10 in 5 views, `tilt` wants 40 degrees of tilt in 5 views, and `edges`
+   wants marker corners in 7 of the 16 cells of a 4 × 4 grid.
+
+Why one group, and not every pair? Cameras that face each other never see the front
+of the board at the same time, so they can only join up through their neighbours. The
+quarters and the view tests stop you from waving the board in one spot, which gives
+lens models that fit the middle of the image and go wrong towards the edges.
 
 ---
 
@@ -443,148 +377,151 @@ more views to choose from, and is optional.
 
 ![The stimulation editor with numbered callouts](images/stim_annotated.png)
 
-The picture shows a loop on pin 53: 5 s of 10 Hz pulses, then 10 s with the
-pin LOW, repeated until the recording stops. The arrow back from the second
-block to the first runs straight behind the forward arrow and across the
-second block. Its status line (9) holds a label written for the picture. For a
-loop with no Ending block the editor leaves that line empty. On the reference
-rig pin 53 is the stimulation pin. The picture's numbers are the editor's own,
-and start again at 1.
+The stimulation editor is where you build a paradigm before a recording. A paradigm is
+a small graph of **blocks**, each driving one pin of the trigger board with a square
+wave for a set time. An arrow means "when this block ends, start that one", so a
+chain runs in order and separate chains run side by side. Every chain starts with the
+recording's first trigger.
 
-The editor builds an optogenetic stimulation paradigm before a recording. A
-paradigm is a graph of blocks. Each block drives one output pin with one
-square wave for a set time. An arrow means "when this block ends, start that
-one", so a chain runs in sequence, and chains that are not connected run at
-the same time. Every chain starts with the recording's first trigger.
-[WORKFLOW.md](WORKFLOW.md#7-optional-stimulation) covers building, testing and
-checking a paradigm, and gives the stimulation warning.
+The picture shows a loop on pin 53: 5 s of 10 Hz pulses, then 10 s with the pin held
+LOW, over and over until the recording stops.[^status] You can't see the arrow back to
+the first block, since it runs behind the forward one. The numbers in this picture
+start again at 1.
+
+The [stimulation walkthrough](WORKFLOW.md#7-optional-stimulation) covers building,
+testing and checking a paradigm. Here we'll just go round the editor's parts.
 
 #### 1. Canvas
 
-The canvas opens empty. To add a block, fill in Pin (3), Freq (4), PW (5) and
-Dur (6), then click Create Block, the green button beside Ending (8). The block
-appears in the middle of the canvas's view, or to the right of any block
-already there.
+The canvas starts empty. To add a block, fill in **Pin**, **Freq**, **PW** and **Dur**
+and click **Create Block**. The new block appears in the middle of the view, or to the
+right of the ones already there.
 
-- Drag a block's body to move it. Drag from a port, one of the circles on a
-  block's edges, to another block's port to draw an arrow. A block takes any
-  number of incoming arrows and at most one outgoing arrow, so a drag from the
-  port of a block that already has its outgoing arrow moves the block instead.
-- Click a block to select it and load its values into the fields. Drag on
-  empty space to select several blocks, and shift-drag to add to the
-  selection.
-- Delete removes the selection. Ctrl+C and Ctrl+V copy and paste blocks.
-  Middle-drag pans, the wheel zooms, and Home fits the graph in view.
-- Escape clears the selection and leaves the editor open, so a running Test
-  keeps its Stop button in view.
-- There is no undo. Save the graph before a large edit.
-- Each block shows its pin, frequency, pulse width, duration and mode
-  (`10% duty`, `constant ON` or `pin LOW`), and is tinted by its pin.
-- A red dot at a block's top right marks the start of its chain, with a white
-  ring when Starting was ticked by hand. A hollow amber dashed ring marks a
-  block in a loop with no start. A black dot marks the Ending block. Blocks
-  that do not start a chain are drawn faded.
+- **Drag** a block to move it.
+- **Drag from a port**, one of the little circles on a block's edges, to another
+  block's port to draw an arrow. A block takes any number of arrows in but only one
+  out, so dragging from a block that already has one just moves that arrow.
+- **Click** a block to select it and load its values into the fields. Drag across
+  empty space to select several, and hold <kbd>Shift</kbd> to add to the selection.
+
+Each block shows its pin, frequency, pulse width and duration, and what the pin will
+actually do: `10% duty`, `constant ON` or `pin LOW`. Its colour follows its pin. A few
+marks tell you how the graph will run:
+
+- A **red dot** at the top right marks the block that starts a chain. It has a white
+  ring if you ticked **Starting** yourself.
+- A **hollow amber ring** marks a loop with no start, which won't run.
+- A **black dot** marks the **Ending** block.
+- Blocks that don't start a chain are drawn faded.
+
+> [!TIP]
+> <kbd>Delete</kbd> removes the selection, <kbd>Ctrl</kbd>+<kbd>C</kbd> and
+> <kbd>Ctrl</kbd>+<kbd>V</kbd> copy and paste, <kbd>Esc</kbd> clears the selection,
+> and <kbd>Home</kbd> fits the graph in view. Middle-drag to pan and scroll to zoom.
+> There's no undo, so **Save** before a big edit.
 
 #### 2. Waveform preview
 
-One second of the wave the Freq and PW fields describe
-([below](#the-waveform-preview)).
+The little plot at the bottom left draws one second of the wave that **Freq** and
+**PW** describe, so give it a glance every time you type them in. We'll come back to
+it [below](#the-waveform-preview).
 
 #### 3. Pin
 
-The output pin. It has no default, and an empty Pin is refused with
-`Enter a pin number.` On the reference rig the stimulation pin is 53. Apply,
-Test, Calibrate and Record refuse some pins
-([WORKFLOW.md](WORKFLOW.md#pins) lists them and says why). Two chains may not
-drive one pin. One chain may use a pin in several blocks, because its blocks run one
-after another.
+The trigger board pin this block drives. There's no default, so you always type one
+in. On our rig, the stimulation pin is 53.
+
+Some pins are off limits, like the camera trigger pins, and **Apply**, **Test**,
+**Calibrate** and **Record** all refuse a paradigm that uses one.
+[Pins](WORKFLOW.md#pins) lists them. Two chains can't
+drive the same pin, but one chain can use a pin in several blocks, since its blocks
+take turns.
 
 #### 4. Freq (Hz)
 
-Pulses per second. 0 holds the pin LOW for the block's duration, which is how
-a pause is written.
+Pulses per second. A frequency of 0 holds the pin LOW for the whole block, which is
+how you write a pause.
 
 #### 5. PW (ms)
 
-How long the pin stays HIGH in each cycle. Frequency and pulse width are
-separate fields, so check the duty cycle in the preview.
+The pulse width: how long the pin stays HIGH in each cycle. It's easy to ask for a
+longer pulse than a cycle can hold, but the preview will catch it.
 
 #### 6. Dur (s)
 
-How long the block runs before its chain moves on. It must be above 0 and can
-be a fraction.
+How long the block runs before its chain moves on. It has to be more than 0, and
+fractions are fine.
 
-Enter in any of these four fields applies the values to the selected block.
-With nothing selected, Enter creates a block, as Create Block does. A new
-block takes 0 Hz, 0 ms and 1 s for the fields left blank.
+> [!TIP]
+> Press <kbd>Enter</kbd> in any of these four fields to apply the values to the
+> selected block. With nothing selected, <kbd>Enter</kbd> creates a new block, just
+> like **Create Block**. A new block fills a blank field with 0 Hz, 0 ms or 1 s.
 
 #### 7. Starting
 
-Marks the selected block as the start of its group. A block with no incoming
-arrow already starts a chain. A loop has no such block, so it needs this or
-it never runs. Each connected group has one start, so ticking one clears the
-others. Available when exactly one block is selected.
+Marks the selected block as the start of its group. Most of the time you won't need
+it, since a block with no arrow coming in already starts a chain. A loop has no such
+block, though, so it needs **Starting** or it never runs. Each connected group has a
+single start, so ticking one clears the others.
 
 #### 8. Ending
 
-Marks the block whose first completion stops the recording. There is at most
-one per canvas, and it is available when exactly one block is selected. A
-looping chain keeps running until the recording stops, so bound a loop with a
-parallel chain that holds the Ending block. Panopticon times the stop from the
-canvas when Record starts, and does not ask the board.
+Marks the block that ends the recording: the first time it finishes, the recording
+stops. A canvas can only have one. A loop on its own keeps going until you stop the
+recording, so to let a loop run for a set time, put the **Ending** block in a separate
+chain beside it.
 
 #### 9. Status line
 
-What the graph will do, such as `Recording will stop 15 s after start.` In
-red, what blocks it: a loop with no start, a pin driven by two chains, an
-Ending block that no chain reaches, or numbers that cannot be read. It also
-shows upload progress, test countdowns, and whether the last upload or test
-stop succeeded.
+The line under the fields tells you what the graph will do, like
+`Recording will stop 15 s after start.` When it turns red, it's telling you what's
+stopping the graph from running: a loop with no start, a pin driven by two chains, an
+**Ending** block that no chain reaches, or a number it can't read. It also shows
+upload progress, the test countdown, and whether the last upload or test stop worked.
 
 #### 10. Test
 
-Runs the paradigm on the board for real, with no camera pins. The paradigm's
-pins switch as they would in a recording, so a device on them runs, and no
-camera is triggered or recorded. The button reads Stop Test while
-a test runs, and the status line counts down (`Testing — 12 s remaining.`). A
-looping test reads `Testing — looping, press Stop Test to end.`, and only Stop
-Test or closing the editor ends it.
+**Test** runs the paradigm on the trigger board for real, without the cameras. The
+pins switch just as they would in a recording, so whatever is wired to them runs too.
+While it runs, the button reads **Stop Test** and the status line counts down
+(`Testing — 12 s remaining.`). A looping paradigm reads
+`Testing — looping, press Stop Test to end.` and keeps going until you press
+**Stop Test** or close the editor.
 
-Test runs whatever the board carries, so when the canvas differs from the last
-upload it offers to upload first, and after a failed Apply it refuses. It uses
-the main window's serial link, so it does not reset the board while Panopticon
-holds the port. [WORKFLOW.md](WORKFLOW.md#when-the-board-resets) lists when a
-Test does reset it. If the board does not confirm the stop, the status line
-reads
-`STOP NOT CONFIRMED — stim may still be running.` and a dialog appears.
-Power-cycle the board.
+Test runs whatever is on the board, so if you've changed the canvas since the last
+upload, it asks whether to upload first. A Test can also reset the board, and
+[When the board resets](WORKFLOW.md#when-the-board-resets) says when.
+
+> [!WARNING]
+> If the board doesn't confirm the stop, the status line reads
+> `STOP NOT CONFIRMED — stim may still be running.` and a dialog appears.
+> Power-cycle the board.
 
 #### 11. Apply to Arduino
 
-Compiles the graph and flashes it to the board, which takes about 30 s
-([State](#16-state)). Apply is refused
-during an acquisition, during another flash or a Test, and for a graph with a
-blocking problem. On success the status line reads
-`Upload successful — press Record to run paradigm.`
-[WORKFLOW.md](WORKFLOW.md#when-the-board-resets) says when Panopticon later
-swaps it off the board and back. A failed upload leaves the board's contents
-unknown, and possibly without its [safe-pins guard](GLOSSARY.md#safe-pin).
-Apply again: Record, Calibrate and Test refuse until an Apply succeeds.
+**Apply to Arduino** compiles the graph and flashes it onto the trigger board, which
+takes about 30 s. When it works, the status line reads
+`Upload successful — press Record to run paradigm.` and your next recording runs it.
+Panopticon takes the paradigm off the board for each calibration and puts it back for
+the recording after. **Apply** won't run while the status line shows a problem in
+red, or while something else is using the board.
 
-Load, Clear and Save share the row. Load and Save read and write the graph as
-JSON, by default `stim_config.json` in the output directory. Load asks before it
-replaces unsaved changes, and leaves the canvas as it was when a file cannot be
-read. Clear asks before it empties the canvas. Save writes a file, and only
-Apply changes the board.
+> [!WARNING]
+> A failed upload leaves the board in an unknown state, possibly without its
+> [safe-pin](GLOSSARY.md#safe-pin) guard. Apply again: **Record**, **Calibrate** and
+> **Test** refuse to run until an **Apply** succeeds.
+
+**Save** and **Load** keep the graph in a JSON file, `stim_config.json` in the output
+directory unless you pick another name. **Load** asks before replacing unsaved
+changes, and **Clear** asks before emptying the canvas. None of them touch the board.
 
 ---
 
 ## The waveform preview
 
-Check this plot whenever you type Freq and PW. It draws one second of the wave
-the fields describe and captions it, so you see the stimulation's shape before
-it reaches the board. The period is `1000 / freq` ms, and the duty cycle is
-`pulse width × freq / 10` percent.
+The waveform preview draws one second of the wave, with a caption, so you can see the
+shape of the stimulation before it reaches the board. The period is `1000 / freq` ms,
+and the duty cycle is `pulse width × freq / 10` percent.[^cycles]
 
 | Fields | Preview |
 |---|---|
@@ -594,42 +531,50 @@ it reaches the board. The period is `1000 / freq` ms, and the duty cycle is
 | 0 Hz: pin held LOW | ![0 Hz](images/wave_0hz.png) |
 | 10 Hz, 100 ms: period 100 ms, 100% duty | ![10 Hz, 100 ms pulse](images/wave_10hz_100ms.png) |
 
-The preview draws at most 400 cycles, so a train above 400 Hz fills only the
-first 400/f seconds of the plot, as a solid band.
-
-Read the last row closely. At 10 Hz each period is 100 ms, so a 100 ms
-pulse fills it and the pin goes HIGH and stays HIGH for the whole block. The
-preview draws one rising edge, turns its border red and reads
-`100% duty — constant ON, not 10 Hz`. A pulse longer than its period does the
-same, captioned for example `pulse 150 ms > period 100 ms`. The board drives
-the pin HIGH in both cases, and the block reads `constant ON`.
+Watch out for the last row. At 10 Hz each period is 100 ms, so a 100 ms pulse fills
+it completely, and the pin goes HIGH and stays there for the whole block. The preview
+draws one rising edge, turns its border red and says
+`100% duty — constant ON, not 10 Hz`. A pulse longer than its period gets the same
+treatment, with a caption like `pulse 150 ms > period 100 ms`. Either way the board
+holds the pin HIGH and the block reads `constant ON`.
 
 ---
 
 ## Controls that hide, and controls that disable
 
-The coverage display (12) and the progress bar (15) stay hidden until they
-have something to show, as their entries say.
+The coverage display (12) and the progress bar (15) stay hidden until they have
+something to show. Other controls grey out when using them would do the wrong thing.
+Hover over a greyed-out toggle or **Solve** to see why.
 
-Disabled while they would do the wrong thing:
+- **Calibrate** and **Record**: while the hardware check runs, while videos are
+  encoded or aligned, during a solve or a stimulation upload, and until a profile is
+  open.
+- **Solve**: while a solve runs, and until a profile is open. During an acquisition
+  or an encode you can still click it, but the status bar just says
+  `Solve unavailable while acquiring/encoding`.
+- The dropdown, the output folder button and the session fields: from the start of
+  an acquisition until its videos are finished, and during a solve.
+- During the jobs in the second table under [State](#16-state): everything above,
+  plus **Snapshot**. **Stimulation** and the sliders keep working.
+- In the editor: **Starting** and **Ending** until one block is selected, **Apply**
+  and **Test** during an upload, and **Apply** during a **Test**.
 
-- Record and Calibrate while the hardware check runs, while videos are
-  encoded or aligned, during a solve, during an editor upload, and until a
-  profile is open.
-- Solve during a solve and until a profile is open. During an acquisition,
-  an encode or an alignment it stays live, and a press shows
-  `Solve unavailable while acquiring/encoding` in the status bar.
-- During a blocking operation (the second table under 16): the dropdown, the
-  output directory, the toggles, Solve, Snapshot and the session fields. The
-  Stimulation button and the two sliders stay live.
-- The session fields, the output directory and the dropdown from the start
-  of an acquisition until its videos are finalised, and during a solve.
-- In the editor: Starting and Ending unless exactly one block is selected,
-  Apply and Test during an upload, and Apply during a Test.
+If you quit in the middle of something, [After you stop](WORKFLOW.md#9-after-you-stop)
+says what happens.
 
-Hover over a disabled toggle or Solve to see what holds it.
-[WORKFLOW.md](WORKFLOW.md#what-happens-at-launch) describes the launch
-hardware check, and [WORKFLOW.md](WORKFLOW.md#quitting-in-the-middle) what
-quitting does in each state.
+[*Next up:* Running a session](WORKFLOW.md)
 
-Next: [WORKFLOW.md](WORKFLOW.md) takes you through a session, one step at a time.
+[^preview]: The preview downsamples each frame 3× per axis, so 1920 × 1200 becomes
+    640 × 400. The grid repaints every 33 × N / 6 ms for N cameras, but never more
+    often than every 33 ms or less often than every 100 ms.
+
+[^tick]: A tick is one pass of the board detector over the latest full-resolution
+    frame from every camera. It visits the cameras one at a time, so a cluttered
+    arena slows it down. On our rig it manages 4 to 5 ticks a second, and the log
+    line `[hud] coverage ticks/s:` gives the rate.
+
+[^status]: The text in the picture's status line (9) was added for the picture. For a
+    loop with no **Ending** block, the editor leaves that line empty.
+
+[^cycles]: The preview draws up to 400 cycles, so a train above 400 Hz fills only the
+    first 400/f seconds of the plot, as a solid band.
