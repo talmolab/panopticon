@@ -1,604 +1,257 @@
 # Installation
 
-Previous: [README.md](../README.md).
+Let's get Panopticon running on your computer. We'll install the software, put the cameras on the network, write a profile that describes your rig, and open it for the first time. By the end, every camera will be streaming live in the window.
 
-This page takes a Windows computer from nothing to a working Panopticon. It
-says what the rig's hardware needs, goes through the install one step at a
-time, and checks the result. Settings are in
-[CONFIGURATION.md](CONFIGURATION.md): every profile field, the templates and
-the sizing formulas. The messages Panopticon prints, with their causes and
-fixes, are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). A FLIR rig follows
-[FLIR.md](FLIR.md) for its install and first test.
-
-This guide assumes the rig is built. The cameras are cabled and powered, and
-each camera's trigger input is wired to a pin of the trigger board. Each
-network switch either already holds the settings that
-[Configure the switches](#configure-the-switches) lists, or you can open its
-settings page to set them. Cameras, their I/O connectors and switches vary
-between labs, so their own manuals cover the wiring and the switch's menus.
-This page says what Panopticon needs from them, and how its tools check it.
+We'll assume the rig is already built: the cameras are cabled and powered, and each camera's trigger input is wired to a pin of the trigger board. Cameras and network switches vary from lab to lab, so their own manuals cover the wiring and the menus. We'll tell you what Panopticon needs from them, and how to check it.
 
 ## Before you start
 
-Find your case in the table, and do the parts it names.
+Find the row that fits you:
 
 | You want to | Do |
 |---|---|
 | Try Panopticon with no cameras | Steps 1, 3 and 4 of [section 2](#2-install-the-software), then [Without any cameras](#without-any-cameras) |
-| Set up Panopticon on a rig that is built and wired but has never run it | [Wiring the trigger line](#wiring-the-trigger-line) for the pin list, every step of section 2 in order, then section 3 |
-| Set up a new computer for a rig that already works | Steps 1 to 5 (step 5 says which parts), step 7 with the old computer's profile and `.pfs` file, steps 8 to 10, [section 3](#3-verify-it-works) |
-| Build a copy of the reference rig | Buy the parts in [The reference rig](#the-reference-rig), then every step of section 2 in order, then section 3 |
-| Build a new rig | [Section 1](#1-what-the-rig-needs), every step of section 2 in order, then [section 3](#3-verify-it-works) |
-| Build a rig with FLIR cameras | Section 1, steps 1, 3 and 4, then [FLIR.md](FLIR.md) from its Spinnaker install onward |
+| Set up a rig that's built but has never run Panopticon | All of section 2 in order, then [section 3](#3-verify-it-works) |
+| Move a working rig to a new computer | Steps 1 to 5 (only this computer's side of step 5), step 7 with the old computer's files, then steps 8 to 10 and section 3 |
+| Build a new rig | [Section 1](#1-what-the-rig-needs) first, then sections 2 and 3 |
+| Use FLIR cameras | Section 1, steps 1, 3 and 4, then [FLIR.md](FLIR.md) |
 
-On this page, a rig that already works is one that has recorded with
-Panopticon before.
-
-Several steps differ between the two kinds of camera.
-[GigE](GLOSSARY.md#gige-vision) cameras plug into a network switch with an
-Ethernet cable. USB3 cameras plug into the computer with a USB cable. The
-reference rig's cameras are GigE.
-
-Have these at hand:
+You'll also want these handy:
 
 - a Windows account that can run PowerShell as Administrator
-- an internet connection, for the downloads
-- each camera's serial number, printed on its label (step 7)
-- a list of which board pin drives which camera, and which pin drives each
-  stimulation device ([Set up the board](#set-up-the-board) says how to make
-  one)
-- the trigger board and its USB cable (step 8)
-
-Each step says what to type or click, what you should see, and what to do if
-you see something else.
-
-Contents:
-
-- [Before you start](#before-you-start)
-- [1. What the rig needs](#1-what-the-rig-needs)
-- [2. Install the software](#2-install-the-software)
-  - [Step 1: install uv](#step-1--install-uv)
-  - [Step 2: install the Basler pylon SDK](#step-2--install-the-basler-pylon-sdk)
-  - [Step 3: get the code](#step-3--get-the-code)
-  - [Step 4: install the Python dependencies](#step-4--install-the-python-dependencies)
-  - [Step 5: put the cameras on the network (GigE)](#step-5--put-the-cameras-on-the-network-gige)
-  - [Step 6: make the camera settings file (.pfs)](#step-6--make-the-camera-settings-file-pfs)
-  - [Step 7: write the rig profile](#step-7--write-the-rig-profile)
-  - [Step 8: flash the trigger firmware](#step-8--flash-the-trigger-firmware)
-  - [Step 9: first launch](#step-9--first-launch)
-  - [Step 10: desktop shortcut](#step-10--desktop-shortcut)
-  - [Updating Panopticon](#updating-panopticon)
-  - [Adding cameras to a rig that already works](#adding-cameras-to-a-rig-that-already-works)
-- [3. Verify it works](#3-verify-it-works)
+- an internet connection
+- each camera's serial number, printed on its label
+- the trigger board and its USB cable
+- a list of which board pin drives which camera, and which pin drives each stimulation device ([Set up the board](#set-up-the-board) shows how to make one)
 
 ---
 
 ## 1. What the rig needs
 
-Skip this section on a rig that already works, or to try Panopticon without
-cameras.
+Skip this section if your rig already records with Panopticon. It's here to help you choose hardware, and to check your plans against a rig we know works.
 
 ### The reference rig
 
-Every measurement in these pages comes from this rig. Building a copy of it?
-Buy these parts and go to [section 2](#2-install-the-software). The rest of
-this section is for choosing other parts, and for checking your own figures
-against one known-good point.
+Every measurement in these docs comes from our rig:
 
-| Part | The reference rig |
+| Part | Our rig |
 |---|---|
 | CPU | Intel Core Ultra 9 285K, 24 cores (8 performance, 16 efficiency) |
 | RAM | 63.4 GiB |
 | GPU | NVIDIA RTX 5080, 12 concurrent NVENC sessions |
 | Cameras | 9 Basler a2A1920-165g5m (5 GigE), 1920x1200 Mono8 at 100 fps |
 | Network | 3 managed multi-gigabit switches (NETGEAR MS510TXM), 3 cameras each, one 10 GbE host port per switch |
-| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins fanned out across nine cameras, stimulation on pin 53 |
+| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins shared by the nine cameras, stimulation on pin 53 |
 | OS | Windows 11 |
 
-Text in code font is typed or read exactly as written. The lower-case names
-with underscores, such as `trigger_pins`, are fields of the rig's profile, the
-settings file you write in [step 7](#step-7--write-the-rig-profile).
+Building a copy? Buy these parts and go straight to [section 2](#2-install-the-software).
 
-### What sets the load
+For any other rig, the load on each part comes down to three numbers: the frame size, the frame rate and the camera count. Frames are always Mono8, one byte per pixel, so a 1920x1200 frame is 2.3 MB. A part that's too small doesn't stop the recording. It quietly loses frames instead, so size each part before you buy it ([the formulas](CONFIGURATION.md#sizing-formulas)).
 
-Panopticon runs on Windows with an NVIDIA GPU, Basler or FLIR machine-vision
-cameras and a hardware TTL trigger, for any number of cameras. The load on
-each part of the rig follows from the frame size, the frame rate and the camera
-count. The pixel format is always Mono8, one byte per pixel, so a 1920x1200
-frame is 2.3 MB. A part too small for its load loses frames while the recording
-carries on, so size each part before you buy it.
+Panopticon runs on 64-bit Windows, the only system we've tested.[^os]
 
-This section says what each load depends on and how to choose the hardware.
-[CONFIGURATION.md](CONFIGURATION.md#sizing-formulas) holds the formulas for the
-network, RAM, disk and NVENC sessions, with the reference rig's figures.
+[^os]: The thread placement settings, `configure_nic.ps1`, `make_shortcut.ps1` and the firewall rule in step 5 are Windows-only. On Linux, USB3 cameras draw their buffers from usbfs, and the launch check warns when `usbfs_memory_mb` is too small for them.
 
 ### Cameras
 
-Panopticon drives cameras through one backend module per vendor, in
-`gui_app/backends/`:
+| Cameras | Status |
+|---|---|
+| Basler, GigE or USB3, through Basler's pylon SDK | Runs our rig |
+| FLIR (Teledyne), GigE or USB3, through the Spinnaker SDK 4.x | In testing. Nothing has run on FLIR hardware yet ([FLIR.md](FLIR.md)) |
 
-| Cameras | Backend | Status |
-|---|---|---|
-| Basler, GigE or USB3 | `basler`, through pypylon and the pylon SDK | Runs the reference rig |
-| FLIR (Teledyne), GigE or USB3 | `flir`, through the Spinnaker SDK 4.x | In testing. Nothing has run on FLIR hardware yet ([FLIR.md](FLIR.md)) |
+Every camera needs a Mono8 pixel format, the same frame size as the others, and a hardware trigger input. Panopticon won't open a camera with a different pixel format or frame size, and you can't mix vendors on one rig.[^backend]
 
-Every camera needs:
-
-- a Mono8 pixel format. Opening refuses a camera set to a wider format,
-  because the capture path stores one byte per pixel.
-- the frame size the profile names, the same on every camera. Opening refuses
-  a camera whose frame size differs.
-- a hardware trigger input ([A trigger source](#a-trigger-source)).
-
-A profile names one backend, so one rig uses one vendor. Support for another
-vendor is one new backend module, and [INTERNALS.md](INTERNALS.md) lists what
-that module has to provide.
+[^backend]: Each vendor is one module in `gui_app/backends/`, and [INTERNALS.md](INTERNALS.md) lists what a module for a new vendor has to provide.
 
 ### Camera temperature
 
-A machine-vision camera without a fan cools through its housing and its mount.
-A camera that reaches its shutdown temperature stops delivering frames in the
-middle of a recording.
+A camera without a fan cools through its housing and its mount, and one that reaches its shutdown temperature stops sending frames, even mid-recording. So plan the cooling before you mount the cameras. Mount each one on metal rather than plastic, fit heatsinks, starting with the cameras that get the least airflow, and plan for passive cooling first: some recording rooms don't allow fans, ours included.
 
-Measured on the reference rig in September 2026 (nine Basler a2A1920-165g5m
-cameras, no fans):
+On our rig, nine fanless a2A1920-165g5m cameras with one heatsink each levelled off at 72-78 °C at idle. They flag Critical at 76 °C and shut down at 81 °C, so there isn't much room.[^thermal] During an acquisition, Panopticon reads each camera's temperature and warns before the camera reaches the shutdown temperature it reports: at 79 °C on these cameras.
 
-- With one heatsink each, idle cameras levelled off at 72-78 °C. Three sat above
-  76 °C, the level the camera itself flags as Critical. The camera shuts down at
-  81 °C.
-- The heatsinks lowered the idle temperature by 2-4 °C. A second heatsink on the
-  hottest camera lowered it by another 2.7 °C.
-- Recording raised the temperature by about 0.3-0.7 °C per minute with the
-  heatsinks, and by 1.1-1.3 °C per minute before them. At those rates, a
-  recording started at the one-heatsink idle level of about 77.5 °C would reach
-  80 °C, 1 °C below the shutdown, in about 3-8 minutes (an estimate).
-
-Plan the cooling before you mount the cameras:
-
-- Mount each camera on metal. A metal bracket conducts heat away from the
-  housing, and a plastic one leaves the camera to cool through the air alone.
-- Fit heatsinks, starting with the cameras in the least airflow.
-- Some recording rooms do not allow fans (the reference rig's room is one), so
-  plan for passive cooling first.
-
-During an acquisition Panopticon reads each camera's temperature and warns
-before the camera reaches the shutdown temperature it reports. The reference
-profile warns at 79 °C on these cameras.
-[CONFIGURATION.md](CONFIGURATION.md#thermal_warn_margin_c) gives the rule and
-its two settings, and [WORKFLOW.md](WORKFLOW.md#while-it-records) says where
-the warning appears.
-
-The Critical and shutdown levels are fixed in the camera's firmware and cannot
-be raised. Leave the camera's temperature override node
-(`BsliDeviceTemperatureOverwriteEnable`) alone: it makes the camera report a
-false temperature, and the camera's own over-temperature protection then acts
-on that false value.
+[^thermal]: Measured in September 2026. The heatsinks bought 2-4 °C, and a second heatsink on the hottest camera another 2.7 °C. Recording warmed the cameras by 0.3-0.7 °C a minute (1.1-1.3 °C before the heatsinks), so by our estimate a camera starting from the idle level of about 77.5 °C would reach 80 °C in 3-8 minutes. The Critical and shutdown levels are set in the camera's firmware and can't be raised. Please leave the camera's temperature override (`BsliDeviceTemperatureOverwriteEnable`) alone: it makes the camera report a false temperature, which its own over-temperature protection then acts on.
 
 ### A trigger source
 
-Panopticon always triggers the cameras in hardware. Free-running cameras drift
-apart, because each runs on its own oscillator. A shared TTL trigger makes frame
-*N* of every camera the same instant, to within the gap between trigger pins
-([Wiring the trigger line](#wiring-the-trigger-line)) and the cameras'
-trigger-to-exposure jitter. Each frame carries the camera's count of the
-triggers it acquired, its [block ID](GLOSSARY.md#block-id). Alignment rests on
-that count.
+Panopticon always triggers the cameras in hardware, because cameras left to run free drift apart. With one shared TTL trigger, frame N is the same instant in every camera,[^instant] and each frame carries the camera's count of the triggers it acquired, its [block ID](GLOSSARY.md#block-id). The trigger can come from Panopticon's own board, or from a source of yours:
 
-| Source | Profile | Stimulation |
+| Source | In the profile | Stimulation |
 |---|---|---|
-| Panopticon's trigger board, an Arduino Mega 2560 or a board like it ([The trigger board](#the-trigger-board)) | `trigger_source: board` (the default), `serial_port`, `trigger_pins` | Runs on the same board |
+| Panopticon's trigger board: an Arduino Mega 2560, or a board like it ([The trigger board](#the-trigger-board)) | `trigger_source: board` (the default), `serial_port`, `trigger_pins` | Runs on the same board |
 | Your own TTL source, such as a pulse generator or a DAQ | `trigger_source: external` | Not available |
 
-Panopticon programs its board itself, through `arduino-cli`
-([step 8](#step-8--flash-the-trigger-firmware)). With your own source you start
-and stop the pulses yourself, and Panopticon refuses the recording if any
-camera receives a frame before every camera is armed
-([CONFIGURATION.md](CONFIGURATION.md#your-own-ttl-source) describes the mode).
+Panopticon programs its own board for you in step 8. With your own source, you start the pulses when Panopticon asks for them, and stop them yourself at the end ([more](CONFIGURATION.md#your-own-ttl-source)).
+
+[^instant]: To within the few microseconds between trigger pins, and each camera's own trigger-to-exposure jitter.
 
 #### Wiring the trigger line
 
-A wiring mistake cannot be repaired after the recording: a camera that misses
-triggers records views that are not simultaneous with the others.
+Take your time with the wiring. A camera that misses triggers records views that aren't simultaneous with the others, and there's no fixing that afterwards. [The trigger board](#the-trigger-board) has a diagram of the whole thing. For each camera, Panopticon needs:
 
-Which pin of a camera's I/O connector is its trigger input, and which is that
-input's ground, differs between models, and the camera's data sheet gives both.
-[The trigger board](#the-trigger-board) draws the wiring as a whole. Panopticon
-needs:
+- **Its trigger input on a pin listed in `trigger_pins`**, or on your own source's output. On a Basler camera that's `Line1`, which Panopticon sets to trigger on the rising edge. On a FLIR camera, `camera.trigger.line` names it ([Wire the trigger](FLIR.md#2-wire-the-trigger)).
+- **A common ground**, the board's GND joined to each trigger input's own ground. An opto-isolated input has a ground of its own, separate from the camera's power ground.
+- **A signal the input accepts.** A Mega drives 5 V, and an opto-isolated input is driven by current. The camera's data sheet gives the input's pins, its switching threshold and the current it draws.
 
-- Each camera's trigger input on a pin listed in the profile's `trigger_pins`,
-  or on your own source's output.
-  - On a Basler camera the input is `Line1`. Panopticon sets
-    `TriggerSource=Line1` and `TriggerActivation=RisingEdge` when an
-    acquisition starts.
-  - On a FLIR camera the profile's `camera.trigger.line` names the input.
-    FLIR.md's [Wire the trigger](FLIR.md#2-wire-the-trigger) covers
-    opto-isolated and non-isolated inputs.
-- A common ground: the board's GND joined to each trigger input's own ground,
-  or to one ground point they all share. An opto-isolated input has a ground of
-  its own, the opto ground, separate from the camera's power ground.
-- A signal each input accepts. A Mega drives 5 V. An opto-isolated input is
-  driven by current. The camera's I/O documentation gives its switching
-  threshold and the current it draws.
+Any digital pin works except `0` and `1`, which carry the board's serial link, and a pin wired to a stimulation device, which goes in `stim_safe_pins` instead. Panopticon won't load a profile that breaks either rule. On a Mega, the spare serial pins `14` to `19` work too (use them last), and `A0` to `A15` are written as `54` to `69`.
 
-The pin numbers are printed on the board beside its sockets, and sockets marked
-GND are ground. Which pins to use:
+One pin can drive several cameras, as long as it can supply the current they all draw. An ATmega2560 pin is rated for about 20 mA, so add up the cameras' input currents first. Our rig drives nine cameras from six pins.
 
-| Pins | Rule |
-|---|---|
-| `0` and `1` | Never. They carry the serial link that configures the board. The profile loader refuses them in `trigger_pins`. |
-| A pin wired to a stimulation device | Never. It belongs in `stim_safe_pins`, and the loader refuses a pin listed in both. |
-| `14` to `19` on a Mega | The Mega's extra serial ports, which Panopticon's firmware leaves free, so they work. Use them last, and leave existing wiring on them as it is. |
-| `A0` to `A15` on a Mega | Digital pins too. Write them as `54` to `69` in the profile and in the editor's Pin field. |
+> [!NOTE]
+> A camera that gets too little current misses a trigger now and then. On a Basler camera the miss leaves no gap in `blockids.npy`, because its block IDs count frames rather than triggers, so the videos stay the same length while they drift apart. The block-ID rate check after each recording is what catches it ([what to do](TROUBLESHOOTING.md#the-recording-looks-fine-but-the-views-are-out-of-sync)).
 
-The stimulation editor refuses a stimulation block on a camera's trigger pin,
-because the extra edges would advance that camera's block IDs and break the
-alignment. Any other digital pin works. Write down which pin drives which
-camera, because you will need the list when one camera stops triggering. The
-profile lists the pins but not which camera is on each.
+Write down which pin drives which camera. The profile doesn't record it, and you'll want the list the day a camera stops triggering. The order of `trigger_pins` doesn't matter, but every pin that drives a camera has to be in it: a camera on a pin the list leaves out gets no triggers, and Panopticon [retires](GLOSSARY.md#retirement) it once it stalls.[^pins]
 
-The board's sketch, the program it runs ([step 8](#step-8--flash-the-trigger-firmware)),
-writes every pin in `trigger_pins` in one loop with interrupts off,
-so no interrupt can widen the gap between pins. The pins still change one after
-another, microseconds apart. Cameras on one pin share one edge. One pin can
-therefore drive several cameras, if it can source the current they all draw.
-An ATmega2560 pin is rated for about 20 mA. One pin per camera gives each input
-the full 20 mA. The reference rig drives nine cameras from six pins.
-
-A camera driven with too little current misses a trigger now and then. A
-missed trigger consumes no block ID and leaves no gap in `blockids.npy`, so the
-videos keep equal lengths while they drift apart in time. Only the block-ID
-rate check after the recording catches it
-([TROUBLESHOOTING.md](TROUBLESHOOTING.md#the-recording-looks-fine-but-the-views-are-out-of-sync)).
-Before you fan one pin out to several cameras, add up their input currents.
-
-The order of `trigger_pins` carries no meaning, but every pin that drives a
-camera must be in the list. A camera on an unlisted pin receives no triggers.
-Panopticon [retires](GLOSSARY.md#retirement) it once it stalls, and the other
-cameras record without it.
+[^pins]: The sketch writes every pin in `trigger_pins` in one loop with interrupts off, so the pins change one after another, microseconds apart, and nothing can widen the gap. Cameras on one pin share one edge. The stimulation editor refuses a stimulation block on a camera's trigger pin, because the extra edges would advance that camera's block IDs.
 
 ### Network
 
-A GigE Vision camera sends each frame as a burst of UDP packets. A link near its
-capacity drops packets, and the frame is lost unless a resend recovers it. USB3
-cameras skip this section, apart from [USB3 cameras](#usb3-cameras) at its end.
+USB3 cameras can skip ahead to [USB3 cameras](#usb3-cameras).
 
-One camera's rate on its link is its frame size in bits times the frame rate,
-before packet headers ([Network](CONFIGURATION.md#network) gives the formula).
-That rate crosses the camera's own link and the host port it shares with the
-other cameras behind the same switch. GigE Vision is the protocol, and it runs
-over 1, 2.5, 5, 10 and 25 Gbit/s links.
+A GigE camera sends each frame as a burst of UDP packets, and a link that's close to full drops some of them. So the camera's own link, and the host port it shares with other cameras, both need room to spare.
 
 #### The camera's own link
 
-A 1 Gbit/s link carries about 54 fps of a 1920x1200 frame, so the reference rig
-uses the a2A1920-165g5m, a 5 Gbit/s model, for 100 fps. At 30 fps the same frame
-needs 553 Mbit/s and fits a 1 Gbit/s camera. The frame rate moves the number
-most: 1280x1024 at 100 fps still needs 1.05 Gbit/s.
+A camera's rate is its frame size in bits times its frame rate. A 1 Gbit/s link carries about 54 fps of a 1920x1200 frame, so 100 fps takes a 5 Gbit/s camera like the a2A1920-165g5m. At 30 fps the same frame needs 553 Mbit/s and fits a 1 Gbit/s camera, while even 1280x1024 needs 1.05 Gbit/s at 100 fps.
 
-The link speed also decides how long one frame takes to send. The camera leaves
-a gap between its packets, the [inter-packet delay](GLOSSARY.md#inter-packet-delay)
-(`GevSCPD` on a Basler camera), so that cameras sharing a port do not burst
-into each other. One frame then takes
-(packets per frame) x (packet time on the wire + delay). That time has to fit
-inside the trigger period. A camera still sending when the next trigger
-arrives ignores that trigger.
+The link speed also decides how long a frame takes to send. The camera leaves a short [inter-packet delay](GLOSSARY.md#inter-packet-delay) between packets (`GevSCPD` on a Basler) so that cameras sharing a port don't burst into each other. A frame then takes (packets per frame) x (packet time + delay), and the sum has to fit inside the trigger period, because a camera that's still sending when the next trigger arrives ignores it. With our settings (9000-byte packets, and `GevSCPD` 10000, which is 10 µs), a 1920x1200 frame is about 260 packets:
 
-Keep the frame time at least a millisecond inside the period. On the reference
-rig at 5 Gbit/s and 100 fps, `GevSCPD` 20000 (about 8.9 ms per frame) kept the
-full frame rate. At 22000 (about 9.5 ms) every camera recorded half the
-trigger rate. Do not set the delay to 0 either. At 0 each frame goes out as one
-burst, and the bursts of cameras sharing a port collide at the switch.
-
-With the reference camera settings (9000-byte packets, `GevSCPD` 10000, which is
-10 µs) a 1920x1200 frame is about 260 packets:
-
-| Negotiated link | Time per packet | Time per frame | At 100 fps (10 ms period) |
+| Link | Per packet | Per frame | At 100 fps (10 ms period) |
 |---|---|---|---|
 | 5 Gbit/s | 14.4 µs + 10 µs | about 6.3 ms | Fits |
-| 2.5 Gbit/s | 28.8 µs + 10 µs | about 10.1 ms | Too long. The camera ignores every second trigger and records 50 fps |
+| 2.5 Gbit/s | 28.8 µs + 10 µs | about 10.1 ms | Too long: the camera ignores every second trigger and records 50 fps |
 
-At 2.5 Gbit/s the inter-packet delay makes each frame take 10.1 ms, longer than
-the 10 ms period, although the link's bandwidth would carry the camera's
-payload. The recording looks normal, and the block-ID rate check after it
-reports that camera at half the trigger rate. Keep
-every camera on a port that negotiates 5 Gbit/s or more. On a 2.5 Gbit/s link,
-`GevSCPD` would have to drop to about 3000 (about 8.3 ms per frame), and the rig
-would need testing again at that setting.
+So keep every camera on a port that negotiates 5 Gbit/s or more. A 2.5 Gbit/s link is sneaky: it has the bandwidth, the recording looks normal, and only the block-ID rate check afterwards shows the camera at half the trigger rate.[^slowlink]
+
+Leave at least a millisecond of the period free. At 5 Gbit/s and 100 fps, we found that `GevSCPD` 20000 (about 8.9 ms per frame) kept the full rate, and 22000 (about 9.5 ms) halved it. Don't set the delay to 0 either, or each frame goes out as one burst and the bursts from cameras sharing a port collide at the switch.
+
+[^slowlink]: To use a 2.5 Gbit/s link, `GevSCPD` would have to drop to about 3000 (about 8.3 ms per frame), and the rig would need testing again at that setting.
 
 #### The host port and the switches
 
-Add up the cameras that share a host port and keep the total well under the
-port's line rate. Three 1920x1200 cameras at 100 fps send 5.53 Gbit/s, which a
-10 GbE port carries with about 45% to spare. Divide the camera count by the
-cameras one port can take, rounding up, for the number of host ports.
+Add up the cameras that share a host port, and keep the total well under the port's line rate. Three 1920x1200 cameras at 100 fps send 5.53 Gbit/s, which a 10 GbE port carries with about 45% to spare. Our rig has three switches with three cameras each, and each switch has its own 10 GbE port on the computer.
 
-The reference rig has nine cameras in three groups of three. Each group sits
-behind its own switch, and each switch has its own 10 GbE port on the host.
+On the switches, check that:
 
-A switch's camera ports have to run at the camera's link speed: a switch with
-1 GbE access ports holds a 5 Gbit/s camera to 1 Gbit/s. Multi-gigabit switches
-often split their ports into speed blocks. Put every camera and the uplink on
-ports that run at the camera's speed, and check the speed each port negotiated,
-as the switch's manual describes.
-
-The reference camera settings send 9000-byte packets
-([jumbo frames](GLOSSARY.md#jumbo-frames)). Every device in the path has to
-accept them:
-
-- the host adapter, with its Jumbo Packet at 9014 bytes
-  ([Configure the host adapters](#configure-the-host-adapters))
-- every switch port, the uplink included, at 9216 bytes
-  ([Configure the switches](#configure-the-switches))
-
-A 10GBASE-T copper run needs Cat6a cable or better. A marginal cable shows up as
-packet loss while the link stays up.
+- every camera port and the uplink run at the camera's link speed. A switch with 1 GbE ports holds a 5 Gbit/s camera to 1 Gbit/s, and multi-gigabit switches often split their ports into speed blocks.
+- every device in the path accepts 9000-byte [jumbo frames](GLOSSARY.md#jumbo-frames): the host adapter with its Jumbo Packet at 9014 bytes, and every switch port, the uplink included, with a maximum frame size of 9216. Step 5 sets both.
+- a 10GBASE-T copper run uses Cat6a cable or better. A marginal cable shows up as packet loss while the link stays up.
 
 #### USB3 cameras
 
-USB3 cameras share the bandwidth of the host controller they plug into. Spread
-them over controllers, and before you record, stream them all together at the
-target rate in pylon Viewer or SpinView.
+USB3 cameras share the bandwidth of the host controller they plug into. Spread them over controllers, and before you record, stream them all at once at the target rate in pylon Viewer or SpinView.
 
 ### CPU
 
-Each camera's grab loop has to finish every frame inside one trigger period,
-10 ms at 100 fps. A loop that falls behind stays behind, because it can
-retrieve frames only as fast as they arrive. Its backlog grows in the driver's
-buffer pool until the pool runs out.
+Each camera's grab loop has to finish every frame within one trigger period, 10 ms at 100 fps. A loop that falls behind never catches up, and its backlog grows in the driver's buffer pool until the pool runs out. At 1920x1200, each camera costs:
 
-The CPU work per camera:
+- about 0.8 ms per frame in its **grab thread**, roughly 8% of a core at 100 fps
+- about 1 ms per frame in its **encoder thread**, outside Python's global interpreter lock (the [GIL](GLOSSARY.md#gil)), thanks to the default [pinned upload](GLOSSARY.md#pinned-upload)
+- for GigE, the **network driver's** packet handling. Three cameras send about 78,000 packets/s into one port, which kept one core 46% busy on our rig.
 
-- A grab thread retrieves each frame, copies it into a buffer of the
-  [NV12 ring](GLOSSARY.md#nv12-ring), queues it for the encoder and releases the
-  driver's buffer. At 1920x1200 that takes about 0.8 ms per frame, roughly 8% of
-  one core at 100 fps.
-- An encoder thread feeds the GPU encoder. With the default
-  [pinned upload](GLOSSARY.md#pinned-upload) it first copies each frame into
-  page-locked memory without holding Python's global interpreter lock (the
-  [GIL](GLOSSARY.md#gil)). That costs about 1 ms of CPU per frame, outside the
-  GIL.
-- For GigE cameras, the network driver reassembles the packets. That work runs
-  as deferred procedure calls (DPCs) on the cores the adapter's receive-side
-  scaling (RSS) assigns. Three 1920x1200 cameras at 100 fps send about 78,000
-  packets/s into one port, and on the reference rig one core ran at 46% DPC load
-  for such a port. [INTERNALS.md](INTERNALS.md#receive-load-on-the-host) has
-  the nine-camera figures.
+The GIL is what really limits how far this scales. Only one thread can run Python at a time, and nine cameras make about 19 busy threads, so how briefly each thread holds the GIL matters more than how many cores you have ([measured](INTERNALS.md#why-a-copying-accessor-is-unaffordable)).
 
-The GIL limits how far this scales. A recording runs two threads per camera plus
-the window's, about 19 busy threads at nine cameras, and only one thread runs
-Python at a time. The time each thread holds the GIL per frame therefore matters
-more than the number of cores
-([measured](INTERNALS.md#why-a-copying-accessor-is-unaffordable)). The pinned
-upload exists for this reason. The GPU encoder's own copy of each frame holds
-the GIL, and on the nine-camera rig that copy made one camera drift behind the
-others. [CONFIGURATION.md](CONFIGURATION.md#nvenc_upload) describes the setting.
+On a CPU with performance and efficiency cores, a grab thread on an efficiency core runs a few percent slow and never catches up. `pin_capture_threads` gives each grab thread a performance core of its own, and `capture_core_exclude` keeps those threads off the cores that carry the network traffic ([more](CONFIGURATION.md#pin_capture_threads)).
 
-On a CPU with performance and efficiency cores the scheduler moves threads
-between the two kinds. A grab thread on an efficiency core runs a few percent
-slow, which it can never make up, and one camera falls behind in each session,
-a different one each launch. `pin_capture_threads` pins each grab thread to its
-own performance core, and `capture_core_exclude` keeps those threads off the
-cores that carry the network adapter's DPCs. Both work on Windows only and do
-nothing on a CPU with one kind of core. The two encoder placement settings
-measured worse on the reference rig and stay off.
-[CONFIGURATION.md](CONFIGURATION.md#pin_capture_threads) describes all four.
-
-The launch check warns below 4 physical cores. That is the floor for running
-Panopticon at all. Size the CPU from the figures above.
+The launch check warns below 4 physical cores, but that's only the floor for running Panopticon at all. Size the CPU from the figures above.
 
 ### RAM
 
-Panopticon holds two sets of frame buffers per camera during an acquisition.
-When you press Record it adds them up, and it refuses the start when the total
-exceeds the memory available at that moment. Running out of memory in the
-middle of a recording would lose frames, so a start that does not fit is
-refused. [RAM](CONFIGURATION.md#ram) gives the formula and the reference rig's
-figures.
+During an acquisition, each camera keeps frames in two places. The driver's **buffer pool** (`max_num_buffer`) holds them while the grab thread catches up, and the [NV12 ring](GLOSSARY.md#nv12-ring) holds them on their way to the encoder. With [kick-out](GLOSSARY.md#kick-out), the default, a frame waits in the ring until every camera has caught that trigger, so the ring grows with `kick_max_lag` and is usually the bigger of the two ([what the lag limit costs](CONFIGURATION.md#kick_max_lag)).
 
-- The driver's buffer pool (`max_num_buffer` per camera) holds frames while a
-  grab thread catches up. Keep it at or above `kick_max_lag`. The profile loader
-  refuses a pool shallower than `kick_max_lag` in kick-out mode.
-- The [NV12 ring](GLOSSARY.md#nv12-ring) holds frames on their way to the
-  encoder. In the default [kick-out](GLOSSARY.md#kick-out) mode a trigger's
-  frames wait in the ring until every camera has delivered that trigger, for at
-  most `kick_max_lag` frames. The ring therefore grows with `kick_max_lag`
-  ([what the lag limit costs](CONFIGURATION.md#kick_max_lag)), and it is usually
-  the larger of the two.
-- The pinned GPU upload adds a little page-locked memory.
+When you flip **Record** on, Panopticon adds them up and won't start if they don't fit in the free memory, since running out halfway through would lose frames. The log shows the sums on a `[hw] RAM for N cameras` line ([the formula](CONFIGURATION.md#ram)).
 
-The total has to be available when you press Record, with the operating system
-and the window on top, so budget about twice that total. The reference rig's
-nine cameras need about half of its 63.4 GiB. A start that fits goes ahead
-without a prompt, and the log records the figures on a `[hw] RAM for N cameras`
-line. The launch check warns below 16 GiB of RAM as Windows reports it, so a
-16 GB machine usually gets the warning. That is the floor for running
-Panopticon at all, and a 16 GB machine cannot hold a six-camera recording at
-the reference settings.
+Budget about twice that total, to leave room for Windows and everything else: our nine cameras need about half of the rig's 63.4 GiB. The launch check warns below 16 GiB. A 16 GB machine usually gets the warning too, and it couldn't hold a six-camera recording at our settings anyway.
 
 ### GPU
 
-Panopticon encodes H.264 on the GPU's NVENC encoder while it captures, which
-keeps the disk rate small ([Disk](#disk)). It needs an NVIDIA GPU with NVENC.
-PyNvVideoCodec does the encoding, and the CUDA runtime arrives as a Python
-package, so no CUDA toolkit is needed.
+Panopticon encodes H.264 on the GPU's NVENC encoder as it records, so you need an NVIDIA GPU with NVENC. The CUDA runtime comes as a Python package, so there's no CUDA toolkit to install.
 
-A real-time recording needs one NVENC session per camera. The NVIDIA driver caps
-how many sessions run at once, and the cap differs between GPUs and has changed
-between driver generations (2, then 3, 5, 8 and 12). More cameras need a more
-capable GPU, and the session cap is often the limit that binds first.
-Panopticon never assumes the cap. When it checks the hardware it asks the driver
-for two more sessions than there are cameras. Before each recording it refuses
-the start if the driver grants fewer than one per camera, unless `encoder: auto`
-can record on the CPU instead. On the
-reference rig an RTX 5080 grants 12 sessions, enough for its nine cameras.
+Each camera needs its own NVENC session, and the driver caps how many can run at once. The cap depends on the GPU and the driver (it has been 2, 3, 5, 8 and 12), and with many cameras it's often the first limit you hit. So at every launch, Panopticon asks the driver for two more sessions than there are cameras, and it won't record with fewer than one per camera unless `encoder: auto` can fall back to the CPU. On our rig, the RTX 5080 grants 12, plenty for nine cameras.
 
-Ask a candidate GPU the same question before you buy cameras for it. This needs
-only steps 1, 3 and 4 below:
+You can ask a GPU the same question before you buy cameras for it, once you've done steps 1, 3 and 4:
 
 ```powershell
 uv run python -c "from gui_app import nvenc; print(nvenc.probe_max_sessions())"
 ```
 
-It prints how many sessions the driver granted, up to 24. Anything at or above
-your camera count is enough. `0` means PyNvVideoCodec did not load, or the
-driver granted no session: close other programs that encode on the GPU and ask
-again. An error instead of a number means the GPU or its driver refused to
-create an encoder.
+It prints how many sessions the driver granted, up to 24. Anything at or above your camera count is enough. If it prints `0`, close any other program that encodes on the GPU and try again.
 
-The CPU encoder competes with the grab threads for cores, so treat it as a
-fallback. [CPU_ENCODE.md](CPU_ENCODE.md) describes it, and
-[CONFIGURATION.md](CONFIGURATION.md#encoder) lists the choices. ffmpeg comes
-with the Python packages (`imageio-ffmpeg`), so there is nothing else to
-install.
+When the GPU runs short, the CPU can encode with libx264 instead, and there's nothing extra to install for it. It competes with the grab threads for cores, though, so treat it as a fallback ([CPU_ENCODE.md](CPU_ENCODE.md)).
 
 ### Disk
 
-The profile field `realtime_encode` decides the disk rate.
+With real-time encoding, the default, only H.264 reaches the disk: a few MB/s even for nine cameras, which any ordinary drive handles.
 
-With real-time encoding (the default) only H.264 reaches the disk, a few MB/s
-even for nine cameras ([Disk](CONFIGURATION.md#disk) gives the rate), and any
-ordinary drive keeps up.
+If neither the GPU nor the CPU can encode every camera live, `realtime_encode: false` writes the raw frames to `raw.bin` and encodes them after the recording. The disk then takes everything, 2.07 GB/s for nine 1920x1200 cameras at 100 fps, so you'll need a drive rated for that, or the cameras split across drives. Panopticon warns at **Record** above 1.5 GiB/s, because a consumer NVMe drive slows to about 1-2 GB/s once its write cache fills.
 
-With `realtime_encode: false` every frame is written whole to `raw.bin` and
-encoded after the recording. Use it only when the GPU cannot give every camera
-a session and the CPU cannot encode them either. The rate is then the full
-payload, 2.07 GB/s for nine 1920x1200 cameras at 100 fps. Above 1.5 GiB/s
-Panopticon warns at Record, because a consumer NVMe drive falls to about
-1-2 GB/s once its write cache fills. Use a drive rated for that sustained rate,
-or split the cameras across drives.
-
-The launch check warns below 500 GiB free and below 500 MiB/s measured write
-speed. It measures the speed by writing 256 MiB to the output directory and
-deleting it.
-
-### Operating system
-
-Panopticon runs on 64-bit Windows, and only Windows has been tested. Several
-parts are Windows-specific: the thread placement settings (they do nothing on
-other systems), `configure_nic.ps1`, `make_shortcut.ps1` and the firewall
-rule in step 5. On Linux, USB3 cameras draw their buffers from usbfs, and the
-launch check warns when `usbfs_memory_mb` is too small for them.
+The launch check warns below 500 GiB free, and below 500 MiB/s of write speed, which it measures by writing 256 MiB to the output folder and deleting it again.
 
 ---
 
 ## 2. Install the software
 
-Do the steps in order, and check the result of each.
+Now let's install everything. Work through the steps in order, and each one ends with a quick check that it worked.
 
-FLIR cameras: follow steps 1, 3 and 4 here, then [FLIR.md](FLIR.md) from its
-Spinnaker install onward.
+Using FLIR cameras? Do steps 1, 3 and 4 here, then follow [FLIR.md](FLIR.md) from its Spinnaker install onward.
 
-Every command goes into PowerShell. To open it, press the Windows key, type
-`powershell` and press Enter. A window opens with a prompt like
-`PS C:\Users\you>`. Type a command, press Enter, and wait for the prompt to come
-back. Right-click pastes.
+### Open PowerShell
 
-Some steps need PowerShell as Administrator, also called an elevated
-PowerShell. Press the Windows key, type `powershell`, right-click
-*Windows PowerShell* in the results and choose *Run as administrator*. Windows
-asks `Do you want to allow this app to make changes to your device?`. Press
-Yes. The window's title then says *Administrator*. An Administrator window
-starts in `C:\Windows\system32`, so a command that runs a script from the
-repository needs `cd $HOME\Desktop\panopticon` first (step 3).
+Every command on this page goes into PowerShell. Press the <kbd>Windows</kbd> key, type `powershell`, and press <kbd>Enter</kbd>. A window opens with a prompt like `PS C:\Users\you>`. Type a command (or right-click to paste one), press <kbd>Enter</kbd>, and wait for the prompt to come back.
 
-If Windows asks for another account's password instead, the window runs as
-that account, and `$HOME` is that account's folder. In such a window, type
-your own folder in full, as in `cd C:\Users\you\Desktop\panopticon`. With no
-administrator password at all, ask your IT staff before you start, because
-several installers on this page need one too.
+A few commands need **PowerShell as Administrator**. Press the <kbd>Windows</kbd> key, type `powershell`, right-click **Windows PowerShell** and choose **Run as administrator**, then answer **Yes**. The title bar says *Administrator*. The window starts in `C:\Windows\system32`, so run `cd $HOME\Desktop\panopticon` before you use one of Panopticon's scripts from it.
 
-This page runs Panopticon's scripts as `uv run <script>.py`, for example
-`uv run gui.py`. `uv run python gui.py` does the same thing.
+> [!NOTE]
+> No administrator password? Ask your IT staff before you start, since several of the installers need one too. If Windows asks for someone else's password, `$HOME` in that window is their folder, so type yours in full, as in `cd C:\Users\you\Desktop\panopticon`.
 
 ### Step 1 — install uv
 
-uv manages the Python version and every package, so nothing goes into a system
-Python. The Windows command from
-<https://docs.astral.sh/uv/getting-started/installation/> is:
+[uv](https://docs.astral.sh/uv/) installs Python and every package Panopticon needs, and keeps them in Panopticon's own folder, away from any other Python on the computer. Install it with:
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-It prints where it installs uv, and the prompt comes back when it is done.
-Close PowerShell and open it again, so that the new window finds uv. Then
-check:
+When the prompt comes back, **close PowerShell and open it again**, so the new window can find uv. Then check that it worked:
 
 ```powershell
 uv --version
 ```
 
-Expected: one line starting with `uv` and a version number, such as:
+You should see one line like this (a newer version is fine):
 
 ```
 uv 0.11.13 (4512a3931 2026-05-10 x86_64-pc-windows-msvc)
 ```
 
-A newer version is fine. If PowerShell says `The term 'uv' is not recognized`,
-sign out of Windows and back in.
+If PowerShell says `The term 'uv' is not recognized`, sign out of Windows and back in.
 
 ### Step 2 — install the Basler pylon SDK
 
-For FLIR cameras, skip this step and follow [FLIR.md](FLIR.md#1-install).
+pypylon, the Python package that drives Basler cameras, runs on Basler's own SDK, so let's install that first. FLIR cameras skip this step and follow [FLIR.md](FLIR.md#1-install) instead.
 
-pypylon, the Python package that drives Basler cameras, calls Basler's own
-SDK, so install the SDK before the Python packages.
+1. Download the **pylon Software Suite** for Windows from <https://www.baslerweb.com/en/downloads/software-downloads/>. Our rig runs version 26.04, and a later one is fine.
+2. Run the installer and keep its defaults. Where it lists camera interfaces, keep **GigE** ticked for network cameras, or **USB** for USB3 ones.
+3. Restart the computer if it asks.
 
-1. Open <https://www.baslerweb.com/en/downloads/software-downloads/> and
-   download the pylon Software Suite for Windows. The reference rig runs
-   version 26.04. A later version is fine.
-2. Run the installer. Its default choices are fine. Where it lists camera
-   interfaces, keep GigE ticked for network cameras, or USB for USB3 cameras.
-3. Wait for it to finish, and restart the computer if it asks.
-
-The SDK provides the camera driver, pylon Viewer (step 6), and the
-IP Configurator and PylonGigEConfigurator (step 5). When the installer has
-finished, the Start menu holds a Basler folder with pylon Viewer and pylon IP
-Configurator in it.
-
-Check the install:
+The Start menu now has a **Basler** folder with **pylon Viewer** and **pylon IP Configurator** in it. To check the install from PowerShell:
 
 ```powershell
 Test-Path "C:\Program Files\Basler\pylon\Runtime\x64\PylonGigEConfigurator.exe"
 ```
 
-Expected: `True`. If it prints `False`, open File Explorer at
-`C:\Program Files\Basler`, type `PylonGigEConfigurator.exe` in its search box,
-and note the folder that holds it. Use that folder in place of
-`C:\Program Files\Basler\pylon\Runtime\x64` in step 5.
+You should see `True`. If you see `False`, search `C:\Program Files\Basler` in File Explorer for `PylonGigEConfigurator.exe`, and use the folder it's in wherever step 5 says `C:\Program Files\Basler\pylon\Runtime\x64`.
 
 ### Step 3 — get the code
 
-The repository is the folder of Panopticon's code, and `git clone` copies it
-from GitHub onto this computer. Git does the copying, so check for it first:
+Panopticon's code lives in a Git repository, and `git clone` copies it onto your computer. Don't worry if you've never used Git: it's just the commands below. First, check that Git is installed:
 
 ```powershell
 git --version
 ```
 
-Expected: one line such as `git version 2.54.0.windows.1`. If PowerShell says
-`The term 'git' is not recognized`, install Git for Windows:
+If you see a version, like `git version 2.54.0.windows.1`, you're set. If PowerShell says `The term 'git' is not recognized`, download Git for Windows from <https://git-scm.com/download/win> and run the installer with all its defaults. Then close PowerShell, open a new one, and check again.
 
-1. Download it from <https://git-scm.com/download/win> and run the installer.
-2. Accept every default: press Next on each screen, then Install.
-3. Close PowerShell, open a new one, and run `git --version` again.
-
-Clone the repository wherever you like. This page uses the Desktop to keep the
-paths short. First check where Windows keeps your Desktop:
-
-```powershell
-[Environment]::GetFolderPath('Desktop')
-```
-
-It prints a path such as `C:\Users\you\Desktop`. On many Windows 11 computers
-OneDrive keeps the Desktop, and the path then reads
-`C:\Users\you\OneDrive\Desktop`. Keep the code out of OneDrive, which would
-sync thousands of files as uv installs them. If the path contains `OneDrive`,
-run `cd $HOME` in place of `cd $HOME\Desktop` below. Then read
-`$HOME\panopticon` wherever this page says `$HOME\Desktop\panopticon`, and
-`C:\Users\you\panopticon` for `C:\Users\you\Desktop\panopticon`.
-
-Then clone:
+Now clone the repository. We'll put it on the Desktop to keep the paths short:
 
 ```powershell
 cd $HOME\Desktop
@@ -606,146 +259,85 @@ git clone https://github.com/talmolab/panopticon.git
 cd panopticon
 ```
 
-The output ends with lines like:
+Git prints its progress, and finishes with a line like `Resolving deltas: 100%`. The prompt now reads `PS C:\Users\you\Desktop\panopticon>`: you're in the **repository folder**, and every command from here on runs in it. In a new PowerShell window, come back with `cd $HOME\Desktop\panopticon`.
 
-```
-Cloning into 'panopticon'...
-remote: Enumerating objects: ...
-Receiving objects: 100% ...
-Resolving deltas: 100% ...
-```
-
-The repository has no submodules, so the clone is complete. If `git clone`
-failed because Git was missing, install it as above, open a new PowerShell and
-run all three lines again.
-
-After the last `cd`, the prompt reads `PS C:\Users\you\Desktop\panopticon>`.
-Every later command runs from there. In a new window, go back with
-`cd $HOME\Desktop\panopticon`.
+> [!TIP]
+> Many Windows 11 computers keep the Desktop in OneDrive, which would try to sync the thousands of files uv installs. Run `[Environment]::GetFolderPath('Desktop')` to see where yours is. If the path contains `OneDrive`, clone into your home folder instead (`cd $HOME` in place of `cd $HOME\Desktop`), and read `$HOME\panopticon` wherever this page says `$HOME\Desktop\panopticon`.
 
 ### Step 4 — install the Python dependencies
 
-On a computer with no cameras, read
-[On a computer with no cameras](#on-a-computer-with-no-cameras) first.
-Otherwise run:
+Now uv can fetch everything else. On a computer with no cameras, use the command in [On a computer with no cameras](#on-a-computer-with-no-cameras) instead. Otherwise run:
 
 ```powershell
 uv sync
 ```
 
-The first run downloads a Python interpreter and about two dozen packages into a
-`.venv` folder in the repository, and ends with a line like
-`Installed 27 packages in 42s`. Later runs take a moment and print two lines,
-such as:
+The first run downloads Python and about two dozen packages into a `.venv` folder in the repository, and ends with a line like `Installed 27 packages in 42s`. Later runs only take a moment.
 
-```
-Resolved 34 packages in 2ms
-Checked 27 packages in 0.92ms
-```
-
-On the rig, check that the camera library, the window library and numpy load:
+On the rig, check that the camera library, the window library and numpy all load:
 
 ```powershell
 uv run python -c "import pypylon.pylon, PyQt5, numpy; print('ok')"
 ```
 
-Expected: `ok`. Anything else means the sync did not finish. Run `uv sync`
-again and read its error.
+You should see `ok`. Anything else means the sync didn't finish, so run `uv sync` again and read its error.
 
-Once a full `uv sync` has run, acquisition, encoding, the calibration solve and
-the post-session tools need no internet. They run offline, in the environment
-`uv sync` built.
+Once `uv sync` has run in full, Panopticon needs no internet. Recording, encoding, the calibration solve and the post-session tools all run offline.
 
 #### Check the GPU driver
 
-Skip this on a computer with no NVIDIA GPU. The GPU encoder needs NVIDIA's own
-driver, and a fresh Windows install may have only a basic display driver.
-Check:
+The GPU encoder needs NVIDIA's own driver, and a fresh Windows install may only have a basic display driver. Check with:
 
 ```powershell
 nvidia-smi --query-gpu=name,driver_version --format=csv
 ```
 
-On the reference rig it prints:
+On our rig it prints:
 
 ```
 name, driver_version
 NVIDIA GeForce RTX 5080, 610.47
 ```
 
-If PowerShell does not recognize `nvidia-smi`, or the name is not an NVIDIA
-card, install the current driver for your card from
-<https://www.nvidia.com/Download/index.aspx> and restart the computer. Task
-Manager shows the same: its Performance tab lists a GPU entry that names the
-NVIDIA card. [GPU](#gpu) says how to ask the driver how many cameras it can
-encode.
+If PowerShell doesn't recognise `nvidia-smi`, or the name isn't an NVIDIA card, install the current driver for your card from <https://www.nvidia.com/Download/index.aspx> and restart. [GPU](#gpu) shows how to ask the driver how many cameras it can encode.
 
 #### On a computer with no cameras
 
-On a machine with no Basler cameras and no NVIDIA GPU, leave the camera and GPU
-packages out:
+On a machine with no Basler cameras and no NVIDIA GPU, leave the camera and GPU packages out:
 
 ```powershell
 uv sync --no-group rig
 ```
 
-Pass `--no-group rig` to every `uv run` on that machine as well, for example
-`uv run --no-group rig gui.py --profile sim`. A plain `uv run` installs the
-default groups again, the camera and GPU packages included, and needs the
-internet to do it. `_launch.bat` runs a plain `uv run`, so start Panopticon
-from PowerShell there. With the flag, that environment runs the simulated rig
-([SIMULATION.md](SIMULATION.md)) and the post-session tools.
+Then add `--no-group rig` to every `uv run` on that machine, as in `uv run --no-group rig gui.py --profile sim`. Without it, uv installs the camera and GPU packages again. `_launch.bat` leaves the flag off, so on this machine start Panopticon from PowerShell.
 
 ### Step 5 — put the cameras on the network (GigE)
 
-A GigE camera streams only when all of these hold:
-
-- It and its host adapter have addresses on the same subnet. In the scheme
-  below, that means the same first three numbers. Otherwise it does not appear
-  at all.
-- Every switch between them passes jumbo frames. Otherwise it appears and
-  delivers nothing.
-- Windows lets its traffic reach Panopticon. Otherwise Panopticon does not find
-  it, or gets no frames from it.
-- The adapter is set up for the traffic the camera sends.
-
 USB3 cameras skip this step.
 
-On a new computer for a rig that already works, the switches and the cameras
-keep their settings. Set up only this computer's side:
+A GigE camera streams only when all of these are right:
 
-1. [Check the cabling](#check-the-cabling), and
-   [find the adapter names](#find-the-adapter-names).
-2. Run `uv run probe_network.py` ([Check the network](#check-the-network)). It
-   lists which adapter hears which cameras, and the cameras' addresses.
-3. [Give the adapters their addresses](#give-the-adapters-their-addresses).
-4. [Configure the host adapters](#configure-the-host-adapters).
-5. [Let the traffic through the firewall](#let-the-traffic-through-the-firewall).
-6. [Check the network](#check-the-network) again.
+- **The addresses.** The camera and its host adapter need addresses on the same subnet, or the camera doesn't show up at all.
+- **The switches.** Every switch between them has to pass jumbo frames, or the camera shows up but sends nothing.
+- **The firewall.** Windows has to let the camera's traffic through, or Panopticon can't find it or gets no frames from it.
+- **The adapter**, which needs a few settings for this kind of traffic.
 
-#### Check the cabling
+We'll take them one at a time.
 
-A switch's uplink is the one cable from that switch to this computer.
-Panopticon needs each uplink in a camera network port of its own on this
-computer, one switch to one port
-([The host port and the switches](#the-host-port-and-the-switches)). The camera
-ports are usually on an add-in network card.
-
-What you should see, with the switches and the cameras powered: the link light
-of each cabled switch port is on, and so is each camera's status light. Once
-the adapters are listed below, each camera port reads `Up`. A port that stays
-`Disconnected` has a loose cable or a switch without power.
+> [!TIP]
+> Moving a working rig to a new computer? The switches and cameras keep their settings, so you only need this computer's side: find the adapter names, give the adapters their addresses, configure them, open the firewall and check the network. `uv run probe_network.py` shows you which adapter hears which cameras.
 
 #### Find the adapter names
 
-Windows gives each network port a name, such as `Ethernet 3`, and every command
-in this step takes one. To list them:
+Each switch has one cable, its uplink, running to a network port of its own on this computer, usually on an add-in network card. With everything powered, the link lights on the switches and each camera's status light should be on.
+
+Windows gives each network port a name, like `Ethernet 3`, and the commands in this step need those names. List them with:
 
 ```powershell
 Get-NetAdapter | Format-Table Name, InterfaceDescription, Status, LinkSpeed
 ```
 
-On the reference rig, part of the output reads:
+On our rig, part of the output reads:
 
 ```
 Name                         InterfaceDescription                         Status       LinkSpeed
@@ -757,29 +349,16 @@ Ethernet 5                   Intel(R) Ethernet Network Adapter X710-TL #3 Up    
 Wi-Fi                        Intel(R) Wi-Fi 7 BE200 320MHz                Up           172 Mbps
 ```
 
-The Name column holds the names the commands take. A camera port reads `Up`
-once its switch is cabled and powered, at the port's speed. Put your own names
-in place of `Ethernet 3` in every command below.
+The **Name** column is what the commands take, so put your own names in place of `Ethernet 3` in every command below. Each camera port should read `Up` at its full speed. A port that stays `Disconnected` has a loose cable or a switch without power.
 
-Leave the port that connects this computer to your building network, and
-Wi-Fi, out of every command in this step. An address from this step, or DHCP
-turned off, on that port cuts the computer off the building network.
+To find which port goes to which switch, unplug one switch's uplink and run the command again: the port that changes to `Disconnected` is that switch's. Plug it back in, repeat for each switch, and write the pairs down.
 
-The ports look alike, so find which one each switch is cabled to. Unplug one
-switch's uplink cable and run the command again. The port that changes to
-`Disconnected` is that switch's. Plug the cable back in, repeat for each switch,
-and write the pairs down. Device Manager lists each port under the name in its
-InterfaceDescription column, such as `Intel(R) Ethernet Network Adapter X710-TL #2`.
+> [!WARNING]
+> Leave your building network's port, and Wi-Fi, out of every command in this step. A fixed address or DHCP turned off on that port cuts the computer off the network.
 
 #### The addressing scheme
 
-Give each switch its own subnet, with the host adapter at `.2` and the cameras
-from `.3` upward. A subnet written `/24`, such as `192.168.5.0/24`, holds every
-address that starts `192.168.5.`, and its mask is `255.255.255.0`. An address
-then tells you which switch a camera is on, and a camera plugged into the wrong
-switch stops answering.
-
-The reference rig, nine cameras behind three switches:
+Give each switch its own subnet, with the host adapter at `.2` and the cameras from `.3` up. A subnet like `192.168.5.0/24` holds every address that starts `192.168.5.`, and its mask is `255.255.255.0`. An address then tells you which switch a camera is on, and a camera plugged into the wrong switch simply stops answering. Here's our rig's plan:
 
 | Subnet | Host adapter | Cameras |
 |---|---|---|
@@ -787,111 +366,47 @@ The reference rig, nine cameras behind three switches:
 | `192.168.4.0/24` | Ethernet 5 at `.2` | `.3` `.4` `.5` |
 | `192.168.5.0/24` | Ethernet 3 at `.2` | `.3` `.4` `.5` |
 
-Panopticon names the cameras `cam1` to `camN` by their serial numbers, sorted
-as text across every switch
-([Adding cameras](#adding-cameras-to-a-rig-that-already-works) says why the
-order matters). The reference rig's plan, with each camera's name:
+You're welcome to reuse ours: `192.168.3.0/24` for the first switch, `192.168.4.0/24` for the second, and so on. Just run `ipconfig` first, and if your building network or Wi-Fi already uses one of those subnets, pick another number for that switch.
 
-| Camera | Serial | Address | Adapter |
-|---|---|---|---|
-| cam1 | 41920544 | `192.168.3.3` | Ethernet 4 |
-| cam2 | 41920545 | `192.168.4.3` | Ethernet 5 |
-| cam3 | 41920546 | `192.168.4.4` | Ethernet 5 |
-| cam4 | 41920547 | `192.168.3.4` | Ethernet 4 |
-| cam5 | 41920548 | `192.168.3.5` | Ethernet 4 |
-| cam6 | 41920549 | `192.168.4.5` | Ethernet 5 |
-| cam7 | 42017507 | `192.168.5.3` | Ethernet 3 |
-| cam8 | 42017508 | `192.168.5.4` | Ethernet 3 |
-| cam9 | 42019425 | `192.168.5.5` | Ethernet 3 |
+Write each camera's serial number beside its address. Panopticon names the cameras `cam1` to `camN` by serial number, sorted as text across every switch, so the plan also tells you each camera's name. After any change of cabling, though, trust what `uv run probe_network.py` reads off the wire over a written plan.
 
-To make your own plan, give each switch a subnet and each camera behind it an
-address from `.3` upward. You can reuse the reference rig's subnets:
-`192.168.3.0/24` for the first switch, `192.168.4.0/24` for the second, and so
-on. Run `ipconfig` first. If an address it lists for the building network or
-Wi-Fi starts with one of those subnets, give that switch another number. Write
-the plan down with each camera's serial number and name, so a camera on the
-wrong switch or with the wrong address is easy to spot.
-
-With a single switch, pylon can assign every address. From an elevated
-PowerShell:
+**Only one switch?** pylon can assign every address for you. From an Administrator PowerShell:
 
 ```powershell
 & "C:\Program Files\Basler\pylon\Runtime\x64\PylonGigEConfigurator.exe" auto-all
 ```
 
-It gives every adapter and camera it finds compatible addresses, and then
-changes adapter and system settings of its own (jumbo frames, interrupt
-moderation, receive descriptors). The host-adapter settings below replace
-those. It does not configure the switch, and it does not let you choose which
-camera gets which address, so plan the addresses by hand once you have more
-than one switch. `auto-all` replaces only
-[Give the cameras their addresses](#give-the-cameras-their-addresses) and
-[Give the adapters their addresses](#give-the-adapters-their-addresses). Still
-set the switch's ports as in
-[Configure the switches](#configure-the-switches), then do
-[Configure the host adapters](#configure-the-host-adapters), the firewall rule
-and [Check the network](#check-the-network).
-
-`uv run probe_network.py` reads the same table off the wire
-([Check the network](#check-the-network)), so trust its output over a written
-plan after any change of cabling.
+It gives every adapter and camera it finds matching addresses, though you don't get to choose which camera gets which. That takes care of [Give the adapters their addresses](#give-the-adapters-their-addresses) and [Give the cameras their addresses](#give-the-cameras-their-addresses). You still need the rest of this step.
 
 #### Configure the switches
 
-A managed switch at its default settings passes discovery, pylon Viewer's
-device list and `ping`, and drops every image packet. A managed switch has a
-settings page, which usually opens in a web browser. Its manual gives the
-page's address, its first password and how a computer reaches it. If someone
-else set up the switches, ask them whether the settings below are saved on
-every port in use.
+Watch out here: at its default settings, a managed switch lets the cameras show up in pylon Viewer and answer `ping`, and then drops every image packet. Each switch has a settings page, usually in a web browser, and its manual gives the address and the first password. If someone else set up the switches, ask them whether these settings are saved on every port in use.
 
-Set these on every port in use, the uplink to the host included:
+Set these on every port in use, the uplink included:
 
 | Setting | Value | Why |
 |---|---|---|
-| Maximum frame size | 9216 | Image packets are 9000 bytes. |
-| Flow control | Symmetric | Lets the switch pause a camera for microseconds instead of dropping its packets. |
-| Energy Efficient Ethernet | Disabled | Off on the reference rig's switches. On the host adapters it caused a stall ([Configure the host adapters](#configure-the-host-adapters)). |
-| Storm control | Disabled | Off on the reference rig's switches, which is the setting its measurements were made with. |
+| Maximum frame size | 9216 | Image packets are 9000 bytes |
+| Flow control | Symmetric | Lets the switch pause a camera for a few microseconds instead of dropping its packets[^flow] |
+| Energy Efficient Ethernet | Disabled | On the host adapters it caused a stall |
+| Storm control | Disabled | Every measurement in these docs was made with it off |
 
-Several cameras burst into one uplink at once. With flow control, 802.3x PAUSE
-frames ask a camera to wait while the switch's queue drains. Without it the
-switch drops the packet, the camera resends it, and that camera's frame
-completes late, which looks like a slow camera. On the reference rig, flow
-control cut resend requests from thousands per camera to about ten
-([measured](INTERNALS.md#resends-driver-choice-and-flow-control)).
+Then save the settings in the switch, as its manual describes, so they survive a power cycle. Panopticon can't read a switch's settings, but [the packet sweep](#test-the-network-with-the-profile) in step 7 will catch any port that doesn't pass 9000-byte packets.
 
-At the end of each recording the grab threads print each camera's stream
-counters. `Resend_Request_Count` in
-the thousands with `Buffer_Underrun_Count` at 0 means loss in the network, and
-flow control is the first thing to check.
-
-Save the settings in the switch, as its manual describes, so a power cycle
-keeps them. A switch reset to its factory settings, or a new one, starts at
-1500-byte frames. No Panopticon tool reads a switch's settings.
-[Test the network with the profile](#test-the-network-with-the-profile) shows
-a port that does not pass 9000-byte packets. The resend counts above show a
-port without flow control.
+[^flow]: Several cameras burst into one uplink at once. Without flow control, the switch drops a packet, the camera resends it, and that camera's frame arrives late, which looks like a slow camera. Turning flow control on cut resend requests from thousands per camera to about ten ([measured](INTERNALS.md#resends-driver-choice-and-flow-control)). The grab threads print each camera's stream counters at the end of a recording, and `Resend_Request_Count` in the thousands with `Buffer_Underrun_Count` at 0 means loss in the network. Flow control is the first thing to check.
 
 #### Give the adapters their addresses
 
-Give each camera port of this computer the `.2` address on its switch's subnet,
-and turn off DHCP on it. From an elevated PowerShell, with your own adapter
-name and subnet:
+Give each camera port the `.2` address on its switch's subnet, and turn off DHCP on it. From an Administrator PowerShell, with your own adapter name and subnet:
 
 ```powershell
 New-NetIPAddress   -InterfaceAlias "Ethernet 3" -IPAddress 192.168.5.2 -PrefixLength 24
 Set-NetIPInterface -InterfaceAlias "Ethernet 3" -Dhcp Disabled
 ```
 
-`New-NetIPAddress` prints two blocks that list the address, and
-`Set-NetIPInterface` prints nothing. An error that the address or object
-already exists means the port holds that address already, which is fine.
-Repeat for each camera port.
+`New-NetIPAddress` prints a couple of blocks listing the address, and `Set-NetIPInterface` prints nothing. An error saying the address already exists just means the port has it already. Repeat for each camera port.
 
-`Get-NetIPAddress -InterfaceAlias "Ethernet 3"` shows the addresses a port
-holds. To remove one it should not hold, such as an address from an earlier
-plan, put that address in place of `192.168.9.2`:
+To see the addresses a port holds, run `Get-NetIPAddress -InterfaceAlias "Ethernet 3"`. To remove one it shouldn't have, like an address from an old plan:
 
 ```powershell
 Remove-NetIPAddress -InterfaceAlias "Ethernet 3" -IPAddress 192.168.9.2 -Confirm:$false
@@ -899,10 +414,7 @@ Remove-NetIPAddress -InterfaceAlias "Ethernet 3" -IPAddress 192.168.9.2 -Confirm
 
 #### Configure the host adapters
 
-In Device Manager, open *Network adapters*, right-click a camera port (listed
-under its InterfaceDescription), choose *Properties* and the *Advanced* tab.
-PowerShell does the same and is easier to repeat for each port. From an
-elevated PowerShell:
+Each camera port needs a few settings changed. You can set them in Device Manager (**Network adapters** → right-click the port → **Properties** → **Advanced**), but PowerShell is easier to repeat for each port. From an Administrator PowerShell:
 
 ```powershell
 Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Jumbo Packet" -DisplayValue "9014 Bytes"
@@ -911,100 +423,66 @@ Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Energy Efficient
 Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Interrupt Moderation" -DisplayValue "Disabled"
 ```
 
-Each line prints nothing when it works. The names above are the ones the
-reference rig's Intel adapters use. If a line reports no matching display name
-or value, list the ones your driver uses, and put them in its place:
+Each line prints nothing when it works. Here's what each setting is for:
+
+- **Jumbo Packet** at 9014 bytes fits a 9000-byte packet plus its headers.
+- **Receive Buffers** at the driver's maximum (4096 on our Intel adapters) absorbs bursts of packets.
+- **Energy Efficient Ethernet** has to be off. With it on, we saw a stall: a worst frame gap of 471, and about 100,000 resend requests.
+- **Interrupt Moderation** off made no measured difference, but we keep every port the same.
+
+A newly added port doesn't inherit these, and Energy Efficient Ethernet and interrupt moderation default to on, so set them on every camera port. If a line says there's no matching display name or value, your driver uses other names. List them, and use those:
 
 ```powershell
 Get-NetAdapterAdvancedProperty -Name "Ethernet 3" | Format-Table DisplayName, DisplayValue
 ```
 
-| Property | Value | Why |
-|---|---|---|
-| Jumbo Packet | 9014 bytes | 9000-byte packets plus headers |
-| Receive Buffers | The driver's maximum (4096 here) | Absorbs bursts of packets |
-| Energy Efficient Ethernet | Disabled | With it on, the reference rig stalled: worst frame gap 471, about 100,000 resend requests |
-| Interrupt Moderation | Disabled | Measured no gain here. Kept off so every port is set the same |
-
-A newly added port does not inherit these settings, and Energy Efficient
-Ethernet and interrupt moderation default to on. Set them on every camera port.
-
-`configure_nic.ps1 -Check` reads each camera port's receive buffers, interrupt
-moderation, RSS ([CPU](#cpu)) and DPC placement, and prints PASS or WARN for
-each. It changes nothing, so it is safe during a recording. Run it from an elevated PowerShell:
-without elevation Windows reports RSS values that are not the adapter's
-settings, and the script then leaves the RSS check unjudged. Any other tool
-that reads RSS, `Get-NetAdapterRss` included, needs elevation too.
+To check every camera port at once, run `configure_nic.ps1 -Check` from an Administrator PowerShell in the repository folder. It prints PASS or WARN for each port's receive buffers, interrupt moderation, receive-side scaling (RSS) and DPC placement. It changes nothing, so it's safe to run even during a recording:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Check
 ```
 
-For a WARN on receive descriptors or interrupt moderation, set that property
-as in the table above and run the check again. A WARN on RSS that says
-`not judged` means the window was not elevated. One that reads `enabled=False`
-needs `Enable-NetAdapterRss -Name "Ethernet 3"` from an elevated PowerShell.
+- **A WARN on receive buffers or interrupt moderation:** set that property as above, and check again.
+- **A WARN on RSS that says `not judged`:** the window wasn't elevated, so run it again as Administrator.
+- **A WARN on RSS that reads `enabled=False`:** run `Enable-NetAdapterRss -Name "Ethernet 3"` from an Administrator PowerShell.
 
-After the first launch (step 9), add `-CaptureCores` with the core list the
-window logs on its `[rig] capture core pool` line, and the check also judges
-whether the adapters' DPCs land on the capture cores:
+<details>
+<summary>Going further: DPC placement and the RSS queues (for a working rig)</summary>
+
+After the first launch (step 9), you can pass the core list from the window's `[rig] capture core pool` log line, and the check also looks at whether the adapters' DPCs land on the capture cores:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Check -CaptureCores 10,11,12,13
 ```
 
-Without `-CaptureCores` the DPC line reads INFO and judges nothing. With it, a
-WARN on DPC affinity says that nothing keeps the DPCs off the capture cores.
-It needs no change on a first install. The script never moves DPCs, and the
-profile's `capture_core_exclude` keeps the capture threads off the cores that
-carry them ([CPU](#cpu)).
+A WARN there needs no change, because `capture_core_exclude` in the profile already keeps the capture threads off those cores.
 
-Without `-Check` the script sets the RSS queue count, and its defaults restore
-the vendor's placement (one queue, every processor). On the reference rig four
-queues changed nothing measurable. Skip this on a first install. It is for
-testing one change at a time on a rig that already works:
+Without `-Check`, the script sets the RSS queue count, and its defaults restore the vendor's placement: one queue, every processor. Four queues changed nothing measurable in our tests, so this is only for testing one change at a time, from an Administrator PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Ports "Ethernet 3,Ethernet 4,Ethernet 5" -WhatIf
 powershell -ExecutionPolicy Bypass -File configure_nic.ps1 -Ports "Ethernet 3,Ethernet 4,Ethernet 5"
 ```
 
-- It needs an elevated PowerShell.
-- Applying resets every port it touches, so the cameras drop off the network
-  and come back within seconds. Never apply it during a recording.
-- It refuses while Panopticon or one of its probes runs, and when it cannot
-  read the process table. `-Force` overrides that after you have checked by
-  hand.
-- Name the ports with `-Ports`. Ports the script finds itself (every adapter
-  that is up with a manual address, which can include an office adapter) are
-  refused unless you add `-Confirm` to be asked about each one.
-- `-WhatIf` prints what it would change and changes nothing.
-- It prints the RSS state before and after. `NOT APPLIED on: ...` means the
-  driver accepted the call and kept another queue count.
+`-WhatIf` shows what it would change without changing anything. Applying resets each port, so the cameras drop off the network for a few seconds: never do it during a recording. Always name the ports with `-Ports`, so the script can't touch your office adapter.
+
+</details>
 
 #### Give the cameras their addresses
 
-FLIR cameras take their addresses in SpinView. For Basler cameras:
+FLIR cameras get their addresses in SpinView. For Basler cameras:
 
-1. Open the Start menu's Basler folder, right-click *pylon IP Configurator*
-   and choose *Run as administrator*.
-2. The list shows one row per camera, with its model, serial number, MAC
-   address and current address. Find each camera by its serial number in your
-   plan.
-3. Select the row, tick *Static IP*, and type the address from your plan, the
-   mask `255.255.255.0` and the gateway `0.0.0.0`. Untick *DHCP*, so the camera
-   does not wait for a server at every boot.
-4. Press *Save*. The row then shows the new address.
+1. In the Start menu's **Basler** folder, right-click **pylon IP Configurator** and choose **Run as administrator**.
+2. Find each camera in the list by its serial number.
+3. Select it, tick **Static IP**, and type the address from your plan, the mask `255.255.255.0` and the gateway `0.0.0.0`. Untick **DHCP**, so the camera doesn't wait for a server every time it boots.
+4. Press **Save**. The row shows the new address.
 
-A camera keeps its address across reboots. If you move an adapter to another
-subnet first, the cameras behind it stop answering until you renumber them too.
-The IP Configurator still reaches them, because it addresses cameras by MAC
-over broadcast, so it is the tool for a camera stranded on the wrong subnet.
+A camera keeps its address when it reboots. And don't worry if one ends up stranded on the wrong subnet: the IP Configurator finds cameras by their MAC address, so it can still reach it.
 
-You can also set an address from Python, which helps when you rebuild a rig
-often. This is optional. Type `uv run python` in the repository folder, paste
-the lines at the `>>>` prompt with your camera's MAC and address, and type
-`exit()` when done:
+<details>
+<summary>Setting an address from Python</summary>
+
+Handy when you rebuild a rig often. Type `uv run python` in the repository folder, paste these lines at the `>>>` prompt with your camera's MAC and address, and type `exit()` when you're done:
 
 ```python
 from pypylon import pylon
@@ -1015,40 +493,31 @@ tl.BroadcastIpConfiguration(mac, True, False, "192.168.5.3", "255.255.255.0", "0
 tl.RestartIpConfiguration(mac)          # applies without a power cycle
 ```
 
+</details>
+
 #### Let the traffic through the firewall
 
-Discovery and streaming use UDP, and Windows can block inbound UDP that no rule
-allows. Allow inbound UDP on the camera adapters. From an elevated PowerShell,
-with your own adapter names:
+The cameras talk over UDP, which Windows may block. From an Administrator PowerShell, let it in on the camera ports, with your own adapter names:
 
 ```powershell
 New-NetFirewallRule -DisplayName "PanopticonGigE" -Direction Inbound -Action Allow -Protocol UDP -InterfaceAlias "Ethernet 3","Ethernet 4","Ethernet 5"
 ```
 
-It prints the rule it made, with `Enabled : True` and `Action : Allow` among
-its lines. The rule names no program, so it holds for whichever Python runs
-Panopticon. A rule for one program has to name the process that owns the
-sockets. `.venv\Scripts\python.exe` and `pythonw.exe` are launchers: each starts
-the Python that uv installed, and that Python owns the sockets.
+It prints the rule it made, including `Enabled : True` and `Action : Allow`.[^firewall]
 
-A block rule overrides every allow rule. If Windows once asked whether to let
-Python through the firewall and the answer was Cancel, it may have added one.
-Open *Windows Defender Firewall with Advanced Security*, look under
-*Inbound Rules* for a Python rule whose action is Block, and delete it.
+One catch: a block rule beats every allow rule. If Windows once asked whether to let Python through the firewall and someone pressed **Cancel**, it may have added one. Open **Windows Defender Firewall with Advanced Security**, look under **Inbound Rules** for a Python rule whose action is **Block**, and delete it.
+
+[^firewall]: The rule belongs to the camera adapters rather than to a program, so it works for whichever Python runs Panopticon. A rule for one program has to name the process that owns the sockets, and `.venv\Scripts\python.exe` and `pythonw.exe` are only launchers that start the Python uv installed.
 
 #### Check the network
+
+Now let's see which cameras answer:
 
 ```powershell
 uv run probe_network.py
 ```
 
-It sends a GigE Vision discovery request from every host adapter and lists the
-cameras that answer each one. Every camera answers discovery whatever address
-it holds, so the adapter that hears a camera is the switch it is plugged into.
-
-For each adapter that hears a camera, it prints the adapter's name and subnet,
-then one line per camera: its serial number, address, MAC address and model.
-On the reference rig, shortened to one adapter:
+It asks every host adapter which cameras it can hear, and lists each camera's serial number, address, MAC and model. On our rig, shortened to one adapter:
 
 ```
 === GVCP discovery, per host adapter ===
@@ -1065,466 +534,230 @@ Ethernet 3  (192.168.5.0/24)
   every camera is on the correct subnet for its switch
 ```
 
-On a healthy network the summary ends with
-`every camera is on the correct subnet for its switch`. A camera line that ends
-in `<-- WRONG SUBNET FOR THIS SWITCH` needs a new address
-([Give the cameras their addresses](#give-the-cameras-their-addresses)). When no
-camera answers at all, check the power, the cables, the link lights and the
-firewall rule.
+You're hoping for `every camera is on the correct subnet for its switch` at the end. A camera line ending in `<-- WRONG SUBNET FOR THIS SWITCH` needs a new address ([Give the cameras their addresses](#give-the-cameras-their-addresses)). If no camera answers at all, check the power, the cables, the link lights and the firewall rule.
 
-Then open pylon Viewer from the Start menu. Every camera appears in its device
-list, on the left, under its model and serial number. Double-click one to open
-it, and press *Continuous Shot* in the toolbar to see live video. Close pylon
-Viewer before you launch Panopticon, because a camera that another program
-holds does not open.
+Then open **pylon Viewer** from the Start menu. Every camera should be in its device list on the left. Double-click one and press **Continuous Shot** to see live video. Close pylon Viewer again before you launch Panopticon, because a camera that another program holds won't open.
 
-Discovery uses small packets, so it passes on a path that drops 9000-byte
-packets. The packet-size sweep tests jumbo frames. It opens the cameras with
-your profile's settings, so it runs at the end of
-[step 7](#test-the-network-with-the-profile).
+Discovery uses small packets, so it passes even when a switch drops 9000-byte ones. We'll test jumbo frames with your profile's settings at the end of [step 7](#test-the-network-with-the-profile).
 
 ### Step 6 — make the camera settings file (.pfs)
 
-For a Basler rig, a `.pfs` file (pylon's feature file) holds the camera
-settings: frame size, pixel format, exposure, gain and the GigE packet
-settings. Panopticon loads it into every camera when it opens them, and a
-recording's exposure and gain come from it. FLIR profiles put these settings in
-the profile's `camera:` block instead ([FLIR.md](FLIR.md#3-write-the-profile)).
+A Basler rig keeps its camera settings in a `.pfs` file, pylon's feature file: the frame size, pixel format, exposure, gain and packet settings. Panopticon loads it into every camera when it opens them, and a recording's exposure and gain come from it. A FLIR profile has a `camera:` block instead ([FLIR.md](FLIR.md#3-write-the-profile)).
 
-With the reference rig's cameras, frame size and wiring, you can skip pylon
-Viewer: use the shipped file, `configs/mono8_1920x1200.pfs`, as `pfs_path` in
-step 7. Otherwise build the file in pylon Viewer with one camera open, save it
-once, and use it for every camera:
+If your cameras, frame size and wiring match ours, you can skip pylon Viewer and use the file we ship, `configs/mono8_1920x1200.pfs`. Otherwise, let's build one in pylon Viewer with one camera open, and then use it for every camera:
 
-1. Open pylon Viewer from the Start menu, and double-click one camera in its
-   device list. The camera's features appear as a tree, with a search box.
-   pylon Viewer hides some features at its lower visibility levels. If a search
-   finds nothing, set the visibility to Guru and search again.
-2. Set the features, using the search box of the feature tree. pylon Viewer
-   shows each feature by its display name, given here in brackets:
-   - `PixelFormat` (Pixel Format): `Mono8`.
-   - `Width` and `Height`: the camera's full sensor size, 1920 and 1200 on the
-     reference cameras, unless you need a smaller frame. Write the same two
-     numbers into the profile's `frame_width` and `frame_height` in step 7.
-   - `ExposureAuto` and `GainAuto` (Exposure Auto, Gain Auto): `Off`.
-     Automatic exposure drifts between cameras.
-   - `ExposureTime` (Exposure Time): under the
-     [exposure ceiling](CONFIGURATION.md#exposure-ceiling). The reference rig
-     records at 3000 µs.
-   - `Gain`: the reference rig records at 6.0 dB. Add infrared light before
-     exposure, and exposure before gain.
-   - `GevSCPSPacketSize`: 9000, if every device in the path passes jumbo
-     frames (step 5). pylon Viewer calls it Packet Size.
-   - `GevSCPD`: the inter-packet delay. The reference rig uses 10000 for three
-     cameras per port at 5 Gbit/s. Work it out for your links
-     ([The camera's own link](#the-cameras-own-link)). pylon Viewer calls it
-     Inter-Packet Delay.
-   - `LineInverter` (Line Inverter) on `Line1`: set Line Selector to `Line1`
-     first. It decides which physical edge of the trigger pulse the camera
-     exposes on, and Panopticon never changes it. With a board pin wired
-     straight to `Line1`, as on the reference rig, leave it off, as
-     `configs/mono8_1920x1200.pfs` does. The 3dface rig's file,
-     `mono8_mono.pfs`, turns it on because that rig is wired differently.
-3. Choose *File > Save Features* and save the file into the repository's
-   `configs` folder under a name of your own, such as `configs/my_rig.pfs`. The
-   folder already holds the two shipped files, `mono8_1920x1200.pfs` (the
-   reference rig's) and `mono8_mono.pfs` (the 3dface rig's).
+1. Open **pylon Viewer** and double-click a camera in its device list. Its features appear as a tree with a search box.[^guru]
+2. Set these features. pylon Viewer shows each one by its display name, given here in brackets:
+    - `PixelFormat` (Pixel Format): `Mono8`.
+    - `Width` and `Height`: the full sensor size, 1920 and 1200 on an a2A1920-165g5m, unless you want a smaller frame. You'll copy these two numbers into the profile in step 7.
+    - `ExposureAuto` and `GainAuto` (Exposure Auto, Gain Auto): `Off`, because automatic exposure drifts between cameras.
+    - `ExposureTime` (Exposure Time): under the [exposure ceiling](CONFIGURATION.md#exposure-ceiling). We record at 3000 µs.
+    - `Gain`: we record at 6 dB. Add infrared light before exposure, and exposure before gain.
+    - `GevSCPSPacketSize` (Packet Size): 9000, once every device in the path passes jumbo frames.
+    - `GevSCPD` (Inter-Packet Delay): we use 10000, for three cameras per port at 5 Gbit/s. Work yours out from [The camera's own link](#the-cameras-own-link).
+    - `LineInverter` (Line Inverter) on `Line1`: select `Line1` under Line Selector first. It decides which edge of the trigger pulse the camera exposes on. With a board pin wired straight to `Line1`, leave it off.[^inverter]
+3. Choose **File** → **Save Features**, and save the file in the repository's `configs` folder under a name of your own, like `configs/my_rig.pfs`.
 4. Close pylon Viewer, so the camera is free for Panopticon.
 
-[CONFIGURATION.md](CONFIGURATION.md#basler-cameras-the-pfs-file) lists every
-feature Panopticon depends on, what it writes itself at each acquisition, and
-the reference values.
+[CONFIGURATION.md](CONFIGURATION.md#basler-cameras-the-pfs-file) lists every feature Panopticon depends on, and what it sets itself at each acquisition.
 
-Judge an exposure on a recording, never on the live preview. The preview runs at
-30 fps, where the 33 ms period has room for almost any exposure. A setting over
-the ceiling looks fine there and halves the frame rate once the cameras are
-triggered.
+> [!TIP]
+> Judge an exposure on a recording, never on the live preview. The preview runs at 30 fps, where almost any exposure fits. A setting over the ceiling looks fine there, then halves the frame rate once the cameras are triggered.
+
+[^guru]: pylon Viewer hides some features at its lower visibility levels. If a search finds nothing, set the visibility to **Guru** and search again.
+
+[^inverter]: Panopticon never changes `LineInverter`. The 3dface rig's file, `configs/mono8_mono.pfs`, turns it on because that rig is wired differently.
 
 ### Step 7 — write the rig profile
 
-The profile is a YAML file in `profiles/` that describes everything besides the
-camera settings: how many cameras, the frame rate, the trigger board's port and
-pins, and where the data goes. Every file in `profiles/` appears in the
-window's profile list under its `name`.
+The profile is a YAML file in `profiles/` that describes everything except the camera settings: how many cameras there are, the frame rate, the trigger board's port and pins, and where the data goes. Every profile in `profiles/` shows up in the window's profile list.
 
-Start from a template in `profiles/templates/`: copy it into `profiles/`, give
-the copy a name of your own, and change every value marked `SITE`.
-CONFIGURATION.md lists the [templates](CONFIGURATION.md#templates), walks
-through [a new rig step by step](CONFIGURATION.md#configure-a-new-rig-step-by-step),
-and describes every field. For Basler GigE cameras, for example:
+Let's start from a template ([CONFIGURATION.md](CONFIGURATION.md#templates) lists them all). For Basler GigE cameras:
 
 ```powershell
 Copy-Item profiles\templates\basler_gige.yaml profiles\my_rig.yaml
 notepad profiles\my_rig.yaml
 ```
 
-Notepad opens the copy. Each line holds a field, a colon and a value, and
-everything after a `#` is a comment. Keep the spaces at the start of each line
-as they are, because YAML reads the indentation to tell which block a field
-belongs to. Save the file when you are done.
+Notepad opens your copy. Each line is a field, a colon and a value, and anything after a `#` is a comment. Keep the spaces at the start of each line as they are, because YAML reads the indentation to tell which block a field belongs to.
 
-Change the line `name: basler_gige` to `name: my_rig`. Use the same word as the
-file name, so the two never disagree. The window's list and `--profile` both
-use the name inside the file, not the file's name.
+First, change the line `name: basler_gige` to `name: my_rig`. The profile list and `--profile` both go by this name rather than the file's, so it's easiest to keep the two the same. Then fill in every value marked `SITE`:
 
-On a new computer for a rig that already works, copy the profile and the
-`.pfs` file from the old computer's `profiles` and `configs` folders instead.
-
-Each value marked `SITE` comes from your rig:
-
-- `name`: the word you chose above.
-- `pfs_path`: the `.pfs` file from step 6. A FLIR rig writes a `camera:` block
-  instead.
-- `frame_width` and `frame_height`: the `Width` and `Height` in that file.
-- `n_cameras` and `camera_serials`: how many cameras, and their serial numbers
-  (below).
-- `trigger_rate_limit`: the camera's maximum frame rate, from its data sheet.
-  It is the 165 in the a2A1920-165g5m's name
-  ([trigger_rate_limit](CONFIGURATION.md#trigger_rate_limit)).
-- `serial_port`: leave it for step 8, which finds the board's port.
-- `trigger_pins`: the board pins wired to the cameras' trigger inputs, from
-  your pin list. Step 8 says how to make the list, and you can fill in the
-  field then.
-- `stim_safe_pins`: every pin wired to a stimulation device (below).
-- `output_dir`: where sessions go (below).
-- `board_config`: the file that describes your printed calibration board.
-  Keep `configs/boards/charuco_8x8_15mm.yaml` for a copy of the reference
-  rig's board ([Board config](CONFIGURATION.md#board-config)).
+- `pfs_path`: your `.pfs` file from step 6.
+- `frame_width` and `frame_height`: the `Width` and `Height` from that file.
+- `n_cameras`: how many cameras there are.
+- `camera_serials`: every camera's serial number, quoted, in ascending order, so the first one is cam1. Panopticon then opens only these cameras, and tells you by name if one is missing ([why that matters](CONFIGURATION.md#camera_serials)). `uv run probe_network.py` prints the serials.
+- `trigger_rate_limit`: the camera's maximum frame rate from its data sheet, like the 165 in a2A1920-165g5m ([more](CONFIGURATION.md#trigger_rate_limit)).
+- `serial_port` and `trigger_pins`: the board's port, and the pins wired to the cameras. Step 8 helps you find both.
+- `stim_safe_pins`: every pin wired to a stimulation device, as in `stim_safe_pins: [53]`. The template starts with an empty list, which protects nothing, so fill it in rather than deleting the line: the default you'd get then, `[53]`, is our rig's pin ([more](CONFIGURATION.md#stim_safe_pins)).
+- `output_dir`: where sessions go, on your largest, fastest drive. Use forward slashes, as in `output_dir: D:/panopticon_data`, because YAML can misread a backslash.
+- `board_config`: the file that describes your printed calibration board. Keep `configs/boards/charuco_8x8_15mm.yaml` if you printed a copy of our board ([Board config](CONFIGURATION.md#board-config)).
 - `metadata_defaults`: your lab's defaults for the sidebar's fields.
 
-The template sets `stim_safe_pins: []`, which holds no pin low. If a
-stimulation device is wired to the board, put its pin in the list, as in
-`stim_safe_pins: [53]` on the reference wiring. The board holds those pins low
-from the first line of its sketch, and step 8 says what that leaves uncovered.
-A profile with no `stim_safe_pins` line uses the default, and the
-default, `[53]`, is the reference rig's stimulation pin and protects nothing on
-other wiring ([stim_safe_pins](CONFIGURATION.md#stim_safe_pins)). A trigger
-board other than the Mega 2560 also sets `board_fqbn` and `board_max_pin`
-([The trigger board](#the-trigger-board)).
+Save the file when you're done. At the next launch, your profile appears in the list at the top of the sidebar. [A new rig, step by step](CONFIGURATION.md#configure-a-new-rig-step-by-step) goes through the other fields, and a board other than the Mega 2560 also needs `board_fqbn` and `board_max_pin` ([The trigger board](#the-trigger-board)).
 
-Put `output_dir` on the largest, fastest drive. Write a Windows path with
-forward slashes, as in `output_dir: D:/panopticon_data`, and never inside
-double quotes with backslashes: YAML reads a backslash in double quotes as the
-start of a special character.
-
-List every camera's serial number in `camera_serials`, quoted, in ascending
-text order. The first entry is cam1. A missing camera then refuses the open by
-name, and a device the list does not name stays closed.
-[camera_serials](CONFIGURATION.md#camera_serials) says what goes wrong without
-it. Each serial number is printed on the camera's label, and
-`uv run probe_network.py` ([Check the network](#check-the-network)) prints it
-beside the camera's address.
-
-At the next launch (step 9) the profile appears in the list at the top of the
-sidebar under its `name`. A profile with a mistake does not load. Panopticon
-leaves it out of the list and names the file and the field in a dialog once
-the window opens.
+> [!TIP]
+> Moving a working rig to a new computer? Just copy the profile and the `.pfs` file over from the old computer's `profiles` and `configs` folders.
 
 #### Test the network with the profile
 
-For a GigE rig, test every camera's path with the profile's camera settings,
-with your profile's `name` in place of `my_rig`:
+Now for the jumbo-frame test we promised in step 5. For a GigE rig, with your profile's name in place of `my_rig`:
 
 ```powershell
 uv run probe_network.py --sweep --profile my_rig
 ```
 
-`--profile` also takes a path to the profile file. The sweep opens the cameras
-through the profile's backend and camera settings, then grabs frames from each
-camera at packet sizes from 1500 to 9000 bytes. It sweeps FLIR GigE cameras
-too, and skips USB3 cameras. It does not open the trigger board.
+The sweep opens the cameras with your profile's settings, and grabs frames from each one at packet sizes from 1500 to 9000 bytes. It skips USB3 cameras, and it leaves the trigger board alone.
 
 - A healthy path shows `complete=10/10` at every size up to 9000.
-- Every size passing up to 1500 and failing from 2000 means a device in that
-  camera's path is still at 1500 bytes: a switch port
-  ([Configure the switches](#configure-the-switches)) or the adapter
-  ([Configure the host adapters](#configure-the-host-adapters)).
+- If every size passes up to 1500 and fails from 2000, a device in that camera's path is still at 1500 bytes: a [switch port](#configure-the-switches) or the [adapter](#configure-the-host-adapters).
 
-Do not test jumbo frames with `ping`. The reference rig's cameras answer only
-small echo requests, so `ping -f -l 8972` fails on a path that carries 9000-byte
-packets, and so does `ping -l 1472`. The sweep's real grabs are the test.
-
-Once Panopticon has opened the profile (step 9), `uv run probe_network.py --sweep`
-uses it without `--profile`.
+> [!NOTE]
+> Don't test jumbo frames with `ping`. Our cameras answer only small echo requests, so `ping -f -l 8972` fails on a path that carries 9000-byte packets, and so does `ping -l 1472`. The sweep's real grabs are the test.
 
 ### Step 8 — flash the trigger firmware
 
-Skip this step if the profile sets `trigger_source: external`.
+Skip this step if your profile sets `trigger_source: external`.
 
-Flashing is writing a new program into the board's memory. You do not flash
-anything yourself in this step. Panopticon flashes the board at the first
-launch, in step 9. This step checks the board and its wiring, lists its pins in
-the profile, installs the tool Panopticon flashes with, and finds the board's
-port.
-
-`gui_app/stim_compiler.py` generates the board's sketch, the program the board
-runs, from the profile and the stimulation editor's canvas, so you upload no
-`.ino` file yourself. The
-[recording-only sketch](GLOSSARY.md#recording-only-sketch) is that sketch with
-no stimulation in it: the camera
-triggers, plus the boot guard that drives every `stim_safe_pins` pin low.
-Panopticon flashes it for you.
+Flashing means writing a new program, a sketch, onto the board. You won't flash anything by hand, because Panopticon writes its own sketch onto the board at the first launch. Here we'll get the board ready for it: check the wiring, list the pins in the profile, install the tool Panopticon flashes with, and find the board's port.
 
 > [!WARNING]
-> Panopticon's responsibility ends at the trigger board's TTL outputs. What you
-> connect to a stimulation pin, and making that device safe, is your lab's
-> responsibility, for a laser, an LED or any other device. Every pin of the
-> board floats for a moment whenever the board resets or is flashed.
-> `stim_safe_pins` holds the listed pins low from the first line of the sketch.
-> A stimulation paradigm reaches the board only through Apply, or a Test of a
-> changed canvas.
+> Panopticon's responsibility ends at the trigger board's TTL outputs. Whatever you connect to a stimulation pin, whether it's a laser, an LED or anything else, is your lab's to make safe. Every pin of the board floats briefly whenever the board resets or is flashed, and that happens at every launch, among other times ([When the board resets](WORKFLOW.md#when-the-board-resets) lists them). Before the first launch, agree with whoever is in charge of each stimulation device how it stays safe while the pins float.
 
-[When the board resets](WORKFLOW.md#when-the-board-resets) lists every case.
-During a flash the board runs its bootloader, the small program that takes in
-a new sketch. No sketch runs then, so every pin floats. The boot guard cannot
-help, because it runs only once the sketch starts.
+The sketch Panopticon writes holds every `stim_safe_pins` pin low from its first line, and it carries no stimulation until you **Apply** or **Test** a paradigm in the stimulation editor. That plain version is the [recording-only sketch](GLOSSARY.md#recording-only-sketch). At every launch, Panopticon checks that the board carries it, and flashes it if not, so a session never starts with an old paradigm on the board.[^flashcheck]
 
-A floating pin is driven neither LOW nor HIGH, so a device wired to it may
-read it as on. Every launch opens the board's port and resets it, the first
-launch in step 9 included. Before that first launch, agree with whoever is in
-charge of each wired stimulation device how it stays safe while the pins float.
-
-At launch, and when you switch to a profile on another serial port, Panopticon
-builds the recording-only sketch and compares it with the one this computer
-last flashed. It flashes the board when they differ, then opens the
-serial port and asks the board which sketch it runs, and flashes again once if
-the board's answer disagrees. A stimulation paradigm stays in the board's flash
-memory through closing the window, a power cycle and unplugging the cable. This
-check means the board carries no stimulation at launch unless you Apply one in
-the session.
-
-A switch between profiles on the same port flashes nothing. If their
-`trigger_pins` or `stim_safe_pins` differ, the first Calibrate or Record flashes
-the board. Until that flash the board keeps the previous profile's boot guard,
-which may leave this profile's stimulation pins undriven.
+[^flashcheck]: A paradigm stays in the board's memory through closing the window, a power cycle and unplugging the cable, which is why the check runs every time. Panopticon compares the sketch it builds with the one this computer last flashed, and flashes the board when they differ. Then it asks the board which sketch it runs, and flashes once more if the answer disagrees. The same check runs when you switch to a profile on another serial port. A switch between profiles on the same port flashes nothing, and if their `trigger_pins` or `stim_safe_pins` differ, the first **Calibrate** or **Record** flashes the board. Until then the board keeps the previous profile's boot guard, which may leave this profile's stimulation pins undriven.
 
 #### The trigger board
 
-The Arduino Mega 2560 is the tested board, and the default. The sketch
-Panopticon generates is plain Arduino code, which `arduino-cli` compiles and
-uploads, so another Arduino-compatible board can take the Mega's place. It
-needs:
+The Arduino Mega 2560 is the board we test on, and the default. The sketch is plain Arduino code that `arduino-cli` compiles and uploads, so another Arduino-compatible board can take the Mega's place if it has:
 
-- An `arduino-cli` core, the package that compiles and uploads for its board
-  family, such as `arduino:avr` for the Mega.
-- 5 V logic, or a level shifter on its outputs, when the camera and
-  stimulation inputs need 5 V. A 3.3 V board's high level can fall below an
-  input's switching threshold.
-- A digital pin for every pin in `trigger_pins` and `stim_safe_pins`. Pins 0
-  and 1 are refused on every board.
-- A USB serial port that either restarts the sketch when Panopticon opens it,
-  as the Mega's does, or leaves the running sketch to answer the `RDY`
-  handshake. Panopticon waits for that answer at every start.
+- an `arduino-cli` core, the package that compiles and uploads for its board family (`arduino:avr` for the Mega)
+- 5 V logic, or a level shifter on its outputs, when the camera and stimulation inputs need 5 V. A 3.3 V board's high level can fall below an input's switching threshold.
+- a digital pin for every pin in `trigger_pins` and `stim_safe_pins`. Pins 0 and 1 are refused on every board.
+- a USB serial port that either restarts the sketch when Panopticon opens it, as the Mega's does, or leaves the running sketch to answer the `RDY` handshake that Panopticon waits for at every start.
 
-For such a board, set [`board_fqbn`](CONFIGURATION.md#board_fqbn) to its name
-in `arduino-cli`, and [`board_max_pin`](CONFIGURATION.md#board_max_pin) to its
-highest digital pin. `arduino-cli board listall` lists the names of the boards
-each installed core supports. When an upload overruns its time limit,
-Panopticon waits for the board's flashing tool to finish before it says what
-to do. It knows the tools of the common cores: `avrdude`, `bossac`,
-`esptool`, `picotool`, the Teensy loader, `dfu-util`, `STM32_Programmer_CLI`
-and `openocd`. With another tool it cannot tell whether a write is still
-running, and its message says so.
+For such a board, set [`board_fqbn`](CONFIGURATION.md#board_fqbn) to its name in `arduino-cli` (`arduino-cli board listall` lists the names) and [`board_max_pin`](CONFIGURATION.md#board_max_pin) to its highest digital pin.[^tools]
 
 ![The trigger board wired to the computer, three cameras and a stimulation device](images/trigger_wiring.png)
 
-Everything right of the dashed line varies by lab: the cameras' I/O
-connectors, the camera network and the stimulation device.
+Everything to the right of the dashed line varies by lab: the cameras' I/O connectors, the camera network and the stimulation device. And don't be surprised when the log calls the board `teensy` and tags its lines `[teensy]`, whatever board it is.
 
-The log calls the trigger board `teensy`, and tags its lines `[teensy]`,
-whatever board it is.
+[^tools]: When an upload runs past its time limit, Panopticon waits for the board's flashing tool to finish before it tells you what to do. It knows the tools of the common cores: `avrdude`, `bossac`, `esptool`, `picotool`, the Teensy loader, `dfu-util`, `STM32_Programmer_CLI` and `openocd`. With any other tool it can't tell whether a write is still running, and its message says so.
 
 #### Set up the board
 
-1. Make the pin list, if the rig came without one. Follow each wire from its
-   board socket to where it ends: a camera's I/O cable, a stimulation device or
-   a ground. Write the socket's number beside the camera's serial number, or
-   beside the device's name. If the wires are bundled or covered, ask whoever
-   wired the rig for the list. Do not unplug wires to find out.
-2. Check the ground ([Wiring the trigger line](#wiring-the-trigger-line)). At
-   least one wire leaves a socket marked GND and joins the cameras' trigger
-   grounds, and the stimulation device's ground too, as in the diagram above.
-   If you cannot trace it, ask whoever wired the rig, and do not rewire it
-   yourself.
-3. List every pin that drives a camera in the profile's `trigger_pins`, and
-   every pin that drives a stimulation device in `stim_safe_pins`. The pin
-   count equals the camera count only if you wired one pin per camera, and
-   nothing checks the two against each other. A camera on a pin the list
-   leaves out receives no triggers, and the test recording in
-   [section 3](#with-real-cameras) shows it.
-4. Install the Arduino IDE from <https://www.arduino.cc/en/software>, which
-   includes `arduino-cli`, or `arduino-cli` on its own.
-5. Install the board support once, for a Mega:
-   `arduino-cli core install arduino:avr`. It downloads the Mega's support
-   files, or reports that they are already installed. Another board needs its
-   own core, and `board_fqbn` and `board_max_pin` in the profile
-   ([The trigger board](#the-trigger-board)).
+1. **Make the pin list**, if the rig came without one. The pin numbers are printed beside the board's sockets, and the sockets marked GND are ground. Follow each wire from its socket to where it ends, and write the socket's number beside the camera's serial number or the device's name. If the wires are bundled or covered, ask whoever wired the rig, and please don't unplug wires to find out.
+2. **Check the ground.** At least one wire should leave a GND socket and join the cameras' trigger grounds, and the stimulation device's ground too, as in the diagram. If you can't trace it, ask them too.
+3. **Fill in the pins.** Every pin that drives a camera goes in `trigger_pins`, and every pin that drives a stimulation device goes in `stim_safe_pins`. Where cameras share a pin, you'll have fewer pins than cameras, and that's fine.
+4. **Install `arduino-cli`**, on its own or with the Arduino IDE from <https://www.arduino.cc/en/software>, which includes it.
+5. **Install the board support**, once. For a Mega:
 
-   If PowerShell says `The term 'arduino-cli' is not recognized`, you have the
-   Arduino IDE's copy, which PowerShell does not find by name. Run it by its
-   full path:
+    ```powershell
+    arduino-cli core install arduino:avr
+    ```
 
-   ```powershell
-   & "C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" core install arduino:avr
-   ```
+    It downloads the Mega's support files, or says they're already installed. Another board needs its own core.
+6. **Close the Arduino IDE's Serial Monitor**, if it's open. It holds the port, and Panopticon needs it.
 
-   If that path is not found, the IDE was installed for your account alone,
-   and its copy is under your own folder:
-
-   ```powershell
-   & "$env:LOCALAPPDATA\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" core install arduino:avr
-   ```
-
-   Panopticon searches both folders itself.
-6. If `arduino-cli` is somewhere unusual, set `PANOPTICON_ARDUINO_CLI` to its
-   full path. Panopticon looks at `PANOPTICON_ARDUINO_CLI`, then `PATH`, then the
-   Arduino IDE's install folders. To set the variable, press the Windows key,
-   type `environment variables`, open *Edit environment variables for your
-   account*, press *New*, and give the name and the path.
-7. Close the Arduino IDE's Serial Monitor. It holds the port, and flashing and
-   recording both need it.
-
-Then find the board's port, the name Windows gives the USB connection, for
-`serial_port`:
-
-1. Plug the trigger board into a USB port of this computer, if it is not
-   plugged in yet.
-2. Right-click the Start button and choose *Device Manager*. Open
-   *Ports (COM & LPT)*. On the reference rig the board is listed as
-   `Arduino Mega 2560 (COM3)`, and `COM3` is what `serial_port` takes. A board
-   that is not a genuine Arduino may be listed as `USB-SERIAL CH340 (COM4)` or
-   `USB Serial Device (COM4)` instead.
-3. To be sure which entry is the board, unplug its cable and watch the entry
-   disappear, then plug it back in.
-
-The board's model is printed on the board itself. A board other than a Mega
-2560 needs `board_fqbn` and `board_max_pin`
-([The trigger board](#the-trigger-board)).
-
-PowerShell lists the port names too, without saying which device is which:
+Got `arduino-cli` with the Arduino IDE? PowerShell can't find the IDE's copy by name, so for step 5 run it by its full path:
 
 ```powershell
-[System.IO.Ports.SerialPort]::GetPortNames()
+& "C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" core install arduino:avr
 ```
 
-which prints, for example, `COM1` and `COM3`. Put the board's port in
-`serial_port`, and the pins you wired in `trigger_pins`, in the profile from
-step 7.
+If that path doesn't exist, the IDE was installed for your account only:
 
-The first time Panopticon opens your profile (step 9) the log shows:
+```powershell
+& "$env:LOCALAPPDATA\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" core install arduino:avr
+```
+
+Panopticon looks in both folders by itself, so there's nothing more to set up.[^cli]
+
+[^cli]: Panopticon looks at the `PANOPTICON_ARDUINO_CLI` environment variable first, then `PATH`, then the Arduino IDE's install folders. If your `arduino-cli` lives somewhere else, set that variable to its full path: press the <kbd>Windows</kbd> key, type `environment variables`, open **Edit environment variables for your account**, press **New**, and give the name and the path. Only the flash and the stimulation editor's **Apply** and **Test** need `arduino-cli`. Without it, the launch shows `arduino-cli was not found`, with every place Panopticon looked.
+
+#### Find the board's port
+
+1. Plug the trigger board into a USB port on this computer.
+2. Right-click the **Start** button, choose **Device Manager**, and open **Ports (COM & LPT)**. On our rig the board is listed as `Arduino Mega 2560 (COM3)`, and `COM3` is what goes in `serial_port`. A board that isn't a genuine Arduino may show up as `USB-SERIAL CH340 (COM4)` or `USB Serial Device (COM4)` instead.
+3. To be sure which entry is the board, unplug it and watch the entry disappear, then plug it back in.
+4. Put the port in your profile's `serial_port`, and save the file.
+
+The first time Panopticon opens your profile (step 9), the log shows:
 
 ```
 [acq] board may carry a stim paradigm from a previous session — flashing the recording-only sketch
 [acq] board flashed with the recording-only sketch; stim is off until you Apply one
 ```
 
-These lines appear at the first launch on every computer, with a new board
-too, and need no action. The sidebar shows `Clearing stim firmware…` while the
-board flashes ([how long](OVERVIEW.md#16-state)). On later launches the flash
-is skipped:
-
-```
-[acq] board already carries the recording-only sketch (no stim); skipping flash
-[acq] trigger board reports sketch <id>: the recording-only sketch
-```
-
-Only the flash and the stimulation editor's Apply and Test need `arduino-cli`.
-Without it, the launch shows `arduino-cli was not found` with every place
-Panopticon looked.
+Nothing to worry about: you'll see this at the first launch on every computer, even with a brand-new board. Later launches skip the flash.
 
 ### Step 9 — first launch
 
-Before you open the profile:
+Time to open Panopticon! Before you do:
 
-- Check that its `serial_port` names Panopticon's trigger board. Opening the
-  profile resets the device on that port, and the first time it also flashes
-  the recording-only sketch onto it.
-- With a stimulation device wired to the board, read
-  [the warning in step 8](#step-8--flash-the-trigger-firmware) first. The
-  launch resets the board, and every pin floats for a moment.
-- Close pylon Viewer, SpinView and any other program that holds the cameras.
+- Check that your profile's `serial_port` names Panopticon's trigger board. Opening the profile resets whatever device is on that port, and the first time, it also flashes the recording-only sketch onto it.
+- Close pylon Viewer, SpinView and anything else that holds the cameras.
 
-Then launch, and compare each screen with the pictures:
+Then:
 
-1. Start Panopticon with your profile's `name` in place of `my_rig`:
+1. Start Panopticon with your profile's name in place of `my_rig`:
 
-   ```powershell
-   uv run gui.py --profile my_rig
-   ```
+    ```powershell
+    uv run gui.py --profile my_rig
+    ```
 
-   A splash panel opens and names each startup step, down to the camera it is
-   opening.
+    A splash screen opens and names each step as it goes, down to the camera it's opening. On our rig it stays up for about 17 s:
 
-   ![The splash screen naming the step under way](images/launch_splash.png)
+    ![The splash screen naming the step under way](images/launch_splash.png)
 
-   If PowerShell prints an error instead, or a `Panopticon failed to start`
-   dialog appears, look the message up in
-   [TROUBLESHOOTING.md](TROUBLESHOOTING.md#installing-and-launching).
+2. The main window opens with a pane for each camera, each showing live video. **Calibrate** and **Record** stay grey while the status bar reads `Checking hardware: Record and Calibrate are available once it reports`:
 
-2. The main window opens with one pane per camera. Each pane shows live video,
-   free-running at about 30 fps, with its frame rate in green at its foot. The
-   status bar along the bottom reads
-   `Checking hardware: Record and Calibrate are available once it reports`,
-   and the Calibrate and Record toggles stay grey until then.
+    ![The window while the launch hardware check runs](images/launch_checking_hardware.png)
 
-   ![The window while the launch hardware check runs](images/launch_checking_hardware.png)
+    On your first launch, the state label at the bottom of the sidebar reads `Clearing stim firmware…` instead of **IDLE** while the board is flashed.
 
-   The pictures show a later launch on the reference rig, with the fields
-   filled in from its last session, and a test folder as the output folder.
-   On your first launch the fields are empty, apart from your profile's
-   defaults. The board is also flashed, and
-   the state label at the foot of the sidebar reads `Clearing stim firmware…`
-   in place of `IDLE` until the flash is done
-   ([how long](OVERVIEW.md#16-state)). If a pane stays black, or a
-   `Camera Error` dialog appears, see
-   [Opening the cameras](TROUBLESHOOTING.md#opening-the-cameras).
+3. Give the check a few more seconds. When it's done, the status bar reads `Hardware check done: encoding with nvenc`, and **Calibrate** and **Record** turn white:
 
-3. Wait for the check to report. On the reference rig the window opens about
-   17 s after the launch, one camera every two seconds or so, and the check
-   reports about 5 s later. The status bar then reads
-   `Hardware check done: encoding with nvenc`, and Calibrate and Record turn
-   from grey to white. `nvenc` is the GPU encoder. `x264` in its place means
-   the CPU encodes ([CPU_ENCODE.md](CPU_ENCODE.md)).
+    ![The window ready, every pane live](images/launch_ready.png)
 
-   ![The window ready, every pane live](images/launch_ready.png)
+4. If anything needs your attention, a **Hardware Check** dialog lists it. Look up each finding in [The hardware check](TROUBLESHOOTING.md#the-hardware-check), then press **OK**:
 
-4. A *Hardware Check* dialog appears only when a finding needs your attention.
-   It shows the whole report, with the findings under *Warnings* at its end.
-   Look each one up in [The hardware check](TROUBLESHOOTING.md#the-hardware-check),
-   then press OK.
+    ![A Hardware Check dialog with one warning](images/hardware_check_warning.png)
 
-   ![A Hardware Check dialog with one warning](images/hardware_check_warning.png)
+You did it! Panopticon remembers the profile, so from now on `uv run gui.py` is all you need.
 
-   This example comes from the reference rig. Its warning is the
-   `nvenc_upload: pinned needs the launch check` row of that table.
+> [!NOTE]
+> The pictures come from a later launch, so the sidebar fields are already filled in. On your first launch they're empty, apart from your profile's defaults.
 
-Panopticon remembers the profile, so later launches need only `uv run gui.py`.
-A launch without `--profile`, on a computer where Panopticon has not opened a
-profile yet, shows this dialog instead:
+If something looks different:
+
+- **PowerShell prints an error, or a `Panopticon failed to start` dialog appears.** Look the message up in [Installing and launching](TROUBLESHOOTING.md#installing-and-launching).
+- **A pane stays black, or a `Camera Error` dialog appears.** See [Opening the cameras](TROUBLESHOOTING.md#opening-the-cameras).
+- **The status bar says `x264` where the picture says `nvenc`.** The CPU is doing the encoding instead of the GPU ([CPU_ENCODE.md](CPU_ENCODE.md)).
+- **Your profile isn't in the list.** It didn't load, and a **Rig profiles** dialog names the file and the field at fault.
+
+#### Choosing a profile in the window
+
+If you start Panopticon without `--profile` on a computer where it hasn't opened a profile yet, a **Choose your rig's profile** dialog asks you to pick one first:
 
 ![The dialog a computer with no chosen profile shows](images/first_launch_choose_profile.png)
 
-Until you choose, Panopticon opens no camera and no serial port, runs no
-hardware check and flashes nothing. The same dialog appears when the
-remembered profile, or the one `--profile` names, does not load. Press OK. The
-window behind it has no camera panes, Calibrate, Record and Solve are grey,
-and the state label reads `Choose a profile`:
+Until you choose, Panopticon doesn't touch the cameras or the trigger board. You'll also see this dialog when the remembered profile, or the one you named with `--profile`, doesn't load.
 
-![The window with no profile chosen](images/first_launch_no_profile.png)
+1. Press **OK**. The window behind the dialog has no camera panes yet, and the state label reads **Choose a profile**:
 
-The profile list is the empty box directly under Metadata. Click it, and the
-list opens:
+    ![The window with no profile chosen](images/first_launch_no_profile.png)
 
-![The profile list open](images/sidebar_profile_dropdown.png)
+2. Click the empty box at the top of the sidebar, just under **Metadata**. The profile list opens:
 
-Click your profile's name. The window then opens its cameras as in items 2 to
-4 above. If your profile is not in the list, it did not load, and a
-`Rig profiles` dialog names the file and the field at fault.
+    ![The profile list open](images/sidebar_profile_dropdown.png)
+
+3. Click your profile's name. Panopticon opens its cameras, and the launch carries on just as above.
 
 #### Read the console
 
-The PowerShell window you launched from shows what Panopticon found. Each line
-starts with the time, to the millisecond, and the thread that printed it:
+The PowerShell window you launched from shows what Panopticon found. Each line starts with the time and the name of the thread that printed it:
 
 ```
 2026-09-03 19:17:35.101 [MainThread] [startup] logging to C:\Users\you\Desktop\panopticon\logs\panopticon_20260903_191735.log
@@ -1541,134 +774,74 @@ starts with the time, to the millisecond, and the thread that printed it:
 2026-09-03 19:17:38.951 [MainThread] [acq] opening teensy on COM3
 ```
 
-`teensy` in the last line is the trigger board
-([The trigger board](#the-trigger-board)). Each camera's grab thread is named
-from 0, so `grab0` is cam1, `grab1` is cam2, and so on.
+The grab threads count from 0, so `grab0` is cam1, `grab1` is cam2, and so on. Look for:
 
-Check in that output:
+- one `[camN] <serial> <width>x<height> Mono8` line per camera, with the frame size you set
+- `zero-copy view OK (PaddingX=0 PaddingY=0)` for every camera
+- the `[header]` block, which you'll want to quote when you report a problem
 
-- One `[camN] <serial> <width>x<height> Mono8` line per camera, with the frame
-  size you set.
-- `zero-copy view OK (PaddingX=0 PaddingY=0)` for every camera.
-- The `[header]` block ([WORKFLOW.md](WORKFLOW.md#the-log) lists what it
-  holds). Quote it when you report a problem.
+The hardware check runs in the background as the window opens. It measures the disk, benchmarks the CPU encoder and counts the NVENC sessions, then writes its report to the log:
 
-The firmware check and the serial port open about a second and a half after the
-window, so the window can draw first.
-
-The hardware check starts with the window and runs in the background. It
-measures the disk and the CPU encoder, and probes the NVENC session cap as
-[GPU](#gpu) describes. Its report goes to the log:
-
-- `[hw] NVENC sessions: 11 (at least — probe stopped at its limit), needed 11`
-  on a nine-camera rig means the driver granted every session the probe asked
-  for.
-- `upload: pinned, shared CUDA context` means the pinned GPU upload passed its
-  launch check. `upload: host (the pinned upload check did not pass)` means it
-  did not, and the dialog of item 4 says so.
+- `[hw] NVENC sessions: 11 (at least — probe stopped at its limit), needed 11` on a nine-camera rig means the driver granted every session the probe asked for.
+- `upload: pinned, shared CUDA context` means the pinned GPU upload passed its launch check, and `upload: host (the pinned upload check did not pass)` means it didn't. The **Hardware Check** dialog tells you when that happens.
 - `Using: nvenc` names the encoder the recordings will use.
 
-Every launch writes the same text to `logs\panopticon_<date>_<time>.log`. That
-file is where to look when Panopticon starts from the desktop shortcut, which
-has no console. Each recording and calibration folder also gets `session.log`,
-the part of the log from arming the cameras to the end of encoding.
+Every launch also writes all of this to `logs\panopticon_<date>_<time>.log`, which is where to look when you start Panopticon from the desktop shortcut, since it has no console. Each recording and calibration folder gets a `session.log` too: the part of the log from arming the cameras to the end of encoding.
 
 ### Step 10 — desktop shortcut
+
+Let's make a desktop icon, so you don't need PowerShell for every launch:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File make_shortcut.ps1
 ```
 
-Expected, on an environment made by uv:
+It prints a few lines, including:
 
 ```
-The venv's pythonw.exe is a console program; the shortcut uses
-CPython's GUI venv launcher, copied to C:\Users\you\Desktop\panopticon\.venv\Scripts\panopticonw.exe
 Shortcut written: C:\Users\you\Desktop\Panopticon.lnk
   Target : C:\Users\you\Desktop\panopticon\.venv\Scripts\panopticonw.exe
   Args   : "C:\Users\you\Desktop\panopticon\gui.py"
   WorkDir: C:\Users\you\Desktop\panopticon
-
-No console window will appear. If the app fails to start and you
-need to see why, run _launch.bat instead -- it keeps the console
-open and pauses on failure so the traceback can be read.
 ```
 
-A Panopticon icon appears on the desktop. Double-click it: the splash appears,
-then the main window, with no console window beside them. The window opens the
-profile you opened last.
+A **Panopticon** icon appears on the desktop. Double-click it, and the splash and the main window open with no console window beside them, on the profile you opened last.[^launcher]
 
-The shortcut needs a launcher that Windows never gives a console. In an
-environment made by uv, `.venv\Scripts\pythonw.exe` is a console program: it
-opens a console window before Panopticon's, and the taskbar entry then belongs
-to that console. The script checks, and in that case copies CPython's own
-windowless venv launcher to `.venv\Scripts\panopticonw.exe` and points the
-shortcut at it, so the launch opens one window. Run the script again after
-recreating the environment. The shortcut skips `uv run`, so it does not update
-the packages. Run `uv sync` yourself after an update
-([Updating Panopticon](#updating-panopticon)). If the script prints
-`No venv at ...`, run `uv sync` first.
+> [!NOTE]
+> The shortcut skips `uv run`, so it won't pick up new packages after an update. That's why [Updating Panopticon](#updating-panopticon) runs `uv sync` by hand.
 
-`_launch.bat` is the other way in. It runs through `uv run` with a console that
-stays open, and it pauses when Panopticon exits with an error, so you can read
-why it failed to start. It passes its arguments on to Panopticon, so
-`.\_launch.bat --profile my_rig`, run in the repository folder, chooses a
-profile at launch. The shortcut passes none.
+> [!TIP]
+> Panopticon won't start from the shortcut? Run `_launch.bat` in the repository folder instead. Its console stays open when Panopticon exits with an error, so you can read what went wrong. It takes the same options as `gui.py`, as in `.\_launch.bat --profile my_rig`.
+
+[^launcher]: In an environment made by uv, `.venv\Scripts\pythonw.exe` is a console program. It would open a console window before Panopticon's, and the taskbar entry would then belong to the console. So the script copies CPython's own windowless launcher to `.venv\Scripts\panopticonw.exe`, and points the shortcut at that.
 
 ### Updating Panopticon
 
-Close Panopticon first. Then, in PowerShell in the repository folder:
+Close Panopticon, then in PowerShell in the repository folder:
 
 ```powershell
 git pull
 uv sync
 ```
 
-`git pull` fetches the new code and prints the files it changed, or
-`Already up to date.` `uv sync` then installs any package the new code needs.
-If `uv sync` rebuilt the environment, run `make_shortcut.ps1` again (step 10)
-so the shortcut points at the new one. Profiles and `.pfs` files you saved
-under names of your own stay as they are.
+`git pull` fetches the new code and lists the files it changed, or says `Already up to date.`, and `uv sync` installs any package the new code needs. If `uv sync` rebuilt the environment, run `make_shortcut.ps1` again so the shortcut points at the new one. Profiles and `.pfs` files you saved under names of your own are left as they are.
 
 ### Adding cameras to a rig that already works
 
-1. Check the serial-number order before you install anything. Panopticon names
-   the cameras `cam1` to `camN` in ascending serial order, compared as text,
-   across every switch. `calibration.toml` stores those names. New cameras keep
-   the old names only if their serials sort after every current one. If a new
-   serial sorts between them, every camera after it is renamed. Old
-   calibrations then describe the wrong cameras, and existing recordings need
-   renaming or re-mapping as well. `uv run probe_network.py` lists each
-   switch's cameras separately, so sort all the serials it prints together.
-   The loader requires `camera_serials` in ascending order, so the same rule
-   applies with it set.
-2. Work out whether you need another host port and switch
-   ([The host port and the switches](#the-host-port-and-the-switches)). Keeping
-   the same number of cameras per port keeps the load on each port unchanged.
-3. Give a new switch its own subnet, as in step 5: the adapter at `.2` and the
-   cameras from `.3`.
-4. Configure the new switch and the new adapter as in step 5. Neither inherits
-   the settings of your working ports: the switch starts at 1500-byte frames,
-   and the adapter with Energy Efficient Ethernet on.
-5. Wire the new cameras' trigger inputs, to new pins added to `trigger_pins` or
-   fanned off existing ones. Fanning out needs no profile change, which is how
-   the reference rig went from six cameras to nine. Check each pin's current
-   first ([Wiring the trigger line](#wiring-the-trigger-line)).
-6. Raise `n_cameras`, and add the new serials to `camera_serials`
-   ([step 7](#step-7--write-the-rig-profile)).
-7. Check capacity again. RAM grows with the camera count and with
-   `kick_max_lag` ([RAM](#ram)), and the GPU has to grant one NVENC session per
-   camera ([GPU](#gpu)).
-8. Run `uv run probe_network.py --sweep --profile my_rig` again: every camera
-   should complete at 9000 bytes. Then calibrate from scratch, because an old
-   `calibration.toml` describes a camera set that no longer exists.
+1. **Check the serial numbers before you install anything.** Panopticon names the cameras `cam1` to `camN` in serial-number order, sorted as text across every switch, and `calibration.toml` uses those names. If a new camera's serial sorts in among the old ones, every camera after it gets renamed, so your old calibrations describe the wrong cameras and existing recordings need re-mapping. Listing them in `camera_serials` doesn't change that, since the list has to be in the same order. `uv run probe_network.py` lists the serials switch by switch, so sort them all together.
+2. **Work out whether you need another host port and switch** ([The host port and the switches](#the-host-port-and-the-switches)). The same number of cameras per port keeps each port's load the same.
+3. **Give a new switch its own subnet**, with the adapter at `.2` and the cameras from `.3`.
+4. **Configure the new switch and the new adapter** as in step 5. Neither inherits your working ports' settings: a new switch starts at 1500-byte frames, and a new adapter with Energy Efficient Ethernet on.
+5. **Wire the new cameras' trigger inputs**, to new pins added to `trigger_pins` or shared with existing ones, after checking each pin's current ([Wiring the trigger line](#wiring-the-trigger-line)). Sharing a pin needs no profile change, and it's how our rig went from six cameras to nine.
+6. **Raise `n_cameras`, and add the new serials to `camera_serials`** in the profile.
+7. **Check the capacity again.** RAM grows with the camera count and with `kick_max_lag`, and the GPU has to grant one NVENC session per camera (see [RAM](#ram) and [GPU](#gpu)).
+8. **Test, then calibrate from scratch.** Run `uv run probe_network.py --sweep --profile my_rig` again, and every camera should complete at 9000 bytes. An old `calibration.toml` describes a camera set that no longer exists, so make a new calibration.
 
 ---
 
 ## 3. Verify it works
 
-Check the software first on the simulated rig, then check on the rig that this
-machine keeps up with its cameras.
+Let's make sure everything works: the software first, on the simulated rig, and then the real rig under load.
 
 ### Without any cameras
 
@@ -1678,38 +851,23 @@ The simulated rig needs no hardware at all:
 uv run gui.py --profile sim
 ```
 
-On a machine installed with `uv sync --no-group rig`, run
-`uv run --no-group rig gui.py --profile sim` instead
-([step 4](#step-4--install-the-python-dependencies)).
+On a machine installed with `uv sync --no-group rig`, run `uv run --no-group rig gui.py --profile sim` instead.
 
-The window opens with the three simulated cameras' panes, and the launch runs
-as in [step 9](#step-9--first-launch). Preview, Calibrate, Record, Stop and the
-stimulation editor's Apply then run end to end.
-[SIMULATION.md](SIMULATION.md) walks through it. Point the output folder
-somewhere scratch first
-([WORKFLOW.md section 3](WORKFLOW.md#3-set-the-output-directory)), because the
-`sim` profile writes to the repository's `data` folder.
+The window opens with three simulated cameras, and the launch runs just as in [step 9](#step-9--first-launch). Before you record anything, point the output folder somewhere you don't mind filling up ([how](WORKFLOW.md#3-set-the-output-directory)), because the `sim` profile writes into the repository's `data` folder. After that, the preview, **Calibrate**, **Record** and the stimulation editor's **Apply** all work end to end, and [SIMULATION.md](SIMULATION.md) walks you through them.
 
-Panopticon now remembers `sim`, so the next plain launch and the desktop
-shortcut open the simulated rig. To go back to your rig, run
-`uv run gui.py --profile my_rig`.
+Panopticon now remembers `sim`, so the next plain launch and the desktop shortcut open the simulated rig. To go back to yours, run `uv run gui.py --profile my_rig`.
 
 ### With real cameras
 
-On the rig, confirm that every camera's path carries 9000-byte packets:
+Now let's make sure the computer keeps up with the cameras. On the rig, check once more that every camera's path carries 9000-byte packets:
 
 ```powershell
 uv run probe_network.py --sweep --profile my_rig
 ```
 
-Then record at least 3000 frames per camera in the window, 30 s at 100 fps.
-Click the Record toggle in the sidebar once to start, and again to stop
-([WORKFLOW.md section 8](WORKFLOW.md#8-record) describes a recording). Each
-grab thread prints a line every 1000 frames while recording (`cycle=`,
-`avg_wait`, `avg_proc`, `deliv_lag`), and a `stream stats` line at the stop.
-The lines appear in the PowerShell window and in the launch's log file in
-`logs\`. From an 18 s recording on the reference rig, with each line's time and
-thread left off, cam1's lines and the recording's totals read:
+Then record at least 3000 frames per camera in the window, which is 30 s at 100 fps. Flip **Record** on in the sidebar to start, and off again to stop.
+
+While it records, each grab thread prints a line to the console and the log every 1000 frames, and a `stream stats` line when you stop. Here's what cam1 printed during an 18 s recording on our rig, with the recording's totals at the end (we've trimmed the timestamps):
 
 ```
 [grab0] frames=1000 timeouts=7 avg_wait=9.03ms avg_proc=0.96ms qsize=1 | deliv_lag=-0.000s copy=0.73 submit=0.02 disp=0.05 rel=0.06 cycle=9.98ms
@@ -1719,47 +877,20 @@ thread left off, cam1's lines and the recording's totals read:
 [cam1] stop summary: frames_retrieved=1846, frame_count=1846, failed_grabs=0, drops=0, ring_full_drops=0, rearms=0, source_down_stalls=0, source_down_rearms=0, frames_before_barrier=0, retired=no
 ```
 
-The `exiting` and `stop summary` lines give each camera's frame count. The
-`[sync] released=` line gives `forced=` for the whole recording.
-
 A healthy recording shows:
 
-- `cycle` equal to the trigger period on every camera, for the whole run:
-  `cycle=10.00ms` at 100 fps. A higher value means the loop falls further behind
-  with every frame, and the buffer pool hides it until the pool is full.
-- `avg_wait` much larger than `avg_proc`. At 100 fps and 1920x1200 a grab thread
-  waits about 8.5 ms for each 0.8 ms of work.
-- `deliv_lag` near zero, and not growing. It is how old a frame is when the grab
-  thread retrieves it, by the camera's own clock.
-- `Buffer_Underrun_Count` 0 on every camera, in the `stream stats` line printed
-  at the stop. A nonzero count means the host did not keep up.
-- Equal frame counts on every camera, and `forced=0`
-  ([forced drops](GLOSSARY.md#forced-drop)).
-- No warning in the status bar after the stop. A recording that lost more
-  than 0.5% of its triggers to kick-out reports its
-  [effective frame rate](GLOSSARY.md#effective-frame-rate) in
-  `WARNINGS.txt`.
+- **`cycle` equal to the trigger period** on every camera, for the whole run: `cycle=10.00ms` at 100 fps. A higher value means the loop falls further behind with every frame, and the buffer pool hides it until the pool is full.
+- **`avg_wait` much larger than `avg_proc`.** At 100 fps and 1920x1200, a grab thread waits about 8.5 ms for every 0.8 ms of work.
+- **`deliv_lag` near zero, and not growing.** It's how old a frame is when the grab thread picks it up, by the camera's own clock.
+- **`Buffer_Underrun_Count` at 0** on every camera, in the `stream stats` line. Anything else means the computer didn't keep up.
+- **Equal frame counts on every camera, and `forced=0`** ([forced drops](GLOSSARY.md#forced-drop)). The `exiting` and `stop summary` lines give each camera's count, and the `[sync] released=` line gives `forced=` for the whole recording.
+- **No warning in the status bar after the stop.** A recording that lost more than 0.5% of its triggers to kick-out reports its [effective frame rate](GLOSSARY.md#effective-frame-rate) in `WARNINGS.txt`.
 
-A 60-second six-camera recording on the reference rig at 100 fps, summed up
-from those lines across all six cameras:
+`Resend_Request_Count` counts packets lost and asked for again, and `Failed_Buffer_Count` counts frames given up on. A high resend count with no failed buffers means the link recovers every packet, just late ([Configure the switches](#configure-the-switches)). Treat a resend count a thousand times the other cameras' as a fault, even when every frame arrives.
 
-```
-cycle=10.00ms on all six    avg_proc 0.80-0.90ms    avg_wait 8.40-8.62ms
-deliv_lag ~0                Buffer_Underrun_Count 0 on all six
-grabbed per camera: [6022, 6022, 6022, 6022, 6022, 6022]
-released=6022  dropped=0  forced=0  queue_full_drops=0
-```
+> [!TIP]
+> Measure on an otherwise idle machine. Other programs' CPU load once moved the cycle from 10.00 to 10.32 ms, and the delivery lag reached 5.6 s after 150 s.
 
-with each camera's lag behind the leader at median 0, 95th percentile 1 and
-maximum 2 frames.
+That's it! Your rig is ready for its first session.
 
-`Resend_Request_Count` counts packets lost and asked for again, and
-`Failed_Buffer_Count` counts frames given up on. A high resend count with no
-failed buffers means the link recovers every packet, each one late
-([Configure the switches](#configure-the-switches)). Treat a resend count a
-thousand times the other cameras' as a fault even when every frame arrives.
-
-Measure on an otherwise idle machine. Other programs' CPU load once moved the
-cycle from 10.00 to 10.32 ms, and the delivery lag reached 5.6 s after 150 s.
-
-Next: [OVERVIEW.md](OVERVIEW.md) names every control in the window you just opened.
+[*Next up:* A tour of the window](OVERVIEW.md)
