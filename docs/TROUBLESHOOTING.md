@@ -112,6 +112,7 @@ Calibrate stay disabled while it runs.
 | `The real-time GPU encode path (PyNvVideoCodec) is unavailable` | Recording then needs libx264 on the CPU. Run `uv sync`, and check the NVIDIA driver. |
 | `ffmpeg's h264_nvenc test encode failed` | The post-session encodes run on the CPU instead, which is slower. |
 | `GOP NOT APPLIED` | The encoder ignored the keyframe setting, so recordings would have one keyframe and could not be seeked. Report the driver and PyNvVideoCodec versions. |
+| `QUALITY NOT APPLIED` | The encoder ignored the `quality` setting, so every camera would record at the library's default quality instead of the profile's. Report the driver and PyNvVideoCodec versions. |
 | `nvenc_upload: pinned needs the launch check` | The pinned GPU upload did not pass its launch check, so this session uses the host upload. The video is the same, and grab threads can fall behind ([INSTALLATION.md](INSTALLATION.md#cpu)). The `[nvenc]` lines in the log say why. |
 | `nvenc_context: own gives each of the <n> encoders a CUDA context of its own` | The GPU lacks free memory for one context per camera, or Panopticon could not measure it (the message says which), so the [pinned upload](GLOSSARY.md#pinned-upload) runs in the shared context. |
 | `usbfs_memory_mb is <n> MB` | Linux only. Raise the usbfs limit as the message says. |
@@ -272,6 +273,7 @@ after the encode, and its rows go to the same file.
 | `cycle` in a grab thread's line above the trigger period | That grab loop does not finish inside one period. Another program uses the CPU, or a change added work to the loop ([INSTALLATION.md](INSTALLATION.md#3-verify-it-works)). |
 | `Buffer_Underrun_Count` above 0 | The driver's buffer pool ran dry, so the host fell behind. The network is not the cause. |
 | A video does not seek in LUC3D | The mp4 lacks a keyframe every second. The launch check proves the keyframe setting, and says `GOP NOT APPLIED` when it fails. Report the log and the encoder the report names. |
+| OpenCV or SLEAP shows a frame or two after the one asked for, late in a long video | The video was recorded before Panopticon gave the encoder its frame rate, so its last frame lasts 1/30 s and its frame rate reads slightly low. `uv run python -m gui_app.retime <session folder>` fixes it in place without re-encoding and keeps every picture, and `uv run python -m gui_app.retime --check <session folder>` only lists the videos it would change. |
 
 ## The recording looks fine but the views are out of sync
 

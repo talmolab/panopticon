@@ -67,6 +67,10 @@ class HardwareReport:
     #: the bitstream. None when NVENC is unavailable or the check could not
     #: run. False means recordings will be a single IDR and unseekable.
     nvenc_gop_ok: bool | None = None
+    #: The real-time encoder actually applies the profile's quality, measured
+    #: from the bitstream. None when NVENC is unavailable or the check could
+    #: not run. False means every camera records at the library's default.
+    nvenc_qp_ok: bool | None = None
     #: Concurrent NVENC sessions the driver granted, -1 when not probed.
     nvenc_sessions: int = -1
     #: libx264 frames per second per core, by preset, -1.0 when not benched.
@@ -215,6 +219,7 @@ def run_hardware_check(output_dir: str = "") -> HardwareReport:
     report.nvenc_runtime = check_nvenc_runtime()
     _ffmpeg_nvenc_ok = report.has_nvenc
     _check_gop(report)
+    _check_qp(report)
 
     if report.cpu_cores < 4:
         report.warnings.append(
@@ -295,6 +300,28 @@ def _check_gop(report: HardwareReport) -> None:
             "installed PyNvVideoCodec before recording.")
 
 
+def _check_qp(report: HardwareReport) -> None:
+    """Measure whether the real-time encoder applies the profile's quality.
+
+    RULE: measured from the bitstream, in the upload mode the recording uses,
+    for the reason `_check_gop` gives: the library drops a keyword it does not
+    know without an error.
+    """
+    if not report.nvenc_runtime:
+        return
+    try:
+        from gui_app import nvenc
+        report.nvenc_qp_ok = nvenc.qp_is_honoured()
+    except Exception:
+        report.nvenc_qp_ok = None
+    if report.nvenc_qp_ok is False:
+        report.warnings.append(
+            "NVENC ignores the quality setting on this build, so every camera "
+            "would record at the library's default quality, not the profile's. "
+            "Check the keyword names in gui_app/nvenc.py against the "
+            "installed PyNvVideoCodec before recording.")
+
+
 def run_encoder_check() -> HardwareReport:
     """The NVENC half of `run_hardware_check`, for a profile switch.
 
@@ -306,6 +333,7 @@ def run_encoder_check() -> HardwareReport:
     report.has_nvenc = bool(_ffmpeg_nvenc_ok)
     report.nvenc_runtime = check_nvenc_runtime()
     _check_gop(report)
+    _check_qp(report)
     return report
 
 
@@ -1110,6 +1138,11 @@ def format_report(report: HardwareReport) -> str:
                      "and be unseekable")
     elif report.nvenc_gop_ok:
         lines.append("       GOP verified from the bitstream: one keyframe per second")
+    if report.nvenc_qp_ok is False:
+        lines.append("       QUALITY NOT APPLIED: every camera would record at the "
+                     "library's default")
+    elif report.nvenc_qp_ok:
+        lines.append("       quality verified from the bitstream")
     if report.nvenc_sessions >= 0:
         lines.append(f"       {report.nvenc_sessions} concurrent encode sessions granted")
     if report.nvenc_upload:

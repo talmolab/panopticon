@@ -68,7 +68,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from gui_app import alignment, ffmpeg_cmd, recording_meta, stim_trace
 
 DEFAULT_FPS = 100
-DEFAULT_QUALITY = 21
+DEFAULT_QUALITY = 28
 
 
 def session_defaults(rec_dir: Path) -> tuple:

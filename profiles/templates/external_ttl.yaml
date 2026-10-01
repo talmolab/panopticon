@@ -44,7 +44,7 @@ frame_width: 1440                  # the ROI each camera is set to; must be even
 frame_height: 1080
 frame_rate: 100                    # SITE: the rate your trigger source runs at
 calibration_frame_rate: 30         # SITE: the rate you run it at to calibrate
-quality: 21
+quality: 28
 realtime_encode: true
 realtime_kick: true
 kick_max_lag: 240
