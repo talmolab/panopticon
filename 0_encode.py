@@ -44,7 +44,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from gui_app import alignment, ffmpeg_cmd, recording_meta  # noqa: E402
 
-DEFAULT_QUALITY = 21
+DEFAULT_QUALITY = 28
 #: Capture files EncodeWorker turns into an mp4.
 SOURCES = ("stream.h264", "raw.bin", "raw_tail.bin")
 

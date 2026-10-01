@@ -17,7 +17,7 @@ frame_width: 1920
 frame_height: 1200
 frame_rate: 100
 calibration_frame_rate: 30   # a slowly waved board gains nothing from 100 fps
-quality: 21
+quality: 28
 # Cameras finished at once after Stop: mp4 copies here, encodes in raw mode.
 encode_parallel: 3
 # H.264 on the GPU during capture; false writes raw frames and encodes after

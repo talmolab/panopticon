@@ -690,7 +690,7 @@ def clear_stale_tmp(rec_dir: Path) -> list[Path]:
     return removed
 
 
-def align_recording(rec_dir, fps: int = 100, quality: int = 21,
+def align_recording(rec_dir, fps: int = 100, quality: int = 28,
                     replace: bool = False, parallel: int = 3,
                     progress=None, backend: str | None = None,
                     should_stop=None, analysis: Analysis | None = None,

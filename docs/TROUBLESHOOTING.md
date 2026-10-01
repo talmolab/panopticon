@@ -112,6 +112,7 @@ Calibrate stay disabled while it runs.
 | `The real-time GPU encode path (PyNvVideoCodec) is unavailable` | Recording then needs libx264 on the CPU. Run `uv sync`, and check the NVIDIA driver. |
 | `ffmpeg's h264_nvenc test encode failed` | The post-session encodes run on the CPU instead, which is slower. |
 | `GOP NOT APPLIED` | The encoder ignored the keyframe setting, so recordings would have one keyframe and could not be seeked. Report the driver and PyNvVideoCodec versions. |
+| `QUALITY NOT APPLIED` | The encoder ignored the `quality` setting, so every camera would record at the library's default quality instead of the profile's. Report the driver and PyNvVideoCodec versions. |
 | `nvenc_upload: pinned needs the launch check` | The pinned GPU upload did not pass its launch check, so this session uses the host upload. The video is the same, and grab threads can fall behind ([INSTALLATION.md](INSTALLATION.md#cpu)). The `[nvenc]` lines in the log say why. |
 | `nvenc_context: own gives each of the <n> encoders a CUDA context of its own` | The GPU lacks free memory for one context per camera, or Panopticon could not measure it (the message says which), so the [pinned upload](GLOSSARY.md#pinned-upload) runs in the shared context. |
 | `usbfs_memory_mb is <n> MB` | Linux only. Raise the usbfs limit as the message says. |

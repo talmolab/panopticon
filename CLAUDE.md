@@ -346,6 +346,15 @@ until someone analyses it.
   released with `_EncoderThread.release_encoder()`. NVENCSTATUS 21 is the
   session limit: never descend a keyword fallback ladder on it, and keep the GOP
   keys (`gop`, `idrperiod`, lowercase) on every rung.
+- The quality reaches PyNvVideoCodec as `constqp` in NVENC's "P,B,I" order
+  (`nvenc.constqp_value`: P at `quality`, I three finer, B three coarser),
+  never as `qp`, which the library ignores. `quality: 28` gives the stream the
+  library writes by default. The launch preflight proves the quality from the
+  bitstream (`nvenc.qp_is_honoured()`), as it proves the GOP. Every rung also
+  passes `fps`. Without it the stream's timing says 30 fps and the remux gives
+  the last frame 1/30 s. The mp4's average frame rate then reads under the
+  real one, and OpenCV's frame-index seeks land late: one frame from about
+  5,000 at 100 fps, two from about 13,000.
 - Prove the GOP from the bitstream (`nvenc.gop_is_honoured()`, run by the launch
   preflight). PyNvVideoCodec ignores keywords it does not know, so a misspelled
   key (`gopLength`, `idrPeriod`) gives one IDR for a whole recording while the

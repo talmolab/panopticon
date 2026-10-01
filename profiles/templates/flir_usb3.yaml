@@ -21,7 +21,7 @@ frame_width: 1440                  # the ROI each camera is set to; must be even
 frame_height: 1080
 frame_rate: 100
 calibration_frame_rate: 30
-quality: 21
+quality: 28
 realtime_encode: true
 realtime_kick: true
 kick_max_lag: 240

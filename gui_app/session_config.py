@@ -75,8 +75,9 @@ _FQBN = re.compile(rf"{_FQBN_PART}:{_FQBN_PART}:{_FQBN_PART}"
                    rf"(:{_FQBN_PART}={_FQBN_PART}(,{_FQBN_PART}={_FQBN_PART})*)?")
 
 #: H.264 quantiser range. The encoders pass RigProfile.quality straight
-#: through as the QP, and libx264 clamps a value above the top of the range
-#: to it, so an out-of-range value would record at another quality.
+#: through as the QP (NVENC as its P-frame QP, see nvenc.constqp_value), and
+#: libx264 clamps a value above the top of the range to it, so an
+#: out-of-range value would record at another quality.
 QUALITY_RANGE = (0, 51)
 
 #: Metadata fields a profile may pre-fill through ``metadata_defaults``. The
@@ -544,7 +545,7 @@ class RigProfile:
     frame_height: int = 1200
     frame_rate: int = 100
     calibration_frame_rate: int = 30
-    quality: int = 21
+    quality: int = 28
     encode_parallel: int = 3
     realtime_encode: bool = True
     # Real-time frame kick-out: gate frames through the cross-camera coordinator

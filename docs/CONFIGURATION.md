@@ -100,7 +100,7 @@ calibration_gain_db: -1           # any negative value keeps the .pfs gain
 # --- Encoding ---------------------------------------------------------------
 encoder: auto                     # auto | nvenc | x264 | raw
 realtime_encode: true             # false writes whole frames to disk
-quality: 21                       # H.264 QP, 0 to 51; lower is larger
+quality: 28                       # H.264 QP, 0 to 51; lower is larger
 encode_parallel: 3                # cameras finished at once after Stop
 nvenc_upload: pinned              # pinned | host
 nvenc_context: shared             # shared | own
@@ -473,11 +473,13 @@ True or false. Default `true`. Reference rig: `true`.
 
 #### `quality`
 
-Integer, 0 to 51. Default `21`. Reference rig: `21`.
+Integer, 0 to 51. Default `28`. Reference rig: `28`.
 
 - Does: The H.264 quantiser (QP) every encoder uses. Lower gives higher quality
-  and larger files ([frame size at 21](#disk)). `session_metadata.json` records
-  it, and `2_align.py` and `0_encode.py` reuse it.
+  and larger files ([frame size at 28](#disk)). The real-time encoder uses it
+  for P frames and three steps finer for the keyframe each second.
+  `session_metadata.json` records it, and `2_align.py` and `0_encode.py` reuse
+  it.
 - Change when: To trade file size against image detail.
 - Goes wrong: A value outside 0 to 51 is refused when the profile loads. File size
   depends on the scene as well as the QP, so measure it on a test recording.
@@ -1405,7 +1407,7 @@ next acquisition needs the same memory as the first.
 
 ### Disk
 
-- Real-time H.264: about 4,600 bytes per frame at `quality: 21` on the reference
+- Real-time H.264: about 4,600 bytes per frame at `quality: 28` on the reference
   rig, so N × F × 4,600 bytes per second. Nine cameras at 100 fps write 4.1 MB/s,
   about 15 GB an hour.
 - Raw capture (`realtime_encode: false`): N × F × W × H bytes per second, the

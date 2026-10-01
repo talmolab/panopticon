@@ -27,7 +27,7 @@ calibration_frame_rate: 30
 # sheet; never 0. 165 is below this camera's maximum: triggers stay safe, but
 # the exposure ceiling is shorter than the camera allows.
 trigger_rate_limit: 165
-quality: 21
+quality: 28
 realtime_encode: true
 realtime_kick: true
 kick_max_lag: 240

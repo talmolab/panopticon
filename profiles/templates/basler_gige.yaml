@@ -35,7 +35,7 @@ calibration_gain_db: -1           # any negative value keeps the .pfs gain
 # --- Encoding ---------------------------------------------------------------
 encoder: auto                     # auto | nvenc | x264 | raw
 realtime_encode: true             # false writes whole frames to disk
-quality: 21                       # H.264 QP, 0 to 51; lower is larger
+quality: 28                       # H.264 QP, 0 to 51; lower is larger
 encode_parallel: 3                # cameras finished at once after Stop
 nvenc_upload: pinned              # pinned | host
 nvenc_context: shared             # shared | own

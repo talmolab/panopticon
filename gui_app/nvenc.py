@@ -174,6 +174,19 @@ def create_h264_encoder(width: int, height: int, qp: int,
     return _create_session(width, height, qp, fps, preset, tuning, notes)
 
 
+def constqp_value(qp: int) -> str:
+    """The `constqp` keyword for quality `qp`, in NVENC's NV_ENC_QP order "P,B,I".
+
+    RULE: P frames take the profile's quality, IDR frames three steps finer
+    and B frames three coarser, clamped to H.264's 0..51. REASON: those are
+    NVENC's own offsets, and they suit a mostly static view. A finer IDR costs
+    once a second and every P frame predicts from it, so at the same picture
+    quality the split takes less bitrate than one QP for every frame. With
+    `quality: 28` the stream is the one PyNvVideoCodec writes by default.
+    """
+    return f"{qp},{min(51, qp + 3)},{max(0, qp - 3)}"
+
+
 def _create_session(width: int, height: int, qp: int, fps: int, preset: str,
                     tuning: str, notes: list | None, extra: dict | None = None):
     """One PyNvVideoCodec encoder through the kwarg ladder.
@@ -204,12 +217,25 @@ def _create_session(width: int, height: int, qp: int, fps: int, preset: str,
     # at all, so every real-time recording had a single IDR while the code, the
     # tests and the docs all agreed the GOP was explicit. A test that asserts
     # on keyword NAMES cannot catch this; only counting IDRs in the output can.
+    #
+    # RULE: the quantiser goes in `constqp`, never `qp`, and only
+    # qp_is_honoured() proves it. REASON: the same silent drop. PyNvVideoCodec
+    # ignores `qp`, so a ladder that passed `qp=str(qp)` recorded at the
+    # library's default whatever the profile said.
+    #
+    # RULE: every rung carries `fps`. REASON: the encoder writes the frame rate
+    # into the stream's timing information, 30 fps when it is not given. The
+    # remux then gives the last frame a 1/30 s duration, the mp4's average
+    # frame rate reads slightly under `fps`, and a reader that seeks by frame
+    # index (OpenCV's CAP_PROP_POS_FRAMES) lands one frame late from about
+    # frame 5,000 at 100 fps and two from about 13,000.
     gop = str(fps)
-    _gop_kw = dict(gop=gop, idrperiod=gop)
+    _gop_kw = dict(gop=gop, idrperiod=gop, fps=str(fps))
+    _qp_kw = dict(rc="constqp", constqp=constqp_value(qp))
     ladder = (
-        dict(codec="h264", preset=preset, tuning_info=tuning, rc="constqp",
-             qp=str(qp), **_gop_kw),
-        dict(codec="h264", preset=preset, rc="constqp", qp=str(qp), **_gop_kw),
+        dict(codec="h264", preset=preset, tuning_info=tuning, **_qp_kw,
+             **_gop_kw),
+        dict(codec="h264", preset=preset, **_qp_kw, **_gop_kw),
         dict(codec="h264", preset=preset, tuning_info=tuning, **_gop_kw),
         dict(codec="h264", **_gop_kw),
     )
@@ -1083,6 +1109,56 @@ def gop_is_honoured(fps: int = 100, size: int = 256) -> bool | None:
         if enc is not None:
             del enc
         gc.collect()
+
+
+#: The two qualities qp_is_honoured() compares, and how much larger the finer
+#: one's stream must be. On noise the bytes roughly double every six QP
+#: steps, so 18 against 40 differs far more than this factor, while a library
+#: that drops the keyword encodes both identically.
+_QP_CHECK = (18, 40)
+_QP_CHECK_RATIO = 2.0
+
+
+def qp_is_honoured(fps: int = 100, size: int = 256) -> bool | None:
+    """Does this build apply the quality keyword? None when NVENC is unavailable.
+
+    RULE: verify from the bitstream, never from the keyword names, as with the
+    GOP. REASON: PyNvVideoCodec accepts unknown keyword arguments silently, so
+    a build that renames the quantiser key records every camera at the
+    library's default quality while the profile reads as applied.
+
+    Encodes the same noise at two qualities through the recording's factory
+    and asks for the finer one to be at least _QP_CHECK_RATIO times larger.
+    """
+    _load()
+    if _nvc is None:
+        return None
+    import numpy as np
+    sizes = []
+    for qp in _QP_CHECK:
+        enc = None
+        try:
+            enc = create_h264_encoder(size, size, qp, fps)
+            rng = np.random.default_rng(0)
+            frame = np.full(size * size * 3 // 2, 128, dtype=np.uint8)
+            n = 0
+            for _ in range(fps // 4):
+                frame[: size * size] = rng.integers(0, 256, size * size,
+                                                    dtype=np.uint8)
+                n += len(enc.Encode(frame))
+            n += len(enc.EndEncode())
+            sizes.append(n)
+        except Exception as e:
+            print(f"[nvenc] quality verification could not run: {e}", flush=True)
+            return None
+        finally:
+            if enc is not None:
+                close = getattr(enc, "Close", None)
+                if close is not None:
+                    close()
+                del enc
+            gc.collect()
+    return sizes[0] >= _QP_CHECK_RATIO * max(1, sizes[1])
 
 
 def probe_monochrome_support(codec: str = "h264", gpuid: int = 0) -> int:

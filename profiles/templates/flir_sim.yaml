@@ -27,7 +27,7 @@ frame_width: 640
 frame_height: 400
 frame_rate: 100
 calibration_frame_rate: 30
-quality: 21
+quality: 28
 encode_parallel: 3
 realtime_encode: true
 realtime_kick: true
