@@ -42,7 +42,8 @@ checked by hand that no other one holds the hardware.
   - `test_backend_contract.py` after `backends/__init__.py` or any backend,
     `test_spinc.py` after `_spinc.py` or `fake_spinc.py`, and
     `test_flir_backend.py` after `flir.py`;
-  - `test_nvgil.py` after `nvenc.py` or `cuda_driver.py`;
+  - `test_nvgil.py` after `nvenc.py` or `cuda_driver.py`, and
+    `test_retime.py` after `retime.py`;
   - `test_trigger_source.py` after `trigger_source.py`;
   - `test_logging.py` and `test_session_log_gui.py` after `logging_setup.py`;
   - `test_main_window_start.py`, `test_first_launch.py` and `test_flir_gui.py`
@@ -354,7 +355,9 @@ until someone analyses it.
   passes `fps`. Without it the stream's timing says 30 fps and the remux gives
   the last frame 1/30 s. The mp4's average frame rate then reads under the
   real one, and OpenCV's frame-index seeks land late: one frame from about
-  5,000 at 100 fps, two from about 13,000.
+  5,000 at 100 fps, two from about 13,000. `gui_app/retime.py` rewrites a
+  video recorded that way without re-encoding, and replaces it only once
+  every picture is proven unchanged.
 - Prove the GOP from the bitstream (`nvenc.gop_is_honoured()`, run by the launch
   preflight). PyNvVideoCodec ignores keywords it does not know, so a misspelled
   key (`gopLength`, `idrPeriod`) gives one IDR for a whole recording while the

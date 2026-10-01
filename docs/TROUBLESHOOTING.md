@@ -273,6 +273,7 @@ after the encode, and its rows go to the same file.
 | `cycle` in a grab thread's line above the trigger period | That grab loop does not finish inside one period. Another program uses the CPU, or a change added work to the loop ([INSTALLATION.md](INSTALLATION.md#3-verify-it-works)). |
 | `Buffer_Underrun_Count` above 0 | The driver's buffer pool ran dry, so the host fell behind. The network is not the cause. |
 | A video does not seek in LUC3D | The mp4 lacks a keyframe every second. The launch check proves the keyframe setting, and says `GOP NOT APPLIED` when it fails. Report the log and the encoder the report names. |
+| OpenCV or SLEAP shows a frame or two after the one asked for, late in a long video | The video was recorded before Panopticon gave the encoder its frame rate, so its last frame lasts 1/30 s and its frame rate reads slightly low. `uv run python -m gui_app.retime <session folder>` fixes it in place without re-encoding and keeps every picture, and `uv run python -m gui_app.retime --check <session folder>` only lists the videos it would change. |
 
 ## The recording looks fine but the views are out of sync
 
