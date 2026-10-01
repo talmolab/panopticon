@@ -885,12 +885,34 @@ Dead ends, do not retry:
   alignment) compress the range instead, storing Y = 16 + raw x 219/255. A
   camera on one path therefore looks different from one on the other.
 
+- 2026-10-01: The encoder settings passed the real GUI (`4382169`). Record
+  92 s, record 64 s, calibrate 33 s and Solve ran in one process: nine cameras,
+  forced 0, and private memory back to 12.9-13.0 GiB after each acquisition.
+  Every video's frames lasted one period, and OpenCV read exactly 100 or
+  30 fps and landed every seek. The Solve failed as it should, since only cam8
+  saw the board, which lay still.
+- 2026-10-01: Videos keep the camera's 0-255 values and declare full range
+  BT.709 (`c270944`). Every ffmpeg writer keeps the values with an explicit
+  `scale`. The real-time remux writes the description into NVENC's stream with
+  `h264_metadata`, and the mp4 carries it in its `colr` box. Chrome ignored a
+  bare range flag, in the stream or in the box, and honoured it only once the
+  primaries, transfer and matrix were declared too. After the `scale` filter,
+  `-color_primaries` and `-color_trc` on the command line did not reach the
+  stream, so `setparams` sets them on the frames. In the real GUI, record 61 s,
+  record 45 s and calibrate 21 s gave nine cameras of videos tagged full range
+  BT.709 (`75dc931`). OpenCV returned the stored values exactly, down to 2 where
+  it had shown 0 before, and LUC3D's WebCodecs path (mediabunny in Chrome)
+  read `fullRange` with the stored values. Older recordings declare no range,
+  and `retime` leaves them so.
+
 Dead ends, do not retry:
 - Scoring a video against its raw frames through `format=gray` (the range
   conversion costs about 9 dB) or with `setpts=N` on inputs of different time
   bases (frames pair off by one).
 - Retagging the stream's timing in the same remux that builds the mp4 (the
   last frame keeps a wrong duration).
+- Declaring the full range alone (Chrome ignores it without the primaries,
+  transfer and matrix).
 
 ---
 
