@@ -42,8 +42,8 @@ checked by hand that no other one holds the hardware.
   - `test_backend_contract.py` after `backends/__init__.py` or any backend,
     `test_spinc.py` after `_spinc.py` or `fake_spinc.py`, and
     `test_flir_backend.py` after `flir.py`;
-  - `test_nvgil.py` after `nvenc.py` or `cuda_driver.py`, and
-    `test_retime.py` after `retime.py`;
+  - `test_nvgil.py` after `nvenc.py` or `cuda_driver.py`, `test_retime.py`
+    after `retime.py`, and `test_full_range.py` after `ffmpeg_cmd.py`;
   - `test_trigger_source.py` after `trigger_source.py`;
   - `test_logging.py` and `test_session_log_gui.py` after `logging_setup.py`;
   - `test_main_window_start.py`, `test_first_launch.py` and `test_flir_gui.py`
@@ -363,14 +363,24 @@ until someone analyses it.
   key (`gopLength`, `idrPeriod`) gives one IDR for a whole recording while the
   code reads as correct. The default path stream-copies `stream.h264`, so `-g`
   on the ffmpeg writers cannot repair it.
+- Every video the rig writes stores the camera's Mono8 values as the luma,
+  unchanged from 0 to 255. It declares full range with BT.709 primaries,
+  transfer and matrix, in the stream and in the mp4's `colr` box
+  (`ffmpeg_cmd.full_range_args`, `ffmpeg_cmd.realtime_remux_args`). A video
+  that declares no range is read as 16 to 235 and stretched by every reader.
+  Chrome, and so LUC3D, needs all three declared. `gray` into `yuv420p`
+  without the explicit `scale` squeezes the values into 16 to 235, and
+  without `setparams` the encoder leaves primaries and transfer unknown.
+  Videos recorded before the description was written declare none, and
+  `retime` leaves that as it is.
 - Every mp4 the rig writes carries `-movflags +faststart`, and every mp4 it
   re-encodes carries `-g <fps>`, so it loads and seeks in the browser labeler
   (LUC3D). Without `-g` a re-encoded file can hold one IDR. Without
   `+faststart` the player reads the whole file before frame 1. Build writer
   commands from `gui_app/ffmpeg_cmd.py`: `h264_encoder_args` plus
-  `mp4_container_args` for a re-encode, `stream_copy_args` for the remux. The
-  remux copies `stream.h264`, so its keyframes come from the encoder's GOP,
-  which the previous rule proves.
+  `mp4_container_args` for a re-encode, `realtime_remux_args` for the remux.
+  The remux copies `stream.h264`, so its keyframes come from the encoder's
+  GOP, which the previous rule proves.
 - The encoder does not copy frames to the GPU with the GIL held. On the `host`
   path PyNvVideoCodec's `Encode()` uploads each NV12 frame with the GIL held,
   0.5-1.1 ms per call on the reference rig, and starves a grab thread until its

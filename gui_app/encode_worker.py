@@ -193,7 +193,7 @@ class EncodeWorker(QThread):
             return [ff, *ffmpeg_cmd.global_args("warning"),
                     "-fflags", "+genpts", "-r", str(self._fps),
                     "-i", str(job.src),
-                    *ffmpeg_cmd.stream_copy_args(), str(job.mp4_path)]
+                    *ffmpeg_cmd.realtime_remux_args(), str(job.mp4_path)]
         return [ff, *ffmpeg_cmd.global_args("warning"),
                 *ffmpeg_cmd.rawvideo_input_args(self._w, self._h, self._fps),
                 "-i", str(job.src),

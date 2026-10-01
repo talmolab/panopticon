@@ -1299,7 +1299,7 @@ Each encoder writes an Annex-B H.264 elementary stream to `stream.h264`. At
 stop `EncodeWorker` wraps it into an mp4 by stream copy:
 
 ```
-ffmpeg -y -nostdin -hide_banner -loglevel warning -fflags +genpts -r <fps> -i stream.h264 -c:v copy -movflags +faststart <mp4>
+ffmpeg -y -nostdin -hide_banner -loglevel warning -fflags +genpts -r <fps> -i stream.h264 -c:v copy -bsf:v h264_metadata=video_full_range_flag=1:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1 -color_range pc -color_primaries bt709 -color_trc bt709 -colorspace bt709 -movflags +faststart+write_colr <mp4>
 ```
 
 There is no re-encode and no GPU, and it takes seconds. The timestamps are
@@ -1320,6 +1320,16 @@ the Talmo Lab (<https://talmolab.github.io/luc3d/>):
 - `-movflags +faststart`, the moov atom at the front. LUC3D reads the file
   from byte 0 in 1 MB pieces until moov parses, so moov at the end means
   reading the whole file, per camera, before frame 1 appears.
+- Full range with BT.709 primaries, transfer and matrix, in the stream and in
+  the container's `colr` box (`+write_colr`). The luma is the camera's Mono8
+  value, 0 to 255. A video that declares no range is read as 16 to 235, so
+  OpenCV, imageio and the browser stretch it: below 16 shows as black and
+  above 235 as white. Chrome, and so LUC3D, honours the range only when all
+  three are declared. The chroma is neutral, so the matrix changes no value.
+  The remux writes the description into NVENC's stream with the
+  `h264_metadata` filter. The ffmpeg writers keep the range with an explicit
+  `scale` and declare it with `setparams`, because an encoder takes the
+  frames' description over the command line's.
 
 `gui_app/ffmpeg_cmd.py` builds every such command line, so a writer that uses
 it cannot drop either option. The mp4 writers are `encode_worker` (remux and

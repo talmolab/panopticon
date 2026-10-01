@@ -86,7 +86,9 @@ The child process:
 ffmpeg -y -nostdin -hide_banner -loglevel error \
   -f rawvideo -vcodec rawvideo -pix_fmt gray -s WxH -r FPS -an -i pipe:0 \
   -c:v libx264 -preset PRESET -tune zerolatency -qp QP -g FPS -bf 0 -threads N \
-  -pix_fmt yuv420p -f h264 -flush_packets 1 pipe:1
+  -vf scale=in_range=full:out_range=full,setparams=range=pc:color_primaries=bt709:color_trc=bt709:colorspace=bt709 \
+  -pix_fmt yuv420p -color_range pc -color_primaries bt709 -color_trc bt709 -colorspace bt709 \
+  -f h264 -flush_packets 1 pipe:1
 ```
 
 `Encode()` writes the NV12 frame's Y plane (the gray image) to the child's
