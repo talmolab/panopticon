@@ -837,7 +837,64 @@ Dead ends, do not retry:
 
 ---
 
-## 10. Standing dead ends (index)
+## 10. The encoder settings and the codec evaluation (30 September 2026)
+
+- 2026-09-30: The profile's quality never reached the real-time encoder
+  (`0c40761`). PyNvVideoCodec ignores `qp`, so every recording since the
+  real-time path was built used the library's default. That default is exactly
+  `constqp` P 28, B 31, I 25: the output is byte-identical for H.264, HEVC and
+  AV1. A true QP 21 is about 15 times larger (79 Mbit/s per camera) because it
+  encodes the sensor noise, and no single QP matches the default's quality
+  without 16-31% more bitrate. The ladder now passes `constqp`, the default
+  quality is 28, and 300 of 300 frames decode identically to before. The
+  libx264 fallback and the post-hoc writers, which had honoured 21, now take
+  28 too. A launch check proves the quality from the bitstream.
+- 2026-09-30: OpenCV's frame seeks drifted on every recording (`0c40761`).
+  The encoder was never given the frame rate, so the stream's timing said
+  30 fps and the remux gave the last frame 1/30 s (427 ticks against 128).
+  The mp4 then read 99.98686 fps, and `CAP_PROP_POS_FRAMES` on a 17,774-frame
+  recording returned the frame asked for up to about 3,000, the next one from
+  5,000 and the one after from 13,000. sleap-io reads through OpenCV first.
+  Passing `fps` fixes the timing for H.264, HEVC and AV1. Applying
+  `h264_metadata=tick_rate` in the same remux leaves the last frame at 384
+  ticks, so the retag has to go on the elementary stream before the remux.
+- 2026-09-30: `gui_app/retime.py` fixes recordings made before that
+  (`e57b092`). On a copy of the 2026-09-29 cam4 video it took 4 s, every one
+  of 17,774 frames decoded identically, and 14 of 14 seeks were exact.
+- 2026-09-30: Codec evaluation, no code change. The source was 600 raw frames
+  from each of the nine cameras, at the recording `.pfs`, free-running on the
+  empty lit rig. The production encoder ran with the codec swapped in, scored
+  by Y-plane PSNR and SSIM against the raw frames. At equal PSNR the rig needs
+  37.1 Mbit/s in H.264, 32.1 in HEVC and 15.1 in AV1 (constqp 110), so AV1
+  saves 59%. The H.264 figure, 16.7 GB an hour, is close to the 17.9 GB of real
+  recordings with mice. Nine unpaced
+  encoders at P3 reach 1,432 fps in H.264, 964 in HEVC and 1,581 in AV1, against
+  the 900 nine cameras at 100 fps need. HEVC keeps its savings only at P3. The
+  grab-thread GIL wait (about 11 us mean, 280-290 us p99) and the encoder
+  thread's CPU (about 2 ms a frame) do not depend on the codec. Chrome 153
+  and Edge 154 play, seek and WebCodecs-decode all three. OpenCV 4.13's
+  Windows wheel decodes AV1 at 40 fps and seeks it in about 1.1 s (H.264:
+  135 fps, 52 ms), while PyAV's dav1d decodes it at 905 fps. Quick Sync on the
+  285K carries about 470 fps of 1920x1200 AV1 across nine streams, roughly
+  half the rig's load.
+- 2026-09-30: Two range findings, no code change yet. The real-time stream
+  carries the camera's full 0-255 range with no range tag, so every reader
+  assumes 16-235 and stretches it. Below 16 goes to 0 (1-6% of the rig's
+  pixels), and OpenCV's view of a QP-28 file scores 29.5 dB against the raw
+  instead of 38.75 dB. The ffmpeg paths (libx264, `raw.bin`, the raw tail,
+  alignment) compress the range instead, storing Y = 16 + raw x 219/255. A
+  camera on one path therefore looks different from one on the other.
+
+Dead ends, do not retry:
+- Scoring a video against its raw frames through `format=gray` (the range
+  conversion costs about 9 dB) or with `setpts=N` on inputs of different time
+  bases (frames pair off by one).
+- Retagging the stream's timing in the same remux that builds the mp4 (the
+  last frame keeps a wrong duration).
+
+---
+
+## 11. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
@@ -877,3 +934,6 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
 - A lens fit on every view within the cut (minutes per camera).
 - A final lens fit from one start only (either start can settle on a wrong
   focal length).
+- Passing the NVENC quantiser as `qp` (the library ignores it and takes
+  `constqp`).
+- Scoring video quality through a range conversion.
