@@ -1573,9 +1573,12 @@ Stage by stage:
   A view is a trigger on which at least two cameras found 6 or more corners,
   and up to 1500 views spread through the take are fitted
   (`REFINE_MAX_VIEWS`). Each step eliminates the board views (a Schur
-  complement), so it solves one system over the camera parameters only. Four
-  rounds (`REFINE_ROUNDS`) fit the corners within 20, 8, 4 and then 2 px
-  under a Huber loss, and score every corner again after each. The reference
+  complement), so it solves one system over the camera parameters only. Five
+  rounds (`REFINE_ROUNDS`) run under a Huber loss and score every corner
+  again after each. The first fits every corner, because a camera the chain
+  misplaced has all of its corners beyond any cut-off and a round that fits
+  none of them leaves it where it was. The next four fit the corners within
+  20, 8, 4 and then 2 px. The reference
   camera keeps the chain's frame and the board's geometry keeps the scale.
   The chained solve is scored on the same corners first, with the cameras
   held and only the board views fitted. The refined cameras replace the

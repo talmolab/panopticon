@@ -1167,7 +1167,14 @@ def chain_extrinsics(cam_names, tree_edges, pairwise, ref_cam):
 #: the corners that reproject within ``keep_px``, each weighed by a Huber loss
 #: of scale ``huber_px``, and then scores every corner again, so a corner an
 #: early round left out can return.
-REFINE_ROUNDS = ((20.0, 3.0), (8.0, 2.0), (4.0, 1.0), (2.0, 1.0))
+#:
+#: RULE: the first round keeps every corner, and only the Huber loss limits
+#: how far one corner pulls. REASON: a camera the chain misplaces puts all of
+#: its corners beyond a cut-off. A round that fits none of them holds that
+#: camera where the chain put it, while the others' corners still lower the
+#: median, so the refinement is accepted with that camera still wrong.
+REFINE_ROUNDS = ((math.inf, 3.0), (20.0, 3.0), (8.0, 2.0), (4.0, 1.0),
+                 (2.0, 1.0))
 #: Levenberg-Marquardt steps per round, at most.
 REFINE_MAX_STEPS = 100
 #: A round stops once a step lowers its cost by less than this fraction.
