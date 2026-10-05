@@ -916,7 +916,43 @@ Dead ends, do not retry:
 
 ---
 
-## 11. Standing dead ends (index)
+## 11. Joint refinement of the calibration (4 October 2026)
+
+- 2026-10-04: Why the Solve scored worse than calibrat3 (measurement, no code
+  change). On the reference rig's 2026-10-01 sweep (nine cameras, 16,407
+  frames), aniposelib's triangulation of aniposelib's own corner detections
+  put the at-rig solve at a median reprojection error of 1.50 px (95th
+  percentile 4.06) on 107,817 observations, and calibrat3's solve of the
+  saved video at 0.15 px. The error grew with tree depth, from 0.53 px at the
+  reference camera to 2.52-2.55 px at cam3 and cam5, three and four links
+  out. The cam9-cam8 edge had 5 shared frames, and five of the six worst
+  cameras hung below it. The chained focal lengths ran 1-4% below
+  calibrat3's.
+- 2026-10-04: The solve refines every lens, camera pose and board view
+  jointly after the tree (`c406eef`). On the same sweep it took the median
+  from 1.50 to 0.17 px (95th percentile 4.06 to 0.55, every camera 0.14 to
+  0.23 px), against calibrat3's 0.15 px on the same observations, and to
+  0.17 px on every frame of the take (758,665 observations, most of them
+  views the refinement never fitted). It moved the focal lengths to within
+  about 0.5% of calibrat3's, and the floor step's five cameras agree on the
+  lying board within 1.0 mm and 1.07 degrees, from 4.0 mm and 1.26 degrees.
+  The step took 53 s on 1,109 views and 126,747 corners, and the whole solve
+  98 s against 44 s (Linux, OpenCV capped at 8 threads). On a synthetic
+  six-camera rig started 4% off in focal length and up to 40 mm off in
+  position, it brought every focal length back within 0.5 px, every camera
+  centre within 0.3 mm and the median error to the noise floor.
+
+Dead ends, do not retry:
+- A generic sparse least-squares solver for the joint refinement (scipy
+  `least_squares`, TRF with a sparse finite-difference Jacobian): 625 s and
+  not converged at its evaluation cap, where Levenberg-Marquardt with the
+  views eliminated converged in 55 s.
+- Building the refinement's normal equations with per-corner `einsum` and
+  `np.add.at` (twice the time of per-camera BLAS products and sorted sums).
+
+---
+
+## 12. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
@@ -959,3 +995,5 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
 - Passing the NVENC quantiser as `qp` (the library ignores it and takes
   `constqp`).
 - Scoring video quality through a range conversion.
+- A generic sparse least-squares solver for the calibration's joint
+  refinement (inexact steps: ten times slower and not converged).
