@@ -942,6 +942,16 @@ Dead ends, do not retry:
   position, it brought every focal length back within 0.5 px, every camera
   centre within 0.3 mm and the median error to the noise floor.
 
+- 2026-10-05: The refinement's first round fits every corner (`ba304bd`). Its
+  first round had kept only corners within 20 px, so a camera the chain had
+  misplaced, with all of its corners beyond that, was held where the chain
+  put it while the others lowered the median. On a synthetic six-camera rig
+  with one camera misplaced 3 or 10 degrees, the old rounds accepted a
+  0.41 px median with that camera at 51 and 206 px; the keep-all first
+  round brought it to 0.35 px and 0.1 mm. On the 2026-10-01 sweep the
+  independent score is unchanged (0.168 px) and the step takes 60 s
+  instead of 53 s.
+
 Dead ends, do not retry:
 - A generic sparse least-squares solver for the joint refinement (scipy
   `least_squares`, TRF with a sparse finite-difference Jacobian): 625 s and
