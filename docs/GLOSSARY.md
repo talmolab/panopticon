@@ -337,8 +337,17 @@ The root-mean-square reprojection error of one camera pair.
 
 The solve chains the pairwise calibrations into one coordinate frame along a tree of
 camera pairs. The tree prefers pairs with a low error over many shared frames, and the
-solve keeps the largest connected group of cameras. There is no global bundle
-adjustment, so an error in one pair carries to every camera beyond it on the tree.
+solve keeps the largest connected group of cameras. Chained, an error in one pair
+carries to every camera beyond it on the tree, so the [joint refinement](#joint-refinement)
+then corrects every camera together.
+
+### Joint refinement
+
+The solve's last fit: every lens, every camera's pose and the board's pose in every
+view, adjusted together to lower the reprojection error of every corner that two or
+more cameras saw (a bundle adjustment). The reference camera stays where the tree put
+it, and the board's size keeps the scale. `calibration_report.json` records the
+median error before and after (`refinement`).
 
 ## Stimulation
 

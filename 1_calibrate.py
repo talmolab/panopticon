@@ -29,6 +29,12 @@ cameras up), so a string sort of the section keys, which is how aniposelib
 reads them, keeps the camera order. Match cameras by each section's ``name``,
 never by position.
 
+The solve fits each camera's lens, then each camera pair, chains the pairs
+along a spanning tree from the reference camera, and then refines every lens,
+camera pose and board view jointly (``refine_jointly``; ``--no-refine`` keeps
+the chained poses). The report's ``refinement`` holds the median error before
+and after.
+
 Detections are paired across cameras by trigger ordinal: frame i of a camera's
 video is trigger ``blockids.npy[i]`` (unwrapped), and two cameras pair on the
 triggers both detected the board in. Cameras drop frames independently, so
@@ -55,6 +61,7 @@ import json
 import math
 import os
 import sys
+import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime
@@ -1153,6 +1160,335 @@ def chain_extrinsics(cam_names, tree_edges, pairwise, ref_cam):
 
 
 # ---------------------------------------------------------------------------
+# Joint refinement: every lens, camera pose and board view at once
+# ---------------------------------------------------------------------------
+
+#: Rounds of the joint refinement, each ``(keep_px, huber_px)``. A round fits
+#: the corners that reproject within ``keep_px``, each weighed by a Huber loss
+#: of scale ``huber_px``, and then scores every corner again, so a corner an
+#: early round left out can return.
+#:
+#: RULE: the first round keeps every corner, and only the Huber loss limits
+#: how far one corner pulls. REASON: a camera the chain misplaces puts all of
+#: its corners beyond a cut-off. A round that fits none of them holds that
+#: camera where the chain put it, while the others' corners still lower the
+#: median, so the refinement is accepted with that camera still wrong.
+REFINE_ROUNDS = ((math.inf, 3.0), (20.0, 3.0), (8.0, 2.0), (4.0, 1.0),
+                 (2.0, 1.0))
+#: Levenberg-Marquardt steps per round, at most.
+REFINE_MAX_STEPS = 100
+#: A round stops once a step lowers its cost by less than this fraction.
+REFINE_TOL = 1e-9
+#: Board views fitted, at most, spread evenly through the take. The
+#: refinement's time grows linearly with the views.
+REFINE_MAX_VIEWS = 1500
+#: Per camera: the lens fit's model (f, cx, cy, k1, k2), then the pose
+#: (Rodrigues rvec, tvec).
+_CAM_PARAMS = 11
+
+
+def _rotations(rvecs):
+    """Rodrigues vectors ``(N, 3)`` as rotation matrices ``(N, 3, 3)``."""
+    th = np.linalg.norm(rvecs, axis=1)[:, None, None]
+    k = rvecs / np.maximum(th[:, :, 0], 1e-12)
+    S = np.zeros((len(rvecs), 3, 3))
+    S[:, 0, 1], S[:, 0, 2], S[:, 1, 2] = -k[:, 2], k[:, 1], -k[:, 0]
+    S[:, 1, 0], S[:, 2, 0], S[:, 2, 1] = k[:, 2], -k[:, 1], k[:, 0]
+    return np.eye(3) + np.sin(th) * S + (1 - np.cos(th)) * (S @ S)
+
+
+def _project(cams, views, obs, sel=slice(None)):
+    """Pixel position ``(n, 2)`` of each observed corner in ``sel``.
+
+    ``cams`` is ``(C, 11)``: f, cx, cy, k1, k2, rvec, tvec per camera, the
+    lens model of the lens fit (one focal length, no k3, no tangential terms).
+    ``views`` is ``(V, 6)``: the board's rvec and tvec in the world, per view.
+    """
+    cam, view, obj = obs["cam"][sel], obs["view"][sel], obs["obj"][sel]
+    Rb, Rc = _rotations(views[:, :3]), _rotations(cams[:, 5:8])
+    Xw = np.einsum("nij,nj->ni", Rb[view], obj) + views[view, 3:]
+    Xc = np.einsum("nij,nj->ni", Rc[cam], Xw) + cams[cam, 8:]
+    xy = Xc[:, :2] / Xc[:, 2:3]
+    r2 = (xy ** 2).sum(1)
+    p = cams[cam]
+    d = 1 + p[:, 3] * r2 + p[:, 4] * r2 ** 2
+    return xy * (p[:, 0] * d)[:, None] + p[:, 1:3]
+
+
+def refinement_observations(active, all_dets, corner_obj,
+                            min_corners=MIN_CORNERS,
+                            max_views=REFINE_MAX_VIEWS):
+    """The corners the joint refinement fits, as ``(obs, keys)``.
+
+    A view is a key (trigger ordinal or frame index, see ``choose_pairing``)
+    on which at least two cameras each found ``min_corners`` corners or more,
+    and each of those cameras' corners on it is one observation. ``obs`` holds
+    ``cam`` (index into ``active``), ``view`` (index into ``keys``), ``obj``
+    (the corner on the board, mm) and ``uv`` (where it was detected, px).
+    With more than ``max_views`` views, ``max_views`` spread evenly through
+    the take are kept. ``obs`` is None when no view is seen by two cameras.
+    """
+    per_cam = []
+    for cam in active:
+        keys, corners, ids = all_dets[cam]
+        per_cam.append({int(k): (c, i) for k, c, i in zip(keys, corners, ids)
+                        if len(i) >= min_corners})
+    seen = defaultdict(int)
+    for dets in per_cam:
+        for k in dets:
+            seen[k] += 1
+    keys = sorted(k for k, n in seen.items() if n >= 2)
+    if not keys:
+        return None, []
+    keys = [keys[i] for i in _spread(len(keys), max_views)]
+    view_of = {k: v for v, k in enumerate(keys)}
+    known = np.array(sorted(corner_obj))
+    cam_l, view_l, obj_l, uv_l = [], [], [], []
+    for ci, dets in enumerate(per_cam):
+        for k, (corners, ids) in dets.items():
+            v = view_of.get(k)
+            if v is None:
+                continue
+            ok = np.isin(ids, known)
+            n = int(ok.sum())
+            cam_l.append(np.full(n, ci))
+            view_l.append(np.full(n, v))
+            obj_l.append(np.stack([corner_obj[int(m)] for m in ids[ok]]))
+            uv_l.append(corners.reshape(-1, 2)[ok])
+    obs = {"cam": np.concatenate(cam_l), "view": np.concatenate(view_l),
+           "obj": np.concatenate(obj_l).astype(np.float64),
+           "uv": np.concatenate(uv_l).astype(np.float64)}
+    return obs, keys
+
+
+def _initial_views(cams, obs, n_views):
+    """Each view's board pose in the world ``(V, 6)``, from the camera that
+    saw most of its corners: solvePnP in that camera, then that camera's
+    pose."""
+    views = np.zeros((n_views, 6))
+    for v in range(n_views):
+        m = obs["view"] == v
+        cs, counts = np.unique(obs["cam"][m], return_counts=True)
+        c = int(cs[counts.argmax()])
+        mm = m & (obs["cam"] == c)
+        p = cams[c]
+        K = np.array([[p[0], 0, p[1]], [0, p[0], p[2]], [0, 0, 1.0]])
+        dist = np.array([p[3], p[4], 0.0, 0.0, 0.0])
+        ok, rvec, tvec = cv2.solvePnP(obs["obj"][mm], obs["uv"][mm], K, dist)
+        R_bc, _ = cv2.Rodrigues(rvec)
+        R_c, _ = cv2.Rodrigues(p[5:8])
+        R_bw = R_c.T @ R_bc
+        t_bw = R_c.T @ (tvec.ravel() - p[8:])
+        views[v] = np.r_[cv2.Rodrigues(R_bw)[0].ravel(), t_bw]
+    return views
+
+
+def _huber_cost(r, scale):
+    a = np.linalg.norm(r, axis=1)
+    return float(np.where(a <= scale, 0.5 * a ** 2,
+                          scale * (a - 0.5 * scale)).sum())
+
+
+def _lm_schur(cams, views, obs, sel, huber, free,
+              max_steps=REFINE_MAX_STEPS, tol=REFINE_TOL):
+    """Levenberg-Marquardt over the observations ``sel``: ``(cams, views,
+    steps)``.
+
+    ``free`` is ``(C, 11)``: which camera parameters move. Every board view
+    moves. Each step eliminates the board views (a Schur complement), solves
+    one dense system over the camera parameters, and recovers each view's
+    6 x 6 block from it.
+
+    RULE: the views are eliminated, and the Jacobian is built one parameter
+    of every camera, or of every view, per projection. REASON: a corner
+    depends on one camera and one view only, so the system has at most
+    11 x cameras unknowns once the views are out, and forward differences cost
+    17 projections a step whatever the number of views. A generic sparse
+    least-squares solver on the same problem takes inexact steps and needs
+    many times more of them.
+    """
+    C, V, P = len(cams), len(views), _CAM_PARAMS
+    cam, view, uv = obs["cam"][sel], obs["view"][sel], obs["uv"][sel]
+    free = free & (np.bincount(cam, minlength=C) > 0)[:, None]
+    fixed = ~free.ravel()
+    cam_h = np.r_[np.full(5, 1e-6), np.full(3, 1e-6), np.full(3, 1e-4)]
+    view_h = np.r_[np.full(3, 1e-6), np.full(3, 1e-4)]
+
+    def proj(c, v):
+        return _project(c, v, obs, sel)
+
+    def runs(key):
+        # Sort order, and where each run of equal keys starts, for sums by key.
+        order = np.argsort(key, kind="stable")
+        k = key[order]
+        starts = np.r_[0, np.flatnonzero(np.diff(k)) + 1]
+        return order, starts, k[starts]
+
+    by_cam = [np.flatnonzero(cam == c) for c in range(C)]
+    v_order, v_starts, v_keys = runs(view)
+    vc_order, vc_starts, vc_keys = runs(view * C + cam)
+
+    def outer(a, b):
+        # Per observation, the sum over its two image axes of a b^T.
+        return a[:, 0, :, None] * b[:, 0, None, :] + a[:, 1, :, None] * b[:, 1, None, :]
+
+    r = proj(cams, views) - uv
+    cost, lam, steps = _huber_cost(r, huber), 1e-3, 0
+    while steps < max_steps:
+        steps += 1
+        base = r + uv
+        a = np.linalg.norm(r, axis=1)
+        w = np.where(a <= huber, 1.0, huber / np.maximum(a, 1e-12))
+        Jc = np.zeros((len(cam), 2, P))
+        for j in np.flatnonzero(free.any(0)):
+            # Lens steps scale with the value (a focal length in px); pose
+            # steps do not (radians, mm). A parameter no camera frees costs
+            # no projection.
+            h = cam_h[j] * (np.maximum(1.0, np.abs(cams[:, j])) if j < 5
+                            else np.ones(C))
+            c2 = cams.copy()
+            c2[:, j] += h * free[:, j]
+            Jc[:, :, j] = ((proj(c2, views) - base) / h[cam, None]
+                           * free[cam, j][:, None])
+        Jv = np.zeros((len(cam), 2, 6))
+        for j in range(6):
+            v2 = views.copy()
+            v2[:, j] += view_h[j]
+            Jv[:, :, j] = (proj(cams, v2) - base) / view_h[j]
+        wJc, wJv = Jc * w[:, None, None], Jv * w[:, None, None]
+        U = np.zeros((C, P, P))
+        gc = np.zeros((C, P))
+        for c, idx in enumerate(by_cam):
+            if len(idx):
+                U[c] = wJc[idx].reshape(-1, P).T @ Jc[idx].reshape(-1, P)
+                gc[c] = wJc[idx].reshape(-1, P).T @ r[idx].ravel()
+        Vb = np.zeros((V, 6, 6))
+        Vb[v_keys] = np.add.reduceat(outer(wJv, Jv)[v_order], v_starts, axis=0)
+        gv = np.zeros((V, 6))
+        gv[v_keys] = np.add.reduceat(
+            np.einsum("nkp,nk->np", wJv, r)[v_order], v_starts, axis=0)
+        W = np.zeros((V * C, P, 6))
+        W[vc_keys] = np.add.reduceat(outer(wJc, Jv)[vc_order], vc_starts, axis=0)
+        Wf = W.reshape(V, C, P, 6).reshape(V, C * P, 6)
+        Wm = Wf.transpose(1, 0, 2).reshape(C * P, V * 6)
+        while True:
+            Ud = (U + lam * np.einsum("cpp->cp", U)[:, :, None] * np.eye(P)
+                  + 1e-9 * np.eye(P))
+            Vd = (Vb + lam * np.einsum("vpp->vp", Vb)[:, :, None] * np.eye(6)
+                  + 1e-9 * np.eye(6))
+            Vi = np.linalg.inv(Vd)
+            Tm = (Wf @ Vi).transpose(1, 0, 2).reshape(C * P, V * 6)
+            S = -(Tm @ Wm.T)
+            for c in range(C):
+                S[c * P:(c + 1) * P, c * P:(c + 1) * P] += Ud[c]
+            rhs = -(gc.ravel() - Tm @ gv.ravel())
+            S[fixed, :] = 0.0
+            S[:, fixed] = 0.0
+            S[fixed, fixed] = 1.0
+            rhs[fixed] = 0.0
+            dc = np.linalg.solve(S, rhs)
+            dv = np.einsum("vij,vj->vi", Vi, -gv - (Wm.T @ dc).reshape(V, 6))
+            c2, v2 = cams + dc.reshape(C, P), views + dv
+            r2 = proj(c2, v2) - uv
+            cost2 = _huber_cost(r2, huber)
+            if np.isfinite(cost2) and cost2 < cost:
+                gain = (cost - cost2) / cost
+                cams, views, r, cost = c2, v2, r2, cost2
+                lam = max(lam / 3, 1e-9)
+                break
+            lam *= 5
+            if lam > 1e9:
+                return cams, views, steps
+        if gain < tol:
+            break
+    return cams, views, steps
+
+
+def refine_jointly(active, ref, intrinsics, extrinsics, all_dets, corner_obj):
+    """Refine every lens, camera pose and board view together:
+    ``(intrinsics, extrinsics, info)``.
+
+    It starts from the lens fits and the chained poses and moves every lens
+    (f, cx, cy, k1, k2), every camera pose but the reference camera's, and
+    every board view, to lower the reprojection error of every corner seen by
+    two or more cameras. The reference camera keeps the chain's frame, and
+    the board's known geometry keeps the scale. ``info`` holds the views, the
+    corners, the median and 95th-percentile error of the chained solve (its
+    cameras held, only the board views fitted) and of the refined one, the
+    refined median per camera, the steps and the seconds. It returns the
+    chained solve unchanged, with ``applied`` false and the ``reason``, when
+    nothing can be refined or the refinement does not lower the median.
+
+    RULE: the chained poses are refined jointly before anything is written.
+    REASON: each pairwise pose is fitted alone and chained along the tree, so
+    an error in one link, such as a pair seen on few frames, moves every
+    camera beyond it, and nothing in the chain corrects it. Fitting all the
+    cameras to all the corners at once spreads each view's evidence over the
+    whole rig.
+    """
+    t0 = time.monotonic()
+    obs, keys = refinement_observations(active, all_dets, corner_obj)
+    if obs is None:
+        return intrinsics, extrinsics, {
+            "applied": False, "reason": "no view was seen by two cameras"}
+    cams = np.zeros((len(active), _CAM_PARAMS))
+    for i, cam in enumerate(active):
+        K, dist = intrinsics[cam]
+        d = np.asarray(dist, np.float64).ravel()
+        rvec, tvec = extrinsics[cam]
+        cams[i] = np.r_[(K[0, 0] + K[1, 1]) / 2, K[0, 2], K[1, 2], d[0], d[1],
+                        np.asarray(rvec, np.float64).ravel(),
+                        np.asarray(tvec, np.float64).ravel()]
+    views = _initial_views(cams, obs, len(keys))
+
+    def error(c, v):
+        return np.linalg.norm(_project(c, v, obs) - obs["uv"], axis=1)
+
+    held = np.zeros((len(active), _CAM_PARAMS), bool)
+    _, views, _ = _lm_schur(cams, views, obs, np.arange(len(obs["uv"])),
+                            REFINE_ROUNDS[0][1], held)
+    before = error(cams, views)
+    free = np.ones_like(held)
+    free[active.index(ref), 5:] = False
+    e, steps, c, v = before, 0, cams, views
+    for keep_px, huber_px in REFINE_ROUNDS:
+        c, v, n = _lm_schur(c, v, obs, np.flatnonzero(e < keep_px), huber_px,
+                            free)
+        steps += n
+        e = error(c, v)
+    info = {
+        "views": len(keys), "observations": int(len(e)),
+        "median_px_chained": round(float(np.median(before)), 4),
+        "p95_px_chained": round(float(np.percentile(before, 95)), 4),
+        "median_px_refined": round(float(np.median(e)), 4),
+        "p95_px_refined": round(float(np.percentile(e, 95)), 4),
+        "median_px_refined_per_camera": {
+            cam: round(float(np.median(e[obs["cam"] == i])), 4)
+            for i, cam in enumerate(active) if (obs["cam"] == i).any()},
+        "steps": int(steps),
+        "seconds": round(time.monotonic() - t0, 1),
+    }
+    if not (np.isfinite(c).all() and (c[:, 0] > 0).all()):
+        info.update(applied=False, reason="the refined cameras are not finite")
+        return intrinsics, extrinsics, info
+    if not info["median_px_refined"] < info["median_px_chained"]:
+        info.update(applied=False,
+                    reason="the refinement did not lower the median error")
+        return intrinsics, extrinsics, info
+    new_intr, new_extr = {}, {}
+    for i, cam in enumerate(active):
+        f, cx, cy, k1, k2 = c[i, :5]
+        dist = np.asarray(intrinsics[cam][1], np.float64)
+        d = np.zeros(dist.size)
+        d[:2] = k1, k2
+        new_intr[cam] = (np.array([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]]),
+                         d.reshape(dist.shape))
+        new_extr[cam] = (c[i, 5:8].copy(), c[i, 8:].copy())
+    info["applied"] = True
+    return new_intr, new_extr, info
+
+
+# ---------------------------------------------------------------------------
 # Floor: the board lying flat for the take's final second
 # ---------------------------------------------------------------------------
 
@@ -1791,6 +2127,10 @@ def main():
                              "hit re-arms a burst of N consecutive frames, so "
                              "a visible board is sampled densely. Ignored "
                              "when codet_frames.json hints are used.")
+    parser.add_argument("--no-refine", action="store_true",
+                        help="Keep the chained pairwise poses: skip the joint "
+                             "refinement of every lens, camera pose and board "
+                             "view.")
     args = parser.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -1961,6 +2301,32 @@ def main():
 
     extrinsics = chain_extrinsics(active, tree, pairwise, ref)
 
+    # --- Joint refinement ---
+    refinement = {"requested": not args.no_refine}
+    if not args.no_refine:
+        print("\nJoint refinement (every lens, camera pose and board view)...")
+        # RULE: the refinement never fails the solve. REASON: the chained
+        # solve is a usable calibration on its own, as the floor step's frame
+        # is; an error here keeps it and says so.
+        try:
+            intrinsics, extrinsics, found = refine_jointly(
+                active, ref, intrinsics, extrinsics, all_dets, corner_obj)
+        except Exception as e:
+            found = {"applied": False,
+                     "reason": "error: {}".format(str(e).strip() or type(e).__name__)}
+        refinement.update(found)
+        if found.get("applied"):
+            print("  {} views, {} corners: median {:.2f} px chained -> {:.2f} px "
+                  "refined (95th percentile {:.2f} -> {:.2f}), {} steps, "
+                  "{:.0f} s".format(
+                      found["views"], found["observations"],
+                      found["median_px_chained"], found["median_px_refined"],
+                      found["p95_px_chained"], found["p95_px_refined"],
+                      found["steps"], found["seconds"]))
+        else:
+            warn("joint refinement not applied ({}); calibration.toml holds "
+                 "the chained pairwise poses".format(found["reason"]), warnings)
+
     # --- Floor (only when the take was recorded with "Flat final second") ---
     floor = {"requested": floor_requested(calib_dir)}
     if floor["requested"]:
@@ -2033,6 +2399,7 @@ def main():
                           codetections=codetections, camera_serials=serials,
                           placed=placed)
     report["floor"] = floor
+    report["refinement"] = refinement
     # The acquisitions of this session that recorded other cameras under the
     # names solved here: calibration_worker.recalibration_reasons reads it.
     report["serial_mismatch"] = serial_mismatch

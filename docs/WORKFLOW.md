@@ -316,7 +316,7 @@ uv run python 1_calibrate.py <session_dir> --board-config configs/boards/<your_b
 `<session_dir>` is the folder that holds `calibration/`, and the board file is the one your profile names. Add `--excluded-views cam4` to leave a camera out. A solve by hand doesn't copy anything into the recording folder, so copy `calibration.toml` there yourself.
 
 > [!TIP]
-> The solve trades a little accuracy for speed. To finish in minutes, it fits each lens on up to 120 frames spread through the take, and each pair on up to 30. For the very best calibration, solve from the full videos with a package that does bundle adjustment, such as sleap-anipose or aniposelib. Both read the `calibration.toml` Panopticon writes.
+> The solve trades a little accuracy for speed. To finish in minutes, it fits each lens on up to 120 frames spread through the take, and each pair on up to 30, then refines every camera together on up to 1500 views of the board. For the very best calibration, solve from the full videos with a package such as calibrat3, sleap-anipose or aniposelib. All read the `calibration.toml` Panopticon writes. Add `--no-refine` to keep the chained pairwise poses.
 
 ### If something looks different
 

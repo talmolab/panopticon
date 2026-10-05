@@ -1522,7 +1522,8 @@ flowchart TD
   I --> PW["Stereo for every pair, intrinsics fixed,<br>on views shared by trigger number"]
   PW --> G["Keep the largest connected group;<br>Prim's tree over the pairs"]
   G --> CH["Chain pairwise R, T along the tree<br>from the reference camera"]
-  CH --> FL["Floor, when asked for:<br>Z = 0 on the board lying still at the end"]
+  CH --> RF["Joint refinement: every lens, camera pose<br>and board view together, the reference camera held"]
+  RF --> FL["Floor, when asked for:<br>Z = 0 on the board lying still at the end"]
   FL --> T["calibration.toml + calibration_report.json<br>+ reprojection_error_histogram.png"]
 ```
 
@@ -1565,6 +1566,25 @@ Stage by stage:
   that camera. The pairwise `R, T` are chained along the tree from the
   reference camera (`--ref-camera`, `cam1` by default), which becomes the
   identity unless the floor step moves the origin.
+- Joint refinement. Starting from the lens fits and the chained poses, one
+  Levenberg-Marquardt fit moves every lens (f, cx, cy, k1, k2), every camera
+  pose but the reference camera's, and the board's pose in every view, to
+  lower the reprojection error of every corner seen by two or more cameras.
+  A view is a trigger on which at least two cameras found 6 or more corners,
+  and up to 1500 views spread through the take are fitted
+  (`REFINE_MAX_VIEWS`). Each step eliminates the board views (a Schur
+  complement), so it solves one system over the camera parameters only. Five
+  rounds (`REFINE_ROUNDS`) run under a Huber loss and score every corner
+  again after each. The first fits every corner, because a camera the chain
+  misplaced has all of its corners beyond any cut-off and a round that fits
+  none of them leaves it where it was. The next four fit the corners within
+  20, 8, 4 and then 2 px. The reference
+  camera keeps the chain's frame and the board's geometry keeps the scale.
+  The chained solve is scored on the same corners first, with the cameras
+  held and only the board views fitted. The refined cameras replace the
+  chained ones only when they are finite and lower the median error; an error
+  or no gain keeps the chained solve with a warning and never fails the solve.
+  `--no-refine` skips the step.
 - Floor. Only when the calibration's `session_metadata.json` has
   `floor_from_final_second`. Each camera reads the last 4 s of its video and
   looks for the board lying still at the end of its last detected stretch.
@@ -1577,8 +1597,9 @@ Stage by stage:
   from 1.5 to 3 px, and poor from 3 px, which is warned about; the bar chart
   in `reprojection_error_histogram.png` uses the same colours. A pair with no
   bar never shared enough views, which is usually worse than a tall bar. The
-  figures are each pair's own stereo residual; nothing recomputes the error
-  against the chained poses.
+  figures are each pair's own stereo residual, measured before the joint
+  refinement. The refinement's own figures score every corner against the
+  final poses (`refinement`, below).
 - Output. `calibration.toml` in aniposelib's layout, one section per camera
   with `name`, `size`, `matrix`, `distortions`, `rotation` (a Rodrigues vector)
   and `translation`, and a `[metadata]` block holding every quality figure. The
@@ -1593,14 +1614,22 @@ Stage by stage:
   vouch for: one with a suspect lens fit, and the smaller side of each poor
   tree edge, whose position runs through that edge. `floor` records whether
   the floor step was asked for and which cameras set it, or why it was
-  skipped. A solve that drops cameras still exits 0. The window copies the
+  skipped. `refinement` records whether the joint refinement ran and was
+  applied (or why not), the views and corners it fitted, the median and
+  95th-percentile error of the chained and of the refined solve, the refined
+  median per camera, its steps and its seconds. A solve that drops cameras
+  still exits 0. The window copies the
   toml beside the recording, and LUC3D reads it.
 
-There is no global bundle adjustment. The extrinsics are pairwise stereo
-results chained along a tree, so error accumulates with tree depth. The tree
-therefore weighs each pair's RMS by its views, and the pairwise chart is the
-quality signal to read. A bundle adjustment over the same correspondences
-is where a better global solution would come from.
+The pairwise stereo results are chained along a tree, so before the joint
+refinement an error in one link moves every camera beyond it, and error grows
+with tree depth. The tree therefore weighs each pair's RMS by its views. The
+joint refinement then fits every camera to every shared corner at once, which
+takes such an error out of the poses, so read `refinement`'s medians for the
+calibration's quality. The pairwise chart and `poorly_placed` still describe
+the chained stage: a pair seen on few frames there means the take was thin for
+that pair, and the refinement cannot place a camera that shares no view with
+the others.
 
 ### Camera order
 
