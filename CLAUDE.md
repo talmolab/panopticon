@@ -546,13 +546,13 @@ until someone analyses it.
   floor step, which then works on the refined poses.
 - The refinement's first round keeps every corner, with only the Huber loss
   limiting each one's pull. A camera the chain misplaces has all of its
-  corners beyond any cut-off; a round that fits none of them holds that camera
-  where the chain put it, and the other cameras still lower the median, so
-  the refinement is accepted with that camera wrong.
+  corners beyond any cut-off. A round that fits none of them holds that camera
+  where the chain put it. The other cameras still lower the median, so the
+  refinement is accepted with that camera wrong.
 - Judge a solve by `refinement`'s medians, not its pair RMS. The pair RMS and
-  `poorly_placed` describe the chained stage: a small change in one lens fit
-  can move the tree to another pair and nearly double the chained error while
-  every pair RMS stays the same.
+  `poorly_placed` describe the chained stage. There, a small change in one lens
+  fit can move the tree to another pair and nearly double the chained error,
+  while every pair RMS stays the same.
 - The report names every camera it cannot vouch for (`poorly_placed`): a lens
   fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
   `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each poor

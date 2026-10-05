@@ -919,11 +919,11 @@ Dead ends, do not retry:
 ## 11. Joint refinement of the calibration (4 October 2026)
 
 - 2026-10-04: Why the Solve scored worse than calibrat3 (measurement, no code
-  change). On the reference rig's 2026-10-01 sweep (nine cameras, 16,407
-  frames), aniposelib's triangulation of aniposelib's own corner detections
-  put the at-rig solve at a median reprojection error of 1.50 px (95th
-  percentile 4.06) on 107,817 observations, and calibrat3's solve of the
-  saved video at 0.15 px. The error grew with tree depth, from 0.53 px at the
+  change). The reference rig's 2026-10-01 sweep has nine cameras and 16,407
+  frames. On it, aniposelib's triangulation of aniposelib's own corner
+  detections put the at-rig solve at a median reprojection error of 1.50 px
+  (95th percentile 4.06) on 107,817 observations. It put calibrat3's solve of
+  the saved video at 0.15 px. The error grew with tree depth, from 0.53 px at the
   reference camera to 2.52-2.55 px at cam3 and cam5, three and four links
   out. The cam9-cam8 edge had 5 shared frames, and five of the six worst
   cameras hung below it. The chained focal lengths ran 1-4% below
@@ -931,32 +931,32 @@ Dead ends, do not retry:
 - 2026-10-04: The solve refines every lens, camera pose and board view
   jointly after the tree (`c406eef`). On the same sweep it took the median
   from 1.50 to 0.17 px (95th percentile 4.06 to 0.55, every camera 0.14 to
-  0.23 px), against calibrat3's 0.15 px on the same observations, and to
-  0.17 px on every frame of the take (758,665 observations, most of them
-  views the refinement never fitted). It moved the focal lengths to within
+  0.23 px), against calibrat3's 0.15 px on the same observations. On every
+  frame of the take (758,665 observations, most of them views the refinement
+  never fitted) it scored 0.17 px too. It moved the focal lengths to within
   about 0.5% of calibrat3's, and the floor step's five cameras agree on the
   lying board within 1.0 mm and 1.07 degrees, from 4.0 mm and 1.26 degrees.
   The step took 53 s on 1,109 views and 126,747 corners, and the whole solve
-  98 s against 44 s (Linux, OpenCV capped at 8 threads). On a synthetic
-  six-camera rig started 4% off in focal length and up to 40 mm off in
-  position, it brought every focal length back within 0.5 px, every camera
-  centre within 0.3 mm and the median error to the noise floor.
+  98 s against 44 s (Linux, OpenCV capped at 8 threads). A synthetic
+  six-camera rig was started 4% off in focal length and up to 40 mm off in
+  position. The refinement brought every focal length back within 0.5 px,
+  every camera centre within 0.3 mm and the median error to the noise floor.
 
 - 2026-10-05: The refinement's first round fits every corner (`ba304bd`). Its
-  first round had kept only corners within 20 px, so a camera the chain had
-  misplaced, with all of its corners beyond that, was held where the chain
-  put it while the others lowered the median. On a synthetic six-camera rig
-  with one camera misplaced 3 or 10 degrees, the old rounds accepted a
-  0.41 px median with that camera at 51 and 206 px; the keep-all first
-  round brought it to 0.35 px and 0.1 mm. On the 2026-10-01 sweep the
+  first round had kept only corners within 20 px. A camera the chain had
+  misplaced had all of its corners beyond that, so it was held where the
+  chain put it while the others lowered the median. On a synthetic
+  six-camera rig with one camera misplaced 3 or 10 degrees, the old rounds
+  accepted a 0.41 px median with that camera at 51 and 206 px. The keep-all
+  first round brought it to 0.35 px and 0.1 mm. On the 2026-10-01 sweep the
   independent score is unchanged (0.168 px) and the step takes 60 s
   instead of 53 s.
 
 Dead ends, do not retry:
 - A generic sparse least-squares solver for the joint refinement (scipy
-  `least_squares`, TRF with a sparse finite-difference Jacobian): 625 s and
-  not converged at its evaluation cap, where Levenberg-Marquardt with the
-  views eliminated converged in 55 s.
+  `least_squares`, TRF with a sparse finite-difference Jacobian). It ran
+  625 s and had not converged at its evaluation cap. Levenberg-Marquardt
+  with the views eliminated converged in 55 s.
 - Building the refinement's normal equations with per-corner `einsum` and
   `np.add.at` (twice the time of per-camera BLAS products and sorted sums).
 
