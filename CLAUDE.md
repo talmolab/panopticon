@@ -534,10 +534,20 @@ until someone analyses it.
   fits solve with `CALIB_USE_LU`, which on 120 views runs about 50 times
   faster than the default SVD and leaves out the same views, give or take
   one.
-- Judge a solve by more than its pair RMS. The tree chains pairwise poses with
-  no bundle adjustment, so a small change in one lens fit can move the tree to
-  another pair. On the reference rig that nearly doubled the error of corners
-  triangulated from the other cameras, while the pair RMS stayed the same.
+- After the tree, `refine_jointly` fits every lens, every camera pose but the
+  reference camera's, and every board view to every corner two or more cameras
+  saw (Levenberg-Marquardt with the views eliminated by a Schur complement).
+  The chained poses alone carry each link's error to every camera beyond it,
+  and nothing in the chain corrects it. The refinement keeps the reference
+  camera's frame and the board's scale, scores the chained solve on the same
+  corners first, and replaces it only when its cameras are finite and its
+  median error is lower. Like the floor step it never fails the solve: an
+  error or no gain keeps the chained poses with a warning. It runs before the
+  floor step, which then works on the refined poses.
+- Judge a solve by `refinement`'s medians, not its pair RMS. The pair RMS and
+  `poorly_placed` describe the chained stage: a small change in one lens fit
+  can move the tree to another pair and nearly double the chained error while
+  every pair RMS stays the same.
 - The report names every camera it cannot vouch for (`poorly_placed`): a lens
   fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
   `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each poor
