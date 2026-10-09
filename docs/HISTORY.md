@@ -962,7 +962,50 @@ Dead ends, do not retry:
 
 ---
 
-## 12. Standing dead ends (index)
+## 12. Cameras lost during a GUI solve (5-9 October 2026)
+
+- 2026-10-05: In the GUI validation of the joint refinement, cam2, cam5 and
+  cam9 stopped delivering preview frames about 3 s into a Solve's corner
+  detection. They stopped within 0.15 s of each other, one on each NIC port
+  and switch. Their preview grab threads re-armed about 50 s later, and every
+  re-arm failed with "The camera device has been physically removed". The
+  next Calibrate was refused, because those cameras would not go into trigger
+  mode. A relaunch reopened all nine without a power cycle. The System and
+  Application event logs held nothing for that minute. Two concurrent CLI
+  solves beside the preview, and an exact replay of the sequence, did not
+  reproduce it. Measured on the rig; no code change.
+- 2026-10-09: On an operator's second Solve of the day, all nine cameras
+  stopped delivering between 12:20:01.6 and 12:20:02.5, 7 s into corner
+  detection. The last result from three of them was an incomplete buffer, so
+  packets were being lost as they went. The event logs were empty again, and a
+  relaunch reopened every camera. The first Solve that day, ten minutes
+  earlier, held the preview at exactly 30 fps throughout. That made 2 losses
+  in about 14 GUI solves, and the solve itself finished both times. Measured
+  on the rig; no code change.
+- 2026-10-09: The 50 s between the silence and the first re-arm is the
+  preview's own ladder: 25 timeouts of 2000 ms. On 10-05 it had been read as
+  the host starving the grab threads, which it does not show. Read from the
+  code, with no code change.
+- 2026-10-09: The GUI process ran at Normal priority, the same as the solve
+  and its detection workers, which hold every CPU at 100%. pylon's threads in
+  the GUI process (packet receive, the control link that keeps each camera
+  attached) had no precedence over them. With the GUI previewing nine cameras
+  at 30 fps and nothing else running, CPUs 0 and 1 already spent 34-38% of
+  their time in DPC. The cause is not proven. Measured on the rig; no code
+  change.
+- 2026-10-09: Three changes (`92fff1e`). The solve lowers itself to below
+  normal priority, and its pool workers inherit it (checked with psutil). A preview
+  grab thread asks the backend on each timeout whether pylon has given the
+  camera up (`is_removed`, pylon's `IsCameraDeviceRemoved`) and ends at once
+  if so. Without that member a silent preview re-arms after 10 s instead of
+  50 s. The window reopens every camera when a preview camera is lost, after
+  the solve finishes, at most 3 times in 10 minutes. A `[solve-watch]` line
+  every second of a solve records the load and each camera's preview rate,
+  so the next loss can be timed against them.
+
+---
+
+## 13. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
