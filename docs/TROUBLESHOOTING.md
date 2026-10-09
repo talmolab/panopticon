@@ -96,6 +96,18 @@ in the list.
 | A pane stays black while its frame rate counts | A display setting. The Brightness and Contrast sliders change the preview only. |
 | The preview is dark | Exposure and gain come from the `.pfs` (or the FLIR `camera:` block). Add light first, then exposure up to the [exposure ceiling](CONFIGURATION.md#exposure-ceiling), then gain. |
 
+## A camera drops out of the preview
+
+A camera can lose contact with the computer while the preview runs, most often during a solve. Its pane freezes and its frame rate drops to 0. Panopticon closes and opens every camera to bring it back, the way a restart would.
+
+| Message or symptom | Cause and fix |
+|---|---|
+| `lost contact. Panopticon reconnects the cameras once <...>.` | Status bar. Panopticon waits for what the message names (a running solve, usually), then reconnects. Nothing to do. |
+| `Reconnected the cameras: <...> had lost contact.` | Status bar. The preview is back. If it keeps happening, the `[solve-watch]` lines in the log show the computer's load and each camera's frame rate around the loss. |
+| `Could not reconnect the cameras after <...> lost contact.` | Status bar, after a `Camera Error` dialog that gives the reason. Power-cycle the camera it names and choose the profile again. |
+| `Cameras keep losing contact` | Dialog. Panopticon reconnected the cameras 3 times in 10 minutes and has stopped trying. Check that camera's network cable, switch port and power, then close Panopticon and open it again. |
+| `preview lost:` | Log line, naming why the camera's preview ended: it reported itself removed, its stream would not restart, or it would not start grabbing. |
+
 ## The hardware check
 
 The check runs at launch and after a profile switch. Its report goes to the log,

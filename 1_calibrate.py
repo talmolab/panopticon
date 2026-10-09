@@ -2114,6 +2114,27 @@ def write_calibration_toml(path, cam_names, intrinsics, extrinsics, sizes,
 # Main
 # ---------------------------------------------------------------------------
 
+def run_below_normal() -> str:
+    """Lower this process to below-normal priority and return a word for the
+    log. The detection workers it starts inherit the priority.
+
+    RULE: the solve runs below normal priority. REASON: it keeps every CPU
+    busy for minutes, and the GUI runs it beside a live preview. At equal
+    priority its threads compete with the camera SDK's own threads in the
+    GUI (packet receive, the control link that keeps each camera attached).
+    Below normal it takes only the CPU that capture leaves idle, and runs at
+    full speed on an otherwise quiet computer. A failure leaves the solve at
+    its normal priority.
+    """
+    try:
+        import psutil
+        p = psutil.Process()
+        p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
+        return "below normal"
+    except Exception as e:
+        return f"normal (could not lower it: {type(e).__name__}: {e})"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Multi-view calibration from ChArUco corner detections.")
@@ -2134,6 +2155,7 @@ def main():
     args = parser.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
+    print("Priority: {}".format(run_below_normal()))
     board_cfg, board = load_board(args.board_config)
     print("Board: {}x{}, sq={}, mk={}, legacy={}".format(
         board_cfg["board_x"], board_cfg["board_y"],

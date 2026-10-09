@@ -334,6 +334,7 @@ uv run python 1_calibrate.py <session_dir> --board-config configs/boards/<your_b
 - **Recalibration recommended.** You'll only see this when it's worth calibrating again: a camera was left out, a camera is unreliable, or another acquisition of this session recorded a different camera under the same name.
 - **Calibration Failed.** The solve couldn't place at least two cameras, or couldn't use the board file. It also gives up after 30 minutes. Calibrate again, or see [Calibration and the solve](TROUBLESHOOTING.md#calibration-and-the-solve).
 - **No Data** or **Missing Board Config.** Solve found no calibration folder or videos where the fields point, or the profile's `board_config` file is missing. Check Date and the Mouse fields first.
+- **A camera's preview freezes while the solve runs.** Now and then a camera loses contact with the computer during a solve. You don't need to do anything: the solve carries on, and once it's done Panopticon reconnects the cameras and the status bar says so ([more](TROUBLESHOOTING.md#a-camera-drops-out-of-the-preview)).
 
 [*Next up:* Stimulation](#7-optional-stimulation)
 

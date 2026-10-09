@@ -108,6 +108,15 @@ FAILED_GRAB_WARN_FRACTION = 0.005
 FAILED_GRAB_PRINT_FIRST = 5
 #: Seconds of per-second failed-grab counts kept for probes.
 FAILED_GRAB_HISTORY_S = 3600
+#: Consecutive preview timeouts (PREVIEW_TIMEOUT_MS each) before a silent
+#: preview camera re-arms. The preview free-runs, so ten seconds without a
+#: frame is a fault, and the recording's STALL_TIMEOUTS at the preview's
+#: timeout would leave the window without that camera for 50 s.
+PREVIEW_STALL_TIMEOUTS = 5
+#: How long the preview's retrieve waits for a frame. A recording waits
+#: 200 ms, because its stall ladder counts trigger periods; the preview
+#: free-runs and only needs to notice silence.
+PREVIEW_TIMEOUT_MS = 2000
 #: How long every other active camera must have been silent before a stalled
 #: camera reads its own silence as the trigger source's (see
 #: GrabThread.set_source_down_check). A board that stops or loses USB silences
@@ -568,6 +577,12 @@ class GrabThread(QThread):
         self.frames_retrieved = 0
         #: Why this camera was retired, or None.
         self.retired_reason = None
+        #: Preview only: why this camera stopped delivering for good (it
+        #: reported itself removed, its stream would not restart, or it would
+        #: not start grabbing), or None. The thread has exited when this is
+        #: set, and only closing and opening the camera brings it back, which
+        #: the main window does (CameraManager.lost_preview_cameras).
+        self.lost_reason = None
         #: Why the decoupled encoder could not be created, or None.
         self.encoder_failure = None
         #: The backend's stream counters as read just before StopGrabbing,
@@ -640,6 +655,17 @@ class GrabThread(QThread):
         except Exception as e:
             print(f"[grab{self._cam_index}] re-arm failed: "
                   f"{type(e).__name__}: {e}", flush=True)
+            return False
+
+    def _camera_removed(self) -> bool:
+        """Whether the backend reports this camera removed. False when the
+        backend has no `is_removed` or cannot tell."""
+        fn = getattr(self._backend, "is_removed", None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn(self._camera))
+        except Exception:
             return False
 
     def _block_rate(self) -> float:
@@ -858,6 +884,7 @@ class GrabThread(QThread):
                 print(f"[grab{self._cam_index}] affinity failed: {e}",
                       flush=True)
         self.retrieve_loop_exited = False
+        self.lost_reason = None
         self.frame_count = 0
         self.timestamps = []
         self.block_ids = []
@@ -1010,6 +1037,8 @@ class GrabThread(QThread):
             # difference between losing one camera and losing the session.
             if recording:
                 self._give_up("camera did not start grabbing")
+            else:
+                self.lost_reason = f"it would not start grabbing ({e})"
             if fd is not None:
                 os.close(fd)
             if enc_thread is not None:
@@ -1049,6 +1078,7 @@ class GrabThread(QThread):
         # burst of GigE resends can't trip it, short enough to lose seconds
         # rather than the rest of the session.
         STALL_TIMEOUTS = 25
+        stall_after = STALL_TIMEOUTS if recording else PREVIEW_STALL_TIMEOUTS
         MAX_REARMS = 5         # stop thrashing if the link is genuinely dead
         # Consecutive per-frame exceptions before this camera is written off. A
         # camera raising every frame is not recoverable by retrying, and in kick
@@ -1092,7 +1122,7 @@ class GrabThread(QThread):
         try:
             while self._running and self._camera.IsGrabbing():
                 try:
-                    timeout = 200 if recording else 2000
+                    timeout = 200 if recording else PREVIEW_TIMEOUT_MS
                     t0 = time.perf_counter()
                     result = self._backend.retrieve(self._camera, timeout)
                     t1 = time.perf_counter()
@@ -1352,6 +1382,25 @@ class GrabThread(QThread):
                         break
                     if not self._running:
                         break
+                    if not recording:
+                        # The preview free-runs, so any timeout is silence
+                        # worth a line: it marks when the camera stopped,
+                        # which the stall ladder reports only later. A camera
+                        # the SDK has given up as removed cannot come back
+                        # through a re-arm, so its preview ends here and the
+                        # window reopens it.
+                        if consec_timeouts == 1:
+                            print(f"[grab{self._cam_index}] preview: no frame "
+                                  f"in {timeout} ms", flush=True)
+                        if self._camera_removed():
+                            self.lost_reason = ("the camera reported itself "
+                                                "removed")
+                            print(f"[grab{self._cam_index}] preview: "
+                                  f"{self.lost_reason} after "
+                                  f"{consec_timeouts * timeout / 1000:.0f} s "
+                                  f"without a frame; its preview ends",
+                                  flush=True)
+                            break
                     # A stall is silence while triggers are known to be
                     # running: either the caller has signalled that the board
                     # acknowledged its start, or a frame has already arrived
@@ -1434,7 +1483,7 @@ class GrabThread(QThread):
                     # Stalled: the stream has gone quiet while triggers are still
                     # running. Restart it rather than time out for the rest of
                     # the session.
-                    if (consec_timeouts >= STALL_TIMEOUTS and not self.desynced
+                    if (consec_timeouts >= stall_after and not self.desynced
                             and self.rearms < MAX_REARMS):
                         self.rearms += 1
                         consec_timeouts = 0
@@ -1446,6 +1495,14 @@ class GrabThread(QThread):
                         elif recording:
                             self._give_up("stream stalled, re-arm failed")
                             break
+                        else:
+                            self.lost_reason = "its stream would not restart"
+                            break
+                    elif (consec_timeouts >= stall_after and not self.desynced
+                            and not recording):
+                        self.lost_reason = (f"still silent after {MAX_REARMS} "
+                                            f"re-arms")
+                        break
                     elif (consec_timeouts >= STALL_TIMEOUTS and not self.desynced
                             and recording):
                         # Re-arms exhausted. Without this the condition above just
@@ -1500,6 +1557,15 @@ class GrabThread(QThread):
             if (recording and not self._triggers_stopped
                     and not self._abandoned and not self.desynced):
                 self._give_up("grab thread exited before the recording was stopped")
+            # The preview's catch-all: a preview that ends while nobody asked
+            # it to (repeated frame errors, IsGrabbing() going False under the
+            # loop) has lost its camera as surely as a removal.
+            if (not recording and self._running and not self._abandoned
+                    and self.lost_reason is None):
+                self.lost_reason = "its preview stopped unexpectedly"
+            if not recording and self.lost_reason is not None:
+                print(f"[grab{self._cam_index}] preview lost: "
+                      f"{self.lost_reason}", flush=True)
             self.frames_retrieved = frame_n
             if recording:
                 self._warn_failed_grabs(frame_n)

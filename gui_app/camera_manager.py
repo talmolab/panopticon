@@ -438,6 +438,22 @@ class CameraManager(QObject):
         return [int(gt.frame_count) + int(getattr(gt, "failed_grabs", 0))
                 for gt in self._grab_threads]
 
+    def failed_grab_counts(self) -> list[int]:
+        """Per camera, grab results that arrived with GrabSucceeded() False
+        since its grab thread started (lost packets the resends did not
+        recover)."""
+        return [int(getattr(gt, "failed_grabs", 0))
+                for gt in self._grab_threads]
+
+    def lost_preview_cameras(self) -> list[tuple[int, str]]:
+        """(index, reason) for each preview camera whose grab thread gave it
+        up (GrabThread.lost_reason): the SDK reported it removed, its stream
+        would not restart, or it would not start grabbing. Only closing and
+        opening the camera brings it back. A recording's threads never report
+        here; they retire instead. Reads one attribute per thread."""
+        return [(i, gt.lost_reason) for i, gt in enumerate(self._grab_threads)
+                if getattr(gt, "lost_reason", None)]
+
     @property
     def frontier_lags(self) -> list:
         """Per-camera triggers behind the leading camera in kick mode, -1 for a

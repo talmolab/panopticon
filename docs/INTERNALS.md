@@ -791,6 +791,7 @@ failure:
 | Constant | Value | Purpose |
 |---|---|---|
 | retrieve timeout | 200 ms recording, 2000 ms preview | A timeout is normal once triggers stop |
+| `PREVIEW_STALL_TIMEOUTS` | 5 consecutive preview timeouts (10 s) | A free-running preview this silent re-arms |
 | `PRE_TRIGGER_GRACE_S` | 90 s | Silence before the source starts is expected, up to this bound |
 | `STALL_TIMEOUTS` | 25 consecutive timeouts (5 s) | The stall detector; resend bursts do not reach it |
 | `MAX_REARMS` | 5 | Re-arms before a dead link is retired |
@@ -827,6 +828,35 @@ These cases leave the ladder:
   camera with no frame keeps waiting. On the board path the window raises one
   alarm per silence that names the board and, on a profile with stimulation
   pins, those pins, because a board without power leaves them undriven.
+
+The preview has no block IDs to protect, so its ladder is shorter. The preview
+free-runs, so any timeout is silence, and the loop logs the first one of each
+silence. On each timeout it asks the backend whether the SDK has given the
+camera up as removed (the optional `is_removed`). pylon does that to a GigE
+camera whose control link lapsed, while the camera stays powered and
+reachable, and only a new open brings it back. A removed camera ends its
+preview at once. Without `is_removed`, a preview silent for
+`PREVIEW_STALL_TIMEOUTS` re-arms, and a re-arm that fails, or `MAX_REARMS` that
+all stay silent, end it. A preview that ends this way, or that will not start
+grabbing, sets the thread's `lost_reason`, and
+`CameraManager.lost_preview_cameras()` reports it.
+
+The window checks for lost cameras once a second (`_check_lost_cameras`). Once
+it is IDLE, with no busy cycle, no camera operation, no solve and no
+Stimulation editor holding the board, it closes and opens every camera, the
+path a profile switch takes, and tries the open `RECONNECT_ATTEMPTS` times,
+`RECONNECT_RETRY_S` apart. Every camera is reopened because names are
+positions and `open_all` opens the whole rig or none. A loss during a solve
+waits for the solve to finish. After `RECONNECT_LIMIT` reconnects within
+`RECONNECT_WINDOW_S` the window stops and asks the operator to check the
+camera.
+
+While a solve runs, the window logs one `[solve-watch]` line a second
+(`gui_app/solve_watch.py`, at `verbose` and above): how busy the CPUs were,
+the busiest CPU's DPC and interrupt share, free RAM, each camera's preview
+frame rate and its new failed grabs. The solve itself runs below normal
+priority (`run_below_normal` in `1_calibrate.py`), and the detection workers it
+starts inherit that.
 
 Retiring is the way out in every other case. In kick-out mode the coordinator
 waits for every camera, so a camera that stops publishing would force-drop

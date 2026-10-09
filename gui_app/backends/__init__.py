@@ -536,13 +536,22 @@ class OptionalBackendMembers(Protocol):
         camera is opened. Never raises. The module-level `sdk_report(name)`
         is the caller."""
 
+    def is_removed(self, cam) -> bool:
+        """True once the SDK has given the camera up as removed, such as a
+        GigE camera whose control link lapsed. A removed camera delivers
+        nothing until it is closed and opened again. The preview grab loop
+        asks on a timeout, so it must answer from the SDK's own state
+        without a round trip to the camera. Never raises: a camera it cannot
+        judge reads False. Without this member a silent preview camera is
+        found by its failed re-arm instead."""
+
 
 #: The names `OptionalBackendMembers` declares, in declaration order.
 OPTIONAL_MEMBERS = ("TRANSPORT_NODES", "RefusalException", "CEILING_BASIS",
                     "BLOCK_RATE_HINTS", "set_bandwidth_reserve",
                     "set_transmission_delay", "thermals", "gain_unit",
                     "exposure_ceiling_us", "set_packet_size", "device_address",
-                    "acquisition_warnings", "sdk_report")
+                    "acquisition_warnings", "sdk_report", "is_removed")
 
 
 def _unknown_backend(name) -> ValueError:

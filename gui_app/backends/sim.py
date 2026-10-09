@@ -147,6 +147,12 @@ class SimFaults:
     #: Delivered frames before every `retrieve()` raises a transport error.
     #: The loop retires the camera after MAX_CONSEC_ERRORS of these.
     fail_after: int = 0
+    #: Results handed over after which the camera is removed, as a GigE
+    #: camera whose control link lapsed: it falls silent, `is_removed`
+    #: answers True and `StartGrabbing` raises. 0 disables. It fires once:
+    #: firing sets it back to 0, so the camera opened again in its place is
+    #: healthy, as a reconnect finds the real one.
+    removed_after: int = 0
     #: `BlockID` raises instead of answering, which the contract allows and
     #: the grab loop must survive.
     blockid_raises: bool = False
@@ -399,6 +405,9 @@ class SimCamera:
         #: Total_Buffer_Count past the number of buffers the camera produced.
         self.stats = {"succeeded": 0, "failed": 0, "underrun": 0,
                       "ignored": 0, "stalled": 0}
+        #: True once `faults.removed_after` has fired on this camera.
+        self.removed = False
+        self._removal_armed = faults.removed_after > 0
 
     # ---------------------------------------------------- CameraHandleProtocol
     def StartGrabbing(self, strategy=None) -> None:
@@ -411,6 +420,9 @@ class SimCamera:
         if not self.is_open:
             raise RuntimeError(f"cam{self.index + 1}: StartGrabbing on a "
                                f"closed camera")
+        if self.removed:
+            raise RuntimeError(f"cam{self.index + 1}: the camera device has "
+                               f"been physically removed (simulated)")
         self._grabbing = True
         self.starts += 1
         self._consumed = 0
@@ -564,10 +576,17 @@ class SimCamera:
         fired, which is what makes the trigger/stop protocol testable at all.
         """
         deadline = time.perf_counter() + max(0, int(timeout_ms)) / 1000.0
+        f = self.faults
+        if self._removal_armed and self.handed >= f.removed_after:
+            self._removal_armed = False
+            f.removed_after = 0
+            self.removed = True
+        if self.removed:
+            _sleep_until(deadline)
+            raise SimTimeout(f"cam{self.index + 1}: removed")
         if not self._grabbing:
             _sleep_until(deadline)
             raise SimTimeout(f"cam{self.index + 1}: not grabbing")
-        f = self.faults
         if f.fail_after and self.handed >= f.fail_after:
             raise RuntimeError(
                 f"cam{self.index + 1}: simulated transport failure")
@@ -860,6 +879,11 @@ class SimBackend:
         cam.close()
         if cam in self.cameras:
             self.cameras.remove(cam)
+
+    @staticmethod
+    def is_removed(cam) -> bool:
+        """Whether the camera's `removed_after` fault has fired."""
+        return bool(getattr(cam, "removed", False))
 
     # ----------------------------------------------------------- diagnostics
     def thermals(self, cam) -> dict:

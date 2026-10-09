@@ -40,7 +40,7 @@ checked by hand that no other one holds the hardware.
   - `test_focus.py` after `focus_worker.py`, `widgets/focus_window.py` or
     `charuco.py`;
   - `test_calibrate.py` and `test_calibrate_degenerate.py` after
-    `1_calibrate.py`;
+    `1_calibrate.py`, and `test_solve_watch.py` after `solve_watch.py`;
   - `test_backend_contract.py` after `backends/__init__.py` or any backend,
     `test_spinc.py` after `_spinc.py` or `fake_spinc.py`, and
     `test_flir_backend.py` after `flir.py`;
@@ -284,6 +284,17 @@ until someone analyses it.
   while every camera is silent retire no camera. A camera with no frame since
   the triggers started is retired at its first stall. While every camera is
   silent, it waits instead.
+- A preview camera that the SDK reports removed (the backend's optional
+  `is_removed`), whose re-arm fails, whose `MAX_REARMS` re-arms stay silent or
+  that will not start grabbing ends its preview and sets
+  `GrabThread.lost_reason`. A silent preview re-arms after
+  `PREVIEW_STALL_TIMEOUTS`. pylon gives up a GigE camera whose control link
+  lapsed while the camera stays powered, and only a new open brings it back.
+  The window (`_check_lost_cameras`) then closes and opens every camera
+  through the profile-switch path, once it is IDLE with no busy cycle, camera
+  operation, solve or editor flash running, and at most `RECONNECT_LIMIT`
+  times in `RECONNECT_WINDOW_S`. A recording's threads never set
+  `lost_reason`: they retire.
 - A recording's kick-out losses reach `WARNINGS.txt` as one line,
   "Effective frame rate X fps (target Y).", once they pass
   `KICKOUT_WARN_FRACTION`. The counts go to `session_metadata.json` (`kickout`)
@@ -582,6 +593,14 @@ until someone analyses it.
   the board lying still at the end of the take, with Z towards the cameras.
   It never fails the solve: a moving board, no view or an error skips it with
   a warning, and the reference camera's frame stays.
+- The solve runs below normal priority (`run_below_normal` in
+  `1_calibrate.py`), and the detection workers it starts inherit it. The GUI
+  runs it beside the live preview, and at equal priority its threads compete
+  with pylon's own threads in the GUI process: packet receive and the control
+  link that keeps each camera attached. While a solve runs, the window logs a
+  `[solve-watch]` line each second (`gui_app/solve_watch.py`): CPU load, the
+  busiest CPU's DPC and interrupt share, free RAM, and each camera's preview
+  rate and new failed grabs.
 - The best calibration comes from full videos of every camera (sleap-anipose).
   The GUI's Solve and `1_calibrate.py` fit a subsample: faster, less accurate.
 

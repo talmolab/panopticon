@@ -30,6 +30,7 @@ from gui_app import logging_setup
 from gui_app import recording_meta
 from gui_app import stim_trace
 from gui_app.calibration_worker import CalibrationWorker, recalibration_reasons
+from gui_app.solve_watch import SolveWatch
 from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
                                     environment_facts, format_report,
                                     installed_encoder, invalidate_nvenc_cache,
@@ -397,6 +398,18 @@ class MainWindow(QMainWindow):
         self._thermal_reported: set = set()
         self._thermal_timer = QTimer()
         self._thermal_timer.timeout.connect(self._poll_thermals)
+
+        # One line a second while a solve runs (gui_app/solve_watch.py): the
+        # computer's load beside what each preview camera delivered.
+        self._solve_watch: SolveWatch | None = None
+        self._solve_watch_timer = QTimer()
+        self._solve_watch_timer.timeout.connect(self._log_solve_watch)
+        # Lost preview cameras (_check_lost_cameras): when the automatic
+        # reconnects ran, the cameras already reported as waiting, and
+        # whether the window has stopped reconnecting.
+        self._reconnect_times: list = []
+        self._lost_noted: tuple = ()
+        self._reconnect_gave_up = False
 
         # The profile named by --profile, else the one this computer
         # remembers.
@@ -1150,6 +1163,144 @@ class MainWindow(QMainWindow):
             for i, fps in enumerate(self._camera_mgr.current_fps):
                 self._camera_grid.update_fps(i, fps)
             self._refresh_capture_health()
+            self._check_lost_cameras()
+
+    #: Automatic reconnects allowed within RECONNECT_WINDOW_S. One more
+    #: stops them and asks the operator to look at the cameras.
+    RECONNECT_LIMIT = 3
+    RECONNECT_WINDOW_S = 600.0
+    #: Opens one reconnect tries, and the wait between them. A camera whose
+    #: control link lapsed can refuse a new one until its own heartbeat
+    #: timeout has run out.
+    RECONNECT_ATTEMPTS = 3
+    RECONNECT_RETRY_S = 5.0
+
+    def _reconnect_blocker(self) -> str | None:
+        """What a reconnect waits for, in words for the log and the status
+        bar, or None when it may run now."""
+        if self._solve_running():
+            return "the solve finishes"
+        if self._worker_busy(self._cam_op):
+            return "the camera operation running now finishes"
+        stim = self._stim_window
+        if stim is not None and (stim.is_uploading() or stim.is_testing()):
+            return "the Stimulation editor releases the trigger board"
+        return None
+
+    def _check_lost_cameras(self):
+        """Reopen the cameras when a preview camera has been lost.
+
+        RULE: a preview camera its grab thread gave up
+        (CameraManager.lost_preview_cameras) is brought back by closing and
+        opening every camera, the path a profile switch takes, once nothing
+        else owns the window (_reconnect_blocker). REASON: pylon gives up a
+        GigE camera whose control link lapsed while the camera stays powered
+        and reachable, and only a new open brings it back; without this the
+        operator had to relaunch. Every camera is reopened because camera
+        names are positional and open_all opens the whole rig or none. A
+        running solve is waited out: it owns the sidebar's gates, and its
+        load is the likeliest reason the link lapsed. More than
+        RECONNECT_LIMIT reconnects within RECONNECT_WINDOW_S stop the
+        retries: a camera that keeps dropping needs its cable, switch port or
+        power looked at.
+        """
+        if (self._state != State.IDLE or self._busy
+                or getattr(self, "_quitting", False)
+                or self._reconnect_gave_up):
+            return
+        lost_fn = getattr(self._camera_mgr, "lost_preview_cameras", None)
+        lost = lost_fn() if lost_fn is not None else []
+        if not lost:
+            self._lost_noted = ()
+            return
+        names = ", ".join(f"cam{i + 1}" for i, _ in lost)
+        blocker = self._reconnect_blocker()
+        if blocker:
+            key = tuple(i for i, _ in lost)
+            if key != self._lost_noted:
+                self._lost_noted = key
+                print(f"[cam] {names} lost ({lost[0][1]}); reconnecting the "
+                      f"cameras once {blocker}", flush=True)
+                self.statusBar().showMessage(
+                    f"{names} lost contact. Panopticon reconnects the cameras "
+                    f"once {blocker}.")
+            return
+        now = time.monotonic()
+        self._reconnect_times = [t for t in self._reconnect_times
+                                 if now - t < self.RECONNECT_WINDOW_S]
+        if len(self._reconnect_times) >= self.RECONNECT_LIMIT:
+            self._reconnect_gave_up = True
+            minutes = self.RECONNECT_WINDOW_S / 60
+            print(f"[cam] {names} lost again after {self.RECONNECT_LIMIT} "
+                  f"reconnects in {minutes:.0f} min; not reconnecting again",
+                  flush=True)
+            QMessageBox.warning(
+                self, "Cameras keep losing contact",
+                f"{names} lost contact again, after Panopticon had already "
+                f"reconnected the cameras {self.RECONNECT_LIMIT} times in "
+                f"{minutes:.0f} minutes, so it has stopped reconnecting.\n\n"
+                f"Check the camera's network cable, its switch port and its "
+                f"power, then close Panopticon and open it again.")
+            return
+        self._reconnect_times.append(now)
+        self._lost_noted = ()
+        self._reconnect_cameras(lost)
+
+    def _reconnect_cameras(self, lost):
+        """Close and reopen every camera off the UI thread, as a profile
+        switch does, retrying the open RECONNECT_ATTEMPTS times."""
+        names = ", ".join(f"cam{i + 1}" for i, _ in lost)
+        reasons = "; ".join(f"cam{i + 1}: {why}" for i, why in lost)
+        print(f"[cam] preview lost ({reasons}); reconnecting every camera",
+              flush=True)
+        self._begin_busy(f"Reconnecting {names}…")
+        self._reconnect_names = names
+
+        def _reconnect():
+            ok = None
+            for attempt in range(1, self.RECONNECT_ATTEMPTS + 1):
+                self._camera_mgr.close_all()
+                ok = self._open_cameras_bg()
+                if ok is True:
+                    return ok
+                print(f"[cam] reconnect attempt {attempt} of "
+                      f"{self.RECONNECT_ATTEMPTS} failed: {ok}", flush=True)
+                if attempt < self.RECONNECT_ATTEMPTS:
+                    time.sleep(self.RECONNECT_RETRY_S)
+            return ok
+
+        self._cam_op = CallableWorker(_reconnect)
+        self._cam_op.done.connect(self._on_reconnect_done)
+        self._cam_op.start()
+
+    def _on_reconnect_done(self, ok):
+        names = getattr(self, "_reconnect_names", "")
+        self._apply_camera_open_result(ok)
+        self._end_busy()
+        self._sidebar.set_status("IDLE", "#888")
+        if ok is True:
+            n = self._camera_mgr.num_cameras
+            print(f"[cam] reconnected: {n} camera(s) back in preview",
+                  flush=True)
+            self.statusBar().showMessage(
+                f"Reconnected the cameras: {names} had lost contact.")
+        else:
+            self.statusBar().showMessage(
+                f"Could not reconnect the cameras after {names} lost contact.")
+
+    def _log_solve_watch(self):
+        """Print the solve watch's line for the second just ended."""
+        watch = self._solve_watch
+        if watch is None:
+            self._solve_watch_timer.stop()
+            return
+        try:
+            line = watch.line(self._camera_mgr.current_fps,
+                              self._camera_mgr.failed_grab_counts())
+        except Exception as e:
+            line = (f"[solve-watch] stopped: {type(e).__name__}: {e}")
+            self._solve_watch_timer.stop()
+        print(line, flush=True)
 
     def _refresh_capture_health(self):
         """Show how far behind real time capture is running, WHILE it happens.
@@ -4912,11 +5063,17 @@ class MainWindow(QMainWindow):
         self._calib_worker.status.connect(lambda s: self.statusBar().showMessage(s))
         self._calib_worker.finished_solve.connect(self._on_calibration_done)
         self._calib_worker.start()
+        # Cold-path detail, so at verbose and above (the default).
+        if logging_setup.verbose():
+            self._solve_watch = SolveWatch()
+            self._solve_watch_timer.start(1000)
 
     def _on_calibration_done(self, success: bool, msg: str):
         # finished_solve is one of run()'s last two emits (finished follows
         # it), so the thread is ending; joining it lets _toggles_permitted()
         # see the solve as over.
+        self._solve_watch_timer.stop()
+        self._solve_watch = None
         worker = self._calib_worker
         if worker is not None and worker.isRunning():
             worker.wait(5000)
@@ -5356,6 +5513,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         self._display_timer.stop()
         self._thermal_timer.stop()
+        self._solve_watch_timer.stop()
         # An external source's watch and prompt end with the window; the
         # source itself is the operator's to stop.
         self._ext_phase = None
