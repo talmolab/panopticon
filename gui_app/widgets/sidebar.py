@@ -16,6 +16,26 @@ from gui_app import session_config, settings
 from gui_app.session_config import RigProfile, ProfileError, REPO_ROOT
 
 
+class NoWheelComboBox(QComboBox):
+    """A combo box that the mouse wheel passes over.
+
+    RULE: only a click and a choice from the list change the selection, never
+    the wheel. REASON: the profile box sits in the sidebar the operator
+    scrolls, and a wheel turned over it steps to the next profile, which
+    closes every camera and opens another rig's. The ignored event goes on to
+    the parent, so the scroll still scrolls.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Without WheelFocus a passing wheel does not take the keyboard focus
+        # either, so the arrow keys cannot step it afterwards by surprise.
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class NotesEdit(QPlainTextEdit):
     """A multi-line session field with the QLineEdit calls the sidebar uses:
     text(), setText() and a textEdited signal that fires for the operator's
@@ -91,7 +111,7 @@ class SidebarWidget(QWidget):
         layout.addWidget(title)
 
         # Profile selector
-        self._profile_combo = QComboBox()
+        self._profile_combo = NoWheelComboBox()
         self._profile_combo.setStyleSheet(
             "QComboBox { background: #1a1a2e; color: #dcdcdc; border: 1px solid #444; "
             "border-radius: 3px; padding: 4px 6px; font-size: 11px; }"
