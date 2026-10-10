@@ -196,6 +196,37 @@ def make_marker_detector(aruco_dict):
     return detect
 
 
+def make_scored_marker_detector(aruco_dict):
+    """Return ``detect(gray) -> (marker_corners, marker_ids, confidence)``.
+
+    ``confidence`` holds one value in [0, 1] per marker: 1 minus the share of
+    the marker's cell pixels that read the wrong colour, from
+    ``ArucoDetector.detectMarkersWithConfidence`` (OpenCV 4.12 and later). On
+    a build without that method it is None and the markers are the same ones
+    ``make_marker_detector`` finds. Only a decoded marker gets a score, so a
+    blurred view keeps a high median over the few markers it still decodes:
+    the score ranks sharp views, and the marker count is what tells a blurred
+    one.
+    """
+    import cv2
+    aruco = cv2.aruco
+    if uses_new_api() and hasattr(aruco.ArucoDetector,
+                                  "detectMarkersWithConfidence"):
+        detector = aruco.ArucoDetector(aruco_dict, aruco.DetectorParameters())
+
+        def detect(gray):
+            corners, ids, conf, _rejected = (
+                detector.detectMarkersWithConfidence(gray))
+            return corners, ids, conf
+        return detect
+    plain = make_marker_detector(aruco_dict)
+
+    def detect(gray):
+        corners, ids = plain(gray)
+        return corners, ids, None
+    return detect
+
+
 def board_summary(cfg: dict) -> dict:
     """The board parameters worth persisting beside a calibration."""
     return {
