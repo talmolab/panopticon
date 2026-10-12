@@ -119,7 +119,7 @@ calibration_min_tilt_deg: 40
 pfs_path: "configs/mono8_1920x1200.pfs"
 output_dir: "data"
 board_config: "configs/boards/charuco_8x8_15mm.yaml"
-# The mouse skeleton (20 nodes) each recording carries for LUC3D.
+# The mouse skeleton (24 nodes) each recording carries for LUC3D.
 skeleton: "skeletons/mouse.json"
 
 serial_port: COM3
