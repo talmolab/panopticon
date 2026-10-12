@@ -96,6 +96,19 @@ in the list.
 | A pane stays black while its frame rate counts | A display setting. The Brightness and Contrast sliders change the preview only. |
 | The preview is dark | Exposure and gain come from the `.pfs` (or the FLIR `camera:` block). Add light first, then exposure up to the [exposure ceiling](CONFIGURATION.md#exposure-ceiling), then gain. |
 
+## A camera drops out of the preview
+
+A camera can lose contact with the computer while the preview runs. Its pane freezes and its frame rate drops to 0. Panopticon closes and opens every camera to bring it back, the way a restart would.
+
+| Message or symptom | Cause and fix |
+|---|---|
+| `lost contact. Panopticon reconnects the cameras once <...>.` | Status bar. Panopticon waits for what the message names (a running solve or camera operation), then reconnects. Nothing to do. |
+| `Reconnected the cameras: <...> had lost contact.` | Status bar. The preview is back. If it keeps happening to one camera, check its cable and switch port. |
+| `Reconnected the cameras` right after a solve, naming every camera | The preview did not restart after the solve, so Panopticon reopened every camera. The log line `the preview did not restart after the solve` gives the reason. |
+| `Could not reconnect the cameras after <...> lost contact.` | Status bar, after a `Camera Error` dialog that gives the reason. Power-cycle the camera it names and choose the profile again. |
+| `Cameras keep losing contact` | Dialog. Panopticon reconnected the cameras 3 times in 10 minutes and has stopped trying. Check that camera's network cable, switch port and power, then close Panopticon and open it again. |
+| `preview lost:` | Log line, naming why the camera's preview ended: it reported itself removed, its stream would not restart, or it would not start grabbing. |
+
 ## The hardware check
 
 The check runs at launch and after a profile switch. Its report goes to the log,
@@ -396,6 +409,8 @@ ignored triggers stay under its tolerance.
 | One line stays thin while the rest are bright | That pair rarely sees the board together. Hold the board where both can see it. |
 | `Solve unavailable while acquiring/encoding` | Solve runs only at `IDLE`. |
 | `A solve is already running` | One solve at a time. It takes several minutes, and the state reads `CALIBRATING...` meanwhile. |
+| `Solve unavailable while a camera operation runs` | The cameras are being reopened (a profile switch or a reconnect), or the stimulus trace is being updated. Press **Solve** again once it's done. |
+| Every pane reads `Preview paused while the solve runs` | The preview pauses for the whole solve, so the cameras' traffic doesn't compete with it. It comes back when the solve ends. |
 | `Calibration directory not found:` | The metadata fields name a session without a calibration. Solve builds the path from the fields as they are when you press it. |
 | `No calibration videos found in:` | The calibration folder holds no videos yet. Wait for the encode to finish, or check the metadata fields. |
 | `Board config not found:` | `board_config` names a file that does not exist. Point it at a file in `configs/boards/`. |

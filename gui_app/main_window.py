@@ -30,6 +30,7 @@ from gui_app import logging_setup
 from gui_app import recording_meta
 from gui_app import stim_trace
 from gui_app.calibration_worker import CalibrationWorker, recalibration_reasons
+from gui_app.solve_watch import SolveWatch
 from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
                                     environment_facts, format_report,
                                     installed_encoder, invalidate_nvenc_cache,
@@ -281,6 +282,9 @@ class MainWindow(QMainWindow):
         #: The config the running solve was started with, so its completion
         #: minutes later does not re-read fields the operator has edited since.
         self._calib_config: SessionConfig | None = None
+        #: True from a Solve's click until its preview is back
+        #: (_pause_preview_for_solve, _on_preview_resumed).
+        self._preview_paused = False
         #: Workers that outlived their join. Kept referenced until Qt reports
         #: them finished: dropping the last reference to a running QThread is
         #: a qFatal, which no excepthook can intercept.
@@ -397,6 +401,18 @@ class MainWindow(QMainWindow):
         self._thermal_reported: set = set()
         self._thermal_timer = QTimer()
         self._thermal_timer.timeout.connect(self._poll_thermals)
+
+        # One line a second while a solve runs (gui_app/solve_watch.py): the
+        # computer's load beside what each preview camera delivered.
+        self._solve_watch: SolveWatch | None = None
+        self._solve_watch_timer = QTimer()
+        self._solve_watch_timer.timeout.connect(self._log_solve_watch)
+        # Lost preview cameras (_check_lost_cameras): when the automatic
+        # reconnects ran, the cameras already reported as waiting, and
+        # whether the window has stopped reconnecting.
+        self._reconnect_times: list = []
+        self._lost_noted: tuple = ()
+        self._reconnect_gave_up = False
 
         # The profile named by --profile, else the one this computer
         # remembers.
@@ -701,16 +717,19 @@ class MainWindow(QMainWindow):
         return rig if rig is not None else self._profile
 
     def _solve_running(self) -> bool:
-        """True while a calibration solve is running.
+        """True while a calibration solve is running, from the preview's
+        pause before it to the preview's return after it.
 
         RULE: a solve counts as an owner of the sidebar's gates, beside the
         state machine, the busy cycle and the stimulation editor's flash.
         REASON: a solve runs for minutes and never leaves State.IDLE, so a
         gate recomputed from the state alone reopens under it - which hands
         back the fields the solve locked and lets a Record start on top of the
-        running solve child.
+        running solve child. The pause and the return are camera operations
+        of the solve's own, and a Record or a profile switch between them and
+        the solve would meet cameras the solve has stopped.
         """
-        return self._worker_busy(self._calib_worker)
+        return self._preview_paused or self._worker_busy(self._calib_worker)
 
     def _toggles_permitted(self) -> bool:
         """Whether the acquisition toggles may be live right now.
@@ -1139,17 +1158,161 @@ class MainWindow(QMainWindow):
     def _refresh_displays(self):
         self._display_tick += 1
         lut = self._preview_lut()
+        # A paused preview keeps each pane's last picture under the pause
+        # notice, and the panes cost the solve nothing.
+        paused = self._preview_paused
 
-        for i, frame in enumerate(self._camera_mgr.latest_frames):
-            if frame is not None:
-                if lut is not None:
-                    frame = lut[frame]
-                self._camera_grid.update_frame(i, frame)
+        if not paused:
+            for i, frame in enumerate(self._camera_mgr.latest_frames):
+                if frame is not None:
+                    if lut is not None:
+                        frame = lut[frame]
+                    self._camera_grid.update_frame(i, frame)
 
         if self._display_tick % 10 == 0:
-            for i, fps in enumerate(self._camera_mgr.current_fps):
-                self._camera_grid.update_fps(i, fps)
+            if not paused:
+                for i, fps in enumerate(self._camera_mgr.current_fps):
+                    self._camera_grid.update_fps(i, fps)
             self._refresh_capture_health()
+            self._check_lost_cameras()
+
+    #: Automatic reconnects allowed within RECONNECT_WINDOW_S. One more
+    #: stops them and asks the operator to look at the cameras.
+    RECONNECT_LIMIT = 3
+    RECONNECT_WINDOW_S = 600.0
+    #: Opens one reconnect tries, and the wait between them. A camera whose
+    #: control link lapsed can refuse a new one until its own heartbeat
+    #: timeout has run out.
+    RECONNECT_ATTEMPTS = 3
+    RECONNECT_RETRY_S = 5.0
+
+    def _reconnect_blocker(self) -> str | None:
+        """What a reconnect waits for, in words for the log and the status
+        bar, or None when it may run now."""
+        if self._solve_running():
+            return "the solve finishes"
+        if self._worker_busy(self._cam_op):
+            return "the camera operation running now finishes"
+        stim = self._stim_window
+        if stim is not None and (stim.is_uploading() or stim.is_testing()):
+            return "the Stimulation editor releases the trigger board"
+        return None
+
+    def _check_lost_cameras(self):
+        """Reopen the cameras when a preview camera has been lost.
+
+        RULE: a preview camera its grab thread gave up
+        (CameraManager.lost_preview_cameras) is brought back by closing and
+        opening every camera, the path a profile switch takes, once nothing
+        else owns the window (_reconnect_blocker). REASON: pylon gives up a
+        GigE camera whose control link lapsed while the camera stays powered
+        and reachable, and only a new open brings it back; without this the
+        operator had to relaunch. Every camera is reopened because camera
+        names are positional and open_all opens the whole rig or none. A
+        running solve is waited out: it owns the sidebar's gates, and its
+        load is the likeliest reason the link lapsed. More than
+        RECONNECT_LIMIT reconnects within RECONNECT_WINDOW_S stop the
+        retries: a camera that keeps dropping needs its cable, switch port or
+        power looked at.
+        """
+        if (self._state != State.IDLE or self._busy
+                or getattr(self, "_quitting", False)
+                or self._reconnect_gave_up):
+            return
+        lost_fn = getattr(self._camera_mgr, "lost_preview_cameras", None)
+        lost = lost_fn() if lost_fn is not None else []
+        if not lost:
+            self._lost_noted = ()
+            return
+        names = ", ".join(f"cam{i + 1}" for i, _ in lost)
+        blocker = self._reconnect_blocker()
+        if blocker:
+            key = tuple(i for i, _ in lost)
+            if key != self._lost_noted:
+                self._lost_noted = key
+                print(f"[cam] {names} lost ({lost[0][1]}); reconnecting the "
+                      f"cameras once {blocker}", flush=True)
+                self.statusBar().showMessage(
+                    f"{names} lost contact. Panopticon reconnects the cameras "
+                    f"once {blocker}.")
+            return
+        now = time.monotonic()
+        self._reconnect_times = [t for t in self._reconnect_times
+                                 if now - t < self.RECONNECT_WINDOW_S]
+        if len(self._reconnect_times) >= self.RECONNECT_LIMIT:
+            self._reconnect_gave_up = True
+            minutes = self.RECONNECT_WINDOW_S / 60
+            print(f"[cam] {names} lost again after {self.RECONNECT_LIMIT} "
+                  f"reconnects in {minutes:.0f} min; not reconnecting again",
+                  flush=True)
+            QMessageBox.warning(
+                self, "Cameras keep losing contact",
+                f"{names} lost contact again, after Panopticon had already "
+                f"reconnected the cameras {self.RECONNECT_LIMIT} times in "
+                f"{minutes:.0f} minutes, so it has stopped reconnecting.\n\n"
+                f"Check the camera's network cable, its switch port and its "
+                f"power, then close Panopticon and open it again.")
+            return
+        self._reconnect_times.append(now)
+        self._lost_noted = ()
+        self._reconnect_cameras(lost)
+
+    def _reconnect_cameras(self, lost):
+        """Close and reopen every camera off the UI thread, as a profile
+        switch does, retrying the open RECONNECT_ATTEMPTS times."""
+        names = ", ".join(f"cam{i + 1}" for i, _ in lost)
+        reasons = "; ".join(f"cam{i + 1}: {why}" for i, why in lost)
+        print(f"[cam] preview lost ({reasons}); reconnecting every camera",
+              flush=True)
+        self._begin_busy(f"Reconnecting {names}…")
+        self._reconnect_names = names
+
+        def _reconnect():
+            ok = None
+            for attempt in range(1, self.RECONNECT_ATTEMPTS + 1):
+                self._camera_mgr.close_all()
+                ok = self._open_cameras_bg()
+                if ok is True:
+                    return ok
+                print(f"[cam] reconnect attempt {attempt} of "
+                      f"{self.RECONNECT_ATTEMPTS} failed: {ok}", flush=True)
+                if attempt < self.RECONNECT_ATTEMPTS:
+                    time.sleep(self.RECONNECT_RETRY_S)
+            return ok
+
+        self._cam_op = CallableWorker(_reconnect)
+        self._cam_op.done.connect(self._on_reconnect_done)
+        self._cam_op.start()
+
+    def _on_reconnect_done(self, ok):
+        names = getattr(self, "_reconnect_names", "")
+        self._apply_camera_open_result(ok)
+        self._end_busy()
+        self._sidebar.set_status("IDLE", "#888")
+        if ok is True:
+            n = self._camera_mgr.num_cameras
+            print(f"[cam] reconnected: {n} camera(s) back in preview",
+                  flush=True)
+            self.statusBar().showMessage(
+                f"Reconnected the cameras: {names} had lost contact.")
+        else:
+            self.statusBar().showMessage(
+                f"Could not reconnect the cameras after {names} lost contact.")
+
+    def _log_solve_watch(self):
+        """Print the solve watch's line for the second just ended."""
+        watch = self._solve_watch
+        if watch is None:
+            self._solve_watch_timer.stop()
+            return
+        try:
+            fps = (None if self._preview_paused
+                   else self._camera_mgr.current_fps)
+            line = watch.line(fps, self._camera_mgr.failed_grab_counts())
+        except Exception as e:
+            line = (f"[solve-watch] stopped: {type(e).__name__}: {e}")
+            self._solve_watch_timer.stop()
+        print(line, flush=True)
 
     def _refresh_capture_health(self):
         """Show how far behind real time capture is running, WHILE it happens.
@@ -4862,8 +5025,14 @@ class MainWindow(QMainWindow):
         # qFatal("QThread: Destroyed while thread is still running"), which
         # sys.excepthook cannot intercept. Instant process death, mid-solve.
         # (Two solves would also race on the same calibration.toml.)
-        if self._calib_worker is not None and self._calib_worker.isRunning():
+        if self._solve_running():
             self.statusBar().showMessage("A solve is already running")
+            return
+        # The pause before the solve and the return after it run in the
+        # camera-operation slot, which must be free.
+        if self._worker_busy(self._cam_op):
+            self.statusBar().showMessage(
+                "Solve unavailable while a camera operation runs")
             return
         try:
             config = self._build_config().validate()
@@ -4890,16 +5059,14 @@ class MainWindow(QMainWindow):
                 "Set board_config in your profile YAML to a valid file in configs/boards/.")
             return
 
-        # The solve's corner detection holds every core; the Focus window's
-        # detection would slow it and take the frames it is measuring from a
-        # host that cannot keep up with the preview.
+        # The solve pauses the preview the Focus window reads, and its corner
+        # detection holds every core.
         self._close_focus_window()
         self._sidebar.set_status("CALIBRATING...", "#aa88ff")
         self._sidebar.set_toggles_enabled(False)
         # set_toggles_enabled touches only the two toggles, not the Solve button
         # (sidebar.set_toggles_enabled), so disable it explicitly here.
         self._sidebar.set_solve_enabled(False)
-        self.statusBar().showMessage("Solving calibration...")
 
         # The solve runs for minutes and finishes against the fields as they
         # were when it started, not as they are then: a mouse id edited in the
@@ -4907,22 +5074,118 @@ class MainWindow(QMainWindow):
         self._calib_config = config
         self._sidebar.set_fields_editable(False)
 
+        if self._camera_mgr.num_cameras:
+            self._pause_preview_for_solve(config, board_cfg)
+        else:
+            self._start_solve(config, board_cfg)
+
+    #: Shown over every pane while the preview is paused for a solve.
+    PREVIEW_PAUSED_TEXT = "Preview paused while the solve runs"
+
+    def _pause_preview_for_solve(self, config, board_cfg):
+        """Stop the preview off the UI thread, then start the solve.
+
+        RULE: the preview is paused for the whole solve, and the solve starts
+        only once every camera has stopped streaming. REASON: the solve's
+        corner detection saturates the computer's memory bandwidth. That
+        stretches the network card's receive DPCs, which then hold one CPU
+        for most of each second, until camera packets are lost and pylon
+        gives cameras up as removed. A DPC preempts every thread, so no
+        priority protects the preview. With no frames to receive, the only
+        traffic left is each camera's control link. The cameras stay open, so
+        the preview returns in a second (resume_preview), not the time a
+        reopen takes.
+        """
+        self._preview_paused = True
+        self._camera_grid.set_paused(self.PREVIEW_PAUSED_TEXT)
+        self._sidebar.set_preview_paused(True)
+        self.statusBar().showMessage("Pausing the preview for the solve...")
+        self._cam_op = CallableWorker(self._camera_mgr.pause_preview)
+        self._cam_op.done.connect(
+            lambda stuck: self._on_preview_paused(stuck, config, board_cfg))
+        self._cam_op.start()
+
+    def _on_preview_paused(self, stuck, config, board_cfg):
+        if getattr(self, "_quitting", False):
+            return
+        if isinstance(stuck, Exception):
+            print(f"[calib] pausing the preview failed: "
+                  f"{type(stuck).__name__}: {stuck}", flush=True)
+        elif stuck:
+            print(f"[calib] the preview of {', '.join(stuck)} did not stop; "
+                  f"solving anyway", flush=True)
+        else:
+            print("[calib] preview paused for the solve", flush=True)
+        self._start_solve(config, board_cfg)
+
+    def _start_solve(self, config, board_cfg):
+        self.statusBar().showMessage("Solving calibration...")
         self._calib_worker = CalibrationWorker(
             config.session_dir, CALIBRATION_SCRIPT, board_cfg)
         self._calib_worker.status.connect(lambda s: self.statusBar().showMessage(s))
         self._calib_worker.finished_solve.connect(self._on_calibration_done)
         self._calib_worker.start()
+        # Cold-path detail, so at verbose and above (the default).
+        if logging_setup.verbose():
+            self._solve_watch = SolveWatch()
+            self._solve_watch_timer.start(1000)
+
+    def _resume_preview_after_solve(self):
+        """Start the preview again off the UI thread (_on_preview_resumed
+        hands the controls back). Waits for a camera operation that holds
+        the slot, which nothing should start while the solve runs."""
+        if getattr(self, "_quitting", False):
+            return
+        if self._worker_busy(self._cam_op):
+            QTimer.singleShot(500, self._resume_preview_after_solve)
+            return
+        self._cam_op = CallableWorker(self._camera_mgr.resume_preview)
+        self._cam_op.done.connect(self._on_preview_resumed)
+        self._cam_op.start()
+
+    def _on_preview_resumed(self, result):
+        if getattr(self, "_quitting", False):
+            return
+        self._preview_paused = False
+        self._camera_grid.set_paused(None)
+        self._sidebar.set_preview_paused(False)
+        self._release_solve_controls()
+        if not isinstance(result, Exception):
+            print("[calib] preview back after the solve", flush=True)
+            return
+        # The cameras are open but not streaming, and the grab threads that
+        # would report a lost camera have stopped, so nothing else notices.
+        why = f"the preview did not restart after the solve ({result})"
+        print(f"[calib] {why}", flush=True)
+        if self._reconnect_gave_up:
+            self.statusBar().showMessage(
+                "The preview did not restart after the solve. Close "
+                "Panopticon and open it again.")
+            return
+        self._reconnect_times.append(time.monotonic())
+        self._reconnect_cameras(
+            [(i, why) for i in range(self._camera_mgr.num_cameras)])
+
+    def _release_solve_controls(self):
+        """Hand back the controls a solve locked."""
+        self._sidebar.set_toggles_enabled(self._toggles_permitted())
+        self._sidebar.set_solve_enabled(True)
+        self._sidebar.set_fields_editable(True)
 
     def _on_calibration_done(self, success: bool, msg: str):
         # finished_solve is one of run()'s last two emits (finished follows
         # it), so the thread is ending; joining it lets _toggles_permitted()
         # see the solve as over.
+        self._solve_watch_timer.stop()
+        self._solve_watch = None
         worker = self._calib_worker
         if worker is not None and worker.isRunning():
             worker.wait(5000)
-        self._sidebar.set_toggles_enabled(self._toggles_permitted())
-        self._sidebar.set_solve_enabled(True)
-        self._sidebar.set_fields_editable(True)
+        # A paused preview keeps the controls locked until it is back.
+        if self._preview_paused:
+            self._resume_preview_after_solve()
+        else:
+            self._release_solve_controls()
         self._sidebar.set_status("IDLE", "#888")
         if success:
             config = self._calib_config or self._build_config()
@@ -5013,6 +5276,10 @@ class MainWindow(QMainWindow):
     def _on_snapshot(self):
         if self._camera_mgr.num_cameras == 0:
             self.statusBar().showMessage("Snapshot: no cameras open")
+            return
+        if self._preview_paused:
+            self.statusBar().showMessage(
+                "Snapshot: the preview is paused while the solve runs")
             return
         self._camera_mgr.request_snapshots()
         # Give the grab threads a moment to stash the next full-res frame.
@@ -5356,6 +5623,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         self._display_timer.stop()
         self._thermal_timer.stop()
+        self._solve_watch_timer.stop()
         # An external source's watch and prompt end with the window; the
         # source itself is the operator's to stop.
         self._ext_phase = None

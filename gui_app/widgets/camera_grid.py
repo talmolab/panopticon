@@ -94,6 +94,24 @@ class CameraCell(QWidget):
         self.fps_overlay.setStyleSheet("color: rgba(100,255,100,180); background: transparent; border: none; padding: 4px;")
         self.fps_overlay.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
 
+        # Covers the whole pane and dims the last picture under it, so a
+        # paused preview never reads as a live one.
+        self.pause_overlay = QLabel("", self)
+        self.pause_overlay.setFont(QFont("Segoe UI", 11))
+        self.pause_overlay.setStyleSheet("color: rgba(255,255,255,210); background: rgba(0,0,0,150); border: none;")
+        self.pause_overlay.setAlignment(Qt.AlignCenter)
+        self.pause_overlay.setWordWrap(True)
+        self.pause_overlay.hide()
+        self.name_overlay.raise_()
+
+    def set_paused(self, text: str | None):
+        """Show ``text`` over the pane, or remove it when None. A paused pane
+        shows no frame rate, and the next update_fps writes it again."""
+        self.pause_overlay.setText(text or "")
+        self.pause_overlay.setVisible(bool(text))
+        if text:
+            self.fps_overlay.setText("")
+
     def mouseDoubleClickEvent(self, event):
         self._grid.toggle_zoom(self._index)
 
@@ -103,6 +121,7 @@ class CameraCell(QWidget):
         self.view.setGeometry(0, 0, w, h)
         self.name_overlay.setGeometry(0, 0, w, 28)
         self.fps_overlay.setGeometry(0, h - 24, w, 24)
+        self.pause_overlay.setGeometry(0, 0, w, h)
 
 
 class CameraGridWidget(QWidget):
@@ -123,6 +142,14 @@ class CameraGridWidget(QWidget):
         self._num_cameras = 0
         self._cols = self.COLS
         self._cam_aspect = self.CAM_ASPECT
+        self._paused_text: str | None = None
+
+    def set_paused(self, text: str | None):
+        """Show ``text`` over every pane, or clear it with None. A grid set
+        up while paused starts paused."""
+        self._paused_text = text
+        for cell in self._cells:
+            cell.set_paused(text)
 
     def set_camera_aspect(self, frame_width: int, frame_height: int):
         """Declare the sensor shape the window is sized for (profile
@@ -182,6 +209,7 @@ class CameraGridWidget(QWidget):
 
         for i in range(num_cameras):
             cell = CameraCell(i, self)
+            cell.set_paused(self._paused_text)
             row, col = divmod(i, self._cols)
             self._layout.addWidget(cell, row, col)
             self._cells.append(cell)

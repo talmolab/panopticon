@@ -200,6 +200,7 @@ restores the profile's. Every default is a healthy camera.
 | `padding_x`, `padding_y`, `padding_from` | Row padding from frame N on | The camera must be retired |
 | `dead_after` | A link that dies at trigger N | Silence, found by the stall ladder |
 | `fail_after` | A transport error on every `retrieve()` after N frames | Retirement after ten errors in a row |
+| `removed_after` | A GigE camera whose control link lapsed after N frames: silence, `is_removed` True, `StartGrabbing` refused. It fires once, so the camera opened again is healthy | In the preview, the window reconnects the cameras |
 | `blockid_raises` | `BlockID` raising, which the contract allows | The grab loop must survive it |
 | `stats_error` | A failing stream-statistics read | `{"error": ...}` from `stream_stats()` |
 | `thermals` | A camera's temperature reading, or None for one that reports nothing | What the thermal watch reads |

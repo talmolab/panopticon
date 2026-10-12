@@ -944,6 +944,20 @@ class BaslerBackend:
     def close(self, cam) -> None:
         cam.Close()
 
+    @staticmethod
+    def is_removed(cam) -> bool:
+        """Whether pylon has given the camera up as removed.
+
+        pylon flags a GigE camera removed when its control link lapses, which
+        happens with the camera still powered and reachable: the camera
+        delivers nothing until the device is closed and opened again. The
+        flag is pylon's own state, so reading it costs no network round trip.
+        """
+        try:
+            return bool(cam.IsCameraDeviceRemoved())
+        except Exception:
+            return False
+
     # -------------------------------------------------------------- diagnostics
     @staticmethod
     def thermals(cam) -> dict:

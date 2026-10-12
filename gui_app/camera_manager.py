@@ -438,6 +438,22 @@ class CameraManager(QObject):
         return [int(gt.frame_count) + int(getattr(gt, "failed_grabs", 0))
                 for gt in self._grab_threads]
 
+    def failed_grab_counts(self) -> list[int]:
+        """Per camera, grab results that arrived with GrabSucceeded() False
+        since its grab thread started (lost packets the resends did not
+        recover)."""
+        return [int(getattr(gt, "failed_grabs", 0))
+                for gt in self._grab_threads]
+
+    def lost_preview_cameras(self) -> list[tuple[int, str]]:
+        """(index, reason) for each preview camera whose grab thread gave it
+        up (GrabThread.lost_reason): the SDK reported it removed, its stream
+        would not restart, or it would not start grabbing. Only closing and
+        opening the camera brings it back. A recording's threads never report
+        here; they retire instead. Reads one attribute per thread."""
+        return [(i, gt.lost_reason) for i, gt in enumerate(self._grab_threads)
+                if getattr(gt, "lost_reason", None)]
+
     @property
     def frontier_lags(self) -> list:
         """Per-camera triggers behind the leading camera in kick mode, -1 for a
@@ -1863,6 +1879,28 @@ class CameraManager(QObject):
                f"missing from every camera. {check}")
         print(f"[acq] WARNING: {msg}", flush=True)
         return [msg]
+
+    def pause_preview(self) -> list[str]:
+        """Stop every preview grab thread, leaving the cameras open but not
+        streaming, and return the names of cameras whose thread is still
+        running after the wait. resume_preview() starts the preview again.
+
+        Each thread stops grabbing as it exits, so its camera sends no frames
+        and only its control link stays up. The stopped threads stay in the
+        list: latest_frames keeps each camera's last picture, a thread that
+        gave its camera up before the pause still reports it through
+        lost_preview_cameras(), and resume_preview() refuses under a thread
+        that has not exited.
+        """
+        threads = list(self._grab_threads)
+        for gt in threads:
+            gt.stop()
+        self._wait_all(threads, STOP_NORMAL_EXIT_S)
+        stuck = [self._cn(i) for i, gt in enumerate(threads) if gt.isRunning()]
+        logging_setup.transition(
+            f"preview: paused on {len(threads) - len(stuck)} camera(s)"
+            + (f"; still running: {', '.join(stuck)}" if stuck else ""))
+        return stuck
 
     def resume_preview(self, preview_fps: float = 30.0):
         """Return all cameras to free-run preview after an acquisition. Resilient

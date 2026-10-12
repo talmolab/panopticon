@@ -962,7 +962,83 @@ Dead ends, do not retry:
 
 ---
 
-## 12. Standing dead ends (index)
+## 12. Cameras lost during a GUI solve (5-12 October 2026)
+
+- 2026-10-05: In the GUI validation of the joint refinement, cam2, cam5 and
+  cam9 stopped delivering preview frames about 3 s into a Solve's corner
+  detection. They stopped within 0.15 s of each other, one on each NIC port
+  and switch. Their preview grab threads re-armed about 50 s later, and every
+  re-arm failed with "The camera device has been physically removed". The
+  next Calibrate was refused, because those cameras would not go into trigger
+  mode. A relaunch reopened all nine without a power cycle. The System and
+  Application event logs held nothing for that minute. Two concurrent CLI
+  solves beside the preview, and an exact replay of the sequence, did not
+  reproduce it. Measured on the rig; no code change.
+- 2026-10-09: On an operator's second Solve of the day, all nine cameras
+  stopped delivering between 12:20:01.6 and 12:20:02.5, 7 s into corner
+  detection. The last result from three of them was an incomplete buffer, so
+  packets were being lost as they went. The event logs were empty again, and a
+  relaunch reopened every camera. The first Solve that day, ten minutes
+  earlier, held the preview at exactly 30 fps throughout. That made 2 losses
+  in about 14 GUI solves, and the solve itself finished both times. Measured
+  on the rig; no code change.
+- 2026-10-09: The 50 s between the silence and the first re-arm is the
+  preview's own ladder: 25 timeouts of 2000 ms. On 10-05 it had been read as
+  the host starving the grab threads, which it does not show. Read from the
+  code, with no code change.
+- 2026-10-09: The GUI process ran at Normal priority, the same as the solve
+  and its detection workers, which hold every CPU at 100%. pylon's threads in
+  the GUI process (packet receive, the control link that keeps each camera
+  attached) had no precedence over them. With the GUI previewing nine cameras
+  at 30 fps and nothing else running, CPUs 0 and 1 already spent 34-38% of
+  their time in DPC. The cause is not proven. Measured on the rig; no code
+  change.
+- 2026-10-09: Three changes (`1196c64`). The solve lowers itself to below
+  normal priority, and its pool workers inherit it (checked with psutil). A preview
+  grab thread asks the backend on each timeout whether pylon has given the
+  camera up (`is_removed`, pylon's `IsCameraDeviceRemoved`) and ends at once
+  if so. Without that member a silent preview re-arms after 10 s instead of
+  50 s. The window reopens every camera when a preview camera is lost, after
+  the solve finishes, at most 3 times in 10 minutes. A `[solve-watch]` line
+  every second of a solve records the load and each camera's preview rate,
+  so the next loss can be timed against them.
+- 2026-10-09: The rig test of `1196c64` in the GUI. The first Solve, on a copy
+  of the 12:19 take, dropped all nine cameras 32 s into corner detection,
+  with the solve at below normal priority. The window waited for the solve
+  and then reopened all nine in 16 s, in the same process, and the Record
+  after it was clean. So the reconnect works, and the priority does not
+  prevent the loss. Measured on the rig.
+- 2026-10-09: What the `[solve-watch]` lines showed. The network card's
+  receive DPC on CPU2 took about 19% of that CPU with the preview alone, and
+  70-100% while the solve's detection held every CPU at 100%. When the
+  cameras dropped, it fell to 5% while the solve stayed at 100%, so the DPC
+  was camera traffic. Measured on the rig; no code change.
+- 2026-10-09: A load test with the preview alone. 24 below-normal threads
+  doing arithmetic held every CPU at 100% for 40 s and left the DPC at
+  15-18%. 24 processes copying memory raised CPU2's DPC from 18% to 50% and
+  CPUs 0 and 1 to 36%, with incomplete buffers and silences on cam3. So
+  contention for memory bandwidth stretches the receive DPCs, and the
+  solve's nine video decoders push them to 100%. A DPC preempts every
+  thread, so no priority protects a streaming preview. Measured on the rig;
+  no code change.
+- 2026-10-12: The preview pauses for the whole solve (`d3b5bc9`, `59861aa`).
+  At Solve the window stops every preview grab thread and starts the solve
+  only once they have stopped. The cameras stay open, and `resume_preview`
+  brings them back when the solve ends. Rig test in the GUI, in two
+  processes. The first ran Record twice, Solve and Record. The second ran
+  Record twice, Solve twice, Record, Calibrate and Record. All three solves
+  were of the 7,715-frame take that lost all nine cameras on 10-09. Each
+  solved 9 of 9 cameras, 0.77 -> 0.37 px, in about 2 min 10 s. The preview
+  stopped in 0.15 s. The busiest CPU's DPC share stayed at 11% or less
+  through detection, with every CPU busy, against 70-100% with the preview
+  streaming, and peaked at 17-20% in the refinement. No camera was lost, and
+  the preview was back at 30 fps 0.2 s after each solve. Every acquisition
+  had 0 forced drops, and the GUI's memory went back to about 12.9 GiB.
+  Measured on the rig.
+
+---
+
+## 13. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
@@ -1007,3 +1083,5 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
 - Scoring video quality through a range conversion.
 - A generic sparse least-squares solver for the calibration's joint
   refinement (inexact steps: ten times slower and not converged).
+- Lowering the solve's priority to keep the preview's cameras (the receive
+  DPCs that lose their packets preempt every thread).
