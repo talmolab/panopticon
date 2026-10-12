@@ -268,9 +268,9 @@ Now let's turn the calibration into a model of the cameras. The [solve](GLOSSARY
 
     ![](images/solve_running.png)
 
-3. Wait while it works. **Calibrate** and **Record** stay greyed out until it's done. On our rig, solving nine cameras takes about a minute and a half.
+3. Wait while it works. The preview pauses for the whole solve: every pane keeps its last picture and reads **Preview paused while the solve runs**, and **Calibrate**, **Record**, **Snapshot** and **Focus** stay greyed out until it's done. On our rig, solving nine cameras takes about a minute and a half.
 
-4. When it's done, the state label goes back to **IDLE** and the status bar reads `Solved N of M cameras — copied to <path>`. If N and M match, every camera made it in:
+4. When it's done, the preview comes back, the state label goes back to **IDLE** and the status bar reads `Solved N of M cameras — copied to <path>`. If N and M match, every camera made it in:
 
     ![](images/solve_done.png)
 
@@ -334,7 +334,8 @@ uv run python 1_calibrate.py <session_dir> --board-config configs/boards/<your_b
 - **Recalibration recommended.** You'll only see this when it's worth calibrating again: a camera was left out, a camera is unreliable, or another acquisition of this session recorded a different camera under the same name.
 - **Calibration Failed.** The solve couldn't place at least two cameras, or couldn't use the board file. It also gives up after 30 minutes. Calibrate again, or see [Calibration and the solve](TROUBLESHOOTING.md#calibration-and-the-solve).
 - **No Data** or **Missing Board Config.** Solve found no calibration folder or videos where the fields point, or the profile's `board_config` file is missing. Check Date and the Mouse fields first.
-- **A camera's preview freezes while the solve runs.** Now and then a camera loses contact with the computer during a solve. You don't need to do anything: the solve carries on, and once it's done Panopticon reconnects the cameras and the status bar says so ([more](TROUBLESHOOTING.md#a-camera-drops-out-of-the-preview)).
+- **Why the preview pauses.** The solve keeps the whole computer busy, and cameras streaming beside it used to lose contact. With the preview paused they send nothing until it's done.
+- **The status bar reads `Reconnected the cameras` after a solve.** The preview didn't come back by itself, so Panopticon closed and opened every camera. You don't need to do anything ([more](TROUBLESHOOTING.md#a-camera-drops-out-of-the-preview)).
 
 [*Next up:* Stimulation](#7-optional-stimulation)
 

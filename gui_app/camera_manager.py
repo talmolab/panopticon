@@ -1880,6 +1880,28 @@ class CameraManager(QObject):
         print(f"[acq] WARNING: {msg}", flush=True)
         return [msg]
 
+    def pause_preview(self) -> list[str]:
+        """Stop every preview grab thread, leaving the cameras open but not
+        streaming, and return the names of cameras whose thread is still
+        running after the wait. resume_preview() starts the preview again.
+
+        Each thread stops grabbing as it exits, so its camera sends no frames
+        and only its control link stays up. The stopped threads stay in the
+        list: latest_frames keeps each camera's last picture, a thread that
+        gave its camera up before the pause still reports it through
+        lost_preview_cameras(), and resume_preview() refuses under a thread
+        that has not exited.
+        """
+        threads = list(self._grab_threads)
+        for gt in threads:
+            gt.stop()
+        self._wait_all(threads, STOP_NORMAL_EXIT_S)
+        stuck = [self._cn(i) for i, gt in enumerate(threads) if gt.isRunning()]
+        logging_setup.transition(
+            f"preview: paused on {len(threads) - len(stuck)} camera(s)"
+            + (f"; still running: {', '.join(stuck)}" if stuck else ""))
+        return stuck
+
     def resume_preview(self, preview_fps: float = 30.0):
         """Return all cameras to free-run preview after an acquisition. Resilient
         to a camera that went offline mid-session (it is skipped, not fatal).

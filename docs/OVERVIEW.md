@@ -180,8 +180,9 @@ also stops by itself when that block finishes.
 position. It reads the calibration from the session folder that **Date**, **Mouse 1**
 and **Mouse 2** point to, so leave those as they were for the calibration.
 
-While it runs, the state label reads **CALIBRATING...** in purple and the cameras
-don't capture. When it's done, the status bar shows the result, and
+While it runs, the state label reads **CALIBRATING...** in purple and the preview
+pauses: every pane keeps its last picture under **Preview paused while the solve
+runs**. When it's done, the preview comes back, the status bar shows the result, and
 [Solve](WORKFLOW.md#6-solve) covers what to look for.
 
 #### 10. Snapshot
@@ -607,6 +608,7 @@ Hover over a greyed-out toggle or **Solve** to see why.
   `Solve unavailable while acquiring/encoding`.
 - The dropdown, the output folder button and the session fields: from the start of
   an acquisition until its videos are finished, and during a solve.
+- **Snapshot** and **Focus**: during a solve, because the preview is paused.
 - During the jobs in the second table under [State](#16-state): everything above,
   plus **Snapshot**. **Stimulation** and the sliders keep working.
 - In the editor: **Starting** and **Ending** until one block is selected, **Apply**

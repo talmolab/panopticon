@@ -593,14 +593,22 @@ until someone analyses it.
   the board lying still at the end of the take, with Z towards the cameras.
   It never fails the solve: a moving board, no view or an error skips it with
   a warning, and the reference camera's frame stays.
+- The window pauses the preview for the whole solve
+  (`_pause_preview_for_solve`). Every preview grab thread stops before the
+  solve starts (`CameraManager.pause_preview`), and the cameras stay open but
+  send no frames. `resume_preview` restarts them when the solve ends, and a
+  preview that will not restart reopens every camera. The solve's corner
+  detection saturates memory bandwidth. That stretches the NIC's receive DPCs
+  until camera packets are lost and pylon gives cameras up as removed, and a
+  DPC preempts every thread, so no priority protects a streaming preview.
+  `_solve_running()` holds from the pause to the preview's return, so every
+  gate the solve shuts stays shut until the cameras stream again.
 - The solve runs below normal priority (`run_below_normal` in
-  `1_calibrate.py`), and the detection workers it starts inherit it. The GUI
-  runs it beside the live preview, and at equal priority its threads compete
-  with pylon's own threads in the GUI process: packet receive and the control
-  link that keeps each camera attached. While a solve runs, the window logs a
+  `1_calibrate.py`), and the detection workers it starts inherit it, so the
+  window stays responsive. While a solve runs, the window logs a
   `[solve-watch]` line each second (`gui_app/solve_watch.py`): CPU load, the
-  busiest CPU's DPC and interrupt share, free RAM, and each camera's preview
-  rate and new failed grabs.
+  busiest CPU's DPC and interrupt share, free RAM, and `preview paused` or each
+  camera's preview rate and new failed grabs.
 - The best calibration comes from full videos of every camera (sleap-anipose).
   The GUI's Solve and `1_calibrate.py` fit a subsample: faster, less accurate.
 

@@ -292,6 +292,7 @@ class SidebarWidget(QWidget):
         self._busy = False
         self._toggles_gate = True
         self._solve_running = False
+        self._preview_paused = False
 
         self._calibrate_toggle = ToggleSwitch("Calibrate", QColor(66, 133, 244))
         self._record_toggle = ToggleSwitch("Record", QColor(234, 67, 53))
@@ -322,7 +323,7 @@ class SidebarWidget(QWidget):
         self._apply_enablement()
 
         self._snapshot_btn = QPushButton("Snapshot")
-        self._snapshot_btn.setToolTip("Save a full-resolution still from every camera to the session's snapshots/ folder")
+        self._snapshot_btn.setToolTip(self._SNAPSHOT_TIP)
         self._snapshot_btn.setStyleSheet(
             "QPushButton { background: #2a2a4a; color: #88aadd; border: 1px solid #444; "
             "border-radius: 3px; padding: 5px 8px; font-size: 11px; }"
@@ -343,9 +344,7 @@ class SidebarWidget(QWidget):
         layout.addWidget(self._stim_btn)
 
         self._focus_btn = QPushButton("Focus")
-        self._focus_btn.setToolTip(
-            "Count the ChArUco markers each camera reads, live, while you "
-            "focus its lens by hand")
+        self._focus_btn.setToolTip(self._FOCUS_TIP)
         self._focus_btn.setStyleSheet(
             "QPushButton { background: #2a2a4a; color: #88aadd; border: 1px solid #444; "
             "border-radius: 3px; padding: 5px 8px; font-size: 11px; }"
@@ -575,6 +574,11 @@ class SidebarWidget(QWidget):
     _RECORD_TIP = "Start or stop a session recording"
     _BUSY_TIP = "Disabled during a background operation"
     _GATE_TIP = "Disabled while encoding, aligning or solving"
+    _SNAPSHOT_TIP = ("Save a full-resolution still from every camera to the "
+                     "session's snapshots/ folder")
+    _FOCUS_TIP = ("Count the ChArUco markers each camera reads, live, while "
+                  "you focus its lens by hand")
+    _PAUSED_TIP = "Disabled while a solve runs: the preview is paused"
 
     def _apply_enablement(self):
         """Recompute the enabled state of Calibrate, Record and Solve from the
@@ -866,12 +870,28 @@ class SidebarWidget(QWidget):
         Snapshot: a busy cycle closes the Focus window, because its cameras
         are about to be reopened, armed or reconfigured."""
         self._busy = busy
-        for w in (self._profile_combo, self._dir_button, self._snapshot_btn,
-                  self._focus_btn):
+        for w in (self._profile_combo, self._dir_button):
             w.setEnabled(not busy)
         for f in self._fields.values():
             f.setEnabled(not busy)
         self._apply_enablement()
+        self._apply_preview_buttons()
+
+    def _apply_preview_buttons(self):
+        """Gate Snapshot and Focus, which work on the live preview: off
+        during a busy cycle, which reopens, arms or reconfigures the cameras,
+        and while the preview is paused (set_preview_paused)."""
+        paused = self._preview_paused and not self._busy
+        for btn, tip in ((self._snapshot_btn, self._SNAPSHOT_TIP),
+                         (self._focus_btn, self._FOCUS_TIP)):
+            btn.setEnabled(not (self._busy or self._preview_paused))
+            btn.setToolTip(self._PAUSED_TIP if paused else tip)
+
+    def set_preview_paused(self, paused: bool):
+        """Grey Snapshot and Focus while the window has the preview paused
+        for a solve. The gate survives a set_busy cycle."""
+        self._preview_paused = paused
+        self._apply_preview_buttons()
 
     def set_status(self, text: str, color: str):
         self._status.setText(text)

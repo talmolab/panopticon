@@ -851,12 +851,26 @@ waits for the solve to finish. After `RECONNECT_LIMIT` reconnects within
 `RECONNECT_WINDOW_S` the window stops and asks the operator to check the
 camera.
 
+The window pauses the preview for the whole solve. At Solve it stops every
+preview grab thread off the UI thread (`CameraManager.pause_preview`), and
+only then starts the solve. Each thread stops grabbing as it exits, so the
+cameras stay open and send nothing but their control traffic. When the solve
+ends, `resume_preview` starts the preview again, and only then does the window
+hand back the controls the solve locked. A preview that does not restart
+reopens every camera, the reconnect's way. The solve's corner detection
+saturates memory bandwidth. With nine cameras streaming beside it, that
+stretched the network card's receive DPCs from about 19% of one CPU to
+70-100%, until packets were lost and pylon gave cameras up as removed. A DPC
+preempts every thread, so lowering the solve's priority did not protect
+the preview.
+
 While a solve runs, the window logs one `[solve-watch]` line a second
 (`gui_app/solve_watch.py`, at `verbose` and above): how busy the CPUs were,
-the busiest CPU's DPC and interrupt share, free RAM, each camera's preview
-frame rate and its new failed grabs. The solve itself runs below normal
-priority (`run_below_normal` in `1_calibrate.py`), and the detection workers it
-starts inherit that.
+the busiest CPU's DPC and interrupt share and free RAM. It shows each
+camera's preview frame rate and new failed grabs only while the preview runs,
+and `preview paused` otherwise. The solve itself runs below normal priority
+(`run_below_normal` in `1_calibrate.py`), and the detection workers it starts
+inherit that.
 
 Retiring is the way out in every other case. In kick-out mode the coordinator
 waits for every camera, so a camera that stops publishing would force-drop

@@ -1,10 +1,11 @@
 """A once-a-second log line about the computer while a calibration solve runs.
 
-The solve keeps every CPU busy for minutes beside the live preview. Each line
-records what the computer was doing that second (how busy the CPUs were, the
-busiest CPU's DPC and interrupt load, free RAM) and what each preview camera
-delivered. A camera lost during a solve can then be put on a timeline against
-the load. No Qt here: the window owns the timer and prints the line.
+The solve keeps every CPU busy for minutes, and the window pauses the preview
+for it. Each line records what the computer was doing that second (how busy
+the CPUs were, the busiest CPU's DPC and interrupt load, free RAM) and, if the
+preview runs, what each camera delivered. A camera lost during a solve can
+then be put on a timeline against the load. No Qt here: the window owns the
+timer and prints the line.
 """
 from __future__ import annotations
 
@@ -83,12 +84,15 @@ class SolveWatch:
     def line(self, fps, failed) -> str:
         """The line for the second just ended. `fps` is each camera's preview
         frame rate (CameraManager.current_fps, which reads 0 for a silent
-        camera) and `failed` each camera's failed-grab count
-        (CameraManager.failed_grab_counts)."""
+        camera), or None while the preview is paused, and `failed` each
+        camera's failed-grab count (CameraManager.failed_grab_counts)."""
         parts = [f"{self._clock() - self._t0:.0f} s"]
         for text in (self._cpu_text(), self._free_text()):
             if text:
                 parts.append(text)
+        if fps is None:
+            parts.append("preview paused")
+            return "[solve-watch] " + "; ".join(parts)
         parts.append("preview fps " + " ".join(f"{f:.0f}" for f in fps))
         failed = [int(n) for n in failed]
         last, self._last_failed = self._last_failed, failed

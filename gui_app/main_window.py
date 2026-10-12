@@ -282,6 +282,9 @@ class MainWindow(QMainWindow):
         #: The config the running solve was started with, so its completion
         #: minutes later does not re-read fields the operator has edited since.
         self._calib_config: SessionConfig | None = None
+        #: True from a Solve's click until its preview is back
+        #: (_pause_preview_for_solve, _on_preview_resumed).
+        self._preview_paused = False
         #: Workers that outlived their join. Kept referenced until Qt reports
         #: them finished: dropping the last reference to a running QThread is
         #: a qFatal, which no excepthook can intercept.
@@ -714,16 +717,19 @@ class MainWindow(QMainWindow):
         return rig if rig is not None else self._profile
 
     def _solve_running(self) -> bool:
-        """True while a calibration solve is running.
+        """True while a calibration solve is running, from the preview's
+        pause before it to the preview's return after it.
 
         RULE: a solve counts as an owner of the sidebar's gates, beside the
         state machine, the busy cycle and the stimulation editor's flash.
         REASON: a solve runs for minutes and never leaves State.IDLE, so a
         gate recomputed from the state alone reopens under it - which hands
         back the fields the solve locked and lets a Record start on top of the
-        running solve child.
+        running solve child. The pause and the return are camera operations
+        of the solve's own, and a Record or a profile switch between them and
+        the solve would meet cameras the solve has stopped.
         """
-        return self._worker_busy(self._calib_worker)
+        return self._preview_paused or self._worker_busy(self._calib_worker)
 
     def _toggles_permitted(self) -> bool:
         """Whether the acquisition toggles may be live right now.
@@ -1152,16 +1158,21 @@ class MainWindow(QMainWindow):
     def _refresh_displays(self):
         self._display_tick += 1
         lut = self._preview_lut()
+        # A paused preview keeps each pane's last picture under the pause
+        # notice, and the panes cost the solve nothing.
+        paused = self._preview_paused
 
-        for i, frame in enumerate(self._camera_mgr.latest_frames):
-            if frame is not None:
-                if lut is not None:
-                    frame = lut[frame]
-                self._camera_grid.update_frame(i, frame)
+        if not paused:
+            for i, frame in enumerate(self._camera_mgr.latest_frames):
+                if frame is not None:
+                    if lut is not None:
+                        frame = lut[frame]
+                    self._camera_grid.update_frame(i, frame)
 
         if self._display_tick % 10 == 0:
-            for i, fps in enumerate(self._camera_mgr.current_fps):
-                self._camera_grid.update_fps(i, fps)
+            if not paused:
+                for i, fps in enumerate(self._camera_mgr.current_fps):
+                    self._camera_grid.update_fps(i, fps)
             self._refresh_capture_health()
             self._check_lost_cameras()
 
@@ -1295,8 +1306,9 @@ class MainWindow(QMainWindow):
             self._solve_watch_timer.stop()
             return
         try:
-            line = watch.line(self._camera_mgr.current_fps,
-                              self._camera_mgr.failed_grab_counts())
+            fps = (None if self._preview_paused
+                   else self._camera_mgr.current_fps)
+            line = watch.line(fps, self._camera_mgr.failed_grab_counts())
         except Exception as e:
             line = (f"[solve-watch] stopped: {type(e).__name__}: {e}")
             self._solve_watch_timer.stop()
@@ -5013,8 +5025,14 @@ class MainWindow(QMainWindow):
         # qFatal("QThread: Destroyed while thread is still running"), which
         # sys.excepthook cannot intercept. Instant process death, mid-solve.
         # (Two solves would also race on the same calibration.toml.)
-        if self._calib_worker is not None and self._calib_worker.isRunning():
+        if self._solve_running():
             self.statusBar().showMessage("A solve is already running")
+            return
+        # The pause before the solve and the return after it run in the
+        # camera-operation slot, which must be free.
+        if self._worker_busy(self._cam_op):
+            self.statusBar().showMessage(
+                "Solve unavailable while a camera operation runs")
             return
         try:
             config = self._build_config().validate()
@@ -5041,16 +5059,14 @@ class MainWindow(QMainWindow):
                 "Set board_config in your profile YAML to a valid file in configs/boards/.")
             return
 
-        # The solve's corner detection holds every core; the Focus window's
-        # detection would slow it and take the frames it is measuring from a
-        # host that cannot keep up with the preview.
+        # The solve pauses the preview the Focus window reads, and its corner
+        # detection holds every core.
         self._close_focus_window()
         self._sidebar.set_status("CALIBRATING...", "#aa88ff")
         self._sidebar.set_toggles_enabled(False)
         # set_toggles_enabled touches only the two toggles, not the Solve button
         # (sidebar.set_toggles_enabled), so disable it explicitly here.
         self._sidebar.set_solve_enabled(False)
-        self.statusBar().showMessage("Solving calibration...")
 
         # The solve runs for minutes and finishes against the fields as they
         # were when it started, not as they are then: a mouse id edited in the
@@ -5058,6 +5074,52 @@ class MainWindow(QMainWindow):
         self._calib_config = config
         self._sidebar.set_fields_editable(False)
 
+        if self._camera_mgr.num_cameras:
+            self._pause_preview_for_solve(config, board_cfg)
+        else:
+            self._start_solve(config, board_cfg)
+
+    #: Shown over every pane while the preview is paused for a solve.
+    PREVIEW_PAUSED_TEXT = "Preview paused while the solve runs"
+
+    def _pause_preview_for_solve(self, config, board_cfg):
+        """Stop the preview off the UI thread, then start the solve.
+
+        RULE: the preview is paused for the whole solve, and the solve starts
+        only once every camera has stopped streaming. REASON: the solve's
+        corner detection saturates the computer's memory bandwidth. That
+        stretches the network card's receive DPCs, which then hold one CPU
+        for most of each second, until camera packets are lost and pylon
+        gives cameras up as removed. A DPC preempts every thread, so no
+        priority protects the preview. With no frames to receive, the only
+        traffic left is each camera's control link. The cameras stay open, so
+        the preview returns in a second (resume_preview), not the time a
+        reopen takes.
+        """
+        self._preview_paused = True
+        self._camera_grid.set_paused(self.PREVIEW_PAUSED_TEXT)
+        self._sidebar.set_preview_paused(True)
+        self.statusBar().showMessage("Pausing the preview for the solve...")
+        self._cam_op = CallableWorker(self._camera_mgr.pause_preview)
+        self._cam_op.done.connect(
+            lambda stuck: self._on_preview_paused(stuck, config, board_cfg))
+        self._cam_op.start()
+
+    def _on_preview_paused(self, stuck, config, board_cfg):
+        if getattr(self, "_quitting", False):
+            return
+        if isinstance(stuck, Exception):
+            print(f"[calib] pausing the preview failed: "
+                  f"{type(stuck).__name__}: {stuck}", flush=True)
+        elif stuck:
+            print(f"[calib] the preview of {', '.join(stuck)} did not stop; "
+                  f"solving anyway", flush=True)
+        else:
+            print("[calib] preview paused for the solve", flush=True)
+        self._start_solve(config, board_cfg)
+
+    def _start_solve(self, config, board_cfg):
+        self.statusBar().showMessage("Solving calibration...")
         self._calib_worker = CalibrationWorker(
             config.session_dir, CALIBRATION_SCRIPT, board_cfg)
         self._calib_worker.status.connect(lambda s: self.statusBar().showMessage(s))
@@ -5068,6 +5130,48 @@ class MainWindow(QMainWindow):
             self._solve_watch = SolveWatch()
             self._solve_watch_timer.start(1000)
 
+    def _resume_preview_after_solve(self):
+        """Start the preview again off the UI thread (_on_preview_resumed
+        hands the controls back). Waits for a camera operation that holds
+        the slot, which nothing should start while the solve runs."""
+        if getattr(self, "_quitting", False):
+            return
+        if self._worker_busy(self._cam_op):
+            QTimer.singleShot(500, self._resume_preview_after_solve)
+            return
+        self._cam_op = CallableWorker(self._camera_mgr.resume_preview)
+        self._cam_op.done.connect(self._on_preview_resumed)
+        self._cam_op.start()
+
+    def _on_preview_resumed(self, result):
+        if getattr(self, "_quitting", False):
+            return
+        self._preview_paused = False
+        self._camera_grid.set_paused(None)
+        self._sidebar.set_preview_paused(False)
+        self._release_solve_controls()
+        if not isinstance(result, Exception):
+            print("[calib] preview back after the solve", flush=True)
+            return
+        # The cameras are open but not streaming, and the grab threads that
+        # would report a lost camera have stopped, so nothing else notices.
+        why = f"the preview did not restart after the solve ({result})"
+        print(f"[calib] {why}", flush=True)
+        if self._reconnect_gave_up:
+            self.statusBar().showMessage(
+                "The preview did not restart after the solve. Close "
+                "Panopticon and open it again.")
+            return
+        self._reconnect_times.append(time.monotonic())
+        self._reconnect_cameras(
+            [(i, why) for i in range(self._camera_mgr.num_cameras)])
+
+    def _release_solve_controls(self):
+        """Hand back the controls a solve locked."""
+        self._sidebar.set_toggles_enabled(self._toggles_permitted())
+        self._sidebar.set_solve_enabled(True)
+        self._sidebar.set_fields_editable(True)
+
     def _on_calibration_done(self, success: bool, msg: str):
         # finished_solve is one of run()'s last two emits (finished follows
         # it), so the thread is ending; joining it lets _toggles_permitted()
@@ -5077,9 +5181,11 @@ class MainWindow(QMainWindow):
         worker = self._calib_worker
         if worker is not None and worker.isRunning():
             worker.wait(5000)
-        self._sidebar.set_toggles_enabled(self._toggles_permitted())
-        self._sidebar.set_solve_enabled(True)
-        self._sidebar.set_fields_editable(True)
+        # A paused preview keeps the controls locked until it is back.
+        if self._preview_paused:
+            self._resume_preview_after_solve()
+        else:
+            self._release_solve_controls()
         self._sidebar.set_status("IDLE", "#888")
         if success:
             config = self._calib_config or self._build_config()
@@ -5170,6 +5276,10 @@ class MainWindow(QMainWindow):
     def _on_snapshot(self):
         if self._camera_mgr.num_cameras == 0:
             self.statusBar().showMessage("Snapshot: no cameras open")
+            return
+        if self._preview_paused:
+            self.statusBar().showMessage(
+                "Snapshot: the preview is paused while the solve runs")
             return
         self._camera_mgr.request_snapshots()
         # Give the grab threads a moment to stash the next full-res frame.
