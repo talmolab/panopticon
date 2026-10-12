@@ -1054,7 +1054,26 @@ Dead ends, do not retry:
 
 ---
 
-## 14. Standing dead ends (index)
+## 14. The pair figures after the refinement (12 October 2026)
+
+- 2026-10-12: A 9-camera calibration fitted every camera to 0.28-0.43 px
+  after the joint refinement. Leave-one-out triangulation on its detections
+  put every camera at 0.15-0.50 px (0.20 px overall). Yet its plot showed one
+  red bar of 265 px, and the log told the operator to check the board
+  config. cam2-cam6's own stereo fit had failed, while the tree went around
+  the pair and the refinement fitted it. The plot, the warnings and
+  `poorly_placed` graded each pair's own fit. Now (`59cb650`) they grade the
+  pair's error under the calibration written: the board fitted to every view
+  the pair shares, with the lenses and poses held. Every pair of that
+  calibration reads 0.40-0.55 px, cam2-cam6 0.47 px. Moving cam6 20 mm along
+  the 435 mm cam2-cam6 baseline reads 4.04 px. A two-view triangulation was
+  tried first and read 0.08-0.22 px, but a camera moved along its pair's
+  baseline leaves that pair's epipolar geometry unchanged, so it cannot see
+  that error.
+
+---
+
+## 15. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
@@ -1101,3 +1120,5 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
   refinement (inexact steps: ten times slower and not converged).
 - Lowering the solve's priority to keep the preview's cameras (the receive
   DPCs that lose their packets preempt every thread).
+- Grading a calibration's pairs by a two-view triangulation (blind to a
+  camera moved along the pair's baseline).

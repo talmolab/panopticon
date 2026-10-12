@@ -548,8 +548,8 @@ until someone analyses it.
   poses held). Below `RMS_GOOD_PX` (1.5 px) it is good, and from
   `RMS_POOR_PX` (3.0 px) up it is poor and warned about. The plot, the pair
   warnings and `poorly_placed` read it. The pair's own stereo fit builds the
-  tree and stays in the report as `stereo_rms`, and one that failed while the
-  calibration fits the pair is a log note only: graded by its fit, such a pair
+  tree and stays in the report as `stereo_rms`. One that failed while the
+  calibration fits the pair is a log note only. Graded by its fit, such a pair
   read as 265 px in a calibration that fits it at 0.47 px. A two-view
   triangulation cannot grade a pair: a camera moved along the pair's baseline
   leaves the epipolar geometry, and so that error, unchanged.
@@ -595,11 +595,11 @@ until someone analyses it.
   `stereo_rms` describe the chained stage. There, a small change in one lens
   fit can move the tree to another pair and nearly double the chained error,
   while every stereo fit stays the same.
-- The report names every camera it cannot vouch for (`poorly_placed`): a lens
-  fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
-  `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each tree
-  edge that is poor under the calibration. The status bar shows them as
-  `unreliable:`.
+- The report names every camera it cannot vouch for (`poorly_placed`). One is
+  a lens fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
+  `INTRINSICS_FX_WARN_FACTOR` of the median. The other is the smaller side of
+  each tree edge that is poor under the calibration. The status bar shows them
+  as `unreliable:`.
 - After Solve, only a finding that recommends recalibrating raises a dialog
   (`calibration_worker.recalibration_reasons`): a dropped camera, an
   unreliable one, or a serial mismatch (`serial_mismatch` in the report).
