@@ -105,9 +105,12 @@ class CameraCell(QWidget):
         self.name_overlay.raise_()
 
     def set_paused(self, text: str | None):
-        """Show ``text`` over the pane, or remove it when None."""
+        """Show ``text`` over the pane, or remove it when None. A paused pane
+        shows no frame rate, and the next update_fps writes it again."""
         self.pause_overlay.setText(text or "")
         self.pause_overlay.setVisible(bool(text))
+        if text:
+            self.fps_overlay.setText("")
 
     def mouseDoubleClickEvent(self, event):
         self._grid.toggle_zoom(self._index)
