@@ -1159,8 +1159,10 @@ class MainWindow(QMainWindow):
         self._display_tick += 1
         lut = self._preview_lut()
         # A paused preview keeps each pane's last picture under the pause
-        # notice, and the panes cost the solve nothing.
-        paused = self._preview_paused
+        # notice, and the panes cost the solve nothing. The Focus window
+        # freezes them too: it shows the camera being focused itself, and
+        # the repaints would take UI-thread time from its detection.
+        paused = self._preview_paused or self._focus_window is not None
 
         if not paused:
             for i, frame in enumerate(self._camera_mgr.latest_frames):
@@ -5081,6 +5083,8 @@ class MainWindow(QMainWindow):
 
     #: Shown over every pane while the preview is paused for a solve.
     PREVIEW_PAUSED_TEXT = "Preview paused while the solve runs"
+    #: Shown over every pane while the Focus window is open.
+    FOCUS_PAUSED_TEXT = "Preview paused while the Focus window is open"
 
     def _pause_preview_for_solve(self, config, board_cfg):
         """Stop the preview off the UI thread, then start the solve.
@@ -5452,6 +5456,8 @@ class MainWindow(QMainWindow):
             list(self._camera_names), engine, self._camera_mgr, parent=self)
         self._focus_window.closed.connect(self._on_focus_closed)
         self._focus_window.show()
+        # The panes stop repainting while it is open (_refresh_displays).
+        self._camera_grid.set_paused(self.FOCUS_PAUSED_TEXT)
         print(f"[focus] window opened on {len(self._camera_names)} camera(s)",
               flush=True)
 
@@ -5462,10 +5468,13 @@ class MainWindow(QMainWindow):
 
     def _on_focus_closed(self):
         """The Focus window has joined its worker: stop keeping full frames
-        unless the coverage HUD keeps them, and drop the window."""
+        unless the coverage HUD keeps them, let the panes repaint again
+        unless a solve has paused them, and drop the window."""
         win, self._focus_window = self._focus_window, None
         if self._coverage_worker is None:
             self._camera_mgr.set_keep_full(False)
+        if not self._preview_paused:
+            self._camera_grid.set_paused(None)
         if win is not None:
             win.deleteLater()
         print("[focus] window closed", flush=True)

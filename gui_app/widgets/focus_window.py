@@ -13,15 +13,15 @@ find the peak. A camera's best sharpness is kept only at its best marker
 count: the score is measured over the decoded markers' hull, and a hull that
 grows with the count would move the score for a reason other than focus.
 
-The zoom view shows the selected camera's board region at full resolution,
-scaled by a whole factor when it is small, so the operator sees the pixels the
-detector sees.
+Beside the tiles, the selected camera's whole view, scaled to fit, shows a
+box around the markers it decoded, so the operator sees where the camera finds
+the board without the picture moving.
 """
 import math
 import time
 from collections import deque
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
                              QLabel, QPushButton, QSizePolicy, QVBoxLayout,
@@ -33,6 +33,9 @@ from gui_app.focus_worker import FocusWorker
 TREND_S = 30.0
 #: Seconds without a reading after which a tile greys out.
 STALE_S = 3.0
+#: Seconds the last board box stays up, dashed, after readings that decode
+#: no marker.
+BOX_HOLD_S = 1.0
 #: Share of the board's markers at or above which the count shows green, and
 #: at or above which it shows amber; below, red.
 GOOD_SHARE = 0.75
@@ -103,7 +106,7 @@ class TrendLine(QWidget):
 
 
 class FocusTile(QFrame):
-    """One camera's counters. Click to select it for the zoom view."""
+    """One camera's counters. Click to show its view."""
 
     clicked = pyqtSignal(int)
 
@@ -244,42 +247,85 @@ class FocusTile(QFrame):
             self._count.setStyleSheet(f"color: {DIM}; border: none;")
 
 
-class ZoomView(QWidget):
-    """The selected camera's board region, at full resolution or a whole
-    multiple of it, so its pixels are the pixels the detector reads."""
+class CameraView(QWidget):
+    """The selected camera's whole view, scaled to fit, with a box around the
+    markers it decoded.
+
+    The framing never follows the detections: a view that cropped to the
+    board jumped from tick to tick when only a few markers decoded, and
+    flickered. The box is the bounding box of the decoded markers, in the
+    colour of the count. After a reading with no marker the last box stays,
+    dashed, for ``BOX_HOLD_S``, so sparse detections do not blink it on and
+    off.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._view = None       # the numpy array the QImage reads
         self._image = None
-        self._caption = "Click a camera to zoom in on it."
-        self.setMinimumSize(420, 320)
+        self._name = ""
+        self._caption = "Click a camera to see its view."
+        self._box = None        # (x0, y0, x1, y1) in view pixels
+        self._box_t = None
+        self._box_fresh = False
+        self._colour = DIM
+        self._label = ""
+        self.setMinimumSize(420, 280)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-    def set_crop(self, crop, name: str):
-        if crop is None:
-            self._image = None
-        else:
-            h, w = crop.shape[:2]
-            img = QImage(crop.data, w, h, crop.strides[0],
-                         QImage.Format_Grayscale8)
-            # Owns its pixels: the array may be freed after this call.
-            self._image = img.copy()
+    @property
+    def box(self):
+        """The box drawn now, in view pixels, or None."""
+        return self._box
+
+    @property
+    def box_fresh(self) -> bool:
+        """Whether the box drawn now comes from the latest reading."""
+        return self._box is not None and self._box_fresh
+
+    def set_view(self, view, scale: float, name: str, stats, total: int,
+                 now: float):
+        """Show ``view`` (a ``FocusTick`` view) with the box from ``stats``
+        (its ``roi`` is in full-frame pixels, ``scale`` maps it on)."""
+        h, w = view.shape[:2]
+        fmt = (QImage.Format_RGB888 if view.ndim == 3
+               else QImage.Format_Grayscale8)
+        # The QImage reads the array's memory, so the array is kept with it.
+        self._view = view
+        self._image = QImage(view.data, w, h, view.strides[0], fmt)
         self._name = name
+        if stats is not None and stats.roi is not None:
+            x0, y0, x1, y1 = stats.roi
+            self._box = (x0 * scale, y0 * scale, x1 * scale, y1 * scale)
+            self._box_t = now
+            self._box_fresh = True
+            self._colour = share_colour(stats.markers, total)
+            self._label = f"{stats.markers} of {total} markers"
+        else:
+            if self._box is not None and now - self._box_t > BOX_HOLD_S:
+                self._box = None
+            self._box_fresh = False
+            self._label = ("no marker decoded" if stats is not None
+                           else "waiting for a frame")
         self.update()
 
     def clear(self, caption: str):
+        self._view = None
         self._image = None
+        self._box = None
+        self._label = ""
         self._caption = caption
         self.update()
 
-    def zoom_factor(self) -> float:
-        """A whole factor up when the crop fits twice or more, else the
-        share that fits it into the view."""
+    def image_rect(self) -> QRectF:
+        """Where the view is drawn: the largest rect of its aspect that fits,
+        centred."""
         if self._image is None:
-            return 1.0
-        fit = min(self.width() / self._image.width(),
-                  self.height() / max(self._image.height(), 1))
-        return float(math.floor(fit)) if fit >= 1.0 else fit
+            return QRectF()
+        iw, ih = self._image.width(), self._image.height()
+        s = min(self.width() / iw, self.height() / max(ih, 1))
+        w, h = iw * s, ih * s
+        return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -289,20 +335,29 @@ class ZoomView(QWidget):
             p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap,
                        self._caption)
             return
-        z = self.zoom_factor()
-        w, h = int(self._image.width() * z), int(self._image.height() * z)
-        mode = Qt.FastTransformation if z >= 1.0 else Qt.SmoothTransformation
-        scaled = self._image.scaled(w, h, Qt.KeepAspectRatio, mode)
-        x, y = (self.width() - w) // 2, (self.height() - h) // 2
-        p.drawImage(x, y, scaled)
-        label = (f"{self._name} at {z:.0f}:1" if z >= 1.0
-                 else f"{self._name} at 1:{1 / z:.1f}")
+        target = self.image_rect()
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(target, self._image)
         p.setPen(QColor("#dcdcdc"))
-        p.drawText(8, 18, label)
+        p.drawText(QPointF(target.x() + 8, target.y() + 18), self._name)
+        if self._label:
+            p.drawText(QPointF(target.x() + 8, target.bottom() - 8),
+                       self._label)
+        if self._box is None:
+            return
+        k = target.width() / self._image.width()
+        x0, y0, x1, y1 = self._box
+        pen = QPen(QColor(self._colour), 2)
+        if not self._box_fresh:
+            pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(target.x() + x0 * k, target.y() + y0 * k,
+                          (x1 - x0) * k, (y1 - y0) * k))
 
 
 class FocusWindow(QDialog):
-    """Live focus counters for every camera, and a zoom on the selected one.
+    """Live focus counters for every camera, and the selected one's view.
 
     It owns its ``FocusWorker``: the worker starts with the window and is
     joined in ``done`` before ``closed`` is emitted, so the owner can turn
@@ -315,10 +370,11 @@ class FocusWindow(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Focus")
         self.setMinimumSize(980, 640)
-        # Room for the zoom to show a typical board region at 2:1.
+        # Room for the camera view beside the counters.
         self.resize(1400, 820)
         self.setStyleSheet("background: #141428; color: #dcdcdc;")
         self._names = list(camera_names)
+        self._total = engine.total_markers
         self._selected = None
         self._shut = False
         self._closed_sent = False
@@ -346,8 +402,8 @@ class FocusWindow(QDialog):
         grid_box = QWidget()
         grid_box.setLayout(grid)
         body.addWidget(grid_box, 1)
-        self.zoom = ZoomView()
-        body.addWidget(self.zoom, 1)
+        self.view = CameraView()
+        body.addWidget(self.view, 1)
         root.addLayout(body, 1)
 
         bottom = QHBoxLayout()
@@ -381,7 +437,7 @@ class FocusWindow(QDialog):
         for tile in self.tiles:
             tile.set_selected(tile.index == index)
         self.worker.set_selected(index)
-        self.zoom.clear(f"Waiting for {self._names[index]}…")
+        self.view.clear(f"Waiting for {self._names[index]}…")
 
     def reset_best(self):
         for tile in self.tiles:
@@ -392,8 +448,10 @@ class FocusWindow(QDialog):
         for cam, stats in tick.results.items():
             if 0 <= cam < len(self.tiles):
                 self.tiles[cam].update_stats(stats, now)
-        if tick.crop is not None and tick.crop_cam == self._selected:
-            self.zoom.set_crop(tick.crop, self._names[tick.crop_cam])
+        cam = tick.view_cam
+        if tick.view is not None and cam == self._selected:
+            self.view.set_view(tick.view, tick.view_scale, self._names[cam],
+                               tick.results.get(cam), self._total, now)
         if tick.ticks_per_s > 0:
             per_cam = (tick.ticks_per_s if self._selected is not None
                        else 2 * tick.ticks_per_s / max(len(self.tiles), 1))

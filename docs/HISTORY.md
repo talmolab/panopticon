@@ -1038,7 +1038,23 @@ Dead ends, do not retry:
 
 ---
 
-## 13. Standing dead ends (index)
+## 13. The Focus window (12 October 2026)
+
+- 2026-10-12: The Focus window, added on 10-09 because cam1's soft lens
+  passed the preview and the coverage HUD, showed the selected camera as a
+  crop around its decoded markers, magnified by a whole factor. When few
+  markers decoded, the crop jumped from tick to tick and its magnification
+  changed, and the operator found the flicker unbearable. Now (`40cc679`)
+  the view is the camera's whole frame, scaled to fit, with a box around the
+  decoded markers that stays dashed for a second after a reading with none.
+  While the window is open the main preview stops repainting, to leave the
+  UI thread to the window. The totals are counted from the board object
+  instead of `board_x` and `board_y`, so a board of any size and layout
+  counts its own.
+
+---
+
+## 14. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
