@@ -35,6 +35,8 @@ from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
                                     installed_encoder, invalidate_nvenc_cache,
                                     select_encoder)
 from gui_app.coverage_worker import CoverageWorker
+from gui_app import charuco
+from gui_app.focus_worker import FocusEngine
 from gui_app import rig_setup
 from gui_app import settings
 from gui_app import stim_compiler
@@ -43,6 +45,7 @@ from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S, STOP_WAIT_S,
                                     ExternalTriggerSource,
                                     make_trigger_source)
 from gui_app.widgets.camera_grid import CameraGridWidget
+from gui_app.widgets.focus_window import FocusWindow
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.stimulation_window import StimulationWindow
 
@@ -369,9 +372,11 @@ class MainWindow(QMainWindow):
         self._sidebar.run_calibration_clicked.connect(self._on_run_calibration)
         self._sidebar.snapshot_clicked.connect(self._on_snapshot)
         self._sidebar.stimulation_clicked.connect(self._on_stimulation)
+        self._sidebar.focus_clicked.connect(self._on_focus)
         self._sidebar.profile_changed.connect(self._on_profile_changed)
 
         self._stim_window: StimulationWindow | None = None
+        self._focus_window: FocusWindow | None = None
         # One timer for the life of the window: a QTimer per recording is a
         # child QObject per recording, never deleted.
         self._stim_end_timer = QTimer(self)
@@ -738,6 +743,10 @@ class MainWindow(QMainWindow):
         self._sidebar.reset_toggles(self._toggles_permitted())
 
     def _begin_busy(self, text: str):
+        # Every busy cycle reopens, arms or reconfigures the cameras, or
+        # flashes the board ahead of an acquisition: the Focus window's
+        # full-resolution detection must not run under any of them.
+        self._close_focus_window()
         self._busy = True
         self._display_timer.stop()
         self._sidebar.set_busy(True)
@@ -4881,6 +4890,10 @@ class MainWindow(QMainWindow):
                 "Set board_config in your profile YAML to a valid file in configs/boards/.")
             return
 
+        # The solve's corner detection holds every core; the Focus window's
+        # detection would slow it and take the frames it is measuring from a
+        # host that cannot keep up with the preview.
+        self._close_focus_window()
         self._sidebar.set_status("CALIBRATING...", "#aa88ff")
         self._sidebar.set_toggles_enabled(False)
         # set_toggles_enabled touches only the two toggles, not the Solve button
@@ -5123,6 +5136,73 @@ class MainWindow(QMainWindow):
         self._stim_window.show()
         self._stim_window.raise_()
 
+    def _focus_refusal(self) -> str:
+        """Why the Focus window cannot open now, or "" when it can.
+
+        RULE: it opens only at IDLE, outside a busy cycle and a solve, with
+        cameras open and a board config. REASON: its detection needs the
+        preview's full-resolution frames, a busy cycle is about to reopen or
+        arm those cameras, and a solve already holds every core.
+        """
+        if not self._profile.name:
+            return ("The Focus window reads the board your profile names. "
+                    "Choose your rig's profile first.")
+        if self._state is not State.IDLE or self._busy:
+            return ("The Focus window runs on the live preview. Wait until "
+                    "the acquisition or camera operation has finished.")
+        if self._solve_running():
+            return ("A solve is running and holds every processor core. "
+                    "Open the Focus window once it has finished.")
+        if self._camera_mgr.num_cameras == 0:
+            return "No camera is open."
+        board_cfg = self._profile.board_config
+        if not board_cfg or not Path(board_cfg).exists():
+            return ("The Focus window counts the markers of the board in "
+                    "board_config, and this profile's board config was not "
+                    f"found: {board_cfg or '(not set)'}.")
+        return ""
+
+    def _on_focus(self):
+        """Open the Focus window, or bring it forward when it is open."""
+        if self._focus_window is not None:
+            self._focus_window.show()
+            self._focus_window.raise_()
+            self._focus_window.activateWindow()
+            return
+        reason = self._focus_refusal()
+        if reason:
+            QMessageBox.information(self, "Focus is not available now", reason)
+            return
+        try:
+            engine = FocusEngine(
+                charuco.load_board_config(self._profile.board_config))
+        except Exception as e:
+            QMessageBox.warning(self, "Focus is not available",
+                                f"The board could not be set up: {e}")
+            return
+        self._camera_mgr.set_keep_full(True)
+        self._focus_window = FocusWindow(
+            list(self._camera_names), engine, self._camera_mgr, parent=self)
+        self._focus_window.closed.connect(self._on_focus_closed)
+        self._focus_window.show()
+        print(f"[focus] window opened on {len(self._camera_names)} camera(s)",
+              flush=True)
+
+    def _close_focus_window(self):
+        """Close the Focus window and join its worker, if it is open."""
+        if self._focus_window is not None:
+            self._focus_window.done(0)
+
+    def _on_focus_closed(self):
+        """The Focus window has joined its worker: stop keeping full frames
+        unless the coverage HUD keeps them, and drop the window."""
+        win, self._focus_window = self._focus_window, None
+        if self._coverage_worker is None:
+            self._camera_mgr.set_keep_full(False)
+        if win is not None:
+            win.deleteLater()
+        print("[focus] window closed", flush=True)
+
     def _board_taken_from_test(self) -> bool:
         """True while an acquisition or a firmware flash holds the board.
 
@@ -5282,6 +5362,7 @@ class MainWindow(QMainWindow):
         self._stop_external_watch()
         # No bound at close: the loop exits after at most one detection pass,
         # and there is no later moment at which a straggler could be joined.
+        self._close_focus_window()
         self._stop_coverage_hud(timeout_ms=0)
         self._stand_down_board_for_quit()
 

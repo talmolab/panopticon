@@ -37,6 +37,8 @@ checked by hand that no other one holds the hardware.
   - `test_ring_release.py` after anything that holds the NV12 ring
     (`grab_thread.py`, `sync_encode.py`, `camera_manager.py`, `gui_app/mp/`);
   - `test_board_coverage.py` after `board_detector.py`;
+  - `test_focus.py` after `focus_worker.py`, `widgets/focus_window.py` or
+    `charuco.py`;
   - `test_calibrate.py` and `test_calibrate_degenerate.py` after
     `1_calibrate.py`;
   - `test_backend_contract.py` after `backends/__init__.py` or any backend,
@@ -489,6 +491,19 @@ until someone analyses it.
   project environment so an offline rig never resolves a second one.
 - The HUD counts ArUco markers, not interpolated ChArUco corners. Counting
   corners is stricter than calibration needs and starves oblique cameras.
+- The Focus window (`widgets/focus_window.py`, `focus_worker.py`) opens only
+  at IDLE, outside a busy cycle and a solve (`_focus_refusal`). `_begin_busy`,
+  Solve and quitting close it, and it joins its worker before it emits
+  `closed`. A busy cycle reopens or arms the cameras, and a solve holds every
+  core. It turns `set_keep_full` on while open, and off at close unless the
+  coverage HUD runs. It reads full frames only, never the decimated preview,
+  which hides the blur it measures.
+- The Focus window's counter is markers decoded. Blur stops the code cells
+  decoding before it widens an edge, so the count separates a soft lens from a
+  sharp one where an edge width does not. Sharpness and marker confidence
+  rank one camera's own readings with the board still. Both change with the
+  board's distance and angle, and a camera keeps its best sharpness only at
+  its best marker count, because the score is taken over the decoded markers.
 - `READY` needs `min_per_cam_shared` co-detection ticks per camera, one
   connected coverage graph (`min_edge` co-detections make a pair an edge), and
   `MIN_GRID_CELLS` of the 2 x 2 view grid per camera. One connected component is

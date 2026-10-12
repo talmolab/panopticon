@@ -133,7 +133,7 @@ The **Acquisition** group has the controls you'll use most.
 **Calibrate** and **Record** are toggles. Click one to start: its knob slides to the
 right and the track fills with colour, blue for **Calibrate** and red for **Record**.
 Click it again to stop. While one toggle is on, the other is greyed out. **Solve**,
-**Snapshot** and **Stimulation** are ordinary buttons.
+**Snapshot**, **Stimulation** and **Focus** are ordinary buttons.
 
 A typical session goes **Calibrate**, **Solve**, **Record**.
 
@@ -193,7 +193,9 @@ don't capture. When it's done, the status bar shows the result, and
 ![The status bar after a snapshot](images/snapshot_saved.png)
 
 Snapshots are great for judging focus, which the shrunken preview hides. They're taken
-from the full frame, so the **Display** sliders don't change them. If a camera sent no
+from the full frame, so the **Display** sliders don't change them. To focus a lens,
+the [Focus window](#the-focus-window) does better: it counts, live, how much of the
+board each camera can read. If a camera sent no
 frame, the message ends with `no frame from:` and the camera's name.
 
 #### 11. Stimulation
@@ -204,6 +206,8 @@ controls are busy.
 
 The editor needs a trigger board to play on, so before you've chosen a profile, or on
 a profile with `trigger_source: external`, the button just shows a dialog saying why.
+
+**Focus**, just below it, opens the [Focus window](#the-focus-window).
 
 #### 12. Coverage display
 
@@ -370,6 +374,55 @@ Why one group, and not every pair? Cameras that face each other never see the fr
 of the board at the same time, so they can only join up through their neighbours. The
 quarters and the view tests stop you from waving the board in one spot, which gives
 lens models that fit the middle of the image and go wrong towards the edges.
+
+---
+
+## The Focus window
+
+A lens that's a little out of focus looks fine in the preview, because the panes are
+shrunk. The board detector notices, though. Blur makes the small black and white
+squares inside each marker run together, and a camera that can't read them gives the
+solve few corners. The **Focus** window shows what each camera reads of the board,
+live, so you can turn the focus ring until it reads the most.
+
+![The Focus window](images/focus_window.png)
+
+Every camera gets a tile:
+
+- The big number is how many of the board's markers the camera decodes, out of all of
+  them (32 on an 8 × 8 board). It's green from three quarters up, amber from two
+  fifths, and red below that.
+- Under it are the ChArUco corners the camera finds. The solve uses those.
+- **best** is the highest count since the window opened or you pressed **Reset best**.
+- The line along the bottom is the last 30 seconds of counts, so you can see which way
+  the ring is taking it.
+- Once 4 or more markers decode, **sharpness** and **confidence** appear. They're for
+  the last bit of turning, when the count has stopped moving.
+
+Click a tile to work on that camera. Panopticon reads it several times a second and
+the other cameras in turn, and shows its view of the board on the right, at full
+resolution or a whole multiple of it.
+
+To focus a camera:
+
+1. Lay the board still near the middle of the arena, where the animal will be, and
+   click **Focus**.
+2. Click the camera's tile.
+3. Loosen the focus ring's lock screw and turn the ring slowly. Watch the big number
+   and the line.
+4. Stop where the count is highest. If every marker decodes, turn gently either way
+   for the highest **sharpness**, then come back to it.
+5. Tighten the lock screw and check that the count hasn't dropped.
+
+> [!TIP]
+> Compare a camera's sharpness only with itself, with the board where it was. It
+> changes with the board's distance and angle, so a camera that sees the board small
+> can score higher than one that sees it large. The window keeps a camera's best
+> sharpness only at its best count for the same reason.
+
+The window works on the live preview, so **Calibrate**, **Record**, **Solve** and
+anything that reopens the cameras close it. While one of those is running, **Focus**
+shows a dialog saying why it can't open.
 
 ---
 

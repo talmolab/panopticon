@@ -16,6 +16,26 @@ from gui_app import session_config, settings
 from gui_app.session_config import RigProfile, ProfileError, REPO_ROOT
 
 
+class NoWheelComboBox(QComboBox):
+    """A combo box that the mouse wheel passes over.
+
+    RULE: only a click and a choice from the list change the selection, never
+    the wheel. REASON: the profile box sits in the sidebar the operator
+    scrolls, and a wheel turned over it steps to the next profile, which
+    closes every camera and opens another rig's. The ignored event goes on to
+    the parent, so the scroll still scrolls.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Without WheelFocus a passing wheel does not take the keyboard focus
+        # either, so the arrow keys cannot step it afterwards by surprise.
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class NotesEdit(QPlainTextEdit):
     """A multi-line session field with the QLineEdit calls the sidebar uses:
     text(), setText() and a textEdited signal that fires for the operator's
@@ -61,6 +81,7 @@ class SidebarWidget(QWidget):
     run_calibration_clicked = pyqtSignal()
     snapshot_clicked = pyqtSignal()
     stimulation_clicked = pyqtSignal()
+    focus_clicked = pyqtSignal()
     profile_changed = pyqtSignal(object)
 
     #: The sidebar's width at first launch and its narrowest; the divider on
@@ -90,7 +111,7 @@ class SidebarWidget(QWidget):
         layout.addWidget(title)
 
         # Profile selector
-        self._profile_combo = QComboBox()
+        self._profile_combo = NoWheelComboBox()
         self._profile_combo.setStyleSheet(
             "QComboBox { background: #1a1a2e; color: #dcdcdc; border: 1px solid #444; "
             "border-radius: 3px; padding: 4px 6px; font-size: 11px; }"
@@ -320,6 +341,19 @@ class SidebarWidget(QWidget):
         )
         self._stim_btn.clicked.connect(self.stimulation_clicked.emit)
         layout.addWidget(self._stim_btn)
+
+        self._focus_btn = QPushButton("Focus")
+        self._focus_btn.setToolTip(
+            "Count the ChArUco markers each camera reads, live, while you "
+            "focus its lens by hand")
+        self._focus_btn.setStyleSheet(
+            "QPushButton { background: #2a2a4a; color: #88aadd; border: 1px solid #444; "
+            "border-radius: 3px; padding: 5px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #333366; border-color: #5078c8; }"
+            "QPushButton:disabled { color: #555; border-color: #333; }"
+        )
+        self._focus_btn.clicked.connect(self.focus_clicked.emit)
+        layout.addWidget(self._focus_btn)
 
         # Live ChArUco coverage graph, shown only during calibration. It takes
         # the sidebar's spare height (stretch 1 against the bottom spacer's 0),
@@ -828,9 +862,12 @@ class SidebarWidget(QWidget):
         must leave the sibling disabled, and a profile switch during a solve
         must leave Solve disabled. The Stimulation button is deliberately
         left alone so the editor can still be opened, and the status label
-        stays legible so the user sees progress."""
+        stays legible so the user sees progress. Focus goes dark with
+        Snapshot: a busy cycle closes the Focus window, because its cameras
+        are about to be reopened, armed or reconfigured."""
         self._busy = busy
-        for w in (self._profile_combo, self._dir_button, self._snapshot_btn):
+        for w in (self._profile_combo, self._dir_button, self._snapshot_btn,
+                  self._focus_btn):
             w.setEnabled(not busy)
         for f in self._fields.values():
             f.setEnabled(not busy)

@@ -188,6 +188,14 @@ Before we can reconstruct anything in 3D, Panopticon needs to know where each ca
 
 Make sure the arena is empty and you have the board handy.
 
+### Check the focus
+
+A soft lens hides in the preview and shows up later as a camera the solve leaves out.
+Before the first calibration on a rig, or after anyone has touched a lens, lay the
+board in the middle of the arena and open **Focus**. Every camera that sees the board
+should decode most of its markers. If one reads far fewer than its neighbours, focus it
+as [The Focus window](OVERVIEW.md#the-focus-window) describes.
+
 ### Start the calibration
 
 1. *(Optional)* If you want LUC3D's floor grid to sit on the arena floor, tick **Flat final second** under **Calibrate**. You'll end the take by laying the board down (more on that below).
@@ -288,6 +296,8 @@ Nice! The solve saved `calibration.toml` in `calibration/` and copied it into th
 A camera is left out of the solve when it has no calibration video that can be read, or fewer than 5 frames with the board in them. It's also left out when its lens fit fails (the fit needs 20 or more frames with 6 or more corners each), or when it isn't linked to the biggest group of cameras that saw the board together.
 
 The solve still succeeds without them, and a **Recalibration recommended** dialog says `PARTIAL: solved N of M cameras.` and names each missing camera with its reason. A camera that's left out adds nothing to 3D, so calibrate again, holding the board where that camera and a neighbour can both see it.
+
+If the same camera keeps failing its lens fit, check its focus before you calibrate again (see [Check the focus](#check-the-focus)). A soft lens can still count towards **READY**, which needs 5 markers in a view. The solve needs 6 corners from a view, and the few scattered markers a soft lens decodes rarely give them.
 
 ### Reading the pairwise calibration plot
 
