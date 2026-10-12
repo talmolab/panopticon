@@ -1637,13 +1637,17 @@ Stage by stage:
   The other cameras' poses of the board measure how far their extrinsics
   disagree, which is warned about past 2 degrees or 10 mm. A moving board, no
   view or any error skips the step with a warning, and never fails the solve.
-- Quality. Each pair's stereo RMS is graded good below 1.5 px, worth checking
-  from 1.5 to 3 px, and poor from 3 px, which is warned about; the bar chart
-  in `reprojection_error_histogram.png` uses the same colours. A pair with no
-  bar never shared enough views, which is usually worse than a tall bar. The
-  figures are each pair's own stereo residual, measured before the joint
-  refinement. The refinement's own figures score every corner against the
-  final poses (`refinement`, below).
+- Quality. Each pair's error under the finished calibration is graded good
+  below 1.5 px, worth checking from 1.5 to 3 px, and poor from 3 px, which is
+  warned about; the bar chart in `reprojection_error_histogram.png` uses the
+  same colours. A pair with no bar never shared enough views, which is
+  usually worse than a tall bar. The figure (`final_pair_rms`) fits the board
+  to each view the pair shares with the calibration's lenses and poses held,
+  so a camera off in scale or along the pair's baseline shows. The pair's own
+  stereo fit, which builds the tree, stays in the report as `stereo_rms`. An
+  own fit that failed while the calibration fits the pair is a note in the
+  log, not a warning. The refinement's own figures score every corner
+  against the final poses (`refinement`, below).
 - Output. `calibration.toml` in aniposelib's layout, one section per camera
   with `name`, `size`, `matrix`, `distortions`, `rotation` (a Rodrigues vector)
   and `translation`, and a `[metadata]` block holding every quality figure. The
@@ -1651,12 +1655,14 @@ Stage by stage:
   aniposelib sorts them as strings; match cameras by each section's `name`.
   `calibration_report.json` holds the same figures for the window. It lists the
   cameras solved, and those dropped with the reason (`partial` is true when any
-  were). It holds the tree, each pair's RMS, frames, `grade` and
+  were). It holds the tree with its links' stereo RMS, each pair's RMS under
+  the calibration, its own fit's `stereo_rms`, its frames, `grade` and
   `codetections`, the bands (`rms_bands_px`) and the median pair RMS. It
   records the pairing rule and the serial each camera name had
   (`camera_serials`). `poorly_placed` names every camera the solve cannot
-  vouch for: one with a suspect lens fit, and the smaller side of each poor
-  tree edge, whose position runs through that edge. `floor` records whether
+  vouch for: one with a suspect lens fit, and the smaller side of each tree
+  edge that is poor under the calibration, whose position runs through that
+  edge. `floor` records whether
   the floor step was asked for and which cameras set it, or why it was
   skipped. `refinement` records whether the joint refinement ran and was
   applied (or why not), the views and corners it fitted, the median and
@@ -1670,10 +1676,11 @@ refinement an error in one link moves every camera beyond it, and error grows
 with tree depth. The tree therefore weighs each pair's RMS by its views. The
 joint refinement then fits every camera to every shared corner at once, which
 takes such an error out of the poses, so read `refinement`'s medians for the
-calibration's quality. The pairwise chart and `poorly_placed` still describe
-the chained stage: a pair seen on few frames there means the take was thin for
-that pair, and the refinement cannot place a camera that shares no view with
-the others.
+calibration's quality. The pairwise chart, the pair warnings and
+`poorly_placed` describe the finished calibration too; only the tree's links
+keep the stereo fits the chain was built from. A pair seen on few frames still
+means the take was thin for that pair, and the refinement cannot place a camera
+that shares no view with the others.
 
 ### Camera order
 

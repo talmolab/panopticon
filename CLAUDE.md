@@ -543,8 +543,16 @@ until someone analyses it.
   determine a homography (`_homography_ok`). A view whose corners lie on one
   board row makes calibrateCamera assert and would end the solve. An OpenCV
   error while fitting one camera fails that camera only.
-- Pair RMS below `RMS_GOOD_PX` (1.5 px) is good, and from `RMS_POOR_PX` (3.0 px)
-  up it is poor and warned about.
+- A pair is graded by its error under the calibration being written
+  (`final_pair_rms`: the board fitted to each shared view with the lenses and
+  poses held). Below `RMS_GOOD_PX` (1.5 px) it is good, and from
+  `RMS_POOR_PX` (3.0 px) up it is poor and warned about. The plot, the pair
+  warnings and `poorly_placed` read it. The pair's own stereo fit builds the
+  tree and stays in the report as `stereo_rms`, and one that failed while the
+  calibration fits the pair is a log note only: graded by its fit, such a pair
+  read as 265 px in a calibration that fits it at 0.47 px. A two-view
+  triangulation cannot grade a pair: a camera moved along the pair's baseline
+  leaves the epipolar geometry, and so that error, unchanged.
 - A camera with more than 60 views has them judged against a reference fit.
   The final lens fit takes `INTRINSICS_FINAL_FRAMES` views spread through the
   take from those the reference reprojects within `INTRINSICS_OUTLIER_FACTOR`
@@ -582,14 +590,16 @@ until someone analyses it.
   corners beyond any cut-off. A round that fits none of them holds that camera
   where the chain put it. The other cameras still lower the median, so the
   refinement is accepted with that camera wrong.
-- Judge a solve by `refinement`'s medians, not its pair RMS. The pair RMS and
-  `poorly_placed` describe the chained stage. There, a small change in one lens
+- Judge a solve by `refinement`'s medians and the pair errors under the
+  calibration, not the stereo fits. The tree's links and each pair's
+  `stereo_rms` describe the chained stage. There, a small change in one lens
   fit can move the tree to another pair and nearly double the chained error,
-  while every pair RMS stays the same.
+  while every stereo fit stays the same.
 - The report names every camera it cannot vouch for (`poorly_placed`): a lens
   fit above `INTRINSICS_RMS_WARN_PX` or with a focal length outside
-  `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each poor
-  tree edge. The status bar shows them as `unreliable:`.
+  `INTRINSICS_FX_WARN_FACTOR` of the median, and the smaller side of each tree
+  edge that is poor under the calibration. The status bar shows them as
+  `unreliable:`.
 - After Solve, only a finding that recommends recalibrating raises a dialog
   (`calibration_worker.recalibration_reasons`): a dropped camera, an
   unreliable one, or a serial mismatch (`serial_mismatch` in the report).
