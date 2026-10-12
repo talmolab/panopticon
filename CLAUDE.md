@@ -508,7 +508,14 @@ until someone analyses it.
   `closed`. A busy cycle reopens or arms the cameras, and a solve holds every
   core. It turns `set_keep_full` on while open, and off at close unless the
   coverage HUD runs. It reads full frames only, never the decimated preview,
-  which hides the blur it measures.
+  which hides the blur it measures. While it is open the main window's panes
+  stop repainting (`_refresh_displays`) under a pause notice: the window shows
+  the selected camera itself.
+- The Focus window shows the selected camera's whole view, shrunk in the
+  worker (`view_of`, `VIEW_MAX_WIDTH`), with the decoded markers' bounding
+  box. Its framing never follows the detections: a crop that did jumped and
+  flickered whenever few markers decoded. Its totals come from the board
+  object (`FocusEngine`), so any board the profile names counts its own.
 - The Focus window's counter is markers decoded. Blur stops the code cells
   decoding before it widens an edge, so the count separates a soft lens from a
   sharp one where an edge width does not. Sharpness and marker confidence

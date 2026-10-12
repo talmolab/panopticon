@@ -53,12 +53,10 @@ MIN_SHARP_MARKERS = 4
 #: Contrast (95th minus 5th percentile, grey levels) under which the hull is
 #: too flat to score: a washed-out view would divide by almost nothing.
 MIN_CONTRAST = 20.0
-#: Margin around the decoded markers in the zoom crop, as a share of their
-#: extent, and its floor in pixels.
-CROP_MARGIN = 0.2
-CROP_MARGIN_MIN_PX = 48
-#: Size of the centre crop shown while the selected camera decodes nothing.
-CENTRE_CROP = (800, 600)
+#: Widest view of the selected camera the worker sends the window. A smaller
+#: frame is sent as it is. The shrink runs here, off the UI thread, so the
+#: window only has to draw it.
+VIEW_MAX_WIDTH = 960
 
 
 @dataclass(frozen=True)
@@ -81,12 +79,27 @@ class FocusStats:
 @dataclass(frozen=True)
 class FocusTick:
     """One tick's results: ``results`` maps camera index to its FocusStats, or
-    None for a camera with no full frame yet. ``crop`` is the selected
-    camera's zoom crop (a grey uint8 array) or None, ``crop_cam`` its index."""
+    None for a camera with no full frame yet. ``view`` is the frame the
+    selected camera's stats were measured on, shrunk to ``VIEW_MAX_WIDTH``
+    (a grey uint8 array, the window's to keep), or None; ``view_cam`` is its
+    camera and ``view_scale`` its size over the full frame's, which maps a
+    FocusStats ``roi`` onto it."""
     results: dict
-    crop: object
-    crop_cam: int | None
+    view: object
+    view_cam: int | None
+    view_scale: float
     ticks_per_s: float
+
+
+def view_of(frame, cv2):
+    """``(view, scale)``: ``frame`` shrunk to ``VIEW_MAX_WIDTH`` by area
+    averaging, or a copy of it when it is that narrow already."""
+    h, w = frame.shape[:2]
+    if w <= VIEW_MAX_WIDTH:
+        return frame.copy(), 1.0
+    scale = VIEW_MAX_WIDTH / w
+    size = (VIEW_MAX_WIDTH, max(1, int(round(h * scale))))
+    return cv2.resize(frame, size, interpolation=cv2.INTER_AREA), scale
 
 
 def board_sharpness(gray, points, cv2) -> float | None:
@@ -184,23 +197,6 @@ def focus_stats(gray, detect, board, cv2, board_ids=None) -> FocusStats:
     return FocusStats(n, n_corners, confidence, sharpness, roi)
 
 
-def zoom_crop(frame, roi):
-    """The part of ``frame`` the zoom view shows: the decoded markers with a
-    margin, or the centre of the frame when ``roi`` is None. A copy, so the
-    UI thread never holds a view into the grab thread's frame."""
-    h, w = frame.shape[:2]
-    if roi is None:
-        cw, ch = min(CENTRE_CROP[0], w), min(CENTRE_CROP[1], h)
-        x0, y0 = (w - cw) // 2, (h - ch) // 2
-        return frame[y0:y0 + ch, x0:x0 + cw].copy()
-    x0, y0, x1, y1 = roi
-    mx = max(CROP_MARGIN_MIN_PX, int(CROP_MARGIN * (x1 - x0)))
-    my = max(CROP_MARGIN_MIN_PX, int(CROP_MARGIN * (y1 - y0)))
-    x0, y0 = max(x0 - mx, 0), max(y0 - my, 0)
-    x1, y1 = min(x1 + mx, w), min(y1 + my, h)
-    return frame[y0:y1, x0:x1].copy()
-
-
 def cameras_for_tick(n_cams: int, selected, cursor: int):
     """``(cameras, next_cursor)`` for one tick.
 
@@ -238,11 +234,22 @@ class FocusEngine:
                else self._board.ids)
         #: The marker IDs the board prints.
         self.board_ids = frozenset(int(i) for i in np.asarray(ids).ravel())
-        bx, by = int(board_cfg["board_x"]), int(board_cfg["board_y"])
-        #: Markers on the board: one in every other square.
-        self.total_markers = bx * by // 2
-        #: Inner corners, which the ChArUco corners are.
-        self.total_corners = (bx - 1) * (by - 1)
+        #: Markers and inner corners (the ChArUco corners) of the board the
+        #: profile's board config describes, counted from the board object
+        #: the solve also builds, so any board size and layout gives its own
+        #: totals.
+        self.total_markers = len(self.board_ids)
+        self.total_corners = int(len(self._chessboard_corners()))
+
+    def _chessboard_corners(self):
+        board = self._board
+        if hasattr(board, "getChessboardCorners"):
+            return np.asarray(board.getChessboardCorners()).reshape(-1, 3)
+        return np.asarray(board.chessboardCorners).reshape(-1, 3)
+
+    @property
+    def cv2(self):
+        return self._cv2
 
     def stats(self, gray) -> FocusStats:
         return focus_stats(gray, self._detect, self._board, self._cv2,
@@ -289,18 +296,17 @@ class FocusWorker(QThread):
         frames = self._camera_mgr.latest_full_frames
         selected = self._selected
         cams, self._cursor = cameras_for_tick(self._n, selected, self._cursor)
-        results, crop = {}, None
+        results, view, scale = {}, None, 1.0
         for cam in cams:
             frame = frames[cam] if cam < len(frames) else None
             if frame is None:
                 results[cam] = None
                 continue
-            stats = self._engine.stats(frame)
-            results[cam] = stats
+            results[cam] = self._engine.stats(frame)
             if cam == selected:
-                crop = zoom_crop(frame, stats.roi)
-        return FocusTick(results, crop, selected if crop is not None else None,
-                         rate)
+                view, scale = view_of(frame, self._engine.cv2)
+        return FocusTick(results, view, selected if view is not None else None,
+                         scale, rate)
 
     def run(self):
         prev_threads = None

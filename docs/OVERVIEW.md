@@ -391,7 +391,8 @@ live, so you can turn the focus ring until it reads the most.
 Every camera gets a tile:
 
 - The big number is how many of the board's markers the camera decodes, out of all of
-  them (32 on an 8 × 8 board). It's green from three quarters up, amber from two
+  them (32 on an 8 × 8 board). The total comes from the board your profile names, so
+  another board shows its own. It's green from three quarters up, amber from two
   fifths, and red below that.
 - Under it are the ChArUco corners the camera finds. The solve uses those.
 - **best** is the highest count since the window opened or you pressed **Reset best**.
@@ -401,8 +402,13 @@ Every camera gets a tile:
   the last bit of turning, when the count has stopped moving.
 
 Click a tile to work on that camera. Panopticon reads it several times a second and
-the other cameras in turn, and shows its view of the board on the right, at full
-resolution or a whole multiple of it.
+the other cameras in turn. Its whole view shows on the right, with a box around the
+markers it decodes, in the colour of the count. When a reading decodes none, the last
+box stays for a second, dashed.
+
+While the window is open, the main window's preview pauses: every pane keeps its last
+picture and reads **Preview paused while the Focus window is open**. The cameras keep
+running, and the preview comes back when you close the window.
 
 To focus a camera:
 
