@@ -21,7 +21,7 @@ Outputs, all into the calibration directory:
   calibration.toml          aniposelib-compatible cameras plus a [metadata]
                             block with every quality figure of the solve
   calibration_report.json   the same figures as JSON for the GUI
-  reprojection_error_histogram.png   pairwise stereo RMS bar chart
+  reprojection_error_histogram.png   each pair's error under the calibration
 
 Cameras are taken in numeric order (cam2 before cam10). The toml numbers its
 camera sections in that order, zero-padded to one width (``[cam_00]`` from 11
@@ -1187,6 +1187,16 @@ REFINE_MAX_VIEWS = 1500
 _CAM_PARAMS = 11
 
 
+def _camera_row(intrinsic, extrinsic):
+    """One camera's ``_CAM_PARAMS`` row: f, cx, cy, k1, k2, rvec, tvec."""
+    K, dist = intrinsic
+    d = np.asarray(dist, np.float64).ravel()
+    rvec, tvec = extrinsic
+    return np.r_[(K[0, 0] + K[1, 1]) / 2, K[0, 2], K[1, 2], d[0], d[1],
+                 np.asarray(rvec, np.float64).ravel(),
+                 np.asarray(tvec, np.float64).ravel()]
+
+
 def _rotations(rvecs):
     """Rodrigues vectors ``(N, 3)`` as rotation matrices ``(N, 3, 3)``."""
     th = np.linalg.norm(rvecs, axis=1)[:, None, None]
@@ -1431,14 +1441,8 @@ def refine_jointly(active, ref, intrinsics, extrinsics, all_dets, corner_obj):
     if obs is None:
         return intrinsics, extrinsics, {
             "applied": False, "reason": "no view was seen by two cameras"}
-    cams = np.zeros((len(active), _CAM_PARAMS))
-    for i, cam in enumerate(active):
-        K, dist = intrinsics[cam]
-        d = np.asarray(dist, np.float64).ravel()
-        rvec, tvec = extrinsics[cam]
-        cams[i] = np.r_[(K[0, 0] + K[1, 1]) / 2, K[0, 2], K[1, 2], d[0], d[1],
-                        np.asarray(rvec, np.float64).ravel(),
-                        np.asarray(tvec, np.float64).ravel()]
+    cams = np.array([_camera_row(intrinsics[cam], extrinsics[cam])
+                     for cam in active])
     views = _initial_views(cams, obs, len(keys))
 
     def error(c, v):
@@ -1792,21 +1796,83 @@ def rms_grade(rms) -> str:
 def pair_quality_warnings(pairwise) -> list[str]:
     """The warning text for each pair that is poor or under-observed.
 
-    A poor pair warns whatever its frame count; a pair below
-    MIN_TREE_FRAMES shared frames warns that it cannot be a full-strength
-    tree edge.
+    ``pairwise`` holds each pair's error under the calibration being
+    written (``graded_pairs``). A poor pair warns whatever its frame count;
+    a pair below MIN_TREE_FRAMES shared frames warns that it cannot be a
+    full-strength tree edge.
     """
     out = []
     for (ca, cb), (_, _, rms, n) in sorted(pairwise.items(), key=_pair_order):
         if rms_grade(rms) == "poor":
-            out.append("{}-{}: stereo RMS {:.1f} px is poor ({} px or more); "
-                       "check that the board config matches the printed "
-                       "board, and record the board across more of both "
-                       "cameras' views".format(ca, cb, rms, RMS_POOR_PX))
+            out.append("{}-{}: {:.1f} px under the calibration is poor ({} px "
+                       "or more); check that the board config matches the "
+                       "printed board, and record the board across more of "
+                       "both cameras' views".format(ca, cb, rms, RMS_POOR_PX))
         elif n < MIN_TREE_FRAMES:
             out.append("{}-{}: only {} shared frames ({}+ needed for a "
                        "full-strength tree edge)".format(
                            ca, cb, n, MIN_TREE_FRAMES))
+    return out
+
+
+def final_pair_rms(pairs, all_dets, intrinsics, extrinsics, corner_obj):
+    """Each pair's error under the calibration being written, as
+    pair -> ``(rms px, views)``.
+
+    On every view both cameras saw (``refinement_observations`` for the
+    two), the board's pose is fitted to both cameras' corners with the lenses
+    and poses about to be written held, as the refinement scores the chained
+    solve. The figure is the RMS of the corners' distances from where that
+    fitted board puts them: the measure a stereo fit reports, against the
+    calibration instead of the pair's own fit. The board's known shape makes
+    a pose that is off in scale or along the pair's baseline show, which a
+    two-view triangulation cannot. A pair is left out when either camera has
+    no pose or they share no view.
+
+    RULE: the plot, the pair warnings and ``poorly_placed`` read these
+    figures, not the pairs' own stereo fits. REASON: a pair's own fit can
+    fail, through a pose flip or a poor start, while the tree goes around
+    the pair and the refinement fits every camera. Graded by that fit, the
+    pair read as a 265 px calibration in a calibration.toml that fits it to
+    a fraction of a pixel.
+    """
+    held = np.zeros((2, _CAM_PARAMS), bool)
+    out = {}
+    for a, b in pairs:
+        if a not in extrinsics or b not in extrinsics:
+            continue
+        obs, keys = refinement_observations([a, b], all_dets, corner_obj)
+        if obs is None:
+            continue
+        cams = np.array([_camera_row(intrinsics[c], extrinsics[c])
+                         for c in (a, b)])
+        views = _initial_views(cams, obs, len(keys))
+        _, views, _ = _lm_schur(cams, views, obs, np.arange(len(obs["uv"])),
+                                REFINE_ROUNDS[0][1], held)
+        e = np.linalg.norm(_project(cams, views, obs) - obs["uv"], axis=1)
+        out[(a, b)] = (float(np.sqrt(np.mean(e * e))), len(keys))
+    return out
+
+
+def graded_pairs(pairwise, final):
+    """``pairwise`` with each pair's error under the calibration
+    (``final_pair_rms``) in place of its own stereo fit's RMS, where there
+    is one."""
+    return {pair: (R, T, final[pair][0] if pair in final else rms, n)
+            for pair, (R, T, rms, n) in pairwise.items()}
+
+
+def failed_fit_notes(pairwise, graded) -> list[str]:
+    """One line for each pair whose own stereo fit was poor while the
+    calibration fits it: information for the log, not a warning."""
+    out = []
+    for pair, (_, _, own, _n) in sorted(pairwise.items(), key=_pair_order):
+        fit = graded[pair][2]
+        if rms_grade(own) == "poor" and rms_grade(fit) != "poor":
+            out.append("{}-{}: its own stereo fit failed ({:.1f} px), so the "
+                       "solve placed both cameras through other pairs; the "
+                       "calibration fits this pair at {:.2f} px".format(
+                           *pair, own, fit))
     return out
 
 
@@ -1890,7 +1956,8 @@ def median_pair_rms(pairwise, cams):
 # ---------------------------------------------------------------------------
 
 def save_reprojection_histogram(path, pair_rms):
-    """Save a pairwise stereo RMS bar chart as PNG, coloured by ``rms_grade``."""
+    """Save each pair's error under the calibration (``final_pair_rms``) as a
+    bar chart PNG, coloured by ``rms_grade``."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -1910,7 +1977,7 @@ def save_reprojection_histogram(path, pair_rms):
     ax.bar(range(len(labels)), values, color=colors)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Stereo RMS (px)")
+    ax.set_ylabel("Reprojection error (px)")
     ax.set_title("Pairwise calibration quality")
     ax.axhline(RMS_GOOD_PX, color="gray", linestyle="--", alpha=0.5,
                label="good (< {:g} px)".format(RMS_GOOD_PX))
@@ -1937,7 +2004,7 @@ def save_reprojection_histogram(path, pair_rms):
 def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
                  components, dropped, hints_used, skip, warnings,
                  pairing=None, codetections=None, camera_serials=None,
-                 placed=None):
+                 placed=None, stereo=None):
     """Assemble every quality figure of a solve into one plain dict.
 
     Written verbatim as ``calibration_report.json`` and rendered into the
@@ -1955,15 +2022,24 @@ def build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
     ``poorly_placed``: camera -> ``{"link", "rms"}`` for every camera whose
     position runs through a poor tree link, or whose lens fit is suspect
     (``"link": "lens fit"``).
+
+    ``stereo``, the pairs' own stereo fits in ``pairwise``'s shape, is given
+    when ``pairwise`` holds their errors under the calibration
+    (``graded_pairs``). Each pair row then keeps its own fit's RMS as
+    ``stereo_rms``, and the tree rows report the fits the chain was built
+    from.
     """
+    fits = stereo if stereo is not None else pairwise
     tree_rows = []
     for a, b in tree:
-        entry = pair_entry(pairwise, a, b)
+        entry = pair_entry(fits, a, b)
         tree_rows.append({"from": a, "to": b,
                           "rms": float(entry[2]), "frames": int(entry[3])})
     pairs = {}
     for (a, b), (_, _, rms, n) in sorted(pairwise.items(), key=_pair_order):
         row = {"rms": float(rms), "frames": int(n), "grade": rms_grade(rms)}
+        if stereo is not None and (a, b) in stereo:
+            row["stereo_rms"] = float(stereo[(a, b)][2])
         if codetections and (a, b) in codetections:
             row["codetections"] = int(codetections[(a, b)])
         pairs["{}-{}".format(a, b)] = row
@@ -2359,25 +2435,33 @@ def main():
         floor.update(found)
 
     # --- Quality summary + histogram ---
-    print("\nPairwise quality (good < {:g} px, poor from {:g} px):".format(
-        RMS_GOOD_PX, RMS_POOR_PX))
+    # Every pair figure from here on is its error under the calibration
+    # about to be written (final_pair_rms); its own stereo fit is kept for
+    # the log and the report's stereo_rms.
+    graded = graded_pairs(pairwise, final_pair_rms(
+        list(pairwise), all_dets, intrinsics, extrinsics, corner_obj))
+    print("\nPairwise quality under the calibration (good < {:g} px, poor "
+          "from {:g} px):".format(RMS_GOOD_PX, RMS_POOR_PX))
     pair_rms = {}
-    for (ca, cb), (_, _, rms, n) in sorted(pairwise.items(), key=_pair_order):
+    for (ca, cb), (_, _, rms, n) in sorted(graded.items(), key=_pair_order):
         pair_rms["{}-{}".format(ca, cb)] = rms
-        print("  {}-{}: RMS={:.2f}px  {}  ({} frames)".format(
-            ca, cb, rms, rms_grade(rms), n))
-    median = median_pair_rms(pairwise, active)
+        print("  {}-{}: {:.2f}px  {}  (own stereo fit {:.2f}px on {} "
+              "frames)".format(ca, cb, rms, rms_grade(rms),
+                               pairwise[(ca, cb)][2], n))
+    median = median_pair_rms(graded, active)
     if median is not None:
-        print("  Median pair RMS over the solved cameras: {:.2f}px  {}".format(
-            median, rms_grade(median)))
-    for w in pair_quality_warnings(pairwise):
+        print("  Median pair error over the solved cameras: {:.2f}px  "
+              "{}".format(median, rms_grade(median)))
+    for line in failed_fit_notes(pairwise, graded):
+        print("  Note: {}".format(line))
+    for w in pair_quality_warnings(graded):
         warn(w, warnings)
     # RULE: a camera placed through a poor link is named first, as unreliable.
     # REASON: the other warnings say a pair is poor, which reads the same
     # whether the pair fixes one camera's position or is merely one of many.
     # A solve can then report every camera "solved" with one of them placed
     # several pixels wrong.
-    placed = poorly_placed(active, tree, pairwise, ref)
+    placed = poorly_placed(active, tree, graded, ref)
     placement = placement_warnings(placed, codetections)
     for w in placement:
         print("  WARNING: {}".format(w))
@@ -2415,11 +2499,11 @@ def main():
     save_reprojection_histogram(hist_path, pair_rms)
 
     # --- Write ---
-    report = build_report(board_cfg, ref, active, tree, pairwise, intrinsic_stats,
+    report = build_report(board_cfg, ref, active, tree, graded, intrinsic_stats,
                           components, dropped, hints_used=bool(hints),
                           skip=args.skip, warnings=warnings, pairing=pairing,
                           codetections=codetections, camera_serials=serials,
-                          placed=placed)
+                          placed=placed, stereo=pairwise)
     report["floor"] = floor
     report["refinement"] = refinement
     # The acquisitions of this session that recorded other cameras under the

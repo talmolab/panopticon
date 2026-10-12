@@ -301,7 +301,7 @@ If the same camera keeps failing its lens fit, check its focus before you calibr
 
 ### Reading the pairwise calibration plot
 
-`reprojection_error_histogram.png` has one bar per pair of cameras. Each bar is that pair's [stereo RMS](GLOSSARY.md#stereo-rms) in pixels, roughly how far apart the two cameras' views of the same board corners land.
+`reprojection_error_histogram.png` has one bar per pair of cameras. Each bar is how well the finished calibration fits that pair: the [stereo RMS](GLOSSARY.md#stereo-rms) in pixels, roughly how far the board corners both cameras saw land from where the calibration puts them.
 
 | Colour | Stereo RMS | Meaning |
 |---|---|---|
@@ -314,6 +314,9 @@ Read the pair names first, then the heights:
 - Every bad bar includes the same camera? Then that camera's the problem. Check its focus and its mount, and calibrate again.
 - Only one pair is bad, and both cameras look fine with everyone else? The two of them didn't share enough views. Calibrate again, showing the board to both at once.
 - A bar is missing? The pair never shared 5 views, so there's nothing to plot.
+
+> [!NOTE]
+> Now and then a pair's own two-camera fit fails. The solve then places both cameras through other pairs, and the log says so in a note, not a warning. The bar shows how the finished calibration fits the pair, so it stays green when the calibration is sound.
 
 ### Solving by hand
 

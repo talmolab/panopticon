@@ -329,9 +329,12 @@ solved calibration projects that corner. It is the basic measure of a calibratio
 
 ### Stereo RMS
 
-The root-mean-square reprojection error of one camera pair.
-`reprojection_error_histogram.png` shows one bar per pair. Below 1.5 px is good, 1.5 to
-3 px is worth checking, and 3 px or more is poor.
+The root-mean-square reprojection error of one camera pair: how far the board corners
+both cameras saw land from where a board fitted to their views puts them. The solve
+measures it twice. The pair's own stereo fit builds the camera tree, and the finished
+calibration's fit of the pair is what `reprojection_error_histogram.png` shows, one
+bar per pair. Below 1.5 px is good, 1.5 to 3 px is worth checking, and 3 px or more
+is poor.
 
 ### Spanning tree
 
