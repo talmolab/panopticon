@@ -1073,7 +1073,19 @@ Dead ends, do not retry:
 
 ---
 
-## 15. Standing dead ends (index)
+## 15. Elbows and knees on the mouse skeleton (12 October 2026)
+
+- 2026-10-12: The reference mouse skeleton gains elbows and knees, at the
+  maintainer's request (`694faca`). `r_elbow`, `l_elbow`, `r_knee` and `l_knee`
+  are appended as nodes 20-23, so every existing node keeps its index and the
+  labels made on the 20-node skeleton stay valid, with the new nodes
+  unlabelled. Each limb is a chain, shoulder-elbow-front paw and
+  haunch-knee-hind paw, in place of the direct shoulder-paw and haunch-paw
+  edges, and the seven left/right pairs are symmetries for flip augmentation.
+  SLEAP 1.3.3 wrote the file: sleap-io 0.9.2's `save_skeleton` loses the node
+  order on reload.
+
+## 16. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
