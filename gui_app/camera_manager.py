@@ -454,6 +454,16 @@ class CameraManager(QObject):
         return [(i, gt.lost_reason) for i, gt in enumerate(self._grab_threads)
                 if getattr(gt, "lost_reason", None)]
 
+    def latest_block_id(self) -> int | None:
+        """The newest unwrapped block ID any camera has put up for display
+        (GrabThread.latest_bid), or None before a recording's first frame
+        and outside a recording. A trigger ordinal for a live display, a
+        display interval behind the newest frame. Reads one attribute per
+        thread."""
+        ids = [b for b in (getattr(gt, "latest_bid", None)
+                           for gt in self._grab_threads) if b is not None]
+        return max(ids) if ids else None
+
     @property
     def frontier_lags(self) -> list:
         """Per-camera triggers behind the leading camera in kick mode, -1 for a

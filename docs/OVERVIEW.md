@@ -73,10 +73,10 @@ delivering, averaged over its last ten frames. At rest, every pane should read a
 30 fps. During a recording it shows the camera's rate, not the preview's, so on our rig
 it reads about 100 fps.
 
-A pane that jumps high for a refresh or two, like the 67 and 69 fps in the picture at
-the top, is just catching up after the computer was busy. What's worth a closer look is
-one pane reading *low* while the others look fine. It's usually the first sign of
-trouble with that camera's cable or trigger, and
+Every pane in the picture at the top reads 30 fps. Now and then one jumps higher, to 60
+or 70 fps, for a refresh or two. That's just the pane catching up after the computer
+was busy. What's worth a closer look is one pane reading *low* while the others look
+fine. It's usually the first sign of trouble with that camera's cable or trigger, and
 [During an acquisition](TROUBLESHOOTING.md#during-an-acquisition) says what to check.
 
 ### Metadata
@@ -174,6 +174,18 @@ The state label goes through the same steps as for **Calibrate**, then reads
 **IDLE** again. If your paradigm has an [**Ending**](#8-ending) block, the recording
 also stops by itself when that block finishes.
 
+When you've applied a paradigm, a yellow lightning bolt sits to the right of **Record**,
+under **Solve**:
+
+![The Acquisition group with the stimulation bolt beside Record](images/sidebar_record_stim.png)
+
+It means the next recording runs the paradigm you applied in the
+[stimulation editor](#the-stimulation-editor), and hovering over it says the same. The
+bolt lights up when **Apply to Arduino** succeeds, and goes out when you apply an empty
+canvas. It stays lit through a calibration, because the recording after it puts the
+paradigm back on the board. Every launch starts without it, since the editor's canvas
+starts empty.
+
 #### 9. Solve
 
 **Solve** turns the calibration you just took into a model of every camera's lens and
@@ -183,7 +195,10 @@ and **Mouse 2** point to, so leave those as they were for the calibration.
 While it runs, the state label reads **CALIBRATING...** in purple and the preview
 pauses: every pane keeps its last picture under **Preview paused while the solve
 runs**. When it's done, the preview comes back, the status bar shows the result, and
-[Solve](WORKFLOW.md#6-solve) covers what to look for.
+[Solve](WORKFLOW.md#6-solve) covers what to look for. Here's a whole solve on our rig,
+with the middle sped up 20x (it really took about a minute and a half):
+
+![Pressing Solve: the preview pauses, the status bar reports each stage, and the preview comes back with the result](images/gif_solve.gif)
 
 #### 10. Snapshot
 
@@ -225,8 +240,9 @@ have enough views of the board. We'll look at it more closely
 
 ### Display
 
-The **Display** group has two sliders. The progress bar and the state label sit below
-them.
+The **Display** group has two sliders, and during a recording that runs a paradigm, the
+**Expected stimulation** panel appears under them. The progress bar and the state label
+sit below.
 
 ![The brightness and contrast sliders, Brightness dragged right](images/sidebar_display.png)
 
@@ -241,6 +257,26 @@ detection all use the frames as they arrive.
 > The sliders keep their positions between launches and show no number. If the panes
 > look black, grey or washed out while their frame rates look normal, drag both
 > handles back to the middle.
+
+#### Expected stimulation
+
+While a recording runs a paradigm, this panel follows it. It isn't in the picture at the
+top, because it only shows during such a recording. Here it follows a short paradigm,
+2 s off and then 4 s of 20 Hz pulses, from **Record** on to **Record** off:
+
+![The bolt beside Record, then the Expected stimulation panel stepping through two blocks to over](images/gif_stimulation_record.gif)
+
+It draws your canvas in miniature, with pulsing blocks in purple and pauses in grey,
+and lights the block each chain should be running with a yellow outline. Under it, a
+line per chain names that block and counts down the time left in it, and the title
+counts the time since the first trigger. When every chain has finished, the blocks dim
+and the title reads **over**. If your canvas is too wide to shrink legibly, the panel
+lays the blocks out in rows, chain by chain.
+[While it records](WORKFLOW.md#while-it-records) goes through what the lines say.
+
+The panel works from the trigger count, the same way `stim_trace.csv` does, so it shows
+what the paradigm should be doing rather than a measurement. The board reports nothing
+back during a recording.
 
 #### 15. Progress
 
@@ -398,13 +434,13 @@ Every camera gets a tile:
 - **best** is the highest count since the window opened or you pressed **Reset best**.
 - The line along the bottom is the last 30 seconds of counts, so you can see which way
   the ring is taking it.
-- Once 4 or more markers decode, **sharpness** and **confidence** appear. They're for
-  the last bit of turning, when the count has stopped moving.
+- **confidence** appears as soon as a marker decodes, and **sharpness** once 4 or
+  more do. They're for the last bit of turning, when the count has stopped moving.
 
-Click a tile to work on that camera. Panopticon reads it several times a second and
-the other cameras in turn. Its whole view shows on the right, with a box around the
-markers it decodes, in the colour of the count. When a reading decodes none, the last
-box stays for a second, dashed.
+Click a tile to work on that camera. Panopticon reads it several times a second, and
+the other cameras in turn (the bottom-right corner says how often). Its whole view
+shows on the right, with a box around the markers it decodes, in the colour of the
+count. When a reading decodes none, the last box stays for a second, dashed.
 
 While the window is open, the main window's preview pauses: every pane keeps its last
 picture and reads **Preview paused while the Focus window is open**. The cameras keep
@@ -444,9 +480,9 @@ chain runs in order and separate chains run side by side. Every chain starts wit
 recording's first trigger.
 
 The picture shows a loop on pin 53: 5 s of 10 Hz pulses, then 10 s with the pin held
-LOW, over and over until the recording stops.[^status] You can't see the arrow back to
-the first block, since it runs behind the forward one. The numbers in this picture
-start again at 1.
+LOW, over and over until the recording stops.[^status] The arrow back to the first
+block runs straight behind the forward one, so it only shows as a line through the
+faded second block. The numbers in this picture start again at 1.
 
 The [stimulation walkthrough](WORKFLOW.md#7-optional-stimulation) covers building,
 testing and checking a paradigm. Here we'll just go round the editor's parts.
@@ -455,7 +491,8 @@ testing and checking a paradigm. Here we'll just go round the editor's parts.
 
 The canvas starts empty. To add a block, fill in **Pin**, **Freq**, **PW** and **Dur**
 and click **Create Block**. The new block appears in the middle of the view, or to the
-right of the ones already there.
+right of the ones already there. The canvas grows to hold every block, so the scroll
+bars can always reach one.
 
 - **Drag** a block to move it.
 - **Drag from a port**, one of the little circles on a block's edges, to another
@@ -477,8 +514,9 @@ marks tell you how the graph will run:
 > [!TIP]
 > <kbd>Delete</kbd> removes the selection, <kbd>Ctrl</kbd>+<kbd>C</kbd> and
 > <kbd>Ctrl</kbd>+<kbd>V</kbd> copy and paste, <kbd>Esc</kbd> clears the selection,
-> and <kbd>Home</kbd> fits the graph in view. Middle-drag to pan and scroll to zoom.
-> There's no undo, so **Save** before a big edit.
+> and <kbd>Home</kbd> or **Fit** brings every block into view. Middle-drag or use the
+> scroll bars to pan, and turn the mouse wheel to zoom. There's no undo, so **Save**
+> before a big edit.
 
 #### 2. Waveform preview
 
@@ -561,19 +599,36 @@ upload, it asks whether to upload first. A Test can also reset the board, and
 
 **Apply to Arduino** compiles the graph and flashes it onto the trigger board, which
 takes about 30 s. When it works, the status line reads
-`Upload successful — press Record to run paradigm.` and your next recording runs it.
-Panopticon takes the paradigm off the board for each calibration and puts it back for
-the recording after. **Apply** won't run while the status line shows a problem in
-red, or while something else is using the board.
+`Upload successful — press Record to run paradigm.` and your next recording runs it,
+and the bolt beside [Record](#8-record) in the main window lights up. Panopticon takes
+the paradigm off the board for each calibration and puts it back for the recording
+after. **Apply** won't run while the status line shows a problem in red, or while
+something else is using the board.
 
 > [!WARNING]
 > A failed upload leaves the board in an unknown state, possibly without its
 > [safe-pin](GLOSSARY.md#safe-pin) guard. Apply again: **Record**, **Calibrate** and
 > **Test** refuse to run until an **Apply** succeeds.
 
+#### 12. Fiber note
+
+The amber line under **Apply** stays there for as long as the editor is open:
+`Apply before you attach the fiber`. Applying flashes the trigger board, and so does a
+**Test** that has to upload the canvas first. While the board resets, its pins float
+for a second or two, and a device on a floating pin can read it as on.
+
+Hover over the note for one more case that's easy to miss. A calibration after an
+**Apply** puts the stimulation-free sketch back, so the next **Record** flashes the
+paradigm again. [When the board resets](WORKFLOW.md#when-the-board-resets) lists
+every flash.
+
+#### Save, Load, Clear and Fit
+
 **Save** and **Load** keep the graph in a JSON file, `stim_config.json` in the output
 directory unless you pick another name. **Load** asks before replacing unsaved
-changes, and **Clear** asks before emptying the canvas. None of them touch the board.
+changes, then fits the view to the blocks it loaded. **Clear** asks before emptying
+the canvas, and **Fit** brings every block into view, just like <kbd>Home</kbd>. None
+of them touch the board.
 
 ---
 
@@ -603,7 +658,11 @@ holds the pin HIGH and the block reads `constant ON`.
 ## Controls that hide, and controls that disable
 
 The coverage display (12) and the progress bar (15) stay hidden until they have
-something to show. Other controls grey out when using them would do the wrong thing.
+something to show, and so do the two stimulation indicators. The bolt beside **Record**
+shows only while the next recording will run a paradigm, and the
+[**Expected stimulation**](#expected-stimulation) panel only during a recording that
+runs one. Neither appears on a profile with `trigger_source: external`, which can't
+stimulate. Other controls grey out when using them would do the wrong thing.
 Hover over a greyed-out toggle or **Solve** to see why.
 
 - **Calibrate** and **Record**: while the hardware check runs, while videos are

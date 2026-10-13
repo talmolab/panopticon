@@ -43,6 +43,21 @@ GRID_MIN_ZOOM = 0.4
 #: application passes the profile's stim_safe_pins instead.
 STANDALONE_SAFE_LOW_PINS = (53,)
 
+#: The standing warning under Apply, and its tooltip.
+FIBER_NOTE = ("⚠ Apply before you attach the fiber: flashing the board can "
+              "switch the laser on for a second or two.")
+FIBER_NOTE_DETAIL = (
+    "Apply flashes the trigger board, and so does a Test that has to upload "
+    "the canvas first.\nWhile the board resets its pins float, and a "
+    "powered laser driver reads a floating pin as on.\nCalibrating after an "
+    "Apply puts the stimulation-free sketch back, so the next Record "
+    "flashes the paradigm again.")
+
+#: The status after a successful Apply, with a paradigm and with none.
+UPLOAD_OK = "Upload successful — press Record to run paradigm."
+UPLOAD_OK_NONE = ("Upload successful — no paradigm: recordings run without "
+                  "stimulation.")
+
 
 def _pin_color(pin: int) -> QColor:
     hue = (int(pin) * 137) % 360
@@ -413,17 +428,39 @@ class StimCanvas(QGraphicsView):
     #: flag toggled, load, clear) so the window can track unsaved work.
     modified = pyqtSignal()
 
+    #: The scene's least extent, in canvas units. It grows to take in every
+    #: block (_fit_scene_rect).
+    SCENE_BASE = QRectF(-3000, -3000, 6000, 6000)
+    #: Room kept beyond the outermost block, so it can be scrolled clear of
+    #: the edge.
+    SCENE_MARGIN = 400
+
     def __init__(self):
         scene = QGraphicsScene()
-        scene.setSceneRect(-3000, -3000, 6000, 6000)
+        scene.setSceneRect(self.SCENE_BASE)
         super().__init__(scene)
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.NoDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
-        self.setStyleSheet("background: #111820; border: none;")
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setStyleSheet(
+            "QGraphicsView { background: #111820; border: none; }"
+            "QScrollBar { background: #141c26; }"
+            "QScrollBar:horizontal { height: 12px; }"
+            "QScrollBar:vertical { width: 12px; }"
+            "QScrollBar::handle { background: #3a4a60; border-radius: 4px; "
+            "margin: 2px; min-width: 24px; min-height: 24px; }"
+            "QScrollBar::handle:hover { background: #5078c8; }"
+            "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }"
+            "QScrollBar::add-page, QScrollBar::sub-page { background: none; }")
+        # RULE: the scroll bars show, and the scene grows to hold every
+        # block. REASON: a view scrolls only within its scene rect, so a
+        # block placed past a fixed rect (a loaded file can put one anywhere)
+        # could be neither scrolled nor panned to, and with the bars hidden
+        # nothing said there was more canvas.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scene.changed.connect(self._fit_scene_rect)
 
         self._arrow_src: ConnectorPort | None = None
         self._rubber:    QGraphicsLineItem | None = None
@@ -453,6 +490,19 @@ class StimCanvas(QGraphicsView):
             for y in range(y0, int(rect.bottom()) + 1, GRID)
         ])
         painter.drawPoints(pts)
+
+    def _fit_scene_rect(self, *_args):
+        """The base extent united with every block plus SCENE_MARGIN."""
+        rect = QRectF(self.SCENE_BASE)
+        blocks = self.blocks()
+        if blocks:
+            used = blocks[0].sceneBoundingRect()
+            for b in blocks[1:]:
+                used = used.united(b.sceneBoundingRect())
+            m = self.SCENE_MARGIN
+            rect = rect.united(used.adjusted(-m, -m, m, m))
+        if rect != self.scene().sceneRect():
+            self.scene().setSceneRect(rect)
 
     def zoom(self) -> float:
         """Current uniform view scale."""
@@ -1097,8 +1147,8 @@ class StimulationWindow(QDialog):
         # ── bottom panel ──────────────────────────────────────────────────────
         bottom = QWidget()
         bottom.setStyleSheet("background: #1a1a2e;")
-        bottom.setMinimumHeight(134)
-        bottom.setMaximumHeight(170)
+        bottom.setMinimumHeight(152)
+        bottom.setMaximumHeight(188)
         outer = QHBoxLayout(bottom)
         outer.setContentsMargins(12, 10, 12, 10)
         outer.setSpacing(14)
@@ -1181,6 +1231,9 @@ class StimulationWindow(QDialog):
         btn_row.setSpacing(8)
         load_btn  = _btn("Load");  load_btn.clicked.connect(self._on_load)
         clear_btn = _btn("Clear"); clear_btn.clicked.connect(self._on_clear)
+        self._fit_btn = _btn("Fit")
+        self._fit_btn.setToolTip("Show every block (Home)")
+        self._fit_btn.clicked.connect(self._canvas.fit_to_content)
         self._status_lbl = _lbl("", color="#888")
         self._status_lbl.setSizePolicy(QSizePolicy.Expanding,
                                        QSizePolicy.Preferred)
@@ -1194,10 +1247,23 @@ class StimulationWindow(QDialog):
                                bg="#3a1e1e", fg="#dd8888",
                                bd="#6a3a3a", hv="#4a2525")
         self._apply_btn.clicked.connect(self._on_apply)
-        for w in [load_btn, clear_btn, self._status_lbl,
+        for w in [load_btn, clear_btn, self._fit_btn, self._status_lbl,
                   save_btn, self._test_btn, self._apply_btn]:
             btn_row.addWidget(w)
         bl.addLayout(btn_row)
+
+        # RULE: the warning stands under Apply for as long as the editor is
+        # open, never as a dialog. REASON: a flash resets the board, its pins
+        # float through the bootloader's wait, and a powered laser driver
+        # reads a floating pin as ON; a dialog is dismissed once and then not
+        # read again.
+        self._fiber_note = _lbl(FIBER_NOTE, color="#e0a040")
+        self._fiber_note.setToolTip(FIBER_NOTE_DETAIL)
+        note_row = QHBoxLayout()
+        note_row.addStretch()
+        note_row.addWidget(self._fiber_note)
+        bl.addLayout(note_row)
+        bl.addStretch()
 
         splitter.addWidget(bottom)
         splitter.setSizes([400, 140])
@@ -1586,6 +1652,9 @@ class StimulationWindow(QDialog):
                 f"has been left as it was.")
             return
         self._dirty = False
+        # A saved file can lay its blocks out far past the window, so show
+        # all of them.
+        self._canvas.fit_to_content()
         if dropped:
             self._set_status(
                 f"Loaded {Path(path).name} — dropped {dropped} invalid edge(s) "
@@ -1686,8 +1755,13 @@ class StimulationWindow(QDialog):
                 "Upload successful, but the serial port could not be "
                 "reopened. Record reopens it, which resets the board: "
                 "switch off what the stimulation pins drive first.", error=True, kind="notice")
+        elif ino == stim_compiler.recording_only_sketch(
+                self._get_safe_pins(), self._get_trigger_pins()):
+            # An empty canvas compiles to the recording-only sketch, so this
+            # Apply turned stimulation off; "run paradigm" would say otherwise.
+            self._set_status(UPLOAD_OK_NONE)
         else:
-            self._set_status("Upload successful — press Record to run paradigm.")
+            self._set_status(UPLOAD_OK)
 
     # ── test run (no cameras) ────────────────────────────────────────────────
     def _on_test(self):

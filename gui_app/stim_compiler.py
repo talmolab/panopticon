@@ -292,6 +292,17 @@ def describe(blocks: list[dict], edges: list[dict]) -> list[dict]:
     return out
 
 
+def chain_block_ids(blocks: list[dict], edges: list[dict]) -> list[list[str]]:
+    """The block ids of each chain, in the order describe() lists its steps.
+
+    Step i of chain c in describe() is block ``chain_block_ids(...)[c][i]``,
+    because both walk _extract_chains(). A display that names a step by its
+    block on the canvas asks this, never its own walk of the arrows.
+    """
+    return [[b["id"] for b in chain]
+            for chain, _loop_to in _extract_chains(blocks, edges)]
+
+
 def test_duration_s(blocks: list[dict], edges: list[dict]) -> float | None:
     """How long a bench test of this paradigm runs.
 

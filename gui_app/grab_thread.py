@@ -611,6 +611,12 @@ class GrabThread(QThread):
         #: frame_sync.unwrap_blockids gives this camera's blockids.npy), or
         #: None outside a recording, where frames carry no ordinal.
         self.latest_full_with_bid = None
+        #: Unwrapped block ID of the newest frame put up for display (the
+        #: numbering of this camera's blockids.npy), or None outside a
+        #: recording. Written once per displayed frame, never per frame, so
+        #: a live display can follow the trigger count at no cost to the grab
+        #: loop.
+        self.latest_bid = None
         # Stall recovery state (see _rearm_stream / _resync_offset).
         self._last_ts = None          # device timestamp of the last good frame
         self._last_bid_eff = -1       # its globally-consistent block ID
@@ -1343,6 +1349,9 @@ class GrabThread(QThread):
                                 td0 = time.perf_counter()
                                 d = self._downsample
                                 self.latest_frame = img[::d, ::d].copy()
+                                if bid is not None:
+                                    self.latest_bid = (
+                                        bid + self._bid_wraps * BLOCKID_WRAP)
                                 # Full-res copy for the coverage HUD detector (calibration
                                 # only) — oblique cams (1/4) need full res to resolve the
                                 # board, same as the post-hoc calibration.

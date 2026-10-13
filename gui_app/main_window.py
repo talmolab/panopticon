@@ -83,6 +83,10 @@ STIM_FILES = ("stim_paradigm.json", "stim_paradigm.ino", "stim_trace.csv")
 #: its log.
 STALE_SESSION_FILES = (("WARNINGS.txt", "codet_frames.json") + STIM_FILES
                        + (logging_setup.SESSION_LOG_NAME,))
+#: How often the sidebar's stimulation display follows the trigger count, in
+#: ms. Four times a second keeps a step's countdown readable and costs one
+#: attribute read per camera.
+STIM_PROGRESS_MS = 250
 
 
 def _has_capture_data(video_dir: Path) -> bool:
@@ -386,6 +390,9 @@ class MainWindow(QMainWindow):
         self._stim_end_timer = QTimer(self)
         self._stim_end_timer.setSingleShot(True)
         self._stim_end_timer.timeout.connect(self._on_stim_end)
+        self._stim_progress_timer = QTimer(self)
+        self._stim_progress_timer.setInterval(STIM_PROGRESS_MS)
+        self._stim_progress_timer.timeout.connect(self._tick_stim_progress)
 
         self._display_timer = QTimer()
         self._display_timer.timeout.connect(self._refresh_displays)
@@ -1035,6 +1042,7 @@ class MainWindow(QMainWindow):
             self._profile_choice = ""
             self._sidebar.set_solve_enabled(True)
         self._apply_camera_open_result(ok)
+        self._refresh_stim_indicator()
         self._log_header_async(f"profile switch to {self._profile.name}")
         self._size_to_screen()
         self._end_busy()
@@ -3116,6 +3124,7 @@ class MainWindow(QMainWindow):
             self._sidebar.set_status("RECORDING", "#ff4444")
             self._save_stim_paradigm()
             self._arm_stim_autostop()
+            self._start_stim_progress()
         if result.get("await_trigger"):
             self._begin_external_wait()
 
@@ -3418,6 +3427,7 @@ class MainWindow(QMainWindow):
             return          # the quit abandons the cameras and the directory
         self._thermal_timer.stop()
         self._cancel_stim_autostop()
+        self._stop_stim_progress()
         self._stop_coverage_hud()
         self._detector = None
         self._sidebar.hide_coverage()
@@ -3545,6 +3555,70 @@ class MainWindow(QMainWindow):
     def _cancel_stim_autostop(self):
         self._stim_end_timer.stop()
 
+    def _start_stim_progress(self):
+        """Show the recording's paradigm in the sidebar and follow it.
+
+        Fed from the arm-time snapshot, the paradigm this recording's files
+        describe. Nothing shows for a recording without one.
+        """
+        snap = self._stim_snapshot
+        if snap is None or not snap.get("provenance", {}).get("chains"):
+            return
+        try:
+            self._sidebar.show_stim_progress(snap["provenance"])
+        except Exception as e:
+            # A display must never take the recording down with it.
+            print(f"[stim] could not show the paradigm's progress: {e}",
+                  flush=True)
+            return
+        self._stim_progress_timer.start()
+
+    def _tick_stim_progress(self):
+        """Place the paradigm at the newest trigger the cameras delivered.
+
+        RULE: t comes from the block ID, as stim_trace.csv's does:
+        t = (unwrapped_blockid - 1) / fps. REASON: the sidebar then names the
+        block the trace gives the same trigger. A wall clock started at the
+        arm runs ahead by the time the board took to start, and drifts.
+        """
+        if self._state != State.RECORDING:
+            self._stop_stim_progress()
+            return
+        latest = getattr(self._camera_mgr, "latest_block_id", None)
+        bid = latest() if latest is not None else None
+        fps = self._acq_fps or 0
+        t = (bid - 1) / fps if bid is not None and fps > 0 else None
+        try:
+            self._sidebar.update_stim_progress(t)
+        except Exception as e:
+            print(f"[stim] progress display failed: {e}", flush=True)
+            self._stop_stim_progress()
+
+    def _stop_stim_progress(self):
+        self._stim_progress_timer.stop()
+        self._sidebar.hide_stim_progress()
+
+    def _stim_armed(self) -> bool:
+        """Whether the next Record puts a stimulation paradigm on the board.
+
+        Derived from _sketch_for, as every question about what the board
+        holds is. An Applied empty canvas leaves _session_stim_ino set to a
+        sketch with no chains, which is the recording-only sketch, so it arms
+        nothing. A profile on an external trigger source runs no paradigm.
+        """
+        if not self._profile.name or self._external_trigger():
+            return False
+        try:
+            want, _label = self._sketch_for("recording")
+            blank, _label = self._sketch_for("calibration")
+        except Exception:
+            return False
+        return want != blank
+
+    def _refresh_stim_indicator(self):
+        """Put the bolt beside Record in step with what the board holds."""
+        self._sidebar.set_stim_armed(self._stim_armed())
+
     # ── shared trigger-board link ─────────────────────────────────────────────
     def _on_stim_applied(self, ino: str):
         """Remember the paradigm the editor just put on the board.
@@ -3562,6 +3636,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[stim] could not record the applied sketch hash: {e}",
                   flush=True)
+        self._refresh_stim_indicator()
         print("[stim] paradigm applied and held for this session", flush=True)
 
     def _on_stim_upload_failed(self, touched_board: bool):
@@ -4139,6 +4214,7 @@ class MainWindow(QMainWindow):
         # until the finalize returns.
         self._thermal_timer.stop()
         self._cancel_stim_autostop()
+        self._stop_stim_progress()
         # Stop the triggers but KEEP the port open: reopening it would reset the
         # board at the start of the next recording and flash a connected laser.
         # This is the everyday stop — the one taken every session — so it is the
