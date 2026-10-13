@@ -1085,7 +1085,44 @@ Dead ends, do not retry:
   SLEAP 1.3.3 wrote the file: sleap-io 0.9.2's `save_skeleton` loses the node
   order on reload.
 
-## 16. Standing dead ends (index)
+---
+
+## 16. Stimulation indicators (12 October 2026)
+
+- 2026-10-12: The applied paradigm became visible outside the editor
+  (`123e2c2`). A yellow bolt beside Record shows while the next recording
+  runs a paradigm.
+  It is derived from `_sketch_for`, so it is off at launch, and an Applied
+  empty canvas, which compiles to the recording-only sketch, turns it off.
+  During a recording that carries a paradigm, an Expected stimulation panel
+  appears under the Display sliders. It draws the canvas in miniature,
+  lights the block each chain should be running and counts down the time
+  left in it. Its time is the newest displayed frame's block ID, through
+  `stim_trace.chain_progress` at `t = (unwrapped_blockid - 1) / fps`, the
+  time base of `stim_trace.csv`. A wall clock started at the arm would run
+  ahead by the board's start-up time, and drift. The panel shows the
+  paradigm's expected state, not a measurement, because the board reports
+  nothing back during a recording. In the editor, an amber note under Apply
+  says to apply before attaching the fiber, since a flash floats the pins
+  for a second or two. It stands there rather than in a dialog, because a
+  dialog is dismissed once and then not read again. The canvas gained scroll
+  bars and a Fit button, and its scene now grows to hold every block. A
+  loaded file could place a block past the old fixed 6000 x 6000 scene,
+  where it could be neither scrolled nor panned to, so Load now fits the
+  view to the graph. After an empty Apply the editor's status says recordings
+  run without stimulation, where it used to say "press Record to run
+  paradigm". Validated on the reference rig in the GUI, with the laser off
+  and the IR LED on pin 53 as the witness. The run was Apply (bolt on), two
+  34 s recordings, Test, then an empty Apply (bolt off, the recording-only
+  sketch on the board). The paradigm ran 5 s off, 10 s of 2 Hz with 250 ms
+  pulses, 5 s held on and 5 s off. In every camera of both recordings, each
+  of the 21 LED rises and 21 falls landed on the trigger `stim_trace.csv`
+  gives it. The LED's state agreed with `pin53_ttl` on every frame but three
+  single frames on cam2. That camera sees the LED dimmest, and its view
+  flickered there by about half the LED's contrast. The panel named the
+  trace's block at the block ID it was drawn from in 132 of 132 samples.
+
+## 17. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
