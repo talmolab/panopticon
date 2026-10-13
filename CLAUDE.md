@@ -29,6 +29,9 @@ checked by hand that no other one holds the hardware.
   module (plain scripts, no pytest, with `QT_QPA_PLATFORM=offscreen`):
   - `test_stim_compiler.py` and `test_stim_trace.py` after `stim_compiler.py`
     or `stim_trace.py`;
+  - `test_stim_guard.py` and `test_widgets.py` after
+    `widgets/stimulation_window.py`, `widgets/sidebar.py` or
+    `widgets/stim_progress.py`;
   - `test_serial_handshake.py` after `serial_controller.py`;
   - `test_frame_sync.py` after `frame_sync.py`;
   - `test_grab_failure.py` and `test_capture_faults.py` after `grab_thread.py`;
@@ -655,6 +658,11 @@ and no Qt.
   session and is never saved, so stim is opt-in per launch through Apply. Derive
   whether the board holds a paradigm from `_sketch_for` and `_session_stim_ino`.
   A separate flag drifts from the board.
+- The bolt beside Record shows `MainWindow._stim_armed()`: whether the sketch
+  `_sketch_for` gives a recording differs from the one it gives a calibration.
+  An Applied empty canvas compiles to the recording-only sketch, so it arms
+  nothing and the bolt stays off. The window refreshes the bolt after every
+  Apply and profile switch and keeps no flag of its own.
 - `updateStim()` does no floating-point math. The compiler resolves period and
   pulse width to integer microseconds (`block_timing()`), because an AVR float
   divide (about 30 µs) inside the trigger busy-wait blurs the ±0.35 µs edge
@@ -678,6 +686,20 @@ and no Qt.
   session, so the match is unknown. `stim_trace.csv` is derived: it uses
   `t = (unwrapped_blockid - 1) / fps`, never the frame index, and cannot know
   whether the laser fired.
+- The sidebar's Expected stimulation panel places the paradigm with
+  `stim_trace.chain_progress` at that same `t`, from the newest displayed
+  frame's block ID (`GrabThread.latest_bid`, through
+  `CameraManager.latest_block_id`), never from a clock. It then lights the step
+  `stim_trace.csv` gives the same trigger. A clock started at the arm runs
+  ahead by the board's start-up time, and drifts. The panel shows the expected
+  state only, because the board reports nothing back.
+- The canvas scene grows to hold every block plus a margin
+  (`StimCanvas._fit_scene_rect`), and the canvas shows scroll bars. A view
+  scrolls only within its scene rect, so a block a loaded file placed past a
+  fixed rect could be neither scrolled nor panned to.
+- The fiber warning (`FIBER_NOTE`) stands under Apply while the editor is open,
+  never in a dialog. Apply and an uploading Test flash the board, and a dialog
+  is dismissed once and then not read again.
 
 ## Serial and laser safety
 

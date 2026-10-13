@@ -7,13 +7,41 @@ from PyQt5.QtWidgets import (
     QProgressBar, QFrame, QPushButton, QFileDialog, QSlider, QComboBox,
     QPlainTextEdit, QMessageBox, QCheckBox,
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QTimer, QPointF, pyqtSignal
+from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QBrush, QPolygonF
 
 from gui_app.widgets.toggle_switch import ToggleSwitch
 from gui_app.widgets.coverage_graph import CoverageGraphWidget
+from gui_app.widgets.stim_progress import StimProgressWidget
 from gui_app import session_config, settings
 from gui_app.session_config import RigProfile, ProfileError, REPO_ROOT
+
+
+class StimBolt(QWidget):
+    """A lightning bolt beside Record while the board holds a stimulation
+    paradigm. Painted rather than typed as an emoji, because Qt draws an
+    emoji in whatever font has the glyph, which differs between computers."""
+
+    #: The outline on a 12 x 20 grid.
+    _SHAPE = ((8, 0), (1, 11), (6, 11), (4, 20), (11, 8), (6, 8))
+    TIP = ("Record runs the stimulation paradigm Applied in the Stimulation "
+           "editor.\nApply an empty canvas to record without it.")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setToolTip(self.TIP)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        s = (self.height() - 6) / 20.0
+        ox = (self.width() - 12 * s) / 2
+        oy = (self.height() - 20 * s) / 2
+        p.setPen(QPen(QColor("#5a4200"), 1))
+        p.setBrush(QBrush(QColor("#ffcc33")))
+        p.drawPolygon(QPolygonF([QPointF(ox + x * s, oy + y * s)
+                                 for x, y in self._SHAPE]))
+        p.end()
 
 
 class NoWheelComboBox(QComboBox):
@@ -318,7 +346,20 @@ class SidebarWidget(QWidget):
         # Built above, before the first profile is applied.
         layout.addWidget(self._floor_box)
 
-        layout.addWidget(self._record_toggle)
+        # The bolt sits in the slot the Solve button takes on the row above,
+        # and keeps it while hidden, so Record does not change width when the
+        # board takes a paradigm.
+        record_row = QHBoxLayout()
+        record_row.setSpacing(6)
+        record_row.addWidget(self._record_toggle, stretch=1)
+        self._stim_bolt = StimBolt()
+        self._stim_bolt.setFixedSize(50, 28)
+        keep = self._stim_bolt.sizePolicy()
+        keep.setRetainSizeWhenHidden(True)
+        self._stim_bolt.setSizePolicy(keep)
+        self._stim_bolt.setVisible(False)
+        record_row.addWidget(self._stim_bolt)
+        layout.addLayout(record_row)
         # Tooltips and enabled state come from the gates from the first paint.
         self._apply_enablement()
 
@@ -407,6 +448,12 @@ class SidebarWidget(QWidget):
         contrast_row.addWidget(contrast_lbl)
         contrast_row.addWidget(self._contrast_slider)
         layout.addLayout(contrast_row)
+
+        # The paradigm a recording should be running, shown only while a
+        # recording carries one (show_stim_progress).
+        self._stim_progress = StimProgressWidget()
+        self._stim_progress.setVisible(False)
+        layout.addWidget(self._stim_progress)
 
         layout.addSpacing(8)
 
@@ -973,6 +1020,31 @@ class SidebarWidget(QWidget):
         self._record_toggle.setChecked(False)
         self._toggles_gate = bool(enabled)
         self._apply_enablement()
+
+    # --- stimulation ---
+    def set_stim_armed(self, armed: bool):
+        """Show the bolt beside Record while the next recording runs a
+        stimulation paradigm. The window derives ``armed`` from the sketch
+        Record would flash, never from a flag of its own."""
+        self._stim_bolt.setVisible(bool(armed))
+
+    @property
+    def stim_armed(self) -> bool:
+        return not self._stim_bolt.isHidden()
+
+    def show_stim_progress(self, provenance: dict):
+        """Show a recording's paradigm under the Display section, waiting for
+        its first trigger. ``provenance`` is what stim_paradigm.json holds."""
+        self._stim_progress.set_paradigm(provenance)
+        self._stim_progress.setVisible(True)
+
+    def update_stim_progress(self, t: float | None):
+        """The paradigm's time from the trigger count, or None before the
+        first trigger."""
+        self._stim_progress.set_time(t)
+
+    def hide_stim_progress(self):
+        self._stim_progress.setVisible(False)
 
     # --- calibration coverage graph ---
     def setup_coverage(self, n_cams: int):

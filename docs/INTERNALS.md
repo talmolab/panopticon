@@ -155,6 +155,17 @@ That makes `stim_trace.csv` exact: a frame's time is
 `t = (unwrapped_blockid - 1) / fps`, and the stimulus model is evaluated at
 that `t`.
 
+The sidebar's Expected stimulation panel follows a recording on the same time
+base. Each grab thread keeps the unwrapped block ID of the newest frame it puts
+up for display, and the camera manager takes the largest over the cameras. Every
+`STIM_PROGRESS_MS` (250 ms) the window evaluates `stim_trace.chain_progress()`
+at `t = (latest - 1) / fps`, so the panel lights the step `stim_trace.csv`
+will give that trigger. The ID is written only with a preview frame, every
+tenth frame while recording, so the grab loop does no extra work per frame,
+and the panel trails the newest trigger by at most that interval. The board
+reports nothing back, so the panel shows the paradigm's expected state, never
+a measurement.
+
 These rules protect the timing and the stimulation pins:
 
 - `updateStim()` does no floating-point arithmetic. It runs inside the trigger

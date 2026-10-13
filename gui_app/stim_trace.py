@@ -140,6 +140,35 @@ def step_active(step: dict) -> bool:
     return drive_mode(step["freq_hz"], step["pulse_width_ms"])[0] != "low"
 
 
+def chain_progress(chains: list[dict], t: float) -> list[dict]:
+    """Where each chain stands at time ``t``, the way build_rows labels it.
+
+    One dict per chain: ``step`` (the step index, or None once a chain that
+    does not loop has finished), ``into_s`` and ``left_s`` (seconds into the
+    step and left in it, None with no step) and ``active`` (whether the step
+    drives its pin, step_active()).
+
+    RULE: a live display passes ``t = (unwrapped_blockid - 1) / fps``, the
+    trigger ordinal build_rows uses, never a wall clock or a frame index.
+    REASON: the display then names the step stim_trace.csv will give the
+    same trigger, and a host clock or a frame count drifts off it with every
+    dropped frame and every millisecond of scheduling delay.
+    """
+    out = []
+    for ch in chains:
+        steps = ch["steps"]
+        idx, into = locate(steps, ch.get("loops_back_to_step"), t)
+        if idx is None:
+            out.append({"step": None, "into_s": None, "left_s": None,
+                        "active": False})
+            continue
+        step = steps[idx]
+        out.append({"step": idx, "into_s": into,
+                    "left_s": max(0.0, _step_seconds(step) - into),
+                    "active": step_active(step)})
+    return out
+
+
 def resolve_chains(paradigm: dict) -> list[dict]:
     """The chains a paradigm describes, rebuilt from its node graph when present.
 

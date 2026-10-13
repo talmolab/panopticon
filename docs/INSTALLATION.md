@@ -728,7 +728,7 @@ Then:
 You did it! Panopticon remembers the profile, so from now on `uv run gui.py` is all you need.
 
 > [!NOTE]
-> The pictures come from a later launch, so the sidebar fields are already filled in. On your first launch they're empty, apart from your profile's defaults.
+> In the pictures, **Experimenter** already reads `IT`. That's a default from our profile ([CONFIGURATION.md](CONFIGURATION.md#metadata_defaults)), and the other fields start empty. Your profile can set defaults of its own.
 
 If something looks different:
 
@@ -754,6 +754,10 @@ Until you choose, Panopticon doesn't touch the cameras or the trigger board. You
     ![The profile list open](images/sidebar_profile_dropdown.png)
 
 3. Click your profile's name. Panopticon opens its cameras, and the launch carries on just as above.
+
+Here's the whole thing in one go, with the cameras opening at 6x speed. Your first launch also spends about 30 s on `Clearing stim firmware…`, which you won't see here:
+
+![Pressing OK, choosing 3dpose from the profile list, and the cameras coming up](images/gif_choose_profile.gif)
 
 #### Read the console
 

@@ -5,7 +5,7 @@ A session is one visit to the rig: we launch Panopticon, tell it which rig and w
 If you haven't set up the rig yet, start with [INSTALLATION.md](INSTALLATION.md). [OVERVIEW.md](OVERVIEW.md) names every part of the window, and if a message pops up that you don't recognise, look it up in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 > [!NOTE]
-> The screenshots come from our rig, nine Basler cameras described by `profiles/3dpose.yaml`, and so does every number marked "on our rig". Your window will show your own cameras, but everything else works the same way.
+> The screenshots come from our rig, nine Basler cameras described by `profiles/3dpose.yaml`, and so does every number marked "on our rig". Your window will show your own cameras, but everything else works the same way. The pictures of the stimulation bolt and the **Expected stimulation** panel, and the clips of the editor and of a short take, come from the [simulated rig](SIMULATION.md), which shows the same sidebar and editor.
 
 You'll keep coming back to two places in the window. The **state label** is the coloured word at the bottom right of the sidebar, and it reads **IDLE** whenever Panopticon is waiting for you. The **status bar** is the line of text along the bottom of the window.
 
@@ -158,7 +158,7 @@ Next, let's tell Panopticon who's in the arena today. The fields name the sessio
 
     ![](images/sidebar_metadata.png)
 
-With the fields above, the session folder is `<output>/20260928/demo1_demo2/`, and cam1's recording will be `20260928-demo1_demo2-cam1-recording.mp4`.
+With the fields above, the session folder is `<output>/20261012/demo1_demo2/`, and cam1's recording will be `20261012-demo1_demo2-cam1-recording.mp4`.
 
 | Field | Default | Goes into |
 |---|---|---|
@@ -195,6 +195,12 @@ Before the first calibration on a rig, or after anyone has touched a lens, lay t
 board in the middle of the arena and open **Focus**. Every camera that sees the board
 should decode most of its markers. If one reads far fewer than its neighbours, focus it
 as [The Focus window](OVERVIEW.md#the-focus-window) describes.
+
+Here it is on our rig. Click a tile to see that camera's whole view, with a box around
+the markers it decodes. The board lay where cam8 sees all of it, while cam5 and cam2
+catch only its edge, so their low counts say nothing about their focus:
+
+![Clicking cam8, cam5 and cam2 in the Focus window, with each count updating live](images/gif_focus.gif)
 
 ### Start the calibration
 
@@ -273,6 +279,8 @@ Now let's turn the calibration into a model of the cameras. The [solve](GLOSSARY
 4. When it's done, the preview comes back, the state label goes back to **IDLE** and the status bar reads `Solved N of M cameras — copied to <path>`. If N and M match, every camera made it in:
 
     ![](images/solve_done.png)
+
+    Here all nine made it in. The end of the line says which cameras placed the floor, and that the solve left a note in `session.log` ([Reading the status bar](#reading-the-status-bar)).
 
 5. Open `reprojection_error_histogram.png` in the session's `calibration/` folder and check that every bar is green ([Reading the pairwise calibration plot](#reading-the-pairwise-calibration-plot)).
 
@@ -364,9 +372,13 @@ For this walkthrough, let's build a classic paradigm: a 5-minute baseline, 30 s 
 4. Make the post-period: **Freq** 0, **PW** 0 and **Dur** 300, then **Create Block**. With that block selected, tick **Ending**, so the recording stops when it finishes.
 5. Join the blocks with arrows: drag from a port on the first block (one of the little circles on its edges) to a port on the second, then from the second to the third. The first block has no arrow coming in, so the chain starts there.
 6. Check the status line under the canvas. It should read `Recording will stop 630 s after start.`
-7. Press **Apply to Arduino** and wait for `Upload successful — press Record to run paradigm.` It takes about 30 seconds.
+7. Before you attach the fiber, press **Apply to Arduino** and wait for `Upload successful — press Record to run paradigm.` It takes about 30 seconds. Applying flashes the board, and its pins float for a second or two while it resets, which is why the editor keeps a reminder about the fiber under **Apply**. Once it's done, a yellow lightning bolt appears beside **Record** in the main window, so you can tell at a glance that the next recording runs a paradigm.
 8. Press **Test** to watch it run. A test drives the pin for real, so whatever's wired to it runs too. It plays the whole paradigm, so press **Stop Test** once you've seen it start.
-9. Press **Save** if you'll use this paradigm again. Next time, **Load** it and press **Apply to Arduino**.
+9. Press **Save** if you'll use this paradigm again. Next time, **Load** it and press **Apply to Arduino**. Loading fits the view to the blocks it brings in, and if you ever lose one off the edge, **Fit** (or <kbd>Home</kbd>) shows them all again. The scroll bars reach the rest of the canvas.
+
+Here are steps 2 to 7 in one go, cut short to two blocks on pin 53: 2 s off, then 4 s at 20 Hz. Until the arrow joins them, they're two chains on one pin, so the status line turns red for a moment. On our rig **Apply** takes about 30 seconds, but the simulated board here takes it at once:
+
+![Two blocks created on pin 53, joined by an arrow, and applied](images/gif_stimulation.gif)
 
 That's it! You can close the editor now, or leave it open while you record.
 
@@ -375,6 +387,9 @@ That's it! You can close the editor now, or leave it open while you record.
 
 > [!TIP]
 > Want a loop? Draw an arrow from the last block back to the first, and tick **Starting** on the block the loop begins with. A loop keeps going until the recording stops, so either stop Record yourself or add a separate timer chain with an **Ending** block ([Ending](OVERVIEW.md#8-ending)).
+
+> [!TIP]
+> Done with stimulation for the day? **Clear** the canvas and press **Apply to Arduino**. The editor says `Upload successful — no paradigm: recordings run without stimulation.`, the bolt beside **Record** goes out, and the recordings after that run no paradigm.
 
 ### Pins
 
@@ -437,13 +452,21 @@ The last two stop **Calibrate** as well. If an upload fails, [Stimulation](TROUB
 Everything's set up. Let's record!
 
 1. Put the animals in the arena and close it.
-2. If you're using a paradigm, make sure it's applied. If you calibrated after applying it, Panopticon flashes it back onto the board first, and the pins float briefly while it does.
+2. If you're using a paradigm, look for the yellow bolt beside **Record**. It's there whenever the next recording will run the paradigm you applied:
+
+    ![The Acquisition group with the stimulation bolt beside Record](images/sidebar_record_stim.png)
+
+    No bolt means no stimulation. If you calibrated after applying the paradigm, Panopticon flashes it back onto the board first, and the pins float briefly while it does.
 3. Flip **Record** on. The state label runs through `Checking capacity…` and `Starting...`, then reads **RECORDING**, and each pane's frame rate climbs to the trigger rate (100 fps on our rig):
 
     ![](images/record_running.png)
 
 4. Keep an eye on the status bar while it records. `Capture healthy` means all's well, and [While it records](#while-it-records) covers everything else it can say.
 5. When you're done, flip **Record** off. If your paradigm has an **Ending** block, it flips Record off for you.
+
+Here's a short take, seen from the sidebar. The animals' IDs and a note go in, **Record** goes on, and the session fields grey out until it's off again:
+
+![Typing two mouse IDs and a note, then flipping Record on and off](images/gif_session_record.gif)
 
 > [!TIP]
 > Press **Snapshot** whenever you like to save a full-resolution still from every camera into the session's `snapshots/` folder.
@@ -465,6 +488,14 @@ Panopticon keeps the videos in step as it records. With [kick-out](GLOSSARY.md#k
 With kick-out off, the status bar reports how late the slowest camera's frames arrive instead. It starts at `Capture healthy — keeping up with the trigger (max lag N ms)`, turns into `CAPTURE FALLING BEHIND: camN is S s behind real time and growing.` past 0.25 s, and into `CAPTURE S s BEHIND REAL TIME (camN).` past 1 s.
 
 If a camera gets close to its shutdown temperature, the status bar starts with `CAMERA TEMPERATURE: camN T C ...`. The alert comes `thermal_warn_margin_c` below the shutdown temperature the camera reports, so our cameras, which shut down at 81 °C, warn at 79 °C. When you see it, stop at a point that suits the experiment and let the cameras cool before the next take, because a camera that reaches its shutdown temperature stops sending frames. Afterwards, `temp_max_c` under `camera_thermals` in `session_metadata.json` shows how hot each one got.
+
+If the recording runs a paradigm, an **Expected stimulation** panel appears in the sidebar, under the **Display** sliders. Here it is about 10 seconds into the paradigm we built in [Optional: stimulation](#7-optional-stimulation):
+
+![The Expected stimulation panel 10 s into the walkthrough paradigm, with the baseline block lit](images/sidebar_stim_progress.png)
+
+The panel is a small copy of your canvas, with pulsing blocks in purple and pauses in grey. The block each chain should be running right now is lit with a yellow outline (here, the baseline). Under it there's a line for each chain, naming that block and counting down the time left in it, like `Pin 53 · block 1 of 3 · off · 4:50 left`. The title counts the time since the first trigger, and reads `Expected stimulation · waiting for the first trigger` until it arrives. When a chain has run its course, its blocks dim and its line reads `Pin 53 · finished`. Once every chain has finished, the title reads `Expected stimulation · over`.
+
+Panopticon works all of this out from the trigger count, the same way it writes `stim_trace.csv`, so the panel lights the same block the trace will give that frame. Keep in mind that it shows what the paradigm *should* be doing, not a measurement. The board reports nothing back while it records, so only a light the cameras can see, like a sync LED, tells you the device on the pin really fired ([After a stimulated recording](#after-a-stimulated-recording)).
 
 ### Your own trigger source
 
