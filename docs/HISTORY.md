@@ -1146,9 +1146,12 @@ Dead ends, do not retry:
   a recording moves into a folder of the same name in the recording folder,
   once its writer has let it go. The reference profile gates pin 51, lists
   it in `stim_safe_pins` as well, and collects `data/usv`. Checked in the
-  simulated GUI and by an arduino-cli compile for the Mega, not yet on the
-  reference rig. The short files at each flash need a pull-down on the gate
-  line, since no sketch runs during a reset.
+  simulated GUI, by an arduino-cli compile for the Mega and on the reference
+  rig. There a calibration acked the gate low and two recordings of 10
+  minutes acked it high. Each recording's .wav, of 303 and 307 MB, moved into
+  its `usv` folder with nothing left behind and no warning. The short files
+  at each flash need a pull-down on the gate line, since no sketch runs
+  during a reset.
 
 ---
 
@@ -1168,7 +1171,10 @@ Dead ends, do not retry:
   earlier takes whose solves crossed the cut on 5 to 8 views read
   connectivity 0, as did the split take. The take of 14 October, whose solve
   crossed the cut on a full-strength pair, read 17. The reference profile's
-  floor therefore drops from 30 to 15. Not yet run on the reference rig.
+  floor therefore drops from 30 to 15. On the reference rig the next
+  calibration read READY at connectivity 19.7 after 4 min 50 s. Its solve
+  kept all nine cameras, crossed the cut on cam2-cam4 with 25 shared views,
+  and refined to a median error of 0.39 px.
 
 Dead ends, do not retry:
 - Raising `calibration_min_connectivity` on a graph counted by markers: the
