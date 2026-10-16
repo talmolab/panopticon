@@ -395,12 +395,13 @@ That's it! You can close the editor now, or leave it open while you record.
 
 The trigger board's numbered sockets are its pins. A stimulation pin is either LOW, at 0 V, or HIGH, at the board's logic voltage (5 V on the Mega 2560), which a TTL input reads as off or on. The number you type in **Pin** is the number printed beside the socket. Panopticon has no idea what's wired to a pin, so a wrong number drives the wrong device.
 
-Your rig's stimulation pins should be listed in its profile's `stim_safe_pins` (`[53]` on our rig), which you can read by opening the profile in Notepad. If that list is empty, or you're not sure, ask the rig's owner before you use a pin.
+Your rig's stimulation pins should be listed in its profile's `stim_safe_pins`, which you can read by opening the profile in Notepad. Ours is `[51, 53]`: pin 53 drives the laser, and pin 51 is the ultrasonic microphone's [gate](#devices-that-follow-the-recording), listed there so it stays low too. If that list is empty, or you're not sure, ask the rig's owner before you use a pin.
 
 The editor won't let you use:
 
 - the camera trigger pins, the profile's `trigger_pins` (ours are `[2, 4, 6, 8, 10, 12]`). Extra pulses on a trigger line would give one camera extra frames, and its block IDs would stop matching the other cameras';
 - pins 0 and 1, which carry the board's serial link;
+- the profile's [`gate_pins`](CONFIGURATION.md#gate_pins) (ours is `[51]`). A block there would cut the gate a [device that follows the recording](#devices-that-follow-the-recording) records on;
 - anything above the profile's [`board_max_pin`](CONFIGURATION.md#board_max_pin), the board's highest pin.
 
 ### When the board resets
@@ -411,9 +412,11 @@ Every sketch Panopticon builds pulls the `stim_safe_pins` LOW, along with every 
 - at every **Apply to Arduino**, and at a **Test** that uploads a changed canvas first;
 - when an acquisition needs the other sketch. Panopticon keeps two, recording-only and recording plus stimulation, and swaps them itself: after an Apply, a calibration flashes the recording-only sketch (`Flashing recording-only firmware…`) and the next recording flashes the paradigm back (`Flashing recording + stimulation firmware…`);
 - at the first **Calibrate** or **Record** after a launch flash that failed;
-- at the first **Calibrate** or **Record** after you switch between two profiles on the same port whose `trigger_pins` or `stim_safe_pins` differ. The switch itself flashes nothing;
+- at the first **Calibrate** or **Record** after you switch between two profiles on the same port whose `trigger_pins`, `stim_safe_pins` or `gate_pins` differ. The switch itself flashes nothing;
 - at the first **Calibrate**, **Record** or **Test** after the port couldn't be opened (the log said `will retry on first use`);
 - at a start the board doesn't acknowledge at first. Panopticon then reopens the port once, and the log says `[teensy] no ack — reopening port to force a board reset`.
+
+A [gate pin](#devices-that-follow-the-recording) floats during a reset too. A recorder that reads a floating input as high starts a file then, and each flash leaves one or two short files, one for the upload and one for the port reopening after it. A pull-down resistor from the gate line to ground, at the recorder's end, holds the line low through the reset. About 1 kΩ beats a typical TTL input's pull-up and takes about 5 mA from the pin when it's high. With the board unplugged, check that the line reads below 0.8 V.
 
 If a flash fails, the acquisition doesn't start, since nobody knows what's on the board then. Panopticon also won't close during a flash, because an interrupted upload can leave the board without the guard that holds its stimulation pins low. For the same reason, don't end Panopticon from Task Manager while the state label reads `Clearing stim firmware…` or `Flashing …`, or while the editor reads `Compiling + uploading… (~30 s)`.
 
@@ -496,6 +499,19 @@ If the recording runs a paradigm, an **Expected stimulation** panel appears in t
 The panel is a small copy of your canvas, with pulsing blocks in purple and pauses in grey. The block each chain should be running right now is lit with a yellow outline (here, the baseline). Under it there's a line for each chain, naming that block and counting down the time left in it, like `Pin 53 · block 1 of 3 · off · 4:50 left`. The title counts the time since the first trigger, and reads `Expected stimulation · waiting for the first trigger` until it arrives. When a chain has run its course, its blocks dim and its line reads `Pin 53 · finished`. Once every chain has finished, the title reads `Expected stimulation · over`.
 
 Panopticon works all of this out from the trigger count, the same way it writes `stim_trace.csv`, so the panel lights the same block the trace will give that frame. Keep in mind that it shows what the paradigm *should* be doing, not a measurement. The board reports nothing back while it records, so only a light the cameras can see, like a sync LED, tells you the device on the pin really fired ([After a stimulated recording](#after-a-stimulated-recording)).
+
+### Devices that follow the recording
+
+Skip this unless your profile sets `gate_pins` or `collect_dirs`.
+
+Another device can record along with the cameras, like the ultrasonic microphone on our rig. Panopticon can start and stop it with the triggers, and gather up what it writes:
+
+- [`gate_pins`](CONFIGURATION.md#gate_pins) are board pins that go high with a recording's first trigger and low when its triggers stop. They stay low during a calibration and while the window is idle. Wire the pin to the device's TTL input, and set the device to record while the input is high. Our microphone's recorder, Avisoft-RECORDER, records on pin 51 with its trigger set to UltraSoundGate DIN and the `!` option on.
+- [`collect_dirs`](CONFIGURATION.md#collect_dirs) names the folders the device writes into. When the recording finishes, every file in them that changed during the recording moves into a folder of the same name in the recording folder. Ours lands in `<mouse1>_<mouse2>_recording\usv\`. Older files stay where they are, and `session_metadata.json` lists what moved.
+
+The gate rises with the first trigger and falls half a trigger period after the last one. A device that records the gate's level, as Avisoft-RECORDER does in the lowest bit of each sample when its trigger is DIN, can therefore line its recording up with the frames. Set a short pretrigger, 0.1 s on our rig, so the file holds the rising edge.
+
+If the device still holds a file open when the recording finishes, Panopticon waits up to `collect_wait_s` seconds (30 by default) for it, then leaves it where it is and names it in `WARNINGS.txt`. A collected folder that gained nothing during the recording gets a line there too, since it usually means the device wasn't recording.
 
 ### Your own trigger source
 
@@ -668,6 +684,7 @@ In the acquisition folder, `calibration/` or `<mouse1>_<mouse2>_recording/`:
 | `calibration_report.json`, `reprojection_error_histogram.png` | The solve's figures, for the window, and its pairwise plot. Calibration only |
 | `codet_frames.json` | The triggers at which two or more cameras saw the board, which lets the solve decode only those frames. Calibration only |
 | `stim_paradigm.json`, `stim_paradigm.ino`, `stim_trace.csv` | The paradigm, its sketch and the modelled stimulus per trigger ([After a stimulated recording](#after-a-stimulated-recording)) |
+| `<folder>/`, such as `usv/` | What a [collected folder](CONFIGURATION.md#collect_dirs) gained during the recording, under that folder's name ([Devices that follow the recording](#devices-that-follow-the-recording)). Recording only |
 | `aligned/alignment.npz`, `aligned/alignment.json` | The alignment index, written whenever an alignment runs ([below](#aligned)) |
 
 The session folder itself holds a copy of `session_metadata.json` from the session's first acquisition, which is never overwritten, and `snapshots/<date>_<HHMMSS>/camN.png`. The launch log stays in `logs\` in the Panopticon folder.
@@ -682,8 +699,9 @@ Each acquisition writes its own copy when it stops. It holds:
 - the host, the OS, Python, the GPU with its driver and memory, and the NVENC sessions available;
 - each camera's temperatures (`camera_thermals`, where `temp_max_c` is the one to read);
 - the encoder used and the one the profile asked for;
-- settings the videos can't show, among them `trigger_source`, `log_level`, `nvenc_upload`, `thermal_warn_margin_c` and `capture_processes`;
+- settings the videos can't show, among them `trigger_source`, `gate_pins`, `log_level`, `nvenc_upload`, `thermal_warn_margin_c` and `capture_processes`;
 - `kickout`: the triggers decided, kept, kicked out and force-dropped, and the [effective frame rate](GLOSSARY.md#effective-frame-rate);
+- `collected`: for each collected folder, the files that moved into the recording and the files left behind;
 - `log`: the log's level and file, and any lines this acquisition lost;
 - `camera_stream_stats` and `nvenc_upload_used`.
 

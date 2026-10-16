@@ -41,7 +41,7 @@ Every measurement in these docs comes from our rig:
 | GPU | NVIDIA RTX 5080, 12 concurrent NVENC sessions |
 | Cameras | 9 Basler a2A1920-165g5m (5 GigE), 1920x1200 Mono8 at 100 fps |
 | Network | 3 managed multi-gigabit switches (NETGEAR MS510TXM), 3 cameras each, one 10 GbE host port per switch |
-| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins shared by the nine cameras, stimulation on pin 53 |
+| Trigger board | Arduino Mega 2560 on `COM3`, six trigger pins shared by the nine cameras, stimulation on pin 53, and the ultrasonic microphone's [gate](WORKFLOW.md#devices-that-follow-the-recording) on pin 51 |
 | OS | Windows 11 |
 
 Building a copy? Buy these parts and go straight to [section 2](#2-install-the-software).

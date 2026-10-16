@@ -121,6 +121,7 @@ trigger_source: board             # board | external
 serial_port: COM3                 # SITE: Device Manager > Ports (COM & LPT)
 trigger_pins: [2, 4, 6, 8]        # SITE: every pin wired to a camera trigger input
 stim_safe_pins: []                # SITE: every pin wired to a laser or LED driver
+# gate_pins: [51]                 # high while a recording runs, for a device that follows it
 # board_fqbn: arduino:avr:mega    # the Mega 2560, the only board tested
 # board_max_pin: 69               # the Mega's highest digital pin (A15)
 
@@ -128,6 +129,8 @@ stim_safe_pins: []                # SITE: every pin wired to a laser or LED driv
 output_dir: data                  # SITE: your largest, fastest drive
 board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
 # skeleton: skeletons/mouse.json  # a SLEAP skeleton each recording carries
+# collect_dirs: [D:/usv]          # folders whose new files move into each recording
+# collect_wait_s: 30              # seconds to wait for a file still open
 
 # --- Calibration coverage ---------------------------------------------------
 calibration_min_per_cam_shared: 120
@@ -686,7 +689,7 @@ List of integers. Default `[2, 4, 6, 8, 10, 12]`. Reference rig: `[2, 4, 6, 8, 1
 
 #### `stim_safe_pins`
 
-List of integers. Default `[53]`. Reference rig: `[53]`.
+List of integers. Default `[53]`. Reference rig: `[51, 53]`.
 
 - Does: Pins the board's sketch drives low as its first step after every reset,
   before it waits for Panopticon. A stimulation device wired there, such as a
@@ -702,6 +705,32 @@ List of integers. Default `[53]`. Reference rig: `[53]`.
   ([stimulation warning](INSTALLATION.md#step-8--flash-the-trigger-firmware)).
   The loader refuses a pin also in `trigger_pins`, but not pins 0 or 1. An
   external-source profile refuses a non-empty list.
+
+#### `gate_pins`
+
+List of integers. Default `[]`. Reference rig: `[51]`.
+
+- Does: Board pins held high from a recording's first trigger until its
+  triggers stop, and low at every other time: from the moment the board
+  starts, through a calibration and while the window is idle. Wire one to the
+  TTL input of a device that should record along with the cameras, such as an
+  ultrasonic microphone's recorder, and set the device to record while the
+  input is high. The pin rises with the first trigger and falls half a
+  trigger period after the last one, so a device that records the line's
+  level can line its recording up with the frames.
+  [Devices that follow the recording](WORKFLOW.md#devices-that-follow-the-recording)
+  shows the setup.
+- Change when: You connect a device that should record only while the cameras
+  do.
+- Goes wrong: Like every pin, a gate pin floats while the board resets: at
+  launch, at every flash, and whenever the port reopens. A device that reads
+  a floating input as high then records a short file. A pull-down resistor on
+  the line, at the device's end, holds it low
+  ([When the board resets](WORKFLOW.md#when-the-board-resets)). The loader
+  refuses pins 0 and 1, a pin in `trigger_pins`, a pin outside 2 to
+  `board_max_pin` and a pin listed twice. A gate pin may also be in
+  `stim_safe_pins`, and no stimulation block may use one. An external-source
+  profile refuses the field.
 
 #### `board_fqbn`
 
@@ -774,6 +803,40 @@ Text, a path. Default `""`. Reference rig: `skeletons/mouse.json`.
   Leave it empty to write no skeleton.
 - Goes wrong: A file that is missing, is not JSON, or has no `nodes` and `links`
   stops the cameras opening, with a message naming the file.
+
+#### `collect_dirs`
+
+List of paths. Default `[]`. Reference rig: `["data/usv"]`.
+
+- Does: Folders another program writes into during a recording, such as an
+  audio recorder's output folder. When a recording finishes, every file in
+  them that changed after the recording started moves into the recording
+  folder, into a folder of the same name, such as
+  `<mouse1>_<mouse2>_recording\usv\`. Files in subfolders keep their place
+  below it, and older files stay where they are. `session_metadata.json`
+  lists what moved under `collected`. Relative paths start at the Panopticon
+  folder, as `output_dir`'s do. A calibration collects nothing.
+- Change when: A device writes files that belong with each recording.
+- Goes wrong: Give the program a folder of its own, because every file that
+  changes there during a recording moves, whoever wrote it. A file the
+  program still holds open after `collect_wait_s` stays where it is, and
+  `WARNINGS.txt` names it. So does a folder that gained nothing during the
+  recording, which usually means the program was not recording. A file
+  already in the recording folder is never replaced. The loader refuses two
+  folders with the same name, a folder named like a camera folder (`cam1`), a
+  drive with no folder, and a folder that is `output_dir` or holds it.
+
+#### `collect_wait_s`
+
+Number, seconds. Default `30`. Reference rig: not set.
+
+- Does: How long the collection keeps trying a file its program still holds
+  open, or that changed in the last second, once a recording finishes.
+- Change when: Your program keeps writing after the triggers stop, such as an
+  audio recorder with a hold time. Set the wait longer than that.
+- Goes wrong: The window stays busy, reading `Finishing…`, while it waits. A
+  file still open at the end of the wait stays where it was written. 0 tries
+  each file once. The loader refuses a negative value.
 
 ### Calibration coverage
 
@@ -1525,6 +1588,15 @@ Single fields:
 | `nvenc_context` | Not `shared` or `own` | `nvenc_context` and `is not one of` |
 | `trigger_pins` | Includes 0 or 1 | `are the Serial0 link` |
 | `trigger_pins` | Lists a pin twice | `lists a pin twice` |
+| `gate_pins` | Includes 0 or 1 | `the trigger board's serial link` |
+| `gate_pins` | Includes a pin in `trigger_pins` | `also a camera trigger line` |
+| `gate_pins` | Includes a pin outside 2 to `board_max_pin` | `not a digital pin on this board` |
+| `gate_pins` | Lists a pin twice | `listed twice` |
+| `collect_dirs` | Lists an empty name | `lists an empty folder name` |
+| `collect_dirs` | Lists a drive with no folder, such as `D:\` | `names a drive, not a folder` |
+| `collect_dirs` | Lists a folder named like a camera folder, such as `cam2` | `beside that camera's video` |
+| `collect_dirs` | Lists two folders with the same name | `share the name` |
+| `collect_wait_s` | Negative | `must be 0 or a positive number of seconds` |
 | `board_fqbn` | Not of the form `vendor:arch:board` | `is not an arduino-cli board name` |
 | `board_max_pin` | Below 2 or above 255 | `must be from 2 to 255` |
 | `trigger_rate_limit` | Negative | `must be 0 (off) or positive` |
@@ -1555,6 +1627,7 @@ Combinations:
 | Sets `nvenc_context: own` with `nvenc_upload: host` | `chooses the CUDA context of the pinned upload path` |
 | Sets `n_cameras` to another count than `camera_serials` has | `disagrees with the` |
 | Sets `capture_processes` above 0 without real-time encoding and kick-out | `needs realtime_encode: true and realtime_kick: true` |
+| Lists in `collect_dirs` the `output_dir` folder, or a folder that holds it | `holds output_dir` |
 
 A FLIR or flir_sim profile:
 
@@ -1574,6 +1647,7 @@ An external trigger source:
 | `trigger_pins` | `your own source drives the cameras' trigger inputs` |
 | A non-empty `stim_safe_pins` | `Stimulation needs trigger_source: board` |
 | `board_fqbn` or `board_max_pin` | `Panopticon never compiles or flashes a board` |
+| A non-empty `gate_pins` | `nothing drives them` |
 
 The `camera:` block. Messages start with the key, such as `camera.trigger.line`:
 

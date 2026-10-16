@@ -337,7 +337,8 @@ UINT32_MAX = 2**32 - 1
 
 
 def forbidden_pin_uses(blocks: list[dict], trigger_pins=(),
-                       max_pin: int = MEGA_MAX_DIGITAL_PIN) -> list[tuple[int, str]]:
+                       max_pin: int = MEGA_MAX_DIGITAL_PIN,
+                       gate_pins=()) -> list[tuple[int, str]]:
     """Stim blocks assigned to pins that must never carry a stim waveform.
 
     max_pin is the profile's board_max_pin, capped at SKETCH_MAX_PIN. A pin
@@ -361,16 +362,24 @@ def forbidden_pin_uses(blocks: list[dict], trigger_pins=(),
       which is what tells a started board from a failed start. Pin 0 is
       especially easy to hit because a blank pin field in the editor coerces to
       0.
+    - **Gate pins** (the profile's `gate_pins`). The gate is high for exactly
+      the recording's triggers, and a device recording on it splits or ends
+      its file wherever a stim block pulls the pin low.
 
-    No legitimate paradigm drives either. Returns [(pin, reason), ...].
+    No legitimate paradigm drives any of them. Returns [(pin, reason), ...].
     """
     trig = {int(p) for p in trigger_pins}
+    gate = {int(p) for p in gate_pins}
     max_pin = min(int(max_pin), SKETCH_MAX_PIN)
     out: list[tuple[int, str]] = []
     for pin in sorted({int(b["pin"]) for b in blocks}):
         if pin in trig:
             out.append((pin, "camera trigger line — extra edges on one camera "
                              "would break cross-camera block-ID alignment"))
+        elif pin in gate:
+            out.append((pin, "recording gate (gate_pins) — a stim waveform "
+                             "would cut the gate the recording's devices "
+                             "follow"))
         elif pin in RESERVED_SERIAL_PINS:
             out.append((pin, "UART RX0/TX0 — would garble the trigger-board "
                              "serial link and the RDY ack"))
@@ -502,9 +511,96 @@ def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
     return out
 
 
+def gate_pin_problems(gate_pins, trigger_pins=(),
+                      max_pin: int = MEGA_MAX_DIGITAL_PIN) -> list[tuple[int, str]]:
+    """Gate pins the sketch cannot drive as a gate. Returns [(pin, reason), ...].
+
+    The profile loader refuses each of these first, and compile_ino refuses
+    them again for a caller with no profile. A gate on the serial link garbles
+    the RDY ack, a gate on a camera trigger line turns that line into one long
+    pulse, and a pin outside 2..max_pin drives nothing.
+    """
+    trig = {int(p) for p in trigger_pins}
+    max_pin = min(int(max_pin), SKETCH_MAX_PIN)
+    out: list[tuple[int, str]] = []
+    pins = [int(p) for p in gate_pins]
+    for pin in sorted(set(pins)):
+        if pin in RESERVED_SERIAL_PINS:
+            out.append((pin, "UART RX0/TX0, the trigger board's serial link"))
+        elif pin in trig:
+            out.append((pin, "also a camera trigger line"))
+        elif pin < 2 or pin > max_pin:
+            out.append((pin, f"not a digital pin on this board (2..{max_pin})"))
+        if pins.count(pin) > 1:
+            out.append((pin, "listed twice"))
+    return out
+
+
+def _gate_snippets(gate_pins: list[int]) -> dict[str, str]:
+    """The sketch text the gate adds, by the place it goes in compile_ino().
+
+    Every entry is empty, and the RDY line keeps its four fields, when there
+    are no gate pins. That keeps such a sketch identical to one compiled
+    before the gate existed, so no board is reflashed for it.
+    """
+    if not gate_pins:
+        return {"block": "", "raise": "", "boot": "", "read": "",
+                "drop": "", "read_loop": "",
+                "ack": "  Serial.println(SKETCH_ID);"}
+    pin_list = ", ".join(str(p) for p in gate_pins)
+    block = (
+        "\n"
+        "// ===== RECORDING GATE =====\n"
+        "// The profile's gate_pins: LOW from boot, raised with the first trigger edge\n"
+        "// of a start that asks for the gate, and dropped with the last trigger pulse\n"
+        "// when the next command (the stop) arrives.\n"
+        f"const uint8_t GATE_PINS[] = {{{pin_list}}};\n"
+        f"const int N_GATE_PINS = {len(gate_pins)};\n"
+        "bool GATE_ARMED = false;    // the last command asked for the gate\n"
+        "bool GATE_PENDING = false;  // raise the gate at the next trigger edge\n"
+        "\n"
+        "// pinMode first, then LOW, as allStimLow() does.\n"
+        "void gatesLow() {\n"
+        "  for (int i = 0; i < N_GATE_PINS; i++) {\n"
+        "    pinMode(GATE_PINS[i], OUTPUT);\n"
+        "    digitalWrite(GATE_PINS[i], LOW);\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "void gatesHigh() {\n"
+        "  for (int i = 0; i < N_GATE_PINS; i++) digitalWrite(GATE_PINS[i], HIGH);\n"
+        "  GATE_PENDING = false;\n"
+        "}\n"
+        "\n"
+        "// The command's optional field after the frame rate: 1 asks for the gate.\n"
+        "// Read after the command's delay(500), when the whole line has arrived.\n"
+        "// Without the field, parseFloat() spends on the trailing newline the same\n"
+        "// timeout the drain after it would, so the ack is no later.\n"
+        "void readGate() {\n"
+        "  GATE_ARMED = Serial.available() && Serial.parseFloat() > 0.5;\n"
+        "  GATE_PENDING = GATE_ARMED && FPS_OUT > 0;\n"
+        "}\n")
+    return {
+        "block": block,
+        # Microseconds after every camera's edge, so it never delays one.
+        "raise": "    if (GATE_PENDING) gatesHigh();   // the first trigger edge\n",
+        # Before readPins(), where setup() blocks on the handshake.
+        "boot": "  gatesLow();\n",
+        "read": "  readGate();\n",
+        # loop() reads a command only at a period boundary, where camsLow()
+        # ends the last trigger pulse, so the gate falls with that pulse.
+        "drop": "    gatesLow();\n",
+        "read_loop": "    readGate();\n",
+        "ack": ("  Serial.print(SKETCH_ID);\n"
+                "  Serial.print(' ');\n"
+                "  Serial.println(GATE_ARMED ? 1 : 0);"),
+    }
+
+
 def compile_ino(blocks: list[dict], edges: list[dict],
                 safe_pins, trigger_pins=(),
-                max_pin: int = MEGA_MAX_DIGITAL_PIN) -> str:
+                max_pin: int = MEGA_MAX_DIGITAL_PIN,
+                gate_pins=()) -> str:
     """Return the .ino source for the combined camera-trigger + stim sketch.
 
     safe_pins is required: it comes from the rig profile's `stim_safe_pins` and
@@ -520,12 +616,25 @@ def compile_ino(blocks: list[dict], edges: list[dict],
     board_max_pin, the ceiling of the pin-range check, and callers that have
     a profile pass it for the same reason.
 
+    gate_pins is the profile's `gate_pins`, and callers that have a profile
+    MUST pass it too. A sketch with gate pins holds them LOW from boot and
+    raises them with the first trigger edge of a start whose command asks
+    for the gate (TeensyController.start_triggers' ``gate``), and they fall
+    with the last trigger pulse when the next command arrives. With no gate
+    pins the sketch is the same text, byte for byte, as one compiled before
+    gate pins existed, so its identity and its RDY line do not change. A
+    sketch with gate pins appends the gate's state to its RDY line.
+
     Also raises ValueError for parameter_problems() (numbers the firmware
     would silently execute as something else) and structural_problems()
     (branches or fan-in the chain walker would silently collapse). The editor
     runs the same three checks before Apply/Test/Record to explain the refusal.
     """
-    bad = forbidden_pin_uses(blocks, trigger_pins, max_pin)
+    gate_bad = gate_pin_problems(gate_pins, trigger_pins, max_pin)
+    if gate_bad:
+        detail = "; ".join(f"pin {p}: {why}" for p, why in gate_bad)
+        raise ValueError(f"gate pin the sketch cannot drive — {detail}")
+    bad = forbidden_pin_uses(blocks, trigger_pins, max_pin, gate_pins)
     if bad:
         detail = "; ".join(f"pin {p}: {why}" for p, why in bad)
         raise ValueError(f"stim block on a forbidden pin — {detail}")
@@ -583,6 +692,7 @@ def compile_ino(blocks: list[dict], edges: list[dict],
     n_pins = len(pins_sorted)
     state_arr = max(n, 1)
     sketch_id = _SKETCH_ID_TOKEN
+    gate = _gate_snippets(sorted({int(p) for p in gate_pins}))
 
     body = f"""\
 // Panopticon: camera trigger + stimulus paradigm
@@ -613,7 +723,7 @@ struct StimChainRef {{
 // the very first thing in setup() so nothing fires before the record command.
 const uint8_t STIM_PINS[] = {{{pin_list}}};
 const int N_STIM_PINS = {n_pins};
-
+{gate['block']}
 {chain_defs}
 
 {chain_table}
@@ -676,7 +786,7 @@ void announceReady() {{
   Serial.print(' ');
   Serial.print((long)FPS_OUT);
   Serial.print(' ');
-  Serial.println(SKETCH_ID);
+{gate['ack']}
 }}
 
 // ===== STIM HELPERS =====
@@ -801,12 +911,12 @@ void updateStim() {{
 void setup() {{
   allStimLow();          // before Serial: setup() blocks on the handshake below
   Serial.begin(BAUDRATE);
-  delay(500);
+{gate['boot']}  delay(500);
   N_CAMS = readPins();
   FPS_OUT = readFPS();
   FRAME_PERIOD = (FPS_OUT > 0) ? (unsigned long)(1e6f / FPS_OUT) : 0xFFFFFFFFUL;
   delay(500);
-  while (Serial.available()) Serial.parseFloat();
+{gate['read']}  while (Serial.available()) Serial.parseFloat();
   announceReady();       // before FRAME_START so the ~1 ms print can't skew it
   FRAME_START = micros();
   if (NUM_CHAINS > 0 && FPS_OUT > 0) initStim();
@@ -816,13 +926,13 @@ void setup() {{
 void loop() {{
   if (Serial.available()) {{
     camsLow();
-    allStimLow();
+{gate['drop']}    allStimLow();
     STIM_ACTIVE = false;
     N_CAMS = readPins();
     FPS_OUT = readFPS();
     FRAME_PERIOD = (FPS_OUT > 0) ? (unsigned long)(1e6f / FPS_OUT) : 0xFFFFFFFFUL;
     delay(500);
-    while (Serial.available()) Serial.parseFloat();
+{gate['read_loop']}    while (Serial.available()) Serial.parseFloat();
     announceReady();
     FRAME_START = micros();
     if (NUM_CHAINS > 0 && FPS_OUT > 0) initStim();
@@ -831,7 +941,7 @@ void loop() {{
     camsLow();
     while (micros() - FRAME_START < FRAME_PERIOD / 2) {{ updateStim(); }}
     camsHigh();
-    while (micros() - FRAME_START < FRAME_PERIOD) {{ updateStim(); }}
+{gate['raise']}    while (micros() - FRAME_START < FRAME_PERIOD) {{ updateStim(); }}
     FRAME_START += FRAME_PERIOD;
   }}
 }}
@@ -862,15 +972,34 @@ def sketch_id(ino_content: str) -> str | None:
     return m.group(1) if m else None
 
 
-def recording_only_sketch(safe_pins, trigger_pins=()) -> str:
+_GATE_PINS_RE = re.compile(r"const uint8_t GATE_PINS\[\] = \{([0-9, ]+)\};")
+
+
+def sketch_gate_pins(ino_content: str) -> list[int]:
+    """The gate pins a sketch drives, or [] for a sketch without a gate.
+
+    The simulated board reads a flashed sketch with this, so its RDY line
+    carries the gate field exactly when the sketch's would.
+    """
+    m = _GATE_PINS_RE.search(ino_content or "")
+    return [int(p) for p in m.group(1).split(",")] if m else []
+
+
+def recording_only_sketch(safe_pins, trigger_pins=(), gate_pins=(),
+                          max_pin: int = MEGA_MAX_DIGITAL_PIN) -> str:
     """The sketch with NO stimulation: camera triggers plus the safe-pin guard.
 
     This is the state the board should be in unless a paradigm was deliberately
     Applied. Flashing it is the only way to be *sure* the board carries no stim:
     the paradigm lives in flash memory, so it survives closing the GUI, power
     cycles and USB unplugs, and there is no way to read it back over serial.
+
+    gate_pins and max_pin are the profile's, as for compile_ino(): every
+    sketch a profile flashes carries its gate, so a recording without a
+    paradigm gates too.
     """
-    return compile_ino([], [], safe_pins, trigger_pins)
+    return compile_ino([], [], safe_pins, trigger_pins, max_pin,
+                       gate_pins=gate_pins)
 
 
 def sketch_sha(ino_content: str) -> str:

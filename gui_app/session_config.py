@@ -17,6 +17,7 @@ import dataclasses
 import difflib
 import json
 import math
+import os
 import re
 import types
 import typing
@@ -33,7 +34,7 @@ from gui_app.logging_setup import DEFAULT_LOG_LEVEL, LOG_LEVELS
 # same reason: it is what compiles for the board and checks its pins.
 from gui_app.stim_compiler import (
     FQBN as DEFAULT_BOARD_FQBN, MEGA_MAX_DIGITAL_PIN as DEFAULT_BOARD_MAX_PIN,
-    RESERVED_SERIAL_PINS, SKETCH_MAX_PIN)
+    RESERVED_SERIAL_PINS, SKETCH_MAX_PIN, gate_pin_problems)
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -96,8 +97,14 @@ _PATH_FIELDS = ("pfs_path", "output_dir", "board_config", "skeleton")
 _LIST_ELEMENT_TYPES = {
     "trigger_pins": int,
     "stim_safe_pins": int,
+    "gate_pins": int,
     "capture_core_exclude": int,
+    "collect_dirs": str,
 }
+
+#: Folder names Panopticon itself writes in a recording folder, which a
+#: collect_dirs folder would land beside under its own name: one per camera.
+_RECORDING_SUBFOLDER = re.compile(r"cam\d+", re.IGNORECASE)
 
 
 class ProfileError(ValueError):
@@ -615,6 +622,16 @@ class RigProfile:
     # recording gets a copy as SKELETON_FILENAME at its folder's root, where
     # LUC3D loads it with the session. Empty: no skeleton is written.
     skeleton: str = ""
+    # Folders other programs write into during a recording, such as an audio
+    # recorder's output folder. When a recording finishes, every file in them
+    # that changed after its start moves into the recording folder, under a
+    # folder of the same name (gui_app/collect.py). Relative paths resolve
+    # against the repository root, as output_dir does. Empty: nothing moves.
+    collect_dirs: list = field(default_factory=list)
+    # Seconds the collection waits for a file another program still holds
+    # open. A file still held then stays where it is, and WARNINGS.txt names
+    # it.
+    collect_wait_s: float = 30.0
     # Trigger-board serial port. No code default: the device name is per-host
     # (COMn on Windows, /dev/tty* elsewhere), so a profile must state it and an
     # empty value fails at the first serial open instead of guessing. A
@@ -736,6 +753,13 @@ class RigProfile:
     # the stimulation workflow are added automatically; list here anything that
     # must be safe even when no paradigm is loaded.
     stim_safe_pins: list = field(default_factory=lambda: [53])
+    # Trigger-board pins held high from a recording's first trigger until its
+    # triggers stop, and low otherwise: from boot, during a calibration and
+    # while idle. A device that records on a TTL input, such as an audio
+    # recorder, follows the recording through one. The sketch drives them low
+    # before the serial handshake, as it does stim_safe_pins, and no stim
+    # block may drive one. Empty: no gate.
+    gate_pins: list = field(default_factory=list)
     # The trigger board's type, as arduino-cli names it (vendor:arch:board,
     # its FQBN). Every compile and upload of the sketch names it, so a board
     # other than the default is a profile edit. Only the Arduino Mega 2560,
@@ -889,6 +913,9 @@ class RigProfile:
         for key in _PATH_FIELDS:
             if key in kwargs:
                 kwargs[key] = _resolve_path(kwargs[key])
+        if "collect_dirs" in kwargs:
+            kwargs["collect_dirs"] = [_resolve_path(d) if d else d
+                                      for d in kwargs["collect_dirs"]]
         if "metadata_defaults" in kwargs:
             merged = _default_metadata()
             merged.update(kwargs["metadata_defaults"])
@@ -952,6 +979,7 @@ class RigProfile:
                 f"board_max_pin {self.board_max_pin} must be from 2 to "
                 f"{SKETCH_MAX_PIN}: pins 0 and 1 are the board's serial link, "
                 f"and the sketch stores a pin number in 8 bits")
+        self._validate_gate_pins()
 
         limit = float(self.trigger_rate_limit)
         if limit < 0:
@@ -1091,6 +1119,7 @@ class RigProfile:
                 f"metadata_defaults keys {bad_meta} are not session metadata "
                 f"fields; allowed: {list(METADATA_DEFAULT_KEYS)}")
         self._validate_camera()
+        self._validate_collect_dirs()
 
     # -------------------------------------------------- validation helpers
     def _given(self, name: str) -> bool:
@@ -1187,6 +1216,73 @@ class RigProfile:
                     f"{key} describes Panopticon's trigger board, but "
                     f"trigger_source is external, so Panopticon never "
                     f"compiles or flashes a board. Remove {key}.")
+        if self.gate_pins:
+            raise ValueError(
+                f"gate_pins {self.gate_pins} are trigger-board pins held "
+                f"high during a recording, but trigger_source is external, "
+                f"so Panopticon never opens the board and nothing drives "
+                f"them. Take the gate from your own trigger source, and "
+                f"remove gate_pins.")
+
+    def _validate_gate_pins(self) -> None:
+        """The gate pins: each a pin the sketch can hold as the gate.
+
+        stim_compiler.gate_pin_problems() is the compiler's own check, so the
+        loader and the compile refuse the same pins. A pin may also be in
+        stim_safe_pins: both hold it low at boot, and no stim block may drive
+        a gate pin.
+        """
+        bad = gate_pin_problems(self.gate_pins, self.trigger_pins,
+                                self.board_max_pin)
+        if bad:
+            detail = "; ".join(f"pin {p} is {why}" for p, why in bad)
+            raise ValueError(
+                f"gate_pins {self.gate_pins}: {detail}. A gate pin is a "
+                f"board output of its own, from 2 to board_max_pin "
+                f"{self.board_max_pin}.")
+
+    def _validate_collect_dirs(self) -> None:
+        """The collected folders: named, distinct, and outside the sessions.
+
+        Each folder's files land in the recording folder under the folder's
+        own name, so two folders with one name would mix, and a camera's
+        name (cam1) would mix with that camera's files. A folder that holds
+        output_dir would hold every session, the new recording included.
+        """
+        wait = self.collect_wait_s
+        if not (math.isfinite(wait) and wait >= 0):
+            raise ValueError(
+                f"collect_wait_s {wait:g} must be 0 or a positive number of "
+                f"seconds")
+        seen = {}
+        for raw in self.collect_dirs:
+            if not raw or not raw.strip():
+                raise ValueError("collect_dirs lists an empty folder name")
+            path = Path(raw)
+            name = path.name
+            if not name:
+                raise ValueError(
+                    f"collect_dirs {raw!r} names a drive, not a folder: its "
+                    f"files would land in the recording folder with no "
+                    f"folder name to keep them apart")
+            if _RECORDING_SUBFOLDER.fullmatch(name):
+                raise ValueError(
+                    f"collect_dirs {raw!r}: its files would go in the "
+                    f"recording's {name} folder, beside that camera's video. "
+                    f"Rename the folder.")
+            key = name.lower()
+            if key in seen:
+                raise ValueError(
+                    f"collect_dirs {seen[key]!r} and {raw!r} share the name "
+                    f"{name}, so their files would mix in the recording's "
+                    f"{name} folder")
+            seen[key] = raw
+            if self.output_dir and is_within(Path(self.output_dir), path):
+                raise ValueError(
+                    f"collect_dirs {raw!r} holds output_dir "
+                    f"{self.output_dir!r}, so every session, the new "
+                    f"recording included, is in it. Collect from a folder of "
+                    f"its own.")
 
     def _validate_capture_processes(self) -> None:
         n = self.capture_processes
@@ -1296,6 +1392,14 @@ class RigProfile:
 
 
 # ----------------------------------------------------------------- coercion
+def is_within(path, folder) -> bool:
+    """True when ``path`` is ``folder`` or inside it, compared as Windows
+    compares paths: absolute, and case-blind."""
+    p = os.path.normcase(os.path.abspath(path))
+    f = os.path.normcase(os.path.abspath(folder))
+    return p == f or p.startswith(f.rstrip("\\/") + os.sep)
+
+
 def _resolve_path(raw: str) -> str:
     if not raw:
         return ""
@@ -1770,6 +1874,10 @@ class SessionConfig:
             # frame_rate is assumed, and the block-ID rate check is the only
             # test of it.
             trigger_source=prof.trigger_source if prof else None,
+            # The board pins a recording holds high from its first trigger to
+            # its stop, for a device that records on them. A calibration
+            # leaves them low.
+            gate_pins=list(prof.gate_pins) if prof else None,
             # How much of this acquisition the session log (session.log)
             # holds, so a reader knows whether a missing line means the event
             # did not happen or the level did not log it.

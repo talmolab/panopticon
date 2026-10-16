@@ -121,6 +121,9 @@ output_dir: "data"
 board_config: "configs/boards/charuco_8x8_15mm.yaml"
 # The mouse skeleton (24 nodes) each recording carries for LUC3D.
 skeleton: "skeletons/mouse.json"
+# Avisoft-RECORDER writes its .wav files into data/usv (its configuration's
+# base directory). Each recording's files move into <recording>/usv/.
+collect_dirs: ["data/usv"]
 
 serial_port: COM3
 # Every pin driven as a camera trigger. The order carries no meaning: the board
@@ -149,9 +152,18 @@ gige_driver: socket
 
 # Optostim pins the board drives low at boot, before it waits for the host, so
 # a powered laser driver does not read a floating pin as on. Pin 53 is the
-# laser. Pins a stimulation paradigm uses are added on top; this list is the
-# floor.
-stim_safe_pins: [53]
+# laser. Pin 51 is the ultrasonic microphone's gate (gate_pins below), listed
+# here too so the same boot guard holds it low. Pins a stimulation paradigm
+# uses are added on top; this list is the floor.
+stim_safe_pins: [51, 53]
+
+# Pin 51 runs to the Avisoft UltraSoundGate's DIN input. Avisoft-RECORDER
+# triggers on DIN with the ! option (high-active), so it records while the pin
+# is high: from each recording's first trigger to its stop. The pin still
+# floats while the board resets, and the DIN input reads a floating line as
+# high, so each reset (a flash, a launch, the port reopening) can leave a short
+# file unless a pull-down holds the line low.
+gate_pins: [51]
 
 # Written to AcquisitionFrameRate in trigger mode. It adds a minimum interval of
 # exposure + 1/165 s between frames, which is what caps exposure at 3.94 ms at

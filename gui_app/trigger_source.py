@@ -79,8 +79,12 @@ class TriggerSource:
     #: False means the operator starts and stops them.
     host_started = False
 
-    def start_triggers(self, pins, fps, may_retry=None) -> bool:
-        """Start the triggers. False means nothing may be recorded."""
+    def start_triggers(self, pins, fps, may_retry=None, gate=None) -> bool:
+        """Start the triggers. False means nothing may be recorded.
+
+        ``gate`` is for a profile with gate pins: whether the board raises
+        them for this start (TeensyController.start_triggers).
+        """
         raise NotImplementedError
 
     def stop_triggers(self, pins) -> bool:
@@ -109,10 +113,13 @@ class BoardTriggerSource(TriggerSource):
         #: The TeensyController, or None while the window holds no link.
         self.teensy = teensy
 
-    def start_triggers(self, pins, fps, may_retry=None) -> bool:
+    def start_triggers(self, pins, fps, may_retry=None, gate=None) -> bool:
         if self.teensy is None:
             return False
-        return self.teensy.start_triggers(pins, fps, may_retry=may_retry)
+        if gate is None:
+            return self.teensy.start_triggers(pins, fps, may_retry=may_retry)
+        return self.teensy.start_triggers(pins, fps, may_retry=may_retry,
+                                          gate=gate)
 
     def stop_triggers(self, pins) -> bool:
         return self.teensy is not None and self.teensy.stop_triggers(pins)
@@ -134,7 +141,7 @@ class ExternalTriggerSource(TriggerSource):
     """
     kind = "external"
 
-    def start_triggers(self, pins, fps, may_retry=None) -> bool:
+    def start_triggers(self, pins, fps, may_retry=None, gate=None) -> bool:
         """Send nothing and return True.
 
         The operator starts the source when prompted, and the caller then

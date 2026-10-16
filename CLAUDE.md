@@ -28,7 +28,7 @@ checked by hand that no other one holds the hardware.
   In a working tree that has them, run the matching suite after touching a
   module (plain scripts, no pytest, with `QT_QPA_PLATFORM=offscreen`):
   - `test_stim_compiler.py` and `test_stim_trace.py` after `stim_compiler.py`
-    or `stim_trace.py`;
+    or `stim_trace.py`, and `test_collect.py` after `collect.py`;
   - `test_stim_guard.py` and `test_widgets.py` after
     `widgets/stimulation_window.py`, `widgets/sidebar.py` or
     `widgets/stim_progress.py`;
@@ -645,8 +645,9 @@ and no Qt.
 - `allStimLow()` is the first statement in `setup()`, before `Serial.begin()`.
   `setup()` blocks on the handshake, so a later call leaves the pin floating,
   and a powered laser driver reads a floating pin as ON. The pins come from the
-  profile's `stim_safe_pins` (`[53]`, the laser, on the reference rig, and `[]`
-  on 3dface). Never hardcode pins in `stim_compiler.py`.
+  profile's `stim_safe_pins` (`[51, 53]`, the gate and the laser, on the
+  reference rig, and `[]` on 3dface). Never hardcode pins in
+  `stim_compiler.py`.
 - The sequence is compiled into the `.ino`, not sent over serial, so an edit
   does nothing until Apply (arduino-cli compile and upload). Record refuses a
   canvas that was never applied, a canvas edited since the last Apply, and an
@@ -701,6 +702,47 @@ and no Qt.
   never in a dialog. Apply and an uploading Test flash the board, and a dialog
   is dismissed once and then not read again.
 
+## Gate pins and collected folders
+
+- `gate_pins` are trigger-board outputs held high from a recording's first
+  trigger until its triggers stop, for a device that records on them (the
+  reference rig's ultrasonic microphone, on pin 51). Every sketch a profile
+  flashes carries its gate, so `stim_compiler.compile_ino` and
+  `stim_compiler.recording_only_sketch` take `gate_pins`, and every caller
+  with a profile passes them: `MainWindow._recording_only_sketch`, the
+  Stimulation editor (`get_gate_pins`) and `probe_flir.py`. A sketch built
+  without them drops the gate and has another identity. A profile without
+  gate pins compiles byte-identical sketches, so no board is reflashed for
+  the feature.
+- The start command carries the gate as a field after the frame rate: 1 for a
+  recording, 0 for a calibration (`MainWindow._gate_request`), and none from a
+  Test or a probe. The sketch appends the gate's state to its RDY line, and
+  `TeensyController.start_triggers` fails a start whose ack has another state
+  or none. A gate raised for a calibration would make the device record it.
+- The gate rises right after the first `camsHigh()`, and falls in the
+  reconfigure branch right after `camsLow()`, which `loop()` reaches only at
+  a period boundary. It is high for N - 1/2 trigger periods for N triggers,
+  which is what lets a device's record of the line be aligned to the frames.
+  No stim block may drive a gate pin (`forbidden_pin_uses()`), and an
+  external trigger source refuses `gate_pins`.
+- A gate pin floats while the board resets, like every pin. A device that
+  reads a floating input as high records at each reset: two short files per
+  flash on the reference rig's Avisoft recorder, one for the upload and one
+  for the port reopening. Only a pull-down at the device's end prevents it.
+- `collect_dirs` folders are collected by `gui_app/collect.py` from
+  `_finalize`, for a recording only, and only after `_finalized` is set:
+  before that a quit deletes the recording folder, and the moved files with
+  it. A file moves when its modification time is at or after
+  `_collect_since`, set just before the trigger source starts, so a file a
+  sketch swap's reset left behind stays.
+- A file moves only once it has gone `SETTLE_S` unmodified and its writer has
+  let it go. On one volume that is a rename, which Windows refuses while the
+  writer holds the file. To another volume it is a copy to a `.partial` name,
+  checked, then the original deleted, then the rename. Never `shutil.move`:
+  when the rename fails it copies, and copies a file still being written. Nothing is overwritten.
+  What moved goes into `session_metadata.json` (`collected`), and every file
+  left and every folder that gained nothing into `WARNINGS.txt`.
+
 ## Serial and laser safety
 
 - A computer may have no profile chosen: nothing remembered, or a remembered or
@@ -726,14 +768,16 @@ and no Qt.
   - at every Calibrate or Record that swaps sketches (`_ensure_sketch_for`).
     While a paradigm is Applied, that is each Calibrate and the Record after it;
   - at the first Calibrate or Record after a failed launch flash, and after a
-    same-port switch to other `trigger_pins` or `stim_safe_pins`;
+    same-port switch to other `trigger_pins`, `stim_safe_pins` or
+    `gate_pins`;
   - at the first Calibrate, Record or Test after the port could not be opened
     or reclaimed;
   - at a start that gets no ack (branch 2 below).
 - Every exchange with the board holds the controller's lock. `board_id` is
   cleared on every open and at the start of every ack wait.
-- Every start is confirmed by an `RDY <n_cams> <fps> <id>` ack, because a start
-  can land in `loop()`'s reconfigure branch instead of a fresh `setup()`.
+- Every start is confirmed by an `RDY <n_cams> <fps> <id>` ack, with the gate's
+  state after it from a sketch with gate pins, because a start can land in
+  `loop()`'s reconfigure branch instead of a fresh `setup()`.
   `start_triggers()` returns a bool:
   1. ack: proceed;
   2. no ack: reset and retry;

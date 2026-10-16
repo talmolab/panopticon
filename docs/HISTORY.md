@@ -1122,7 +1122,37 @@ Dead ends, do not retry:
   flickered there by about half the LED's contrast. The panel named the
   trace's block at the block ID it was drawn from in 132 of 132 samples.
 
-## 17. Standing dead ends (index)
+---
+
+## 17. The ultrasonic microphone's gate, and collected folders (16 October 2026)
+
+- 2026-10-15: An Avisoft UltraSoundGate microphone joined the reference rig.
+  Avisoft-RECORDER records on its DIN input, wired to pin 51 of the trigger
+  board, and a stimulation block held the pin high. Each flash left two short
+  files, of 1.5 s and 0.9 s. The DIN input reads a floating line as high, and
+  the pin floats through two resets per flash: the upload's, and the one when
+  the port reopens after it. The recorder keeps the DIN level in the lowest
+  bit of every sample, which was high for exactly each gated stretch. No code
+  change.
+- 2026-10-16: The gate became a profile field of its own, with a folder
+  collector beside it (`f6c54b2`). `gate_pins` are held low from boot and
+  raised right after a recording's first trigger edge. They drop with the
+  last trigger pulse when the stop arrives. A calibration, a bench Test and
+  the probes leave them low. The start command carries the gate after the
+  frame rate, and the RDY line reports its state, so a sketch without the
+  gate refuses a gated start. A profile without gate pins compiles the same
+  sketch, byte for byte, so no other rig was reflashed. `collect_dirs` names
+  folders another program writes into. Every file there that changed during
+  a recording moves into a folder of the same name in the recording folder,
+  once its writer has let it go. The reference profile gates pin 51, lists
+  it in `stim_safe_pins` as well, and collects `data/usv`. Checked in the
+  simulated GUI and by an arduino-cli compile for the Mega, not yet on the
+  reference rig. The short files at each flash need a pull-down on the gate
+  line, since no sketch runs during a reset.
+
+---
+
+## 18. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
