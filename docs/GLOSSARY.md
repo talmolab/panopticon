@@ -293,7 +293,8 @@ not match the printed board.
 
 A moment when two or more cameras see the calibration board at once. The coverage
 display counts them live and saves their block IDs in `codet_frames.json`, so the solve
-does not have to scan whole videos.
+does not have to scan whole videos. A pair of cameras counts the moment only when both
+see at least six of the same board corners, because the solve can pair no other view.
 
 ### READY
 

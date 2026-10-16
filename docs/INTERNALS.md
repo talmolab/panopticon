@@ -1536,9 +1536,15 @@ wall-clock worth varies with the camera count and the scene. A slower tick
 means more frames behind each count, which errs on the safe side. The rate is
 logged as `[hud] coverage ticks/s:` every 30 seconds.
 
-Per tick and per camera the HUD counts ArUco markers. Counting interpolated
-ChArUco corners would be stricter than the solve's eligibility and would
-starve oblique cameras.
+Per tick and per camera the HUD counts ArUco markers. Counting a camera's
+own interpolated ChArUco corners would be stricter than the solve's
+eligibility and would starve oblique cameras. A pair is judged on corners,
+because the solve pairs two views of one trigger only when they share
+`charuco.MIN_CORNERS` corners (`shared_views`). The HUD interpolates each
+seen camera's corners through `charuco.interpolate_corners`, the solve's own
+call, about 0.3 ms a view on the reference rig against 9 ms for the markers.
+Counted by markers, the reference rig's weakest cut read well joined while
+the solve could pair almost none of its views.
 
 
 | Threshold | Value | Effect |
@@ -1551,8 +1557,9 @@ starve oblique cameras.
 | `MIN_GRID_CELLS` | [`calibration_min_grid_cells`](CONFIGURATION.md#calibration_min_grid_cells), of 4 | Spatial spread over the 2x2 grid |
 
 A tick in which two or more cameras pass `edge_threshold` adds one to each
-such camera's count, one to each such pair's co-detections, and a hint to
-`codet_frames`. READY needs all of these:
+such camera's count and a hint to `codet_frames`. It adds one to the
+co-detections of each pair of them whose views share `charuco.MIN_CORNERS`
+corners, each view holding that many. READY needs all of these:
 
 - Every camera has `min_per_cam_shared` co-detection ticks.
 - The pairs with at least `min_edge` co-detections form one connected graph.

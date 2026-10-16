@@ -1152,7 +1152,33 @@ Dead ends, do not retry:
 
 ---
 
-## 18. Standing dead ends (index)
+## 18. The coverage display's pair count (16 October 2026)
+
+- 2026-10-16: A calibration read READY at connectivity 44.9 against a floor of
+  30. Its solve then split the rig at its weakest cut, cams 1, 4, 7 and 9
+  against the other five, and dropped the four. The display counted a pair's
+  co-detection whenever both cameras decoded 5 markers in one tick. The solve
+  pairs two views only when they share 6 ChArUco corners. Decoding the take's
+  hinted frames as the solve does, cam1-cam3 had 26 marker co-detections and
+  no shared view, cam1-cam2 20 and 3, and cam8-cam9 12 and 1. Counting shared
+  markers would not have helped: cam1-cam3 shared 6 or more markers in 3 ticks
+  and no corners in any. The display now counts a pair only on 6 shared
+  corners, interpolated through the solve's own call (`3fd7e51`). That costs
+  0.3 ms a view against 9.3 ms for the markers. Recounted that way, three
+  earlier takes whose solves crossed the cut on 5 to 8 views read
+  connectivity 0, as did the split take. The take of 14 October, whose solve
+  crossed the cut on a full-strength pair, read 17. The reference profile's
+  floor therefore drops from 30 to 15. Not yet run on the reference rig.
+
+Dead ends, do not retry:
+- Raising `calibration_min_connectivity` on a graph counted by markers: the
+  cut's marker co-detections were views the solve could not pair.
+- Counting a pair by the markers its two views share (no corners in common in
+  ticks with 6 or more shared markers).
+
+---
+
+## 19. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
@@ -1201,3 +1227,7 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
   DPCs that lose their packets preempt every thread).
 - Grading a calibration's pairs by a two-view triangulation (blind to a
   camera moved along the pair's baseline).
+- Raising `calibration_min_connectivity` on a graph counted by markers
+  (the cut's marker co-detections were views the solve could not pair).
+- Counting a pair by the markers its two views share (no corners in common
+  in ticks with 6 or more shared markers).

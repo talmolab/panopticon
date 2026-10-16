@@ -503,8 +503,14 @@ until someone analyses it.
   header on `1_calibrate.py`. OpenCV renamed `chessboardCorners` to
   `getChessboardCorners()` between 4.6 and 4.7, and the solve runs in the
   project environment so an offline rig never resolves a second one.
-- The HUD counts ArUco markers, not interpolated ChArUco corners. Counting
-  corners is stricter than calibration needs and starves oblique cameras.
+- The HUD counts a camera's presence in a tick by ArUco markers. Counting its
+  own interpolated ChArUco corners is stricter than calibration needs and
+  starves oblique cameras. A pair's co-detection counts only when its two
+  views share `charuco.MIN_CORNERS` ChArUco corners, each view holding that
+  many, which is the view the solve pairs (`shared_views`). Both sides
+  interpolate through `charuco.interpolate_corners`. Counted by markers, the
+  reference rig's weakest cut read connectivity 44.9 at READY while the solve
+  paired none of its views and dropped four cameras.
 - The Focus window (`widgets/focus_window.py`, `focus_worker.py`) opens only
   at IDLE, outside a busy cycle and a solve (`_focus_refusal`). `_begin_busy`,
   Solve and quitting close it, and it joins its worker before it emits
@@ -526,7 +532,8 @@ until someone analyses it.
   board's distance and angle, and a camera keeps its best sharpness only at
   its best marker count, because the score is taken over the decoded markers.
 - `READY` needs `min_per_cam_shared` co-detection ticks per camera, one
-  connected coverage graph (`min_edge` co-detections make a pair an edge), and
+  connected coverage graph (`min_edge` co-detections on shared corners make a
+  pair an edge), and
   `MIN_GRID_CELLS` of the 2 x 2 view grid per camera. One connected component is
   enough: the board is one-sided, so opposed cameras never co-detect. `READY`
   counts one per camera per co-detection tick, and its thresholds stay at most
@@ -739,7 +746,8 @@ and no Qt.
   let it go. On one volume that is a rename, which Windows refuses while the
   writer holds the file. To another volume it is a copy to a `.partial` name,
   checked, then the original deleted, then the rename. Never `shutil.move`:
-  when the rename fails it copies, and copies a file still being written. Nothing is overwritten.
+  when the rename fails it copies, and copies a file still being written.
+  Nothing is overwritten.
   What moved goes into `session_metadata.json` (`collected`), and every file
   left and every folder that gained nothing into `WARNINGS.txt`.
 

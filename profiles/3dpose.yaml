@@ -93,18 +93,21 @@ calibration_gain_db: -1            # keep the .pfs gain (6 dB)
 # alone: it is cheap, and it stops a board being waved in one spot, which gives
 # confident but badly conditioned intrinsics.
 calibration_min_per_cam_shared: 120
-# Shared board sightings before a camera pair counts as connected. Nine cameras
-# need at least eight such pairs, so this number multiplies through the whole
-# calibration. A 9/9 solve has succeeded at 40, so 20 keeps a margin; 15 is the
-# next step down if waving is still slow. The floor (what the solve needs for a
-# stable relative pose per pair) has not been measured.
+# Views a camera pair shares before it counts as connected. A view counts when
+# both cameras see at least 6 of the same ChArUco corners in one trigger, the
+# view the solve pairs. Nine cameras need at least eight such pairs, so this
+# number multiplies through the whole calibration. The solve calls a pair of 10
+# shared views a full-strength link, so 20 keeps a margin; 15 is the next step
+# down if waving is still slow.
 calibration_min_edge: 20
 calibration_min_grid_cells: 3
-# The co-detection graph's algebraic connectivity. This rig's weakest cut is
-# always the same: cams 1, 4, 7 and 9 against the other five. At 30 that cut
-# carries about 70 co-detections. The two good calibrations passed 30 before
-# the other tests did. A take whose other tests passed at 8.7 waited 8 s more.
-calibration_min_connectivity: 30
+# The graph's algebraic connectivity, on those shared views. This rig's weakest
+# cut is always the same: cams 1, 4, 7 and 9 against the other five. Recounted
+# from the videos, the one take whose solve crossed it with a full-strength
+# pair read 17, about 45 views across the cut. Four takes whose solve split the
+# rig or crossed the cut on 5 to 8 views read 0. At 15 the cut needs about 33
+# views. Counted by markers instead, those five takes read 16 to 80.
+calibration_min_connectivity: 15
 # The view tests: cells of the 4 x 4 fill grid, the board's size, its tilt in
 # degrees. Cam 1, the far camera, is the weakest on every take. In the two good
 # calibrations it reached 8 cells, a fifth-best size of 0.12 and a fifth-best

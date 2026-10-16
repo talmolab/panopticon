@@ -398,9 +398,11 @@ here are our rig's. A profile can switch the last two off by setting them to 0.
    (`calibration_min_per_cam_shared`).
 2. **grid**: each camera has seen it in 3 of its four quarters
    (`calibration_min_grid_cells`).
-3. **groups**: the pairs that have shared 20 ticks (`calibration_min_edge`) link every
-   camera into one group, directly or through other cameras.
-4. **link**: the group is well knit, meaning its algebraic connectivity reaches 30
+3. **groups**: the pairs that have shared 20 views (`calibration_min_edge`) link every
+   camera into one group, directly or through other cameras. A view counts for a pair
+   only when both cameras see at least six of the same board corners, the views the
+   solve can pair.
+4. **link**: the group is well knit, meaning its algebraic connectivity reaches 15
    (`calibration_min_connectivity`). One weak link between two halves of the rig
    keeps it low.
 5. **views**: each camera's shared views pass the view tests. `closer` wants a board
