@@ -28,6 +28,12 @@ Rules and their reasons:
 REQUIRED_KEYS = {"board_x": int, "board_y": int,
                  "square_length": float, "marker_length": float}
 
+#: ChArUco corners a view needs before the solve keeps it, and corners two
+#: cameras must have in common before the solve counts a view they share
+#: (``1_calibrate.shared_views``). The coverage HUD counts a pair's
+#: co-detection by the same rule, so its graph is the graph the solve builds.
+MIN_CORNERS = 6
+
 
 def check_board_config(cfg) -> None:
     """Raise ``ValueError`` unless ``cfg`` is a mapping with every required key.
@@ -194,6 +200,24 @@ def make_marker_detector(aruco_dict):
                 gray, aruco_dict, parameters=params)
             return corners, ids
     return detect
+
+
+def interpolate_corners(board, marker_corners, marker_ids, gray):
+    """``(corners, ids)`` of the ChArUco corners the markers place, as an
+    (N, 2) float array and an (N,) int array, or ``(None, None)``.
+
+    Both the solve and the HUD interpolate through this function, so the
+    corners the HUD counts in common are the corners the solve pairs. Fewer
+    than two markers place no corner.
+    """
+    import cv2
+    if marker_ids is None or len(marker_ids) < 2:
+        return None, None
+    _ret, cc, ci = cv2.aruco.interpolateCornersCharuco(
+        marker_corners, marker_ids, gray, board)
+    if ci is None or len(ci) == 0:
+        return None, None
+    return cc.reshape(-1, 2), ci.ravel()
 
 
 def make_scored_marker_detector(aruco_dict):

@@ -414,7 +414,8 @@ ignored triggers stay under its tolerance.
 | No camera ever brightens in the coverage HUD | No camera finds the board's markers. Either the board is too dark (raise `calibration_exposure_us`), or `board_config` does not describe the printed board. |
 | The coverage HUD never appears | OpenCV is missing, or `board_config` names a file that does not exist. The rest of the window still works. |
 | The caption's `grid <n>/<n>` count stops short of its target | The board is waved in one part of the view. Carry it into each camera's corners. |
-| One line stays thin while the rest are bright | That pair rarely sees the board together. Hold the board where both can see it. |
+| Every camera brightens in the coverage HUD, but no line between them ever appears | The cameras find the board's markers, but no two of them place the same ChArUco corners, and a line counts only views that share six or more. Check that `board_config` matches the printed board, `board_legacy` included: with the flag wrong, every marker is found and no corner comes back. |
+| One line stays thin while the rest are bright | That pair rarely sees the same corners of the board together. Hold the board face-on where both can see it. |
 | `Solve unavailable while acquiring/encoding` | Solve runs only at `IDLE`. |
 | `A solve is already running` | One solve at a time. It takes several minutes, and the state reads `CALIBRATING...` meanwhile. |
 | `Solve unavailable while a camera operation runs` | The cameras are being reopened (a profile switch or a reconnect), or the stimulus trace is being updated. Press **Solve** again once it's done. |
@@ -426,7 +427,7 @@ ignored triggers stay under its tolerance.
 | `No ChArUco board detections found.` | The board was not visible, or the board config does not match the printed board. A board printed with the pre-4.6 OpenCV layout needs `board_legacy: true`. With the flag wrong either way, every marker is found and no corner comes back. |
 | `Fewer than two cameras produced valid intrinsics.` | Each camera needs at least 20 frames with 6 or more corners. Record longer, with the board filling more of each view. |
 | `No camera pair saw the board together.` | Hold the board where several cameras see it at once. |
-| `The coverage graph is disconnected.` | Too few cameras share board sightings. Hold the board where neighbouring cameras see it together. |
+| `The coverage graph is disconnected.` | Too few cameras share views of the same board corners. Hold the board face-on where neighbouring cameras see it together. |
 | `Calibration solve failed (singular matrix).` | Too few detections, or the board seen from one angle only. Record more orientations. |
 | `Missing dependency:` | The environment is incomplete. Run `uv sync` and try again. |
 | `Calibration timed out (<n> min)` | The solve did not finish. A calibration recorded without the coverage HUD has no co-detection hints, so the solve scans every video. |

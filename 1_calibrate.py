@@ -153,8 +153,9 @@ def _write_text_atomic(path, text: str) -> None:
 # ---------------------------------------------------------------------------
 
 #: ChArUco corners a view needs before it is used at all, and the corners two
-#: views of one trigger must share before they enter a stereo pair.
-MIN_CORNERS = 6
+#: views of one trigger must share before they enter a stereo pair. Defined in
+#: gui_app/charuco.py, because the coverage HUD counts pairs by the same rule.
+MIN_CORNERS = charuco.MIN_CORNERS
 #: Detection frames a camera needs before its intrinsics are solved.
 INTRINSICS_MIN_FRAMES = 20
 #: Above this many views, a camera's views are judged against a reference fit
@@ -352,7 +353,6 @@ def _detect_into(task, out):
     # Each worker process is one camera; two OpenCV threads apiece keeps a
     # worker per camera from oversubscribing the host.
     cv2.setNumThreads(2)
-    aruco = cv2.aruco
     # Board and marker detector share one API choice with the HUD, so the
     # markers the HUD counted are the markers the solve interpolates from.
     board, aruco_dict = charuco.make_board(board_cfg)
@@ -360,12 +360,12 @@ def _detect_into(task, out):
 
     def _detect(gray):
         mc, mi = _detect_markers(gray)
-        if mi is None or len(mi) < 2:
-            return None, None
-        ret, cc, ci = aruco.interpolateCornersCharuco(mc, mi, gray, board)
+        # The HUD interpolates through the same helper, so a pair it counts
+        # is a pair whose views this keeps.
+        cc, ci = charuco.interpolate_corners(board, mc, mi, gray)
         if ci is None or len(ci) < MIN_CORNERS:
             return None, None
-        return cc.reshape(-1, 2), ci.ravel()
+        return cc, ci
 
     cap = cv2.VideoCapture(str(video_path))
     try:

@@ -90,27 +90,29 @@ class _CharucoEngine:
         # numpy alone (tests, hosts without OpenCV).
         import cv2
         self._cv2 = cv2
-        # Board and marker detector both come from the shared helper, so the
-        # HUD and the solve can never disagree about dictionary, layout, legacy
-        # policy or which ArUco API generation is in use; the helper raises on
-        # an unknown dictionary or an unexpressible legacy flag. The HUD counts
-        # markers only (no charuco corner interpolation), because the count
-        # and centroid are all the coverage logic reads.
+        # Board, marker detector and corner interpolation all come from the
+        # shared helper, so the HUD and the solve can never disagree about
+        # dictionary, layout, legacy policy, ArUco API generation or which
+        # corners a view holds; the helper raises on an unknown dictionary or
+        # an unexpressible legacy flag.
         self._board, self._dict = charuco.make_board(board_cfg)
         self._detect_markers = charuco.make_marker_detector(self._dict)
         self._marker_fraction = marker_area_fraction(board_cfg)
 
     def detect(self, gray):
-        """Return (marker_count, centroid_xy_normalized, view) for a frame.
+        """Return (marker_count, centroid_xy_normalized, view, corner_ids).
 
         centroid_xy is the mean of all detected marker corners, normalized to
         [0, 1] by the frame dimensions, and view is ``view_shape``'s
-        ``(cells, size, tilt_deg)``. Returns (0, None, None) when nothing is
-        found.
+        ``(cells, size, tilt_deg)``. corner_ids is the frozenset of ChArUco
+        corner IDs the markers place (``charuco.interpolate_corners``), the
+        corners a pair's co-detection is judged on. Returns
+        (0, None, None, frozenset()) when nothing is found.
         """
         cv2 = self._cv2
+        none = (0, None, None, frozenset())
         if gray is None:
-            return 0, None, None
+            return none
         if gray.ndim == 3:
             gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
         if not gray.flags["C_CONTIGUOUS"]:
@@ -119,15 +121,20 @@ class _CharucoEngine:
         try:
             m_corners, m_ids = self._detect_markers(gray)
             if m_ids is None or len(m_ids) == 0:
-                return 0, None, None
+                return none
             n = int(len(m_ids))
             quads = np.concatenate([c.reshape(-1, 4, 2) for c in m_corners])
             all_pts = quads.reshape(-1, 2)
             cx = float(all_pts[:, 0].mean()) / max(w, 1)
             cy = float(all_pts[:, 1].mean()) / max(h, 1)
-            return n, (cx, cy), view_shape(quads, w, h, self._marker_fraction)
+            _cc, ci = charuco.interpolate_corners(self._board, m_corners,
+                                                  m_ids, gray)
+            corner_ids = (frozenset() if ci is None
+                          else frozenset(int(c) for c in ci))
+            return (n, (cx, cy), view_shape(quads, w, h, self._marker_fraction),
+                    corner_ids)
         except cv2.error:
-            return 0, None, None
+            return none
 
 
 #: The corners of a unit square in ArUco's corner order (top-left, top-right,
@@ -339,7 +346,7 @@ class BoardDetector:
             self.ticks_per_s = (inst if self.ticks_per_s <= 0
                                 else 0.9 * self.ticks_per_s + 0.1 * inst)
 
-        seen, views = [], {}
+        seen, views, corners = [], {}, {}
         for i in range(self.n):
             # A frames list shorter than n (a camera whose first frame has not
             # arrived) reads as "no frame" for the missing cameras, never an
@@ -353,6 +360,7 @@ class BoardDetector:
                 seen.append(i)
                 if len(found) > 2 and found[2] is not None:
                     views[i] = found[2]
+                corners[i] = found[3] if len(found) > 3 else frozenset()
                 if centroid is not None:
                     r, c = self._centroid_to_cell(*centroid)
                     if not self.grid_covered[i, r, c]:
@@ -370,10 +378,23 @@ class BoardDetector:
                 self.per_cam_frames[i] += 1
                 if i in views:
                     self._count_view(i, *views[i])
+            # RULE: a pair co-detects only when its two views share
+            # charuco.MIN_CORNERS corners, each view holding that many.
+            # REASON: that is the view the solve can use (shared_views), and
+            # cameras on either side of the rig's weakest cut both decode
+            # markers far more often than they place the same corners. Counted
+            # by markers, a cut the solve never bridged read as well joined,
+            # READY latched, and the solve dropped one side of the rig.
             for a in range(len(seen)):
+                ca = corners[seen[a]]
+                if len(ca) < charuco.MIN_CORNERS:
+                    continue
                 for b in range(a + 1, len(seen)):
-                    self.shared[seen[a], seen[b]] += 1
-                    self.shared[seen[b], seen[a]] += 1
+                    cb = corners[seen[b]]
+                    if (len(cb) >= charuco.MIN_CORNERS
+                            and len(ca & cb) >= charuco.MIN_CORNERS):
+                        self.shared[seen[a], seen[b]] += 1
+                        self.shared[seen[b], seen[a]] += 1
             if block_ids is not None:
                 tick = {i: int(block_ids[i]) for i in seen
                         if i < len(block_ids) and block_ids[i] is not None}

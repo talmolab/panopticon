@@ -863,8 +863,10 @@ Integer. Default `120`. Reference rig: `120`.
 
 Integer. Default `40`. Reference rig: `20`.
 
-- Does: How many shared detections make a camera pair count as connected. READY
-  needs the connected pairs to join every camera into one group.
+- Does: How many views a camera pair must share to count as connected. A view
+  counts when both cameras see at least 6 of the same ChArUco corners in one
+  trigger, which is what the solve needs to pair them. READY needs the
+  connected pairs to join every camera into one group.
 - Change when: Lower it when two groups of cameras will not join. On a large rig
   this decides most of the waving time.
 - Goes wrong: Too high, and a rig whose cameras face each other never reaches
@@ -884,13 +886,13 @@ Integer, 0 to 4. Default `3`. Reference rig: `3`.
 
 #### `calibration_min_connectivity`
 
-Number, 0 or more. Default `0`. Reference rig: `30`.
+Number, 0 or more. Default `0`. Reference rig: `15`.
 
 - Does: The least algebraic connectivity the graph of camera pairs must reach.
-  Each pair counts with its shared detections, once it has `calibration_min_edge`
+  Each pair counts with its shared views, once it has `calibration_min_edge`
   of them. The value is 0 while the cameras form two groups, and small while a
   weak link holds them together. For two groups of a and b cameras joined by c
-  shared detections, it is about c x (a + b) / (a x b). While it is short, the
+  shared views, it is about c x (a + b) / (a x b). While it is short, the
   display names the two groups.
 - Change when: Set it when calibrations pass READY with one group of cameras
   barely linked to the rest. It depends on how many cameras you have and where
