@@ -37,11 +37,12 @@ from gui_app.hardware_check import (HardwareCheckThread, check_capacity,
                                     select_encoder)
 from gui_app.coverage_worker import CoverageWorker
 from gui_app import charuco
+from gui_app import collect
 from gui_app.focus_worker import FocusEngine
 from gui_app import rig_setup
 from gui_app import settings
 from gui_app import stim_compiler
-from gui_app.session_config import SessionConfig, RigProfile
+from gui_app.session_config import METADATA_FILENAME, SessionConfig, RigProfile
 from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S, STOP_WAIT_S,
                                     ExternalTriggerSource,
                                     make_trigger_source)
@@ -180,6 +181,10 @@ class MainWindow(QMainWindow):
     #: What the finalize itself found (raw.bin against its block IDs, the
     #: block-ID rate check outside kick mode), for this recording's report.
     _finalize_warnings: tuple | list = ()
+    #: time.time() just before this acquisition's trigger source started,
+    #: or None before then. A file in a collect_dirs folder that changed at
+    #: or after it moves into the recording (_collect_files).
+    _collect_since: float | None = None
     #: Rate-check texts this recording has already reported, so the
     #: alignment summary's copy of the same finding is not shown twice.
     _reported_rate_warnings: frozenset | set = frozenset()
@@ -1980,8 +1985,7 @@ class MainWindow(QMainWindow):
         held = self._session_stim_ino
         if held is None:
             return None
-        blank = stim_compiler.recording_only_sketch(
-            self._profile.stim_safe_pins, self._profile.trigger_pins)
+        blank = self._recording_only_sketch()
         if held == blank:
             return None
         return ("Apply the empty canvas first",
@@ -2160,6 +2164,7 @@ class MainWindow(QMainWindow):
         self._capture_warnings = []
         self._sweep_warnings = []
         self._finalize_warnings = []
+        self._collect_since = None
         self._reported_rate_warnings = set()
         self._align_notes = []
         self._thermal_warnings = []
@@ -2757,11 +2762,17 @@ class MainWindow(QMainWindow):
                 return False
             return True
 
+        # Files other programs write from here on belong to this recording
+        # (collect_dirs): the board cannot raise a gate before this start.
+        self._collect_since = time.time()
         # BoardTriggerSource forwards to this controller's start_triggers
         # with the same arguments: the RDY ack, the reset-and-retry and the
-        # may_retry veto are the controller's.
+        # may_retry veto are the controller's. The gate field raises the
+        # profile's gate pins for a recording and keeps them low otherwise.
+        gate = self._gate_request(acq_type)
         if not make_trigger_source(self._profile, teensy).start_triggers(
-                self._profile.trigger_pins, fps, may_retry=may_retry):
+                self._profile.trigger_pins, fps, may_retry=may_retry,
+                gate=gate):
             if self._quitting:
                 # The quit closed the link under this start; the board is
                 # already stood down.
@@ -2920,6 +2931,9 @@ class MainWindow(QMainWindow):
         print(f"[acq] every camera is armed and none has received a frame; "
               f"the operator starts the trigger source at {fps} Hz",
               flush=True)
+        # Files other programs write from here on belong to this recording
+        # (collect_dirs): the operator starts the source after this.
+        self._collect_since = time.time()
         return {"ok": True, "await_trigger": True}
 
     def _cancel_external_start(self, message: str,
@@ -3659,10 +3673,31 @@ class MainWindow(QMainWindow):
         print("[stim] Apply failed on the board; its contents are unknown "
               "until the next flash", flush=True)
 
+    def _recording_only_sketch(self) -> str:
+        """The profile's recording-only sketch: its trigger, safe and gate
+        pins.
+
+        RULE: every sketch the window compares or flashes is built from the
+        profile's gate_pins too. REASON: a sketch built without them drives no
+        gate, and its identity differs from the one the board was flashed
+        with, so the board would be reflashed to a sketch with no gate.
+        """
+        p = self._profile
+        return stim_compiler.recording_only_sketch(
+            p.stim_safe_pins, p.trigger_pins, getattr(p, "gate_pins", ()),
+            getattr(p, "board_max_pin", stim_compiler.MEGA_MAX_DIGITAL_PIN))
+
+    def _gate_request(self, acq_type: str) -> bool | None:
+        """The start's gate field: None for a profile with no gate pins, and
+        otherwise whether this acquisition raises them, which only a
+        recording does."""
+        if not getattr(self._profile, "gate_pins", None):
+            return None
+        return acq_type == "recording"
+
     def _sketch_for(self, acq_type: str):
         """(source, label) of the firmware this acquisition must run under."""
-        blank = stim_compiler.recording_only_sketch(
-            self._profile.stim_safe_pins, self._profile.trigger_pins)
+        blank = self._recording_only_sketch()
         if acq_type == "calibration" or not self._session_stim_ino:
             return blank, "recording-only"
         return self._session_stim_ino, "recording + stimulation"
@@ -3921,8 +3956,7 @@ class MainWindow(QMainWindow):
                   flush=True)
             return
         try:
-            blank = stim_compiler.recording_only_sketch(
-                self._profile.stim_safe_pins, self._profile.trigger_pins)
+            blank = self._recording_only_sketch()
             self._pending_sha = stim_compiler.sketch_sha(blank)
         except Exception as e:
             print(f"[acq] could not build the recording-only sketch: {e}", flush=True)
@@ -4276,6 +4310,7 @@ class MainWindow(QMainWindow):
             # can still fail: everything the session consists of is on disk by
             # now, so a quit racing the restore must not delete it.
             self._finalized = True
+            self._collect_files()
             logging_setup.transition(
                 f"finalize: capture record saved {time.monotonic() - t0:.2f} "
                 f"s after the stop began; restoring the preview")
@@ -4358,6 +4393,48 @@ class MainWindow(QMainWindow):
                             encoding="utf-8")
         except Exception as e:
             print(f"[acq] could not record stream statistics: {e}", flush=True)
+
+    def _collect_files(self) -> None:
+        """Move what other programs wrote during this recording into its
+        folder (the profile's collect_dirs). Worker thread.
+
+        RULE: it runs only for a recording, and only once _finalized is set.
+        REASON: a quit before then deletes the recording folder
+        (_abandon_and_cleanup), and the files moved into it would go too. A
+        calibration is not what those programs record.
+
+        What it moved goes into session_metadata.json (``collected``), and
+        what it could not move into this recording's WARNINGS.txt, through
+        _finalize_warnings. Nothing here fails the finalize.
+        """
+        dirs = list(getattr(self._profile, "collect_dirs", None) or [])
+        since = self._collect_since
+        if (self._acq_type != "recording" or not dirs or since is None
+                or not self._video_dir):
+            return
+        logging_setup.transition(
+            f"collect: moving what {len(dirs)} collect_dirs folder(s) gained "
+            f"during the recording into {self._video_dir}")
+        try:
+            got = collect.collect(dirs, self._video_dir, since,
+                                  self._profile.collect_wait_s)
+        except Exception as e:
+            print(f"[collect] the collection failed: {e}", flush=True)
+            self._finalize_warnings = list(self._finalize_warnings) + [
+                f"collect_dirs: the collection failed ({type(e).__name__}: "
+                f"{e}), so the files stay where they were written."]
+            return
+        self._finalize_warnings = (list(self._finalize_warnings)
+                                   + list(got.problems))
+        path = Path(self._video_dir) / METADATA_FILENAME
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            meta["collected"] = got.folders
+            path.write_text(json.dumps(meta, indent=2, default=str),
+                            encoding="utf-8")
+        except Exception as e:
+            print(f"[collect] could not record the collection in "
+                  f"{METADATA_FILENAME}: {e}", flush=True)
 
     def _upload_record(self) -> dict | None:
         """How NVENC received this acquisition's frames, or None when it did
@@ -5460,6 +5537,10 @@ class MainWindow(QMainWindow):
                 board_taken=self._board_taken_from_test,
                 get_safe_pins=lambda: self._profile.stim_safe_pins,
                 get_trigger_pins=lambda: self._profile.trigger_pins,
+                # A paradigm's sketch carries the gate as the recording-only
+                # sketch does, and no block may drive a gate pin.
+                get_gate_pins=lambda: list(
+                    getattr(self._profile, "gate_pins", None) or []),
                 # The board the editor compiles for, uploads to and checks
                 # pins against: the profile's, which a switch can change.
                 get_board_fqbn=lambda: self._profile.board_fqbn,

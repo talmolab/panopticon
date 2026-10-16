@@ -777,7 +777,13 @@ class _BoardSource:
         self.port = "sim" if fake else (profile.serial_port or "")
         self.pins = list(profile.trigger_pins or [])
         self.safe = list(profile.stim_safe_pins or [])
-        self.sketch = stim_compiler.recording_only_sketch(self.safe, self.pins)
+        # The gate pins and the pin ceiling too, or the sketch differs from
+        # the one the window flashes for this profile and the board is
+        # refused. The probe sends no gate field, so the gate stays low.
+        self.sketch = stim_compiler.recording_only_sketch(
+            self.safe, self.pins, list(getattr(profile, "gate_pins", ()) or []),
+            getattr(profile, "board_max_pin",
+                    stim_compiler.MEGA_MAX_DIGITAL_PIN))
         self.want_id = stim_compiler.sketch_id(self.sketch)
         self.teensy = None
         self.heard_id = None

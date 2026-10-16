@@ -1051,6 +1051,7 @@ class StimulationWindow(QDialog):
                  get_safe_pins: Callable[[], list] = lambda: list(
                      STANDALONE_SAFE_LOW_PINS),
                  get_trigger_pins: Callable[[], list] = lambda: [],
+                 get_gate_pins: Callable[[], list] = lambda: [],
                  get_board_fqbn: Callable[[], str] = lambda: stim_compiler.FQBN,
                  get_max_pin: Callable[[], int] = lambda: (
                      stim_compiler.MEGA_MAX_DIGITAL_PIN),
@@ -1079,6 +1080,11 @@ class StimulationWindow(QDialog):
         # silently break cross-camera block-ID alignment. Defaults to empty so a
         # bare editor still works, but main_window MUST pass the profile's pins.
         self._get_trigger_pins = get_trigger_pins
+        # The profile's gate_pins: every sketch the editor compiles carries the
+        # gate, as the recording-only sketch does, and no block may drive a
+        # gate pin. main_window MUST pass them, or an Applied paradigm drops
+        # the gate and the board's ack refuses every gated recording.
+        self._get_gate_pins = get_gate_pins
         # The profile's board_fqbn and board_max_pin: the board every Apply
         # compiles for and uploads to, and the ceiling of the pin check. The
         # defaults are the Mega 2560's, for an editor opened on its own.
@@ -1366,7 +1372,8 @@ class StimulationWindow(QDialog):
         blocks, edges = self._canvas.get_workflow()
         return stim_compiler.compile_ino(blocks, edges, self._get_safe_pins(),
                                          self._get_trigger_pins(),
-                                         self._get_max_pin())
+                                         self._get_max_pin(),
+                                         gate_pins=self._get_gate_pins())
 
     def _blocking_problem(self) -> str | None:
         """Reason this workflow must not be uploaded or run, or None."""
@@ -1380,7 +1387,8 @@ class StimulationWindow(QDialog):
         # the rig's core assumption that block ID N is the same instant on every
         # camera, so it blocks Apply, Test and Record.
         bad = stim_compiler.forbidden_pin_uses(blocks, self._get_trigger_pins(),
-                                               self._get_max_pin())
+                                               self._get_max_pin(),
+                                               self._get_gate_pins())
         if bad:
             return "\n\n".join(
                 [f"Pin {p} cannot carry a stim waveform: {why}." for p, why in bad]
@@ -1513,7 +1521,8 @@ class StimulationWindow(QDialog):
         # half-described session.
         ino = stim_compiler.compile_ino(blocks, edges, self._get_safe_pins(),
                                         self._get_trigger_pins(),
-                                        self._get_max_pin())
+                                        self._get_max_pin(),
+                                        gate_pins=self._get_gate_pins())
         reference = flashed_source if flashed_source is not None \
             else self._uploaded_ino
         matches = None if reference is None else (ino == reference)
@@ -1756,7 +1765,8 @@ class StimulationWindow(QDialog):
                 "reopened. Record reopens it, which resets the board: "
                 "switch off what the stimulation pins drive first.", error=True, kind="notice")
         elif ino == stim_compiler.recording_only_sketch(
-                self._get_safe_pins(), self._get_trigger_pins()):
+                self._get_safe_pins(), self._get_trigger_pins(),
+                self._get_gate_pins(), self._get_max_pin()):
             # An empty canvas compiles to the recording-only sketch, so this
             # Apply turned stimulation off; "run paradigm" would say otherwise.
             self._set_status(UPLOAD_OK_NONE)

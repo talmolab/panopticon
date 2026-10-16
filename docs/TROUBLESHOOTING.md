@@ -164,6 +164,8 @@ before you connect a stimulation device to the board.
 | Message or symptom | Cause and fix |
 |---|---|
 | A stimulation device switches on briefly at launch | The board resets when its port opens and when it is flashed, and every pin floats for a moment during the reset, before `stim_safe_pins` can hold it low. The device's own wiring decides what it does then ([INSTALLATION.md step 8](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
+| A device on a [gate pin](CONFIGURATION.md#gate_pins), such as an audio recorder, makes a short file at launch or at each flash | The board resets when its port opens and when it is flashed, and the gate pin floats until the sketch runs. A recorder that reads a floating input as high records then. Fit a pull-down resistor on the gate line ([When the board resets](WORKFLOW.md#when-the-board-resets)). |
+| `its sketch has no gate pins` | Log line. The board answered a start that asked for the gate without a gate, so the start was rolled back. Its sketch was built without the profile's `gate_pins`. Press **Apply** in the Stimulation editor, on an empty canvas if no paradigm is wanted, to flash a sketch with the gate. |
 | `Could not clear stim firmware` | The board could not be flashed, so it may still carry an earlier paradigm, a looping one included. Fix the cause the message gives, then press **Apply** on an empty Stimulation canvas before you record. |
 | `arduino-cli was not found` | Install the Arduino IDE or `arduino-cli`, or set `PANOPTICON_ARDUINO_CLI` to its path. The message lists every place searched. Only flashing, Apply and Test need it. |
 | `trigger board not reachable on <port> at startup; will retry on first use` | The port did not open at launch. Check the cable, the port name and the Arduino Serial Monitor. The next Calibrate, Record or Test opens the port, which resets the board and floats its pins for a moment ([why](INSTALLATION.md#step-8--flash-the-trigger-firmware)). |
@@ -281,6 +283,12 @@ after the encode, and its rows go to the same file.
 | `The post-hoc alignment failed` | The videos are left as recorded and are not aligned. Run `2_align.py --replace` once the cause is fixed. |
 | `Alignment failed: <error> — videos left as-is` | The status line for the row above. |
 | `Not replacing any video:` | A camera recorded nothing, or no trigger is common to every camera. The message gives the `--exclude` or `--truncate-to-shortest` command to run. |
+| `changed during the recording, so nothing was collected from it` | A [collected folder](CONFIGURATION.md#collect_dirs) gained no file while the cameras recorded. Check that the program writing there was running and recording. On our rig, Avisoft-RECORDER has to be monitoring, with its trigger on the gate ([Devices that follow the recording](WORKFLOW.md#devices-that-follow-the-recording)). |
+| `were still open or changing after` | The program still held those files when `collect_wait_s` ran out, so they stay in its folder. Move them into the recording folder by hand once the program closes them, and raise `collect_wait_s` if its files always close late. |
+| `could not be moved into` | The message gives each file's reason. A file of the same name already in the recording folder is never replaced. |
+| `does not exist, so nothing was collected from it` | A folder in `collect_dirs` is missing. Create it, or correct the path in the profile. |
+| `the recording folder is inside` | The output folder lies inside a `collect_dirs` folder, so the collection would move the session into itself. Choose another output folder in the sidebar. |
+| `the collection failed` | An error stopped the collection, and the files stay where they were written. The log has the error. Move them by hand. |
 | `raw.bin holds <n> whole frames but <n> were recorded` | The disk lost the last frames of this camera. Its block IDs and frame times were cut to the frames on disk. |
 | One camera stops delivering partway through a recording, the others fine | Check its temperature first ([INSTALLATION.md](INSTALLATION.md#camera-temperature)), then its power and its link. |
 | `cycle` in a grab thread's line above the trigger period | That grab loop does not finish inside one period. Another program uses the CPU, or a change added work to the loop ([INSTALLATION.md](INSTALLATION.md#3-verify-it-works)). |

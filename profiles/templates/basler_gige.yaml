@@ -56,6 +56,7 @@ trigger_source: board             # board | external
 serial_port: COM3                 # SITE: Device Manager > Ports (COM & LPT)
 trigger_pins: [2, 4, 6, 8]        # SITE: every pin wired to a camera trigger input
 stim_safe_pins: []                # SITE: every pin wired to a laser or LED driver
+# gate_pins: [51]                 # high while a recording runs, for a device that follows it
 # board_fqbn: arduino:avr:mega    # the Mega 2560, the only board tested
 # board_max_pin: 69               # the Mega's highest digital pin (A15)
 
@@ -63,6 +64,8 @@ stim_safe_pins: []                # SITE: every pin wired to a laser or LED driv
 output_dir: data                  # SITE: your largest, fastest drive
 board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
 # skeleton: skeletons/mouse.json  # a SLEAP skeleton each recording carries
+# collect_dirs: [D:/usv]          # folders whose new files move into each recording
+# collect_wait_s: 30              # seconds to wait for a file still open
 
 # --- Calibration coverage ---------------------------------------------------
 calibration_min_per_cam_shared: 120

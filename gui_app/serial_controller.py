@@ -13,13 +13,14 @@ from gui_app.stim_compiler import SIM_PORT, is_sim_port  # noqa: F401 (SIM_PORT 
 
 #: One complete ack line from the sketch: ``RDY <n_cams> <fps>`` with an
 #: optional 8-hex sketch identity appended by firmware that knows its own
-#: build. Applied with fullmatch() to the WHOLE stripped line, never searched
+#: build, and after it the gate's state (0 or 1) from a sketch with gate pins.
+#: Applied with fullmatch() to the WHOLE stripped line, never searched
 #: for inside it, because the ack exists to prove the board printed exactly
 #: this line: a superstring such as ``RDY 6 1000`` cannot satisfy a request
 #: for 100 fps, and a stray byte in front of the token (``xRDY 6 100``) or a
 #: boot message run into it (``bootRDY 6 100``) is not something the sketch
 #: prints, so it is a garbled ack, not a confirmed start.
-_RDY_LINE = re.compile(r"RDY (\d+) (-?\d+)(?: ([0-9a-fA-F]{8}))?")
+_RDY_LINE = re.compile(r"RDY (\d+) (-?\d+)(?: ([0-9a-fA-F]{8})(?: ([01]))?)?")
 
 
 class TeensyController:
@@ -198,13 +199,20 @@ class TeensyController:
         print("[teensy] simulated board opened", flush=True)
         return True
 
-    def start_triggers(self, pins: list[int], fps: int, may_retry=None) -> bool:
+    def start_triggers(self, pins: list[int], fps: int, may_retry=None,
+                       gate: bool | None = None) -> bool:
         """Configure the board for acquisition and confirm it understood.
 
         Tries the existing connection first (no reset, no laser flash). If the
         board does not confirm, reopens the port to force a reset — the proven
         path — and retries. Returns False only when the board is genuinely
         unreachable, so the caller can abort instead of recording nothing.
+
+        ``gate`` is for a profile with gate pins: True raises them with the
+        first trigger, False keeps them low. It is sent as a field after the
+        frame rate, and the ack must report the same state. None sends the
+        command without the field, which every sketch reads as gate low, and
+        accepts any ack.
 
         The retry is skipped, and the start fails, in two cases:
 
@@ -226,7 +234,7 @@ class TeensyController:
                 print("[teensy] start_triggers called but port not open", flush=True)
                 return False
 
-            if self._send(pins, fps):
+            if self._send(pins, fps, gate):
                 return True
 
             if self._owner_interrupts != interrupts:
@@ -255,11 +263,12 @@ class TeensyController:
                 print("[teensy] the link was stopped or closed during the "
                       "reopen: not sending the start again", flush=True)
                 return False
-            return self._finish_retry(pins, fps)
+            return self._finish_retry(pins, fps, gate)
 
-    def _finish_retry(self, pins: list[int], fps: int) -> bool:
+    def _finish_retry(self, pins: list[int], fps: int,
+                      gate: bool | None = None) -> bool:
         """The second attempt of start_triggers(), after the forced reset."""
-        if self._send(pins, fps):
+        if self._send(pins, fps, gate):
             return True
 
         if self._speaks_rdy:
@@ -274,12 +283,16 @@ class TeensyController:
         print("[teensy] no ack support detected — assuming pre-RDY firmware", flush=True)
         return True
 
-    def _send(self, pins: list[int], fps: int) -> bool:
+    def _send(self, pins: list[int], fps: int, gate: bool | None = None) -> bool:
         # The trailing newline terminates readFPS()'s parseFloat immediately
         # instead of letting it burn its 1 s timeout; the sketch's drain still
         # burns one timeout on that newline, which the ack budgets cover.
-        # Harmless to older firmware.
-        cmd = ",".join(str(x) for x in [len(pins)] + list(pins) + [fps]) + "\n"
+        # Harmless to older firmware. So is the gate field: a sketch without
+        # gate pins drains it with the newline.
+        fields = [len(pins)] + list(pins) + [fps]
+        if gate is not None:
+            fields.append(int(bool(gate)))
+        cmd = ",".join(str(x) for x in fields) + "\n"
         # Set before the write: a write that fails part-way may still have
         # delivered the command.
         self._start_unconfirmed = True
@@ -290,9 +303,10 @@ class TeensyController:
             print(f"[teensy] write failed: {e}", flush=True)
             return False
         print(f"[teensy] sent: {cmd!r}", flush=True)
-        return self._await_ack(len(pins), fps)
+        return self._await_ack(len(pins), fps, gate=gate)
 
-    def _await_ack(self, n_pins: int, fps: int, timeout: float | None = None) -> bool:
+    def _await_ack(self, n_pins: int, fps: int, timeout: float | None = None,
+                   gate: bool | None = None) -> bool:
         """Wait for one complete ``RDY <n_pins> <fps>`` line and return whether
         the board echoed exactly the configuration that was sent.
 
@@ -302,9 +316,16 @@ class TeensyController:
         not, marks the board as RDY-speaking; a mismatched line fails at once
         because the board has already answered and a second, correct line is
         not coming.
+
+        With ``gate`` given, the line must also end in that gate state. A line
+        without the field comes from a sketch with no gate pins, which never
+        raises a gate, so it fails a start that asked for one.
         """
         want_n, want_fps = int(n_pins), max(int(fps), 0)
         want = f"RDY {want_n} {want_fps}"
+        want_gate = None if gate is None else str(int(bool(gate)))
+        if want_gate is not None:
+            want += f" (gate {want_gate})"
         # The identity is whatever THIS ack says; a missed ack leaves none.
         self.board_id = None
         ser = self._ser
@@ -338,6 +359,12 @@ class TeensyController:
                     return False
                 self.board_id = (m.group(3) or "").lower() or None
                 got_n, got_fps = int(m.group(1)), int(m.group(2))
+                if want_gate is not None and m.group(4) != want_gate:
+                    why = ("its sketch has no gate pins" if m.group(4) is None
+                           else f"its gate is {m.group(4)}")
+                    print(f"[teensy] wanted {want!r}, got {line.strip()!r}: "
+                          f"{why}", flush=True)
+                    return False
                 if (got_n, got_fps) == (want_n, want_fps):
                     print(f"[teensy] ack {want!r}"
                           + (f" id={self.board_id}" if self.board_id else ""),

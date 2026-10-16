@@ -105,6 +105,11 @@ class SimBoard:
         #: firmware predating the identity line looks like to the host.
         self.sketch_id: str | None = None
         self.last_sketch: str | None = None
+        #: The gate pins of the last sketch accepted, and whether the current
+        #: run raised them: a start that asked for the gate on a sketch that
+        #: has one. A stop or any later command lowers them.
+        self.gate_pins: list = []
+        self.gate_armed = False
 
     # ------------------------------------------------------------------ time
     def virtual_now(self) -> float:
@@ -551,10 +556,12 @@ def accept_upload(ino_content: str, board: SimBoard | None = None) -> str | None
     tells which build the board runs instead of trusting a per-machine record
     of what was last uploaded.
     """
-    from gui_app.stim_compiler import sketch_id
+    from gui_app.stim_compiler import sketch_gate_pins, sketch_id
     brd = board or shared_board()
     brd.last_sketch = ino_content
     brd.sketch_id = sketch_id(ino_content)
+    brd.gate_pins = sketch_gate_pins(ino_content)
+    brd.gate_armed = False
     return brd.sketch_id
 
 
@@ -660,26 +667,41 @@ class SimSerial:
 
     # ------------------------------------------------------------ board side
     def _handle(self, line: str) -> None:
-        """Parse one `n,p1..pn,fps` command and queue the RDY answer."""
+        """Parse one `n,p1..pn,fps[,gate]` command and queue the RDY answer.
+
+        The fields are read by count, as the sketch's readPins() does: n, then
+        n pins, then the frame rate, then the optional gate field.
+        """
         parts = [p for p in line.split(",") if p != ""]
         if len(parts) < 2:
             return                      # not a command; the sketch ignores it
         try:
             n = int(float(parts[0]))
-            pins = [int(float(p)) for p in parts[1:-1]]
-            fps = int(float(parts[-1]))
+            if len(parts) < n + 2:
+                return                  # the sketch would still be waiting
+            pins = [int(float(p)) for p in parts[1:1 + n]]
+            fps = int(float(parts[1 + n]))
+            extra = parts[2 + n:]
+            asked = bool(extra) and float(extra[0]) > 0.5
         except ValueError:
             return                      # garbled; no ack, so the host retries
+        brd = self._board
+        # Only a sketch with gate pins reads the field; any other drains it.
+        has_gate = bool(brd.gate_pins)
+        brd.gate_armed = has_gate and asked and fps > 0
         if fps > 0:
-            rate = self._board.start(fps, pins)
+            rate = brd.start(fps, pins)
         else:
             # readFPS() clamps a negative rate to 0, so a stop is acked as
             # `RDY <n> 0` instead of echoing the -1 the host sent.
-            rate = self._board.stop()
-        if self._board.silent:
+            rate = brd.stop()
+        if brd.silent:
             return
-        sid = self._board.sketch_id
-        reply = f"RDY {n} {int(rate)}" + (f" {sid}" if sid else "") + "\r\n"
+        sid = brd.sketch_id
+        reply = f"RDY {n} {int(rate)}" + (f" {sid}" if sid else "")
+        if sid and has_gate:
+            reply += f" {int(brd.gate_armed)}"
+        reply += "\r\n"
         with self._lock:
             self._out.extend(reply.encode("ascii"))
             self._ready_at = time.perf_counter() + self._board.ack_delay_s

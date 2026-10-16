@@ -199,20 +199,24 @@ The link to the board carries configuration, never timing: 115200 baud, 8N1,
 and one command format for start and stop.
 
 ```
-<n_pins>,<pin1>,...,<pinN>,<fps>\n
+<n_pins>,<pin1>,...,<pinN>,<fps>[,<gate>]\n
 ```
 
 A negative `fps` stops the board: the reconfigure branch runs `camsLow()` and
 `allStimLow()`, and the sketch reads the rate as 0 and sends no more triggers.
 The trailing newline ends the sketch's last `parseFloat()` at once instead of
-letting it wait out its one-second timeout.
+letting it wait out its one-second timeout. `<gate>` is sent only on a
+profile with [gate pins](#the-recording-gate), 1 for a recording and 0
+otherwise. A sketch without gate pins drains it with the newline.
 
-The sketch answers `RDY <n_pins> <fps> <id>` from `announceReady()`. Both
-configuration paths call it before they set `FRAME_START`, so the print cannot
-shift the clock. `<id>` is eight hex characters that name the sketch build.
-The host matches the whole line (`serial_controller._RDY_LINE`), so
-`RDY 6 1000` does not confirm a request for 100 fps, and a boot message run
-into the token counts as a garbled ack.
+The sketch answers `RDY <n_pins> <fps> <id>` from `announceReady()`, and a
+sketch with gate pins appends the gate's state, 0 or 1. Both configuration
+paths call it before they set `FRAME_START`, so the print cannot shift the
+clock. `<id>` is eight hex characters that name the sketch build. The host
+matches the whole line (`serial_controller._RDY_LINE`), so `RDY 6 1000` does
+not confirm a request for 100 fps, and a boot message run into the token
+counts as a garbled ack. A start that sent `<gate>` also needs the same gate
+state back, so a board whose sketch has no gate pins refuses it.
 
 ### The RDY handshake
 
@@ -291,6 +295,40 @@ With no profile chosen, the window touches no hardware until the operator
 picks one ([WORKFLOW.md](WORKFLOW.md#what-happens-at-launch)). The profile
 names the port and the pins the board holds LOW at boot, so a profile picked
 on the operator's behalf would be another rig's.
+
+### The recording gate
+
+A profile's [`gate_pins`](CONFIGURATION.md#gate_pins) are board outputs that
+another device records on, such as an ultrasonic microphone's recorder. The
+compiler adds the gate to every sketch for such a profile, the
+recording-only sketch and every paradigm's, so the gate never depends on
+whether a paradigm is applied:
+
+- `gatesLow()` drives the gate pins LOW in `setup()`, right after
+  `Serial.begin()` and before the handshake blocks, and again in the
+  reconfigure branch, right after `camsLow()`.
+- `readGate()` reads the command's `<gate>` field after the configuration
+  path's `delay(500)`, when the whole line has arrived. Without the field,
+  its `parseFloat()` spends on the newline the timeout the drain would have
+  spent, so the ack comes no later.
+- A start with `<gate>` 1 sets `GATE_PENDING`, and `loop()` raises the gate
+  right after the first `camsHigh()`, microseconds after the first trigger
+  edge.
+- `loop()` reads a command only at a period boundary, where `camsLow()` ends
+  the previous pulse. The stop therefore drops the gate half a period after
+  the last trigger's rising edge, and the gate is high for (N - 1/2) periods
+  for N triggers.
+
+The window sends `<gate>` 1 for a recording and 0 for a calibration
+(`MainWindow._gate_request`). A bench Test and the probes send no field, so
+the gate stays low. A profile without gate pins compiles the same sketch,
+byte for byte, as before the gate existed, so its identity and its RDY line
+are unchanged. A stimulation block on a gate pin is refused like one on a
+trigger pin (`stim_compiler.forbidden_pin_uses`).
+
+Software cannot hold the gate through the board's reset, which floats every
+pin. A device that reads a floating input as high records during each reset,
+so a gate line needs a pull-down at the device's end.
 
 ### An external trigger source
 
@@ -1899,6 +1937,28 @@ count, because both change under a working rig, and a driver update that
 lowers the cap below the camera count pushes cameras onto `raw.bin`. It also
 records the encoder and upload the recording used, the kick-out counts,
 the log level and lines lost, and each camera's serial and stream counters.
+
+### Files from other programs
+
+A profile's [`collect_dirs`](CONFIGURATION.md#collect_dirs) names folders
+other programs write into during a recording. The finalize moves every file
+in them modified at or after `_collect_since` into
+`<session>_recording/<folder name>/`, at its path below the folder
+(`gui_app/collect.py`). `_collect_since` is the time just before the trigger
+source starts, after any sketch swap, so a file a reset made while the board
+was flashed is older and stays.
+
+The collection runs only for a recording, and only once `_finalized` is set:
+a quit before then deletes the recording folder, and the moved files with
+it. A file moves only once it has gone `SETTLE_S` unmodified and its writer
+has let it go. On one volume that is a rename, which Windows refuses while
+the writer holds the file. To another volume the file is copied to a
+`.partial` name and checked against the original, the original is deleted,
+and only then does the copy take its name. A delete the writer blocks
+removes the copy instead. A file still held after `collect_wait_s` stays, and
+so does a file whose name is taken: nothing is overwritten. What moved goes
+into `session_metadata.json` (`collected`), and every file left or folder
+that gained nothing goes into `WARNINGS.txt`.
 
 ---
 
