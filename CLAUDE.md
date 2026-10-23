@@ -700,7 +700,9 @@ and no Qt.
   `CameraManager.latest_block_id`), never from a clock. It then lights the step
   `stim_trace.csv` gives the same trigger. A clock started at the arm runs
   ahead by the board's start-up time, and drifts. The panel shows the expected
-  state only, because the board reports nothing back.
+  state only, because the board reports nothing back. The recorded time beside
+  the state label (`MainWindow._tick_record_clock`) reads the same `t`, so it
+  gives the videos' length and reads 0:00 until the first frame.
 - The canvas scene grows to hold every block plus a margin
   (`StimCanvas._fit_scene_rect`), and the canvas shows scroll bars. A view
   scrolls only within its scene rect, so a block a loaded file placed past a

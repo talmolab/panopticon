@@ -17,6 +17,15 @@ from gui_app import session_config, settings
 from gui_app.session_config import RigProfile, ProfileError, REPO_ROOT
 
 
+def record_time_text(t: float | None) -> str:
+    """A recording's elapsed time for the sidebar: M:SS, or H:MM:SS from an
+    hour. None (no frame yet) and a negative time read 0:00."""
+    s = int(t) if t is not None and t > 0 else 0
+    h, rest = divmod(s, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 class StimBolt(QWidget):
     """A lightning bolt beside Record while the board holds a stimulation
     paradigm. Painted rather than typed as an emoji, because Qt draws an
@@ -472,7 +481,21 @@ class SidebarWidget(QWidget):
         self._status.setFont(QFont("Segoe UI", 10, QFont.Bold))
         self._status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._status.setStyleSheet("color: #888; border: none; padding: 4px;")
-        layout.addWidget(self._status)
+        # The time recorded so far shares the state's row, on the left, and
+        # shows only while a recording runs (show_record_time). Fixed-width
+        # digits keep the label from shifting as the seconds tick.
+        self._record_time = QLabel("")
+        self._record_time.setFont(QFont("Consolas", 10, QFont.Bold))
+        self._record_time.setStyleSheet(
+            "color: #ff4444; border: none; padding: 4px;")
+        self._record_time.setToolTip(self._RECORD_TIME_TIP)
+        self._record_time.setVisible(False)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        status_row.addWidget(self._record_time)
+        status_row.addStretch()
+        status_row.addWidget(self._status)
+        layout.addLayout(status_row)
 
         self._restore_state()
         self._brightness_slider.valueChanged.connect(self._schedule_save)
@@ -619,6 +642,8 @@ class SidebarWidget(QWidget):
     _SOLVE_TIP = "Solve the camera calibration from the recorded calibration videos"
     _CALIBRATE_TIP = "Start or stop a calibration recording"
     _RECORD_TIP = "Start or stop a session recording"
+    _RECORD_TIME_TIP = ("Time recorded so far: from the first trigger to the "
+                        "newest frame the cameras delivered")
     _BUSY_TIP = "Disabled during a background operation"
     _GATE_TIP = "Disabled while encoding, aligning or solving"
     _SNAPSHOT_TIP = ("Save a full-resolution still from every camera to the "
@@ -943,6 +968,17 @@ class SidebarWidget(QWidget):
     def set_status(self, text: str, color: str):
         self._status.setText(text)
         self._status.setStyleSheet(f"color: {color}; border: none; padding: 4px;")
+
+    def show_record_time(self, t: float | None):
+        """Show the time recorded so far beside the state: ``t`` seconds
+        from the first trigger, or 0:00 before it. The window feeds it while
+        a recording runs."""
+        self._record_time.setText(record_time_text(t))
+        self._record_time.setVisible(True)
+
+    def hide_record_time(self):
+        self._record_time.setVisible(False)
+        self._record_time.setText("")
 
     def show_progress(self, current: int, total: int, label: str = "Encoding"):
         self._progress.setVisible(True)

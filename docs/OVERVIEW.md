@@ -170,8 +170,11 @@ The [recording walkthrough](WORKFLOW.md#8-record) covers the question you'll get
 the session folder already holds data.
 
 The state label goes through the same steps as for **Calibrate**, then reads
-**RECORDING** in red. Flip it off and you'll see **Finishing…**, **ENCODING** and
-**IDLE** again. If your paradigm has an [**Ending**](#8-ending) block, the recording
+**RECORDING** in red, and the time recorded so far counts up to its left. That time
+comes from the frames the cameras have delivered, so it gives the length your
+videos will have, and it stays at 0:00 until the first trigger. Flip **Record** off
+and the time goes away, and you'll see **Finishing…**, **ENCODING** and **IDLE**
+again. If your paradigm has an [**Ending**](#8-ending) block, the recording
 also stops by itself when that block finishes.
 
 When you've applied a paradigm, a yellow lightning bolt sits to the right of **Record**,
@@ -242,7 +245,7 @@ have enough views of the board. We'll look at it more closely
 
 The **Display** group has two sliders, and during a recording that runs a paradigm, the
 **Expected stimulation** panel appears under them. The progress bar and the state label
-sit below.
+sit below, and during a recording the time recorded so far sits to the label's left.
 
 ![The brightness and contrast sliders, Brightness dragged right](images/sidebar_display.png)
 

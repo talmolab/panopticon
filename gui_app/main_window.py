@@ -88,6 +88,9 @@ STALE_SESSION_FILES = (("WARNINGS.txt", "codet_frames.json") + STIM_FILES
 #: ms. Four times a second keeps a step's countdown readable and costs one
 #: attribute read per camera.
 STIM_PROGRESS_MS = 250
+#: How often the sidebar's recorded time follows the trigger count, in ms.
+#: Twice a second keeps the seconds digit from lagging a whole second behind.
+RECORD_CLOCK_MS = 500
 
 
 def _has_capture_data(video_dir: Path) -> bool:
@@ -398,6 +401,9 @@ class MainWindow(QMainWindow):
         self._stim_progress_timer = QTimer(self)
         self._stim_progress_timer.setInterval(STIM_PROGRESS_MS)
         self._stim_progress_timer.timeout.connect(self._tick_stim_progress)
+        self._record_clock_timer = QTimer(self)
+        self._record_clock_timer.setInterval(RECORD_CLOCK_MS)
+        self._record_clock_timer.timeout.connect(self._tick_record_clock)
 
         self._display_timer = QTimer()
         self._display_timer.timeout.connect(self._refresh_displays)
@@ -3139,6 +3145,7 @@ class MainWindow(QMainWindow):
             self._save_stim_paradigm()
             self._arm_stim_autostop()
             self._start_stim_progress()
+            self._start_record_clock()
         if result.get("await_trigger"):
             self._begin_external_wait()
 
@@ -3442,6 +3449,7 @@ class MainWindow(QMainWindow):
         self._thermal_timer.stop()
         self._cancel_stim_autostop()
         self._stop_stim_progress()
+        self._stop_record_clock()
         self._stop_coverage_hud()
         self._detector = None
         self._sidebar.hide_coverage()
@@ -3598,10 +3606,7 @@ class MainWindow(QMainWindow):
         if self._state != State.RECORDING:
             self._stop_stim_progress()
             return
-        latest = getattr(self._camera_mgr, "latest_block_id", None)
-        bid = latest() if latest is not None else None
-        fps = self._acq_fps or 0
-        t = (bid - 1) / fps if bid is not None and fps > 0 else None
+        t = self._recorded_seconds()
         try:
             self._sidebar.update_stim_progress(t)
         except Exception as e:
@@ -3611,6 +3616,38 @@ class MainWindow(QMainWindow):
     def _stop_stim_progress(self):
         self._stim_progress_timer.stop()
         self._sidebar.hide_stim_progress()
+
+    def _recorded_seconds(self) -> float | None:
+        """Seconds from the recording's first trigger to the newest frame the
+        cameras put up for display: (block ID - 1) / fps, or None before the
+        first frame."""
+        latest = getattr(self._camera_mgr, "latest_block_id", None)
+        bid = latest() if latest is not None else None
+        fps = self._acq_fps or 0
+        return (bid - 1) / fps if bid is not None and fps > 0 else None
+
+    def _start_record_clock(self):
+        """Show the time recorded so far beside the state, from 0:00."""
+        self._sidebar.show_record_time(None)
+        self._record_clock_timer.start()
+
+    def _tick_record_clock(self):
+        """Follow the recorded time.
+
+        RULE: the time comes from the block ID, as the stimulation display's
+        does. REASON: it then reads the length the videos will have, and an
+        external source that has not started yet reads 0:00. A wall clock
+        started at the arm counts the board's start-up time and every second
+        spent waiting for the source.
+        """
+        if self._state != State.RECORDING:
+            self._stop_record_clock()
+            return
+        self._sidebar.show_record_time(self._recorded_seconds())
+
+    def _stop_record_clock(self):
+        self._record_clock_timer.stop()
+        self._sidebar.hide_record_time()
 
     def _stim_armed(self) -> bool:
         """Whether the next Record puts a stimulation paradigm on the board.
@@ -4249,6 +4286,7 @@ class MainWindow(QMainWindow):
         self._thermal_timer.stop()
         self._cancel_stim_autostop()
         self._stop_stim_progress()
+        self._stop_record_clock()
         # Stop the triggers but KEEP the port open: reopening it would reset the
         # board at the start of the next recording and flash a connected laser.
         # This is the everyday stop — the one taken every session — so it is the

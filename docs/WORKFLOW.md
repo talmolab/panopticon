@@ -460,7 +460,7 @@ Everything's set up. Let's record!
     ![The Acquisition group with the stimulation bolt beside Record](images/sidebar_record_stim.png)
 
     No bolt means no stimulation. If you calibrated after applying the paradigm, Panopticon flashes it back onto the board first, and the pins float briefly while it does.
-3. Flip **Record** on. The state label runs through `Checking capacity…` and `Starting...`, then reads **RECORDING**, and each pane's frame rate climbs to the trigger rate (100 fps on our rig):
+3. Flip **Record** on. The state label runs through `Checking capacity…` and `Starting...`, then reads **RECORDING**, with the time recorded so far counting up to its left. Each pane's frame rate climbs to the trigger rate (100 fps on our rig):
 
     ![](images/record_running.png)
 
