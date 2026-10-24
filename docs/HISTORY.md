@@ -1184,7 +1184,21 @@ Dead ends, do not retry:
 
 ---
 
-## 19. Standing dead ends (index)
+## 19. The recorded time in the sidebar (23 October 2026)
+
+- 2026-10-23: The sidebar shows how long a recording has run, to the left of
+  RECORDING on the state label's row (`a4ee5b6`). It reads M:SS, and H:MM:SS
+  from an hour. The time is `(block ID - 1) / fps` of the newest displayed
+  frame, the Expected stimulation panel's time base, rather than a clock
+  started at Record. A clock would count the board's start-up time and every
+  second spent waiting for an external source, and the block ID gives the
+  length the videos will have. It refreshes every 500 ms and hides at the
+  stop. Checked offline in the widget, stimulation and simulated-rig GUI
+  suites.
+
+---
+
+## 20. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
