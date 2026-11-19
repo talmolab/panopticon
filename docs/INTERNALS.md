@@ -1,6 +1,6 @@
 # How Panopticon works
 
-Previous: [CPU_ENCODE.md](CPU_ENCODE.md). Next: [HISTORY.md](HISTORY.md), the
+Previous: [CLOSED_LOOP.md](CLOSED_LOOP.md). Next: [HISTORY.md](HISTORY.md), the
 dated record of decisions and measurements.
 
 This page describes the mechanisms: how a hardware trigger becomes a frame,

@@ -40,6 +40,7 @@ The rest are reference pages, for when you need them:
 | [FLIR.md](docs/FLIR.md) | You have FLIR cameras. It replaces parts of the installation |
 | [SIMULATION.md](docs/SIMULATION.md) | You want to try or develop Panopticon without hardware |
 | [CPU_ENCODE.md](docs/CPU_ENCODE.md) | The GPU can't encode every camera, and the CPU takes over |
+| [CLOSED_LOOP.md](docs/CLOSED_LOOP.md) | You want stimulation that follows the animal, such as real-time place preference, or to track live with your own SLEAP model |
 | [INTERNALS.md](docs/INTERNALS.md) | You maintain Panopticon, and want to know how capture, alignment, encoding and calibration work |
 | [HISTORY.md](docs/HISTORY.md) | You maintain Panopticon, and want the dated decisions, measurements and dead ends |
 
