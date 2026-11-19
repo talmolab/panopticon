@@ -50,6 +50,7 @@ from gui_app.widgets.camera_grid import CameraGridWidget
 from gui_app.widgets.focus_window import FocusWindow
 from gui_app import closed_loop
 from gui_app.widgets.sidebar import SidebarWidget
+from gui_app.widgets.status_bar import StatusBar
 from gui_app.widgets.stimulation_window import StimulationWindow
 
 from gui_app import board_detector
@@ -333,6 +334,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Panopticon")
         self.setMinimumSize(1000, 400)
         self._apply_theme()
+        # A long status line keeps its start and its end in a narrow window
+        # (widgets/status_bar.py).
+        self.setStatusBar(StatusBar())
         icon_path = Path(__file__).parent.parent / "panopticon.ico"
         if icon_path.exists():
             icon = QIcon(str(icon_path))

@@ -93,8 +93,35 @@ class PreviewPane(QWidget):
         p.end()
 
 
+def balanced_wrap_width(fm, text: str, width: int) -> int:
+    """The narrowest width, at most ``width``, that word-wraps ``text`` into
+    as few lines as ``width`` does, so the lines come out about equally long
+    rather than a full line over one stray word. ``fm`` is the font's
+    QFontMetrics."""
+    width = max(1, int(width))
+    huge = 1 << 20
+
+    def size(w):
+        r = fm.boundingRect(QRect(0, 0, w, huge), Qt.TextWordWrap, text)
+        return r.width(), r.height()
+
+    _w, lines_h = size(width)
+    lo, hi = 1, width
+    while lo < hi:
+        mid = (lo + hi) // 2
+        w, h = size(mid)
+        if h <= lines_h and w <= mid:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
 class CameraCell(QWidget):
     """Container for one camera view."""
+
+    #: Pixels kept clear between the pause notice and each side of the pane.
+    PAUSE_MARGIN = 12
 
     def __init__(self, index: int, grid: "CameraGridWidget", parent=None):
         super().__init__(parent)
@@ -128,9 +155,30 @@ class CameraCell(QWidget):
         """Show ``text`` over the pane, or remove it when None. A paused pane
         shows no frame rate, and the next update_fps writes it again."""
         self.pause_overlay.setText(text or "")
+        self._fit_pause_text()
         self.pause_overlay.setVisible(bool(text))
         if text:
             self.fps_overlay.setText("")
+
+    def _fit_pause_text(self):
+        """Keep the pause notice inside the pane.
+
+        RULE: the notice wraps into lines of about equal length that stay
+        PAUSE_MARGIN clear of each side of the pane. REASON: in a pane about
+        as wide as the notice (three columns in the narrowest window), the
+        notice on one line runs from edge to edge, and each pane's notice
+        reads on into the next one's. The overlay still covers the whole
+        pane, so the dimming is unchanged: only its text area narrows. A
+        notice that fits on one line is drawn as before, centred.
+        """
+        label = self.pause_overlay
+        w = self.width()
+        if not label.text() or w <= 0:
+            return
+        text_w = balanced_wrap_width(label.fontMetrics(), label.text(),
+                                     w - 2 * self.PAUSE_MARGIN)
+        side = max(0, (w - text_w) // 2)
+        label.setContentsMargins(side, 0, side, 0)
 
     def mouseDoubleClickEvent(self, event):
         self._grid.toggle_zoom(self._index)
@@ -142,6 +190,7 @@ class CameraCell(QWidget):
         self.name_overlay.setGeometry(0, 0, w, 28)
         self.fps_overlay.setGeometry(0, h - 24, w, 24)
         self.pause_overlay.setGeometry(0, 0, w, h)
+        self._fit_pause_text()
 
 
 class CameraGridWidget(QWidget):
