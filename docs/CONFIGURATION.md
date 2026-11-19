@@ -975,7 +975,8 @@ Elsewhere they do nothing.
 True or false. Default `false`. Reference rig: `true`.
 
 - Does: Pins each camera's grab thread to a performance core of its own and raises
-  its priority.
+  its priority. On a CPU with hyperthreading, every performance core takes one
+  grab thread before any core takes a second on its other hyperthread.
 - Change when: Turn it on for a hybrid Intel CPU after a test recording shows a
   camera falling behind.
 - Goes wrong: Off on a hybrid CPU, Windows may run a grab thread on an efficiency
@@ -994,7 +995,9 @@ List of integers. Default `[0]`. Reference rig: `[0, 1]`.
   measured with a DPC trace. On the reference rig that is CPUs 0 and 1
   ([measured](INTERNALS.md#receive-load-on-the-host)).
 - Goes wrong: A list that excludes every performance core falls back to all of
-  them. The log line `[rig] capture core pool` shows the pool in use.
+  them. The list names logical CPUs, so on a CPU with hyperthreading, excluding
+  one leaves the other hyperthread of its core in the pool. The log line
+  `[rig] capture core pool` shows the pool in use.
 
 #### `encoder_pcores`
 

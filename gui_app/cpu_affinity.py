@@ -132,7 +132,10 @@ class CpuClasses(NamedTuple):
     groups    - processor groups seen;
     ids       - {logical CPU: CPU Set id}, the handles SetThreadSelectedCpuSets
                 takes (they are NOT the logical indices);
-    reason    - why `fast` is empty, or "" when it is populated.
+    reason    - why `fast` is empty, or "" when it is populated;
+    cores     - {logical CPU: CoreIndex}, the physical core it runs on. The
+                hyperthreads of one core share a CoreIndex; without
+                hyperthreading every logical CPU has one of its own.
     """
     fast: list
     slow: list
@@ -140,6 +143,7 @@ class CpuClasses(NamedTuple):
     groups: set
     ids: dict
     reason: str
+    cores: dict = {}
 
 
 #: Byte layout of one SYSTEM_CPU_SET_INFORMATION record: Size(4) Type(4)
@@ -154,7 +158,8 @@ _CPU_SET_HEADER = struct.Struct("<IIIHB")
 def parse_cpu_set_information(raw: bytes) -> list:
     """Records of a SYSTEM_CPU_SET_INFORMATION buffer as dicts.
 
-    Each dict carries id, group, logical (the index WITHIN its group) and
+    Each dict carries id, group, logical (the index WITHIN its group), core
+    (the CoreIndex, shared by the hyperthreads of one physical core) and
     efficiency_class. Records of other types are skipped; a zero Size ends the
     walk, since it can only mean a truncated buffer.
     """
@@ -167,6 +172,7 @@ def parse_cpu_set_information(raw: bytes) -> list:
             break
         if rtype == _CPU_SET_TYPE_CPU_SET:
             out.append({"id": cid, "group": group, "logical": logical,
+                        "core": raw[off + 15],
                         "efficiency_class": raw[off + 18]})
         off += size
     return out
@@ -197,20 +203,24 @@ def classify_cpu_sets(raw: bytes, process_mask: int = 0) -> CpuClasses:
     by_class: dict = {}
     groups = set()
     ids: dict = {}
+    cores: dict = {}
     for r in recs:
         by_class.setdefault(r["efficiency_class"], []).append(r["logical"])
         groups.add(r["group"])
         ids[r["logical"]] = r["id"]
+        cores[r["logical"]] = r["core"]
     for xs in by_class.values():
         xs.sort()
     if not by_class:
-        return CpuClasses([], [], by_class, groups, ids, "no CPU set records")
+        return CpuClasses([], [], by_class, groups, ids, "no CPU set records",
+                          cores)
     if len(groups) > 1:
         return CpuClasses([], [], by_class, groups, {},
-                          f"{len(groups)} processor groups: pinning disabled")
+                          f"{len(groups)} processor groups: pinning disabled",
+                          {})
     if len(by_class) < 2:
         return CpuClasses([], [], by_class, groups, ids,
-                          "not hybrid: one efficiency class")
+                          "not hybrid: one efficiency class", cores)
     top = max(by_class)
     fast = list(by_class[top])
     slow = sorted(x for c, xs in by_class.items() if c != top for x in xs)
@@ -219,8 +229,9 @@ def classify_cpu_sets(raw: bytes, process_mask: int = 0) -> CpuClasses:
         slow = [c for c in slow if process_mask & (1 << c)]
         if not fast:
             return CpuClasses([], slow, by_class, groups, ids,
-                              "no performance core inside the process mask")
-    return CpuClasses(fast, slow, by_class, groups, ids, "")
+                              "no performance core inside the process mask",
+                              cores)
+    return CpuClasses(fast, slow, by_class, groups, ids, "", cores)
 
 
 def _read_cpu_set_buffer() -> bytes:
@@ -245,6 +256,9 @@ def describe_classes(classes: CpuClasses) -> str:
         line += f"; processor groups {sorted(classes.groups)}"
     if classes.fast:
         line += f"; performance class {max(classes.by_class)} -> {classes.fast}"
+        n_phys = physical_core_count(classes.fast, classes.cores)
+        if n_phys < len(classes.fast):
+            line += f" on {n_phys} physical cores"
     else:
         line += f"; no pinning ({classes.reason})"
     return line
@@ -253,7 +267,8 @@ def describe_classes(classes: CpuClasses) -> str:
 def cpu_classes() -> CpuClasses:
     """The cached classification of this host (enumerated once)."""
     performance_cores()
-    return _classes_cache or CpuClasses([], [], {}, set(), {}, "not enumerated")
+    return _classes_cache or CpuClasses([], [], {}, set(), {}, "not enumerated",
+                                        {})
 
 
 def performance_cores() -> list[int]:
@@ -358,8 +373,35 @@ def set_overflow_priority(level: int | None) -> None:
     _overflow_priority = None if level is None else int(level)
 
 
+def physical_core_count(cpus, cores) -> int:
+    """How many physical cores the logical CPUs `cpus` span. `cores` maps a
+    logical CPU to its CoreIndex; a CPU it lacks counts as a core of its own."""
+    return len({cores.get(c, ("cpu", c)) for c in cpus})
+
+
+def one_per_core(cpus, cores) -> list[int]:
+    """`cpus` reordered so every physical core's first logical CPU comes
+    before any core's second one, each round in the order of `cpus`.
+
+    The hyperthreads of one core share its execution units, so two grab
+    threads on them each run slower than alone. Ordered this way, the pool's
+    first slots land on distinct physical cores and a core takes a second
+    grab thread only once every core holds one. `cores` maps a logical CPU to
+    its CoreIndex; a CPU it lacks counts as a core of its own. Without
+    hyperthreading every core has one logical CPU and the order is unchanged.
+    """
+    taken: dict = {}
+    ranked = []
+    for pos, c in enumerate(cpus):
+        core = cores.get(c, ("cpu", c))
+        ranked.append((taken.get(core, 0), pos, c))
+        taken[core] = taken.get(core, 0) + 1
+    return [c for _, _, c in sorted(ranked)]
+
+
 def capture_core_pool(exclude=None) -> list[int]:
-    """P-cores a capture thread may use: the P-cores, minus logical CPU 0.
+    """P-cores a capture thread may use: the P-cores, minus logical CPU 0,
+    with one logical CPU of every physical core first (one_per_core).
 
     CPU 0 is not an ordinary core on Windows. It is the boot processor and the
     default target for timer interrupts and much DPC work, including the NIC's
@@ -382,15 +424,24 @@ def capture_core_pool(exclude=None) -> list[int]:
     cameras than the pool holds the extra capture threads float over the
     pool (see place_capture_thread). That is a far better trade than a camera
     parked on the busiest core in the machine. `exclude` is the profile's
-    capture_core_exclude; an explicit set_core_order() wins over both, so a
-    rig that has measured something different can override them.
+    capture_core_exclude, in logical CPUs: on a hyperthreaded part, excluding
+    one leaves the other hyperthread of its core in the pool. An explicit
+    set_core_order() wins over both, so a rig that has measured something
+    different can override them.
+
+    The order matters because place_capture_thread pins slot i to pool[i].
+    In logical order, a hyperthreaded part lists both hyperthreads of a core
+    side by side, and two grab threads would share one physical core while
+    others stood idle. The pool keeps the same logical CPUs and orders them
+    one per physical core first, so a part without hyperthreading gets the
+    same pool, in the same order, as the logical order.
     """
     cores = performance_cores()
     if len(cores) <= 1:
         return cores
     drop = set(DEFAULT_EXCLUDED_CORES if exclude is None else exclude)
     pruned = [c for c in cores if c not in drop]
-    return pruned or cores
+    return one_per_core(pruned or cores, cpu_classes().cores)
 
 
 def place_capture_thread(slot: int, priority: int | None = None) -> dict:
@@ -414,6 +465,11 @@ def place_capture_thread(slot: int, priority: int | None = None) -> dict:
     whichever core is momentarily free. Nothing changes for a rig with no
     more cameras than pool cores. The overflow threads take `priority`
     unless set_overflow_priority() gave them a level of their own.
+
+    A core here is a logical CPU. On a hyperthreaded part the pool lists one
+    logical CPU of every physical core first (capture_core_pool), so two
+    pinned grab threads share a physical core, each on a hyperthread of its
+    own, only when the cameras outnumber the pool's physical cores.
     """
     cores = _core_order or capture_core_pool()
     out = {"pinned": False, "cpu": None, "priority": False,

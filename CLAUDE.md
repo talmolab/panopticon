@@ -957,6 +957,11 @@ each zone's state to the board.
 - Pin each grab thread to its own P-core (`pin_capture_threads`). A grab thread
   on an E-core runs a few percent slow, which the grab loop's per-frame budget
   cannot absorb.
+- On a CPU with hyperthreading, `cpu_affinity.capture_core_pool` lists one
+  logical CPU of every P-core before any core's second, by the CoreIndex
+  Windows reports. Two grab threads then share a physical core only when the
+  cameras outnumber the pool's physical cores. The reference rig has no
+  hyperthreading, so its pool stays in logical order.
 - Keep capture threads off the cores that carry NIC DPC
   (`capture_core_exclude`). A grab thread there is descheduled by the traffic it
   is receiving. `capture_core_exclude` is `[0, 1]` on the reference rig, where
