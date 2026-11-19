@@ -1344,7 +1344,84 @@ Dead ends, do not retry:
 
 ---
 
-## 21. Standing dead ends (index)
+## 21. The to-do list of 19 November (19 November 2026)
+
+- 2026-11-19: The burst losses follow the network adapters (no code
+  change). probe_network's discovery puts cam1, cam4 and cam5 on Ethernet 4
+  (192.168.3.x), cam2, cam3 and cam6 on Ethernet 5 (192.168.4.x), and cam7,
+  cam8 and cam9 on Ethernet 3 (192.168.5.x), one switch each. In the
+  19 November closed-loop recording, every failed grab came in a burst on
+  the three cameras of one adapter at once. The losses of the 12 October
+  calibration, on cam1, cam4 and cam5, were the same adapter. So the frames
+  are lost at an adapter or its switch, not at a camera. Which of the two is
+  still open.
+- 2026-11-19: The status bar showed "Camera graph..." through the whole
+  joint refinement and the floor step (`a6699d8`). The calibration worker
+  forwards only lines that start with a prefix it lists, and neither
+  stage's heading was listed. Both are now, so every stage `1_calibrate.py`
+  prints a heading for reaches the status bar.
+- 2026-11-19: The capture core pool ignored hyperthreading (`db4f56e`). It
+  listed the performance cores in logical order, which puts a core's two
+  hyperthreads side by side. On an i9-13900H's layout with CPU 0 excluded,
+  the first six grab threads went to four physical cores while two stood
+  idle. The pool now takes one logical CPU of every core first, by the
+  CoreIndex Windows reports, then the second hyperthreads. On the reference
+  rig's 285K, which has no hyperthreading, the pool, its order and every
+  placement are identical before and after. No hyperthreaded computer has
+  run it.
+- 2026-11-19: The disk estimate budgeted 4,600 bytes per H.264 frame, and
+  243 of the 246 recordings on the rig's computer averaged more
+  (`f355087`). Over their 2,214 videos, 16 September to 18 November, the
+  median video held 6.8 KB per frame and the 90th percentile 8.5 KB. The
+  largest held 18.9 KB. A recording's cameras together averaged 1.1 to
+  13.6 KB, both extremes on 16 September, before the lighting changed. The
+  budget is now 14,000 bytes, above every recording, so nine cameras at
+  100 fps are budgeted 45 GB an hour. The raw ratio the encoder refusals
+  quote falls from about 500 to about 165.
+- 2026-11-19: The Focus window's minimum grows to fit its tiles
+  (`646da2c`). At the fixed 980 x 640 minimum, nine tiles in three columns
+  need 1056 px beside the camera view. The fixed minimum overrode the
+  layout's, so the view kept its own width and covered cam3, cam6 and cam9.
+  The minimum is now 980 x 640 or what the layout needs, whichever is
+  larger: 1056 x 640 for nine cameras, 1254 x 713 for sixteen. The window
+  still opens at 1400 x 820 and looks the same there.
+- 2026-11-19: Solve in a 1000 px window (`7bd7003`). Each of nine panes is
+  240 px wide, and the pause notice is 236 px on one line, so each pane's
+  notice ran on into the next. The notice now wraps into lines of about
+  equal length, 12 px clear of the pane's sides. The status line after a
+  solve, 1157 px with its path, lost its end at the bar's edge: the floor
+  cameras, an unreliable camera, the notes. The status bar now elides a long
+  message's middle and shows it whole as a tooltip. At 1600 px both look as
+  before. Checked in renders and the suites, not yet in the GUI.
+- 2026-11-19: Closed-loop screenshots (`3b243e1`). make_screenshots.py
+  gained a `zones` mode that opens the window on the rig with the trigger
+  board untouched, draws zones in the real zone editor and grabs it. The
+  preview's outline appears only after Apply, which flashes the board, so
+  that figure marks the zone applied without an Apply. Since the gate pin
+  was added, the stimulation figures had put their blocks on pin 51, the
+  microphone's gate, which Apply refuses. They take the first safe pin that
+  is not a gate pin now. No mouse was in the arena.
+- 2026-11-19: Filming the editor at 960 px showed Create Block cut to
+  "sate Blc" (`14e02ec`). In zone had widened the parameter row to about
+  1025 px, past the editor's 860 px minimum, and the splitter let the row
+  shrink below its own minimum. The editor is now never narrower than the
+  row. The two stimulation GIFs were filmed again on the simulated rig, at
+  1040 px (`a9c84ea`).
+- 2026-11-19: Schematics (`ec79b20`). Isaac asked for schematics with the
+  to-do list. The trigger board's wiring figure in INSTALLATION.md gains a
+  gate pin wired to a recorder, with a pull-down to GND at the recorder's
+  end. It also gains an LED in parallel on the stimulation pin, the way to
+  check what the board delivered. A new figure opens CLOSED_LOOP.md. It runs
+  from the tap at `rate_hz` through the tracker process and the zone logic's
+  four settings to the board. There, one byte per zone, resent after 50 ms,
+  sets the sketch's bit, and a 250 ms watchdog clears it. Every fact on both
+  figures was read from the code, the profile or the docs. The LED's
+  resistor is drawn without a value and comes from no page. The generators
+  stay local.
+
+---
+
+## 22. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
