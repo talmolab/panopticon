@@ -639,17 +639,22 @@ The Arduino Mega 2560 is the board we test on, and the default. The sketch is pl
 
 For such a board, set [`board_fqbn`](CONFIGURATION.md#board_fqbn) to its name in `arduino-cli` (`arduino-cli board listall` lists the names) and [`board_max_pin`](CONFIGURATION.md#board_max_pin) to its highest digital pin.[^tools]
 
-![The trigger board wired to the computer, three cameras and a stimulation device](images/trigger_wiring.png)
+![The trigger board wired to the computer, three cameras, a stimulation device with an optional LED in parallel on its pin, and a recorder on a gate pin with a pull-down resistor to ground](images/trigger_wiring.png)
 
-Everything to the right of the dashed line varies by lab: the cameras' I/O connectors, the camera network and the stimulation device. And don't be surprised when the log calls the board `teensy` and tags its lines `[teensy]`, whatever board it is.
+Everything to the right of the dashed line varies by lab: the cameras' I/O connectors, the camera network, the stimulation device and the recorder. Two parts of the diagram are optional:
+
+- **An LED on the stimulation pin**, wired in parallel with the stimulation device where the cameras can see it. It's how you check what the board delivered, and we recommend one before you stimulate an animal ([Check the loop with a light](CLOSED_LOOP.md#4-check-the-loop-with-a-light)).
+- **A gate pin**, listed in `gate_pins`, for a device that should record along with the cameras ([Devices that follow the recording](WORKFLOW.md#devices-that-follow-the-recording)). The board holds it high from a recording's first trigger to its stop, and low the rest of the time. On our rig it runs to the DIN input of the ultrasonic microphone's Avisoft UltraSoundGate. Like every pin, it floats while the board resets, and a pull-down resistor from the line to GND, at the device's end, holds it low then ([When the board resets](WORKFLOW.md#when-the-board-resets)).
+
+And don't be surprised when the log calls the board `teensy` and tags its lines `[teensy]`, whatever board it is.
 
 [^tools]: When an upload runs past its time limit, Panopticon waits for the board's flashing tool to finish before it tells you what to do. It knows the tools of the common cores: `avrdude`, `bossac`, `esptool`, `picotool`, the Teensy loader, `dfu-util`, `STM32_Programmer_CLI` and `openocd`. With any other tool it can't tell whether a write is still running, and its message says so.
 
 #### Set up the board
 
 1. **Make the pin list**, if the rig came without one. The pin numbers are printed beside the board's sockets, and the sockets marked GND are ground. Follow each wire from its socket to where it ends, and write the socket's number beside the camera's serial number or the device's name. If the wires are bundled or covered, ask whoever wired the rig, and please don't unplug wires to find out.
-2. **Check the ground.** At least one wire should leave a GND socket and join the cameras' trigger grounds, and the stimulation device's ground too, as in the diagram. If you can't trace it, ask them too.
-3. **Fill in the pins.** Every pin that drives a camera goes in `trigger_pins`, and every pin that drives a stimulation device goes in `stim_safe_pins`. Where cameras share a pin, you'll have fewer pins than cameras, and that's fine.
+2. **Check the ground.** At least one wire should leave a GND socket and join the cameras' trigger grounds, and the grounds of the stimulation device and any recorder too, as in the diagram. If you can't trace it, ask them too.
+3. **Fill in the pins.** Every pin that drives a camera goes in `trigger_pins`, and every pin that drives a stimulation device goes in `stim_safe_pins`. A pin wired to a recorder goes in `gate_pins`. Where cameras share a pin, you'll have fewer pins than cameras, and that's fine.
 4. **Install `arduino-cli`**, on its own or with the Arduino IDE from <https://www.arduino.cc/en/software>, which includes it.
 5. **Install the board support**, once. For a Mega:
 
