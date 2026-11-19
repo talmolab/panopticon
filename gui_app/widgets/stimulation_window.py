@@ -1282,6 +1282,10 @@ class StimulationWindow(QDialog):
         create_btn = _btn("Create Block", bg="#1e3a1e", fg="#88dd88",
                           bd="#3a6a3a", hv="#254a25")
         create_btn.clicked.connect(self._on_create)
+        # Never narrower than its label: at about 960 px wide, In zone took
+        # the room and the layout clipped the button to "sate Blc".
+        create_btn.setMinimumWidth(create_btn.sizeHint().width())
+        self._create_btn = create_btn
         param_row.addSpacing(12)
         param_row.addWidget(create_btn)
         param_row.addStretch()
@@ -1340,6 +1344,11 @@ class StimulationWindow(QDialog):
         splitter.addWidget(bottom)
         splitter.setSizes([400, 140])
         root.addWidget(splitter)
+        # Never narrower than the parameter row: the splitter lets its panes
+        # shrink below their minimum, and the row then squeezes its fields
+        # together and pushes Create Block off the window's edge.
+        self.setMinimumWidth(max(self.minimumWidth(),
+                                 bottom.minimumSizeHint().width()))
 
         for f in (self._f_pin, self._f_freq, self._f_pw, self._f_dur):
             f.returnPressed.connect(self._on_field_enter)
