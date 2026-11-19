@@ -743,8 +743,8 @@ drifting behind, a different one each time.
 [`pin_capture_threads`](CONFIGURATION.md#pin_capture_threads) gives each grab
 thread a performance core of its own while they last. The rest float over the
 same pool and share its cores with the pinned threads. With it on, every grab
-thread runs at raised priority, and no two are pinned to one core. On a CPU
-without performance cores it changes nothing. `capture_core_exclude`
+thread runs at raised priority, and no two are pinned to one logical CPU. On a
+CPU without performance cores it changes nothing. `capture_core_exclude`
 removes cores from the pool, for the cores that carry the NIC's DPCs.
 `encoder_pcores` and `pin_encoder_threads` place the encoder threads and ship
 off, because both measured worse than leaving the encoders to Windows. The
@@ -752,9 +752,13 @@ performance cores are read from the operating system
 (`GetSystemCpuSetInformation`), because on the reference CPU they interleave
 with the efficiency cores: logical CPUs 0, 1, 10, 11, 12, 13, 22 and 23. The
 reference profile excludes 0 and 1, which leaves a pool of 6 cores for 9 grab
-threads: 6 are pinned and 3 float. Every call checks for Windows and does
-nothing elsewhere, because a failure to pin costs performance and must never
-stop a recording.
+threads: 6 are pinned and 3 float. On a CPU with hyperthreading, the pool lists
+one logical CPU of every performance core before any core's second, by the
+`CoreIndex` the same call reports. Two pinned grab threads then share a
+physical core only when the cameras outnumber the pool's physical cores. The
+reference CPU has no hyperthreading, so its pool keeps logical order. Every
+call checks for Windows and does nothing elsewhere, because a failure to pin
+costs performance and must never stop a recording.
 
 ### Instrumentation
 
@@ -1429,6 +1433,14 @@ it cannot drop either option. The mp4 writers are `encode_worker` (remux and
 encode) and `alignment.extract_aligned()`; the tail merge writes an Annex-B
 stream, and the remux adds the container. `-preset superfast` changes neither
 the GOP nor the atom order and makes files about 64% larger.
+
+On the reference rig an NVENC frame at `quality: 28` costs about 7 KB in the
+mp4. Over the 2,214 camera videos of 246 recordings on the rig's computer, 65
+million frames at 1920 x 1200 and 100 fps, the median video held 6.8 KB per
+frame, the 90th percentile 8.5 KB and the largest 18.9 KB. The size follows
+the scene's noise, so a recording's cameras together averaged anywhere from
+1.1 to 13.6 KB per frame. The disk estimate budgets `H264_BYTES_PER_FRAME`,
+14,000 bytes, above every one of those recordings.
 
 ### Reconciliation: what blockids.npy may claim
 
@@ -2206,7 +2218,7 @@ profile fields ([CONFIGURATION.md](CONFIGURATION.md)).
 | `ACK_TIMEOUT`, `STOP_ACK_TIMEOUT` | 4.0 s, 3.0 s | `serial_controller.py` | Waits for the board's RDY line |
 | `READY_TIMEOUT_S` | 30 s | `main_window.py` | Bound of the readiness barrier |
 | `QUEUE_LINES` | 20,000 | `logging_setup.py` | Log lines queued before a line is dropped |
-| `H264_BYTES_PER_FRAME` | 4600 | `hardware_check.py` | Disk estimate per H.264 frame, measured on NVENC recordings |
+| `H264_BYTES_PER_FRAME` | 14000 | `hardware_check.py` | Disk estimate per H.264 frame, above every NVENC recording measured |
 | `MAX_NUM_BUFFER` | 1000 | `camera_manager.py` | Pool depth only for a caller that passes none |
 | `glow_threshold`, `edge_threshold` | 4, 5 | `board_detector.py` | Markers that light a node, and that count for an edge |
 | `optimal_shared` | 200 | `board_detector.py` | Where a coverage edge reads as full |

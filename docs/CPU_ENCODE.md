@@ -187,10 +187,11 @@ and a count below it as a refusal.
 
 ## The disk estimate on the CPU path is a lower bound
 
-`hardware_check.H264_BYTES_PER_FRAME = 4600` was measured on NVENC recordings
-at the rig's qp. libx264 at `ultrafast` and the same qp writes more, and the
-CPU path has no measurement on rig content. The disk warnings therefore
-call the estimate a lower bound whenever the CPU encoder is installed.
+`hardware_check.H264_BYTES_PER_FRAME = 14000` comes from NVENC recordings at
+the rig's qp, above the highest per-frame average of any recording measured.
+libx264 at `ultrafast` and the same qp writes more than NVENC, and the CPU path
+has no measurement on rig content. The disk warnings therefore call the
+estimate a lower bound whenever the CPU encoder is installed.
 
 ## When to prefer which
 

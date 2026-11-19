@@ -2,10 +2,10 @@
 
 The real-time capture path is NVENC by design, and a machine without an NVIDIA
 GPU (or one whose driver session cap is already spent) has no GPU encoder to
-give every camera. Its only other option today is `raw.bin` at ~500x the
-H.264 size, which fills a disk in minutes. This module is the middle ground:
-one `ffmpeg -c:v libx264` child process per camera, fed the Y plane of each
-NV12 frame over a pipe, producing the same Annex-B elementary stream that
+give every camera. Its only other option today is `raw.bin` at hundreds of
+times the H.264 size, which fills a disk in minutes. This module is the middle
+ground: one `ffmpeg -c:v libx264` child process per camera, fed the Y plane of
+each NV12 frame over a pipe, producing the same Annex-B elementary stream that
 `stream.h264` already holds. Nothing downstream changes -- the remux, the
 block-ID bookkeeping and the labeler see the same bytes.
 
@@ -39,9 +39,9 @@ import time
 
 from gui_app import ffmpeg_cmd
 
-#: Bytes drained from the child's stdout per read. One frame of 1920x1200 at
-#: qp21 is ~4.6 KB, so this is several frames per syscall without ever holding
-#: a large buffer.
+#: Bytes drained from the child's stdout per read. One H.264 frame of
+#: 1920x1200 at the rig's quality is kilobytes, not megabytes, so this is
+#: several frames per syscall without ever holding a large buffer.
 _READ_CHUNK = 1 << 16
 
 #: stderr lines kept for the message a failed encode raises. Bounded because a

@@ -43,8 +43,11 @@ from PyQt5.QtCore import QThread, pyqtSignal
 #: an estimate.
 SOLVE_TIMEOUT_S = 1800
 
-#: Progress line prefixes worth forwarding to the status bar.
+#: Progress line prefixes worth forwarding to the status bar: the heading of
+#: every stage ``1_calibrate.py`` runs, and its per-camera lines. A stage
+#: missing here leaves the previous stage's line standing while it runs.
 _STATUS_PREFIXES = ("Detecting", "Intrinsics", "Pairwise", "Camera graph",
+                    "Joint refinement", "Floor",
                     "Calibration complete", "  Using co-detection",
                     "  cam")
 
