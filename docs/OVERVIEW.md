@@ -270,7 +270,9 @@ top, because it only shows during such a recording. Here it follows a short para
 ![The bolt beside Record, then the Expected stimulation panel stepping through two blocks to over](images/gif_stimulation_record.gif)
 
 It draws your canvas in miniature, with pulsing blocks in purple and pauses in grey,
-and lights the block each chain should be running with a yellow outline. Under it, a
+each labelled with its pin, what it drives and its duration, as far as the block's size
+allows. It outlines the block each chain should be running in yellow and lights it. A
+block ticked **In zone** lights only while a mouse is in its zone. Under it, a
 line per chain names that block and counts down the time left in it, and the title
 counts the time since the first trigger. When every chain has finished, the blocks dim
 and the title reads **over**. If your canvas is too wide to shrink legibly, the panel
@@ -574,6 +576,30 @@ stops. A canvas can only have one. A loop on its own keeps going until you stop 
 recording, so to let a loop run for a set time, put the **Ending** block in a separate
 chain beside it.
 
+#### In zone
+
+Beside **Ending**, **In zone** makes a block pulse only while the live tracker finds
+a mouse in its zone, and hold its pin low the rest of the time. With no block
+selected, it applies to the next **Create Block**, which then opens the zone editor
+to pick or draw the block's zone. With a block selected, it turns that block's zone
+on or off. The block's header then reads `zone A` (or its zone's letter) after its
+pin, and a double click on the block opens its zone. It needs a profile with a
+[`closed_loop`](CONFIGURATION.md#closed_loop) block.
+[Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) shows a session.
+
+#### The zone editor
+
+The zone editor lists the paradigm's zones on the left, each in its own colour with
+the camera it's drawn on. A zone is the area a block listens to, so one laser needs
+one zone. **New zone** starts another, on the camera you're drawing on, or on the
+camera you click next. **Delete zone** removes one. On the right, every camera's live
+view shows the zones drawn on it, and clicking a camera opens it large, with the
+tools: **Select** to move a shape, resize it by its handles or move a polygon's
+corner, then **Polygon**, **Rectangle** and **Ellipse** to draw, and **Copy**,
+**Paste** and **Delete**. Another zone's shapes on the same camera are dimmed, and a
+click on one with **Select** switches to that zone. The mice the tracker finds are
+marked with lime circles, and **Cameras** goes back to every camera.
+
 #### 9. Status line
 
 The line under the fields tells you what the graph will do, like
@@ -632,8 +658,9 @@ every flash.
 **Save** and **Load** keep the graph in a JSON file, `stim_config.json` in the output
 directory unless you pick another name. **Load** asks before replacing unsaved
 changes, then fits the view to the blocks it loaded. **Clear** asks before emptying
-the canvas, and **Fit** brings every block into view, just like <kbd>Home</kbd>. None
-of them touch the board.
+the canvas, and **Fit** brings every block into view, just like <kbd>Home</kbd>.
+**Zones** opens the zone editor to change any zone. **Save** and **Load** keep the
+zones with the blocks. None of them touch the board.
 
 ---
 
@@ -667,7 +694,9 @@ something to show, and so do the two stimulation indicators. The bolt beside **R
 shows only while the next recording will run a paradigm, and the
 [**Expected stimulation**](#expected-stimulation) panel only during a recording that
 runs one. Neither appears on a profile with `trigger_source: external`, which can't
-stimulate. Other controls grey out when using them would do the wrong thing.
+stimulate. Once a paradigm with zone blocks is applied, each camera's pane outlines
+the zones drawn on it, and fills a zone while a mouse is in it. Other controls
+grey out when using them would do the wrong thing.
 Hover over a greyed-out toggle or **Solve** to see why.
 
 - **Calibrate** and **Record**: while the hardware check runs, while videos are
@@ -681,7 +710,7 @@ Hover over a greyed-out toggle or **Solve** to see why.
 - **Snapshot** and **Focus**: during a solve, because the preview is paused.
 - During the jobs in the second table under [State](#16-state): everything above,
   plus **Snapshot**. **Stimulation** and the sliders keep working.
-- In the editor: **Starting** and **Ending** until one block is selected, **Apply**
+- In the editor: **Starting**, **Ending** and **In zone** until one block is selected, **Apply**
   and **Test** during an upload, and **Apply** during a **Test**.
 
 If you quit in the middle of something, [After you stop](WORKFLOW.md#9-after-you-stop)

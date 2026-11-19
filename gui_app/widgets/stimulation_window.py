@@ -185,6 +185,13 @@ def parse_workflow(blocks, edges) -> tuple[list[dict], list[dict]]:
         rec["pin"] = int(rec["pin"])
         rec["start"] = bool(d.get("start", False))
         rec["end"] = bool(d.get("end", False))
+        zone = d.get("zone")
+        if zone and (len(str(zone)) != 1
+                     or str(zone) not in stim_compiler.ZONE_NAMES):
+            raise ValueError(f"block {bid!r}: zone {zone!r} is not one of the "
+                             f"letters {stim_compiler.ZONE_NAMES[0]} to "
+                             f"{stim_compiler.ZONE_NAMES[-1]}")
+        rec["zone"] = str(zone) if zone else None
         parsed_blocks.append(rec)
     parsed_edges: list[dict] = []
     for n, e in enumerate(edges, start=1):
@@ -218,6 +225,10 @@ class BlockItem(QGraphicsItem):
         self.explicit_start = False
         # When this block finishes, the recording stops. At most one per canvas.
         self.explicit_end = False
+        # The zone (a letter) this block follows: it pulses only while the
+        # live tracker reports a mouse in that zone, and holds its pin LOW
+        # otherwise (closed loop). None for a block that pulses regardless.
+        self.zone: str | None = None
         # Resolved globally by StimCanvas.refresh_starts() -- never set directly.
         self._is_start = True
         self._needs_start = False
@@ -294,7 +305,8 @@ class BlockItem(QGraphicsItem):
         painter.setPen(QPen(Qt.white))
         painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
         painter.drawText(QRectF(0, 0, BW, HEADER_H), Qt.AlignCenter,
-                         f"Pin {self.pin}")
+                         f"Pin {self.pin}  ·  zone {self.zone}" if self.zone
+                         else f"Pin {self.pin}")
 
         # body text — spell out the resulting waveform, since a pulse width at or
         # above the period is a 100% duty cycle, not a malformed train.
@@ -325,6 +337,13 @@ class BlockItem(QGraphicsItem):
             painter.setBrush(QBrush(QColor("#000000")))
             painter.drawEllipse(QPointF(BW - 24, 9), 5, 5)
 
+    def mouseDoubleClickEvent(self, event):
+        """A double click on a zone block opens its zone in the editor."""
+        views = self.scene().views() if self.scene() else []
+        if views and hasattr(views[0], "block_double_clicked"):
+            views[0].block_double_clicked.emit(self)
+        super().mouseDoubleClickEvent(event)
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
             if self.out_arrow:
@@ -335,10 +354,15 @@ class BlockItem(QGraphicsItem):
 
     def to_dict(self) -> dict:
         p = self.pos()
-        return {"id": self.block_id, "x": p.x(), "y": p.y(),
-                "pin": self.pin, "freq": self.freq,
-                "pw": self.pw, "dur": self.dur,
-                "start": self.explicit_start, "end": self.explicit_end}
+        d = {"id": self.block_id, "x": p.x(), "y": p.y(),
+             "pin": self.pin, "freq": self.freq,
+             "pw": self.pw, "dur": self.dur,
+             "start": self.explicit_start, "end": self.explicit_end}
+        # Only a zone block carries the key, so a saved paradigm without one
+        # reads as it did before zone blocks existed.
+        if self.zone:
+            d["zone"] = self.zone
+        return d
 
 
 # ── ArrowItem ─────────────────────────────────────────────────────────────────
@@ -423,6 +447,7 @@ class ArrowItem(QGraphicsItem):
 # ── StimCanvas ────────────────────────────────────────────────────────────────
 class StimCanvas(QGraphicsView):
     block_selected = pyqtSignal(object)  # BlockItem or None
+    block_double_clicked = pyqtSignal(object)  # BlockItem
     starts_changed = pyqtSignal(int)     # count of blocks stuck without a start
     #: Emitted on every structural change (block or arrow added or removed,
     #: flag toggled, load, clear) so the window can track unsaved work.
@@ -821,6 +846,7 @@ class StimCanvas(QGraphicsView):
         new_blocks = []
         for d in self._clipboard:
             blk = BlockItem(d["pin"], d["freq"], d["pw"], d["dur"])
+            blk.zone = d.get("zone") or None
             blk.setPos(origin.x() + d["rx"] + BW + 40, origin.y() + d["ry"])
             self.scene().addItem(blk)
             new_blocks.append(blk)
@@ -865,6 +891,7 @@ class StimCanvas(QGraphicsView):
                             block_id=d["id"])
             blk.explicit_start = d["start"]
             blk.explicit_end = d["end"]
+            blk.zone = d["zone"]
             blk.setPos(d["x"], d["y"])
             self.scene().addItem(blk)
             by_id[d["id"]] = blk
@@ -1059,8 +1086,21 @@ class StimulationWindow(QDialog):
                  release_serial: Callable[[], None] = lambda: None,
                  on_applied: Callable[[str], None] = lambda ino: None,
                  on_upload_failed: Callable[[bool], None] = lambda touched: None,
+                 zone_host=None,
                  parent=None):
         super().__init__(parent)
+        # The main window's side of the closed loop: the cameras' frames and
+        # size, the live tracking, and the zones it sends (main_window's
+        # _ZoneHost). None for an editor opened on its own, which can save
+        # and load zones but not draw them.
+        self._zone_host = zone_host
+        #: The paradigm's zones by name (closed_loop.Zone), saved and loaded
+        #: with it. A block ticked In zone names one.
+        self._zones: dict = {}
+        #: Whether Create Block makes a zone block, while no block is
+        #: selected; and the zone the last one followed.
+        self._create_in_zone = False
+        self._last_zone: str | None = None
         self._get_port       = get_port
         self._get_output_dir = get_output_dir
         self._get_fps        = get_fps
@@ -1146,6 +1186,7 @@ class StimulationWindow(QDialog):
 
         self._canvas = StimCanvas()
         self._canvas.block_selected.connect(self._on_block_selected)
+        self._canvas.block_double_clicked.connect(self._on_block_double_clicked)
         self._canvas.starts_changed.connect(self._on_starts_changed)
         self._canvas.modified.connect(self._on_canvas_modified)
         splitter.addWidget(self._canvas)
@@ -1210,6 +1251,23 @@ class StimulationWindow(QDialog):
         )
         self._end_cb.toggled.connect(self._on_end_toggled)
 
+        self._zone_cb = QCheckBox("In zone")
+        self._zone_cb.setToolTip(
+            "Closed loop: the block pulses only while the live tracker\n"
+            "finds a mouse in its zone, and holds its pin LOW otherwise.\n"
+            "Ticked with no block selected, Create Block opens the zones\n"
+            "to pick or draw the block's zone. Double-click a zone block to\n"
+            "change its zone. Needs the profile's closed_loop block.")
+        self._zone_cb.setEnabled(self._zone_host is not None)
+        self._zone_cb.setStyleSheet(
+            "QCheckBox { color: #e0c060; font-size: 11px; border: none; }"
+            "QCheckBox:disabled { color: #555; }"
+            "QCheckBox::indicator { width: 12px; height: 12px; border-radius: 3px; "
+            "border: 1px solid #666; background: #1a1a2e; }"
+            "QCheckBox::indicator:checked { background: #c8a030; border-color: #f0d080; }"
+        )
+        self._zone_cb.toggled.connect(self._on_zone_toggled)
+
         param_row = QHBoxLayout()
         param_row.setSpacing(8)
         for w in [_lbl("Pin"), self._f_pin,
@@ -1220,6 +1278,7 @@ class StimulationWindow(QDialog):
         param_row.addSpacing(10)
         param_row.addWidget(self._start_cb)
         param_row.addWidget(self._end_cb)
+        param_row.addWidget(self._zone_cb)
         create_btn = _btn("Create Block", bg="#1e3a1e", fg="#88dd88",
                           bd="#3a6a3a", hv="#254a25")
         create_btn.clicked.connect(self._on_create)
@@ -1240,6 +1299,12 @@ class StimulationWindow(QDialog):
         self._fit_btn = _btn("Fit")
         self._fit_btn.setToolTip("Show every block (Home)")
         self._fit_btn.clicked.connect(self._canvas.fit_to_content)
+        self._zones_btn = _btn("Zones")
+        self._zones_btn.setToolTip(
+            "Name zones and draw them on the cameras, for blocks ticked "
+            "In zone")
+        self._zones_btn.clicked.connect(self._on_zones)
+        self._zones_btn.setEnabled(self._zone_host is not None)
         self._status_lbl = _lbl("", color="#888")
         self._status_lbl.setSizePolicy(QSizePolicy.Expanding,
                                        QSizePolicy.Preferred)
@@ -1253,7 +1318,8 @@ class StimulationWindow(QDialog):
                                bg="#3a1e1e", fg="#dd8888",
                                bd="#6a3a3a", hv="#4a2525")
         self._apply_btn.clicked.connect(self._on_apply)
-        for w in [load_btn, clear_btn, self._fit_btn, self._status_lbl,
+        for w in [load_btn, clear_btn, self._fit_btn, self._zones_btn,
+                  self._status_lbl,
                   save_btn, self._test_btn, self._apply_btn]:
             btn_row.addWidget(w)
         bl.addLayout(btn_row)
@@ -1299,6 +1365,12 @@ class StimulationWindow(QDialog):
             cb.blockSignals(True)
             cb.setChecked(bool(block is not None and getattr(block, flag)))
             cb.blockSignals(False)
+        # In zone stays usable with nothing selected: then it says whether
+        # Create Block makes a zone block.
+        self._zone_cb.blockSignals(True)
+        self._zone_cb.setChecked(bool(block.zone) if block is not None
+                                 else self._create_in_zone)
+        self._zone_cb.blockSignals(False)
         if block is not None:
             self._f_pin.setText(str(block.pin))
             self._f_freq.setText(str(block.freq))
@@ -1312,6 +1384,83 @@ class StimulationWindow(QDialog):
     def _on_end_toggled(self, checked: bool):
         if self._selected_block is not None:
             self._canvas.set_explicit_end(self._selected_block, checked)
+
+    def _on_zone_toggled(self, checked: bool):
+        blk = self._selected_block
+        if blk is None:
+            self._create_in_zone = checked
+            return
+        if checked and not blk.zone:
+            name = self._choose_zone(self._last_zone)
+            if name is None:
+                self._zone_cb.blockSignals(True)
+                self._zone_cb.setChecked(False)
+                self._zone_cb.blockSignals(False)
+                return
+            self._set_block_zone(blk, name)
+        elif not checked and blk.zone:
+            self._set_block_zone(blk, None)
+
+    def _set_block_zone(self, blk: "BlockItem", name: str | None):
+        blk.zone = name
+        if name:
+            self._last_zone = name
+        blk.update()
+        # The same signal a start or end change sends, so the status line,
+        # the unsaved-changes flag and the Record check see the edit.
+        self._canvas.refresh_starts()
+        self._canvas.modified.emit()
+
+    def _on_block_double_clicked(self, blk: "BlockItem"):
+        if not blk.zone:
+            return
+        name = self._choose_zone(blk.zone)
+        if name is not None and name != blk.zone:
+            self._set_block_zone(blk, name)
+
+    # ── zones ────────────────────────────────────────────────────────────────
+    def zones(self) -> dict:
+        """The paradigm's zones by name (closed_loop.Zone)."""
+        return dict(self._zones)
+
+    def _set_zones(self, zones: dict):
+        self._zones = dict(zones)
+        self._dirty = True
+        if self._zone_host is not None:
+            self._zone_host.zones_changed(self.zones())
+        self._canvas.viewport().update()
+
+    def _zone_editor(self, current: str | None, choose: bool):
+        """The zone editor on the main window's cameras, or None with the
+        reason shown when zones cannot be drawn here."""
+        from gui_app.widgets.zone_editor import ZoneEditor
+        host = self._zone_host
+        why = ("Zones are drawn on the rig's cameras, which this editor "
+               "cannot see when it is opened on its own." if host is None
+               else host.unavailable())
+        if why:
+            QMessageBox.information(self, "Zones are not available", why)
+            return None
+        w, h = host.frame_size()
+        return ZoneEditor(self._zones, w, h, host.n_cameras(), host.frames,
+                          get_tracking=host.tracking, watch=host.watch,
+                          current=current, choose=choose,
+                          locked=host.locked(), parent=self)
+
+    def _choose_zone(self, current: str | None) -> str | None:
+        """Open the zone editor to pick (or draw) a block's zone. Returns its
+        name, or None when the operator cancels."""
+        ed = self._zone_editor(current, choose=True)
+        if ed is None or ed.exec_() != QDialog.Accepted:
+            return None
+        self._set_zones(ed.result_zones())
+        return ed.chosen()
+
+    def _on_zones(self):
+        """The Zones button: edit every zone, without picking one."""
+        ed = self._zone_editor(self._last_zone, choose=False)
+        if ed is not None and ed.exec_() == QDialog.Accepted:
+            self._set_zones(ed.result_zones())
 
     def _num(self, field) -> float:
         try:
@@ -1423,6 +1572,19 @@ class StimulationWindow(QDialog):
                     f"at the same time, so they would fight over the output and "
                     f"the waveform would be neither one. Give each chain its own "
                     f"pin, or put them in sequence as a single chain.")
+        followed = sorted({stim_compiler.zone_of(b) for b in blocks
+                           if stim_compiler.is_zone_block(b)})
+        if followed:
+            why = (self._zone_host.unavailable()
+                   if self._zone_host is not None else None)
+            if why:
+                return why
+            bare = [z for z in followed
+                    if z not in self._zones or self._zones[z].empty]
+            if bare:
+                return (f"Zone {', '.join(bare)} has no shapes, so the blocks "
+                        f"that follow it would never pulse.\n\nDouble-click "
+                        f"such a block to draw its zone, or untick In zone.")
         return None
 
     def invalidate_upload(self, reason: str = ""):
@@ -1526,7 +1688,7 @@ class StimulationWindow(QDialog):
         reference = flashed_source if flashed_source is not None \
             else self._uploaded_ino
         matches = None if reference is None else (ino == reference)
-        return {
+        out = {
             "saved_by": "Panopticon Stimulation Editor",
             "safe_low_pins": list(self._get_safe_pins()),
             "end_time_s": stim_compiler.end_time_s(blocks, edges),
@@ -1536,6 +1698,34 @@ class StimulationWindow(QDialog):
             "blocks": blocks,
             "edges": edges,
         }
+        # The zones the In zone blocks follow, as drawn on their cameras.
+        # Only a paradigm with zones carries the key, so every other record
+        # reads as it did before zones existed.
+        if self._zones:
+            out["zones"] = self._zones_dict()
+        return out
+
+    def _zones_dict(self) -> dict:
+        from gui_app.closed_loop import zones_to_dict
+        w, h = (self._zone_host.frame_size() if self._zone_host is not None
+                else self._zone_frame_size)
+        return zones_to_dict(self._zones, w, h)
+
+    #: The frame size a standalone editor keeps loaded zones at.
+    _zone_frame_size = (0, 0)
+
+    def _parse_zones(self, raw) -> dict:
+        """A paradigm file's zones, checked against this rig's cameras."""
+        from gui_app.closed_loop import zones_from_dict
+        if not raw:
+            return {}
+        host = self._zone_host
+        if host is None:
+            size = raw.get("frame_size") or [0, 0]
+            self._zone_frame_size = tuple(size)
+            return zones_from_dict(raw, *size)
+        w, h = host.frame_size()
+        return zones_from_dict(raw, w, h, host.n_cameras())
 
     def firmware_source(self) -> str:
         return self._compile()
@@ -1597,8 +1787,18 @@ class StimulationWindow(QDialog):
     # ── create ────────────────────────────────────────────────────────────────
     def _on_create(self):
         params = self._read_params(defaults=True)
-        if params is not None:
-            self._canvas.add_block(*params)
+        if params is None:
+            return
+        zone = None
+        if self._zone_cb.isChecked() and self._selected_block is None:
+            zone = self._choose_zone(self._last_zone)
+            if zone is None:
+                self._set_status("No zone was chosen, so no block was created.",
+                                 kind="notice")
+                return
+        blk = self._canvas.add_block(*params)
+        if zone:
+            self._set_block_zone(blk, zone)
 
     def _on_clear(self):
         if QMessageBox.question(
@@ -1620,9 +1820,11 @@ class StimulationWindow(QDialog):
         # a write failure is reported by path rather than as a traceback.
         p = Path(path)
         blocks, edges = self._canvas.get_workflow()
+        data = {"blocks": blocks, "edges": edges}
+        if self._zones:
+            data["zones"] = self._zones_dict()
         try:
-            p.write_text(json.dumps({"blocks": blocks, "edges": edges}, indent=2),
-                         encoding="utf-8")
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except OSError as e:
             self._set_status(f"Could not save {p.name}.", error=True)
             QMessageBox.critical(
@@ -1652,8 +1854,12 @@ class StimulationWindow(QDialog):
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 raise ValueError("the file holds no 'blocks' and 'edges'")
+            # The zones first: a file whose zones belong to another rig's
+            # cameras is refused before the canvas changes.
+            zones = self._parse_zones(data.get("zones"))
             dropped = self._canvas.load_workflow(
                 data.get("blocks", []), data.get("edges", []))
+            self._set_zones(zones)
         except Exception as e:
             QMessageBox.critical(
                 self, "Load failed",

@@ -1198,7 +1198,153 @@ Dead ends, do not retry:
 
 ---
 
-## 20. Standing dead ends (index)
+## 20. Closed-loop zone stimulation (18 November 2026)
+
+- 2026-11-18: Real-time place preference needed stimulation that follows the
+  animal: a block that pulses only while a mouse is in a zone drawn on one
+  camera, the reference rig's top-down cam5. The paradigm ran on the trigger
+  board with nothing coming back from the host. The sketch's `loop()` also
+  took any serial byte during a recording as a new configuration. It dropped
+  the cameras' and stimulation pins, waited 500 ms and restarted its trigger
+  count. Zone blocks (`57cab81`) read a zone byte, `Z` or `z`, at the top of
+  `loop()`, before that branch. Only sketches with a zone block carry the
+  code, and every other sketch is the same text, byte for byte (four
+  compared with master). A sketch without zone blocks takes the byte as a
+  command whose frame rate never arrives, and stops triggering. So the host
+  writes zone bytes only to the sketch the board's last ack named. The board
+  turns the zone off 250 ms after the last byte. The zone sketch compiles for
+  the Mega in 6,658 bytes of flash and 477 bytes of RAM.
+- 2026-11-18: The tracker, the Zone window and the record (`76326e9`). One
+  grab thread publishes a full-resolution frame at `rate_hz`. A worker
+  process in its own Python finds the mice, so neither the GPU runtime nor
+  its Python work enters the capture process. ONNX Runtime 1.32 with CUDA 13
+  runs on the RTX 5080. The full two-stage 14t export took 12.9 ms a frame
+  there (median, with a suite loading the CPU). The threshold tracker takes
+  1 ms. The window resends the zone every 50 ms and needs 2 frames in and 3
+  out. It writes closed_loop.csv and closed_loop.json, and stim_trace.csv
+  gains a `zone_in` column from them. Checked in the simulated window: the
+  two refusals, the tracker's start, and a recording with the zone on the
+  mouse and one with it off, in one process. Not yet run on the reference
+  rig.
+- 2026-11-18: The model, with no code change. 14t, the 3dpose detector, takes
+  three channels. They are the frame, the frame minus the median of about 60
+  keyframes from the whole recording, and the frame 10 triggers later minus
+  the one 10 before. Live, neither the later frame nor the background
+  exists. The homecage model takes the plain frame, and had been run on cam5
+  on 28 September. It kept the free mouse in 13% of 354 frames: the backlit
+  floor makes a mouse a black silhouette, which its training video never
+  showed. A centroid model on cam5's raw frames was trained from 14t's labels
+  instead: 145 images, 344 mice, 40 sessions, scored 5-fold by session.
+
+- 2026-11-18: A review of the branch before its first rig run (`46eabf4`). The
+  zone sketch's reconfigure test now consumes a zone byte at the head. A
+  byte that arrived in the microseconds between the drain and a second
+  `Serial.available()` entered the branch, and `readPins()` then skipped
+  every later zone byte, triggering nothing until the stop. At 20 bytes a
+  second that is once in minutes to tens of minutes of recording. The
+  simulated board takes zone bytes as they are written, so it could not
+  show it. The trace now follows the sketch's anchor: on a 1 Hz train, a
+  mouse back within the second had its pulses traced a second early. A
+  final watchdog lapse is recorded, and a recording's loop is never
+  replaced. A dead worker ends its loop and its tap, and the tap copies into
+  buffers touched in advance. Quit stands the board down before the tracker
+  closes. The zone sketch compiles in 6,688 bytes.
+- 2026-11-18: The model on the rig (`8ba4f42`). The 3dpose profile tracks
+  cam5 with the one-channel centroid model, kept on the rig PC with its
+  tracker environment. On the RTX 5080 the worker tracks a frame in 5.8 ms
+  (median). Against the 9-camera tracking projected into cam5, it misses a
+  dark mouse in 5% of frames (14t 1%), mostly for one frame, and a white
+  CD1 in 27%. So the zone waits five tracked frames before it turns off,
+  and detections count from 0.3. The capture-cost check of
+  test_mp_sim_e2e (300 us per frame) failed on master as on the branch, at
+  medians of 297 to 304 us across three runs each.
+- 2026-11-18: Named zones (`bd61bbf`). At the rig, Isaac asked for the zone
+  to be drawn in the stimulation editor, on any camera, and for more than one
+  zone. The shapes were to include rectangles and ellipses beside polygons,
+  with handles to resize them, and copy and paste. A zone is now a set of shapes on one camera, named by a
+  letter from A to P, and each zone block follows one zone. The zone byte is
+  the zone's letter, a capital while a mouse is in it and lower case while
+  none is. The sketch keeps a bit and a watchdog for each zone a block uses,
+  and consumes any other letter. The window taps every camera a zone is
+  drawn on and resends each zone on its own clock. Zones are saved with the
+  paradigm. After Apply, the preview outlines the applied zones on their
+  cameras. Zones and mice are drawn in saturated colours, since white and
+  black vanish on these cameras. `closed_loop` lost its `camera` key, and
+  the Zone window and its sidebar button are gone. The editor has run only
+  on the simulated rig.
+- 2026-11-18: The named-zone sketch on the rig, before that commit (no code
+  change). An IR LED in the middle of the field followed pin 53, and a zone
+  A block on that pin ran at 2 Hz with 250 ms pulses. A 60 s schedule of zone
+  bytes went through `send_zone()` while the nine cameras recorded 6,048
+  triggers each, none forced. On the seven cameras that see the LED well
+  (cam5 and cam6 see it faintly), it never lit while the zone was out. While
+  the zone was in, it was lit half the time at 2.0 pulses a second. Bytes for
+  a zone B, which the sketch had no bit for, changed nothing. Once the bytes
+  stopped, the last lit frame came 0.28 s later. About 400 bytes a second for
+  8 s left the block IDs contiguous. The first lit frame came 13 to 26 ms
+  after the first `in` byte. cam1, cam4 and cam5 each failed 7 grabs, and the
+  kick-out kept them aligned: the same three cameras lost frames in the
+  October calibrations.
+- 2026-11-18: The body-centre model (in `bd61bbf`). The first model's
+  centroid was the middle of each mouse's box, which the tail stretches.
+  Isaac retrained it with the centroid at the mean of the keypoints off the
+  tail. It was scored over 12 whole sessions, every 20th frame without a hand
+  in the arena, against the 3D tracking projected into cam5 and reduced the
+  same way. A dark mouse was within 25 px in 98.2% of frames (first model
+  85.7%) and missed in 1.1% (5.0%), for 0.3 s at the median. A white CD1 was
+  missed in 24.7%, in runs of up to 27 s, so a zone cannot follow a CD1. On
+  the RTX 5080 it takes about 6.5 ms a frame.
+- 2026-11-18: One model for all nine cameras (`acb15e1`). Zones can now be
+  drawn on any camera, and the cam5 model had seen no other view. gnu trained
+  the same network on raw frames from all nine cameras, unmirrored. It was
+  scored against the 3D tracking projected into each camera. A dark mouse was
+  within 25 px in 93.0% (cam7) to 99.0% (cam5) of frames and missed in 0.3%
+  (cam5) to 5.9% (cam7). On cam5 it beats the cam5 model (0.3% missed against
+  1.1%). A white CD1 was missed in 16 to 29% on six cameras, and in 61 to 80%
+  on cam2, cam4 and cam9. Through the window's worker on the RTX 5080 it
+  takes 6.3 ms a frame on every camera. 14t's offline centroids sit 50 to
+  64 px from the body centre (median, every camera, both body models), on
+  the head in the frames looked at. They cannot score a body-centre model.
+- 2026-11-19: The first closed loop on the rig, and a second zone on one
+  camera (`eb0d977`). Isaac drew a rectangle on cam5 around the IR LED on
+  pin 53, with a 20 Hz block of 100 ms pulses, so the pin stayed high while
+  the zone was in. He then moved his hand into the zone and out, through a
+  40 s recording. The tracker took the hand for a mouse, which is fine for a
+  test. Zone A turned on six times, for 13 s in all. On five cameras the LED
+  followed the expected trace at a correlation of 0.94 to 0.98, and on cam1
+  it matched in 99.5% of frames. The LED changed 10 to 30 ms after each of
+  the 12 zone events. No frame was dropped, with two kicked triggers. In the
+  editor, a second zone could not go on zone A's camera. New zone went to
+  the cameras page, whose save of the draw page reselected zone A. The click
+  on the same camera then reopened zone A. The tests had only tried another
+  camera. New zone on a camera's page now starts the zone there.
+- 2026-11-19: Five zones on five cameras with a mouse (no code change). Isaac
+  drew a zone on each of cam5, cam4, cam1, cam2 and cam7, and gave each its
+  own 50 s block on pins 50, 52, 53, 54 and 55. The IR LED was on pin 53,
+  which zone C on cam4 drove. A mouse ran through a 150 s recording. The
+  window tracked the five cameras at 10 Hz each and found no mouse in 0%
+  (cam5) to 10.6% (cam2) of tracked frames. On six cameras the LED matched
+  pin 53's trace in 99.93% of frames, and switched 10 to 20 ms after each of
+  zone C's six changes. Once the blocks ended at 50 s, the LED never lit,
+  though the mouse was in zone C for 46% of the rest. Tracking went on to
+  the stop. No frame was dropped or forced. Failed grabs came in bursts on
+  three cameras at once, always the same groups of three (cams 1, 4 and 5,
+  cams 2, 3 and 6, cams 7, 8 and 9), whichever cameras were tracked. The same bursts hit cams 1, 4
+  and 5 in the LED run without tracking.
+- 2026-11-19: Expected stimulation lights a zone block only with a mouse in
+  its zone (`8a2d43c`). Isaac asked for it, and for the panel's blocks to
+  show their parameters. The running block keeps its yellow outline either
+  way. Each block is labelled with its pin and zone, what it drives and its
+  duration, as many lines as fit.
+
+Dead ends, do not retry:
+- Feeding 14t's three-channel input live (it needs a frame 10 triggers ahead
+  and a background from the whole recording).
+- The homecage model on the backlit cam5 floor (missed the free mouse).
+
+---
+
+## 21. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
@@ -1251,3 +1397,6 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
   (the cut's marker co-detections were views the solve could not pair).
 - Counting a pair by the markers its two views share (no corners in common
   in ticks with 6 or more shared markers).
+- Feeding the 14t detector's three-channel input live (it needs a frame 10
+  triggers ahead and a background from the whole recording).
+- The homecage model on the backlit cam5 floor (missed the free mouse).

@@ -128,6 +128,19 @@ skeleton: "skeletons/mouse.json"
 # base directory). Each recording's files move into <recording>/usv/.
 collect_dirs: ["data/usv"]
 
+# Closed loop: zones are drawn on the cameras in the Stimulation editor. The
+# model is a SLEAP body-centre model trained on all nine cameras' raw frames,
+# exported to ONNX and kept on this computer. The tracker runs in its own
+# environment with onnxruntime-gpu. The model misses a dark mouse for a frame
+# now and then (cam7 most, cam5 least), so a zone waits five tracked frames
+# (half a second) before it turns off. It misses a white CD1 often on every
+# camera, and nearly always on cam2, cam4 and cam9.
+closed_loop:
+  model: "C:/Users/isaac/.panopticon/models/allcam_centroid_body_20261118.onnx"
+  python: "C:/Users/isaac/.panopticon/tracker-venv/Scripts/python.exe"
+  min_confidence: 0.3
+  leave_updates: 5
+
 serial_port: COM3
 # Every pin driven as a camera trigger. The order carries no meaning: the board
 # writes the pins one after another in one noInterrupts() block, microseconds

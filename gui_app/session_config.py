@@ -271,6 +271,108 @@ class CameraSpec:
         return out
 
 
+#: Trackers a closed_loop block may name: a SLEAP model exported to ONNX, or
+#: dark pixels below a gray level (no model, for a backlit floor and the
+#: simulated rig).
+CLOSED_LOOP_TRACKERS = ("onnx", "threshold")
+
+
+@dataclass(frozen=True)
+class ClosedLoopSpec:
+    """A profile's ``closed_loop:`` block, as ``parse_closed_loop_spec``
+    returns it: what tracks the cameras live, and how a tracked mouse
+    becomes the state of the zones that zone blocks follow. The zones, and
+    the cameras they are drawn on, belong to the paradigm.
+
+    ``model`` and ``python`` are resolved against the repository root like
+    every profile path. ``python`` None runs the tracker in Panopticon's own
+    interpreter, which has no ONNX runtime, so an onnx tracker names the
+    interpreter of an environment that has one.
+    """
+    tracker: str = "onnx"
+    model: str | None = None
+    python: str | None = None
+    #: Tracked frames per second, of each camera a zone is drawn on, in the
+    #: preview as in a recording.
+    rate_hz: float = 10.0
+    #: Detections with a lower confidence are ignored. The ONNX export marks
+    #: nearly every slot valid, so this is the only filter.
+    min_confidence: float = 0.2
+    #: Consecutive tracked frames with a mouse in the zone before the zone
+    #: turns on, and without one before it turns off.
+    enter_updates: int = 2
+    leave_updates: int = 3
+    #: Seconds without a tracked frame after which the zone turns off.
+    lost_s: float = 0.5
+    #: Threshold tracker only: the gray level a mouse is darker than, and the
+    #: smallest dark area, in full-resolution pixels, that counts as one.
+    threshold: int | None = None
+    min_area_px: int | None = None
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+_CLOSED_LOOP_KEYS = tuple(f.name for f in dataclasses.fields(ClosedLoopSpec))
+
+
+def parse_closed_loop_spec(raw) -> ClosedLoopSpec | None:
+    """The ``closed_loop:`` block as a ClosedLoopSpec, or None for an empty
+    one. Raises ValueError naming the key at fault."""
+    if raw is None:
+        return None
+    d = _check_keys(raw, _CLOSED_LOOP_KEYS, "closed_loop")
+    tracker = _spec_choice("closed_loop.tracker", d.get("tracker", "onnx"),
+                           CLOSED_LOOP_TRACKERS)
+    spec = ClosedLoopSpec(
+        tracker=tracker,
+        model=_spec_scalar("closed_loop.model", str, d.get("model"), True),
+        python=_spec_scalar("closed_loop.python", str, d.get("python"), True),
+        rate_hz=_spec_scalar("closed_loop.rate_hz", float,
+                             d.get("rate_hz", 10.0)),
+        min_confidence=_spec_scalar("closed_loop.min_confidence", float,
+                                    d.get("min_confidence", 0.2)),
+        enter_updates=_spec_scalar("closed_loop.enter_updates", int,
+                                   d.get("enter_updates", 2)),
+        leave_updates=_spec_scalar("closed_loop.leave_updates", int,
+                                   d.get("leave_updates", 3)),
+        lost_s=_spec_scalar("closed_loop.lost_s", float, d.get("lost_s", 0.5)),
+        threshold=_spec_scalar("closed_loop.threshold", int,
+                               d.get("threshold"), True),
+        min_area_px=_spec_scalar("closed_loop.min_area_px", int,
+                                 d.get("min_area_px"), True))
+    if not (math.isfinite(spec.rate_hz) and spec.rate_hz > 0):
+        raise ValueError(f"closed_loop.rate_hz {spec.rate_hz:g} must be a "
+                         f"positive number of tracked frames per second")
+    if not (0.0 <= spec.min_confidence <= 1.0):
+        raise ValueError(f"closed_loop.min_confidence {spec.min_confidence:g} "
+                         f"must be from 0 to 1")
+    for key in ("enter_updates", "leave_updates"):
+        if getattr(spec, key) < 1:
+            raise ValueError(f"closed_loop.{key} must be 1 or more tracked "
+                             f"frames")
+    if not (math.isfinite(spec.lost_s) and spec.lost_s > 1.0 / spec.rate_hz):
+        raise ValueError(
+            f"closed_loop.lost_s {spec.lost_s:g} must be longer than one "
+            f"tracked frame at rate_hz {spec.rate_hz:g} "
+            f"({1.0 / spec.rate_hz:g} s), or every gap between tracked frames "
+            f"would read as a lost mouse")
+    if spec.tracker == "onnx" and not spec.model:
+        raise ValueError("closed_loop.model is required for the onnx tracker: "
+                         "the SLEAP centroid model exported to ONNX")
+    if spec.tracker == "threshold":
+        if spec.threshold is None or not (1 <= spec.threshold <= 254):
+            raise ValueError(
+                "closed_loop.threshold is required for the threshold tracker: "
+                "the gray level from 1 to 254 that a mouse is darker than")
+        if spec.min_area_px is None or spec.min_area_px < 1:
+            raise ValueError(
+                "closed_loop.min_area_px is required for the threshold "
+                "tracker: the smallest dark area, in full-resolution pixels, "
+                "that counts as a mouse")
+    return spec
+
+
 _CAMERA_KEYS = tuple(f.name for f in dataclasses.fields(CameraSpec))
 _TRIGGER_KEYS = tuple(f.name for f in dataclasses.fields(TriggerSpec))
 _PER_CAMERA_KEYS = tuple(f.name for f in dataclasses.fields(PerCameraSpec))
@@ -801,6 +903,12 @@ class RigProfile:
     # Parsed by parse_camera_spec; required for flir and flir_sim, accepted
     # by sim, refused for basler, whose settings are the .pfs.
     camera: CameraSpec | None = None
+    # Live tracking of one camera for closed-loop stimulation: the camera,
+    # the tracker and how a tracked mouse becomes the zone state that the
+    # Stimulation editor's zone blocks follow. Parsed by
+    # parse_closed_loop_spec. None: no closed loop, and Record refuses a
+    # paradigm with a zone block.
+    closed_loop: ClosedLoopSpec | None = None
     # Worker processes the cameras are captured in; 0 captures in this
     # process. Cameras are dealt to workers contiguously by camera index.
     # Multi-process capture runs only on the real-time kick-out path, so
@@ -916,6 +1024,12 @@ class RigProfile:
         if "collect_dirs" in kwargs:
             kwargs["collect_dirs"] = [_resolve_path(d) if d else d
                                       for d in kwargs["collect_dirs"]]
+        loop = kwargs.get("closed_loop")
+        if loop is not None:
+            kwargs["closed_loop"] = dataclasses.replace(
+                loop,
+                model=_resolve_path(loop.model) if loop.model else loop.model,
+                python=_resolve_path(loop.python) if loop.python else loop.python)
         if "metadata_defaults" in kwargs:
             merged = _default_metadata()
             merged.update(kwargs["metadata_defaults"])
@@ -1120,6 +1234,7 @@ class RigProfile:
                 f"fields; allowed: {list(METADATA_DEFAULT_KEYS)}")
         self._validate_camera()
         self._validate_collect_dirs()
+        self._validate_closed_loop()
 
     # -------------------------------------------------- validation helpers
     def _given(self, name: str) -> bool:
@@ -1240,6 +1355,20 @@ class RigProfile:
                 f"gate_pins {self.gate_pins}: {detail}. A gate pin is a "
                 f"board output of its own, from 2 to board_max_pin "
                 f"{self.board_max_pin}.")
+
+    def _validate_closed_loop(self) -> None:
+        """The closed_loop block against the rest of the profile: the trigger
+        board that carries the zones is Panopticon's."""
+        loop = self.closed_loop
+        if loop is None:
+            return
+        if self.trigger_source != "board":
+            raise ValueError(
+                f"closed_loop is set, but trigger_source is "
+                f"{self.trigger_source}: the zone reaches the stimulation "
+                f"through Panopticon's trigger board, which an external "
+                f"source replaces. Remove closed_loop, or use "
+                f"trigger_source: board.")
 
     def _validate_collect_dirs(self) -> None:
         """The collected folders: named, distinct, and outside the sessions.
@@ -1487,6 +1616,8 @@ def _coerce_field(f: dataclasses.Field, value, backend: str | None = None):
     """
     if f.name == "camera":
         return parse_camera_spec(value, backend or "")
+    if f.name == "closed_loop":
+        return parse_closed_loop_spec(value)
     tp = f.type
     inner = _optional_inner(tp)
     if inner is not None:

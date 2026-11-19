@@ -432,6 +432,54 @@ A recording with blocks on the canvas also writes these beside the videos:
 
 [^sync]: At our 100 fps and 3 ms exposure, a camera shows when a train starts and stops, but a 20 Hz train aliases against the frame rate. For pulse-level evidence, you'd need a photodiode on a spare board input.
 
+### Closed-loop stimulation
+
+A closed loop makes a block pulse only while a mouse is in a zone you draw, which is how you run real-time place preference. A zone is a set of shapes on one camera, named by a letter (A, B and on), and every block ticked **In zone** follows one zone: while the tracker finds a mouse in that zone, the block runs its pulses, and the rest of the time its pin stays low. Any mouse counts, so with cagemates in the arena, a cagemate in the zone turns it on too.
+
+One laser needs one zone, however many shapes make it up: a mouse in any of its shapes turns it on. A second zone is for a second block that should follow a different area, such as a second laser for the other side of the arena. Two zones can share a camera.
+
+Your profile needs a [`closed_loop`](CONFIGURATION.md#closed_loop) block, and the model needs a Python environment of its own ([Set up the tracker](#set-up-the-tracker)). Then, in the stimulation editor:
+
+1. Fill in the block's **Pin**, **Freq**, **PW** and **Dur** as usual, tick **In zone** with no block selected, and press **Create Block**. The zone editor opens, with every camera's live view.
+2. Click the camera you'll draw on. The one above the arena is the safe choice: in a side view, a zone on the floor doesn't line up with a point on the mouse's back. The camera opens large, and the new zone gets the next free letter.
+3. Draw the zone with **Rectangle**, **Ellipse** or **Polygon**. Drag from corner to corner for a rectangle or an ellipse, and hold <kbd>Shift</kbd> for a square or a circle. For a polygon, click each corner and double-click (or press <kbd>Enter</kbd>) to close it. A right click takes back a corner. Any number of shapes can make up the zone.
+4. Switch to **Select** to adjust: click a shape, drag it to move it, and drag a handle to resize it, or a polygon's corner to move that corner. <kbd>Ctrl</kbd>+<kbd>C</kbd> and <kbd>Ctrl</kbd>+<kbd>V</kbd> copy and paste shapes, and <kbd>Delete</kbd> removes them. Each zone has its own colour, and the mice the tracker finds are marked with lime circles. Watch them for a minute: every mouse should carry one, and nothing else should. If not, see [`min_confidence`](CONFIGURATION.md#closed_loopmin_confidence).
+5. Press **Use zone A**. The block appears with `zone A` in its header. To make another block follow the same zone, create it the same way and pick zone A from the list. To give it a zone of its own, press **New zone**. On a camera's page, the new zone starts on that camera. On the cameras page, click the camera for it. With **Select**, a click on another zone's dimmed shape switches to that zone.
+6. Apply as usual, and press **Save** to keep the paradigm and its zones in one file. Panopticon never brings a zone back by itself: **Load** the file next time, double-click a zone block to open its zone, and check it still lines up, since the arena can sit a little differently from one session to the next.
+
+Once the paradigm is applied, the main window's preview outlines each zone it follows on its camera, in the zone's colour, and fills the zone while a mouse is in it. While a recording runs, the zones can be looked at but not changed, and the Expected stimulation panel says, for each zone block, whether a mouse is in its zone. A running zone block keeps its yellow outline throughout, and lights only while a mouse is in its zone.
+
+With the defaults the tracker looks at 10 frames a second of every camera a zone is drawn on, and a zone turns on once a mouse has been in it for 2 tracked frames in a row and off after 3 without one ([`enter_updates`](CONFIGURATION.md#closed_loopenter_updates)). The pulses then start 0.1 to 0.2 s after a mouse enters, and stop 0.2 to 0.3 s after it leaves. A pulse already running when a zone turns off still finishes, and a mouse that comes straight back never makes the pulses come faster than the block's frequency.
+
+> [!NOTE]
+> The window sends each zone's state to the board 20 times a second. If those updates stop, because the tracker or Panopticon stopped, the board turns the zone off by itself 250 ms later. Stopping the recording turns every zone off too.
+
+A closed-loop recording also writes these beside the videos:
+
+- `closed_loop.csv`: one row per tracked frame of each camera, with its time, camera and block ID, the mice found and kept, the zones a mouse was in, each zone's state, whether it went to the board, the tracker's time, and every detection as `x:y:confidence`. Every detection is there, whatever its confidence, so a recording can be scored again at another threshold.
+- `closed_loop.json`: the settings, the tracker, the zones as drawn, and `events`, each change of a zone with the block ID it applied from.
+
+`stim_trace.csv` gains a `zone_<letter>_in` column per zone from those events, and a zone block's pulses appear there only while its zone reads 1. The window can't know the exact trigger at which the board heard each update, so the column can be a trigger or two off. As for any paradigm, a light that follows the stimulation pin, where a camera can see it, is the evidence of what was delivered.
+
+#### Set up the tracker
+
+The model runs in a Python environment of its own, so its GPU libraries stay out of Panopticon's. You'll do this once per computer. In PowerShell:
+
+```powershell
+uv venv C:\tracker-env --python 3.12
+uv pip install --python C:\tracker-env\Scripts\python.exe "onnxruntime-gpu[cuda,cudnn]" numpy opencv-python-headless
+```
+
+Then point the profile at it, and at the model:
+
+```yaml
+closed_loop:
+  model: models/cam5_centroid.onnx
+  python: C:/tracker-env/Scripts/python.exe
+```
+
+The model is a SLEAP centroid model trained on the cameras' frames as they are, one gray channel, and exported to ONNX with `sleap-nn export`. Open **Zones** in the stimulation editor to check it: the status line names the tracker's error if the environment or the model is wrong. The `threshold` tracker needs no model and no environment ([`tracker`](CONFIGURATION.md#closed_looptracker)).
+
 ### If something looks different
 
 **Record** checks that the board carries what the canvas shows, and won't start when they disagree:
@@ -443,6 +491,10 @@ A recording with blocks on the canvas also writes these beside the videos:
 | `Apply the empty canvas first` | The canvas is empty, but the board still carries the paradigm you applied earlier. Apply the empty canvas |
 | `Cannot record with this stim workflow` | An Apply failed or is still running, or the editor shows a problem in red, such as a forbidden pin |
 | `Stop the stimulation test first` | A Test is running. Stop it in the editor |
+| `No closed loop for the zone blocks` | A block is ticked **In zone**, and the profile has no [`closed_loop`](CONFIGURATION.md#closed_loop) block. Untick it and apply again, or add the block |
+| `The tracker is not ready` | A block is ticked **In zone**, and the tracker is starting or has stopped. In the editor, **Zones** shows its state. If it shows an error, see [Set up the tracker](#set-up-the-tracker) |
+| `Draw the zone first` | A block follows a zone with no shapes. Double-click the block to draw its zone |
+| `A zone's camera is not open` | A zone is drawn on a camera this profile hasn't opened |
 
 The last two stop **Calibrate** as well. If an upload fails, [Stimulation](TROUBLESHOOTING.md#stimulation) explains its messages.
 
@@ -496,7 +548,7 @@ If the recording runs a paradigm, an **Expected stimulation** panel appears in t
 
 ![The Expected stimulation panel 10 s into the walkthrough paradigm, with the baseline block lit](images/sidebar_stim_progress.png)
 
-The panel is a small copy of your canvas, with pulsing blocks in purple and pauses in grey. The block each chain should be running right now is lit with a yellow outline (here, the baseline). Under it there's a line for each chain, naming that block and counting down the time left in it, like `Pin 53 · block 1 of 3 · off · 4:50 left`. The title counts the time since the first trigger, and reads `Expected stimulation · waiting for the first trigger` until it arrives. When a chain has run its course, its blocks dim and its line reads `Pin 53 · finished`. Once every chain has finished, the title reads `Expected stimulation · over`.
+The panel is a small copy of your canvas, with pulsing blocks in purple and pauses in grey, each labelled with its pin and parameters as far as its size allows. The block each chain should be running right now is lit, with a yellow outline (here, the baseline). Under it there's a line for each chain, naming that block and counting down the time left in it, like `Pin 53 · block 1 of 3 · off · 4:50 left`. The title counts the time since the first trigger, and reads `Expected stimulation · waiting for the first trigger` until it arrives. When a chain has run its course, its blocks dim and its line reads `Pin 53 · finished`. Once every chain has finished, the title reads `Expected stimulation · over`.
 
 Panopticon works all of this out from the trigger count, the same way it writes `stim_trace.csv`, so the panel lights the same block the trace will give that frame. Keep in mind that it shows what the paradigm *should* be doing, not a measurement. The board reports nothing back while it records, so only a light the cameras can see, like a sync LED, tells you the device on the pin really fired ([After a stimulated recording](#after-a-stimulated-recording)).
 
@@ -684,6 +736,7 @@ In the acquisition folder, `calibration/` or `<mouse1>_<mouse2>_recording/`:
 | `calibration_report.json`, `reprojection_error_histogram.png` | The solve's figures, for the window, and its pairwise plot. Calibration only |
 | `codet_frames.json` | The triggers at which two or more cameras saw the board, which lets the solve decode only those frames. Calibration only |
 | `stim_paradigm.json`, `stim_paradigm.ino`, `stim_trace.csv` | The paradigm, its sketch and the modelled stimulus per trigger ([After a stimulated recording](#after-a-stimulated-recording)) |
+| `closed_loop.csv`, `closed_loop.json` | The tracked cameras' mice per tracked frame, the zones and their changes ([Closed-loop stimulation](#closed-loop-stimulation)). Recording only, with a block ticked **In zone** |
 | `<folder>/`, such as `usv/` | What a [collected folder](CONFIGURATION.md#collect_dirs) gained during the recording, under that folder's name ([Devices that follow the recording](#devices-that-follow-the-recording)). Recording only |
 | `aligned/alignment.npz`, `aligned/alignment.json` | The alignment index, written whenever an alignment runs ([below](#aligned)) |
 
@@ -713,6 +766,7 @@ One row per trigger, with these columns:
 - `blockid`, `t_s` and `any_active`;
 - per chain, `chain<i>_step`, `chain<i>_active`, `chain<i>_freq_hz` and `chain<i>_pw_ms`;
 - a modelled `pin<N>_ttl` per pin;
+- `zone_<letter>_in` per zone a block follows: whether that zone was on for the trigger;
 - a `frame_<cam>` column per camera, blank where that camera has no frame for the trigger.
 
 When the videos are aligned, every `frame_<cam>` equals `frame`. `2_align.py --replace` rewrites the file, and `3_stim_trace.py` writes it again by hand.

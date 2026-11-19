@@ -48,6 +48,7 @@ from gui_app.trigger_source import (FIRST_TRIGGER_TIMEOUT_S, STOP_WAIT_S,
                                     make_trigger_source)
 from gui_app.widgets.camera_grid import CameraGridWidget
 from gui_app.widgets.focus_window import FocusWindow
+from gui_app import closed_loop
 from gui_app.widgets.sidebar import SidebarWidget
 from gui_app.widgets.stimulation_window import StimulationWindow
 
@@ -148,6 +149,61 @@ class State(Enum):
     ALIGNING = "ALIGNING"
 
 
+class _ZoneHost:
+    """The Stimulation editor's view of the closed loop: the cameras, the
+    live tracking, and where the zones it edits go."""
+
+    def __init__(self, win: "MainWindow"):
+        self._win = win
+
+    def unavailable(self) -> str | None:
+        """Why zones cannot be drawn and tracked now, or None."""
+        w = self._win
+        p = getattr(w, "_profile", None)
+        if p is None:
+            return "Choose a profile first: zones are drawn on its cameras."
+        if getattr(p, "closed_loop", None) is None:
+            return ("This profile has no closed_loop block, so no camera is "
+                    "tracked live and a zone block would never pulse. Add "
+                    "closed_loop to the profile (CONFIGURATION.md) to use "
+                    "zones.")
+        if not w._camera_names:
+            return "The cameras are not open."
+        return None
+
+    def frame_size(self) -> tuple:
+        p = self._win._profile
+        return int(p.frame_width), int(p.frame_height)
+
+    def n_cameras(self) -> int:
+        return len(self._win._camera_names)
+
+    def frames(self) -> list:
+        return list(self._win._camera_mgr.latest_frames)
+
+    def tracking(self) -> dict:
+        loop = self._win._closed_loop
+        return loop.snapshot() if loop is not None else {}
+
+    def watch(self, cams) -> None:
+        """Track these cameras too while the zone editor shows them; the
+        tracker starts the first time the editor asks."""
+        if self.unavailable():
+            return
+        loop = self._win._closed_loop
+        if loop is None and cams:
+            loop = self._win._ensure_closed_loop()
+        if loop is not None:
+            loop.watch(cams)
+
+    def locked(self) -> bool:
+        loop = self._win._closed_loop
+        return bool(loop is not None and loop.snapshot().get("armed"))
+
+    def zones_changed(self, zones: dict) -> None:
+        self._win._on_zones_changed(zones)
+
+
 class MainWindow(QMainWindow):
     #: Serial open attempts on the interactive start path. The port is
     #: normally already held from launch, so this only runs when the board is
@@ -188,6 +244,16 @@ class MainWindow(QMainWindow):
     #: or None before then. A file in a collect_dirs folder that changed at
     #: or after it moves into the recording (_collect_files).
     _collect_since: float | None = None
+    #: The closed loop's tracker, the zones the Stimulation editor holds,
+    #: the zones the applied paradigm follows, and the finishing recording's
+    #: log (see __init__).
+    _closed_loop = None
+    _zones: dict = {}
+    _applied_zones: tuple = ()
+    _closed_loop_log = None
+    _closed_loop_started = 0.0
+    #: Whether the panes were last given zone outlines to draw.
+    _zones_outlined = False
     #: Rate-check texts this recording has already reported, so the
     #: alignment summary's copy of the same finding is not shown twice.
     _reported_rate_warnings: frozenset | set = frozenset()
@@ -393,6 +459,15 @@ class MainWindow(QMainWindow):
 
         self._stim_window: StimulationWindow | None = None
         self._focus_window: FocusWindow | None = None
+        # Closed loop (gui_app/closed_loop.py): the live tracker, started
+        # when the Stimulation editor's zones need it or a paradigm with zone
+        # blocks is applied, and kept until the profile changes or the window
+        # quits; the editor's zones; the zones the applied paradigm follows;
+        # and the log of the recording that is finishing.
+        self._closed_loop: closed_loop.ClosedLoop | None = None
+        self._zones: dict = {}
+        self._applied_zones: tuple = ()
+        self._closed_loop_log: closed_loop.RecordingLog | None = None
         # One timer for the life of the window: a QTimer per recording is a
         # child QObject per recording, never deleted.
         self._stim_end_timer = QTimer(self)
@@ -1031,6 +1106,8 @@ class MainWindow(QMainWindow):
         # The old board's own pins, for the stop a switch to another port or
         # to an external trigger source sends it (_stand_down_switched_board).
         self._switch_from_pins = list(self._profile.trigger_pins)
+        # The tracker belongs to the old profile's cameras.
+        self._shutdown_closed_loop()
         self._profile = profile
         self._apply_log_level()
 
@@ -1184,11 +1261,17 @@ class MainWindow(QMainWindow):
         paused = self._preview_paused or self._focus_window is not None
 
         if not paused:
+            overlays = self._zone_overlays()
+            # Only while zones are applied, or once more to clear them.
+            outline = bool(overlays) or self._zones_outlined
+            self._zones_outlined = bool(overlays)
             for i, frame in enumerate(self._camera_mgr.latest_frames):
                 if frame is not None:
                     if lut is not None:
                         frame = lut[frame]
                     self._camera_grid.update_frame(i, frame)
+                if outline:
+                    self._camera_grid.set_zone_overlay(i, overlays.get(i, []))
 
         if self._display_tick % 10 == 0:
             if not paused:
@@ -1196,6 +1279,23 @@ class MainWindow(QMainWindow):
                     self._camera_grid.update_fps(i, fps)
             self._refresh_capture_health()
             self._check_lost_cameras()
+
+    def _zone_overlays(self) -> dict:
+        """Per camera index, the applied paradigm's zones drawn on it, each
+        with whether a mouse is in it now: [(Zone, on), ...]. Empty until a
+        paradigm with zone blocks is applied."""
+        if not self._applied_zones:
+            return {}
+        states = {}
+        if self._closed_loop is not None:
+            states = self._closed_loop.snapshot().get("zones") or {}
+        out: dict = {}
+        for name in self._applied_zones:
+            z = self._zones.get(name)
+            if z is not None and not z.empty:
+                out.setdefault(z.cam_index, []).append(
+                    (z, bool(states.get(name))))
+        return out
 
     #: Automatic reconnects allowed within RECONNECT_WINDOW_S. One more
     #: stops them and asks the operator to look at the cameras.
@@ -1939,6 +2039,53 @@ class MainWindow(QMainWindow):
                     "stim_paradigm.json and stim_trace.csv describe the edited "
                     "one.\n\nPress Apply in the Stimulation editor, or undo "
                     "the edit.")
+        return self._closed_loop_refusal()
+
+    def _closed_loop_refusal(self):
+        """(title, message) when the applied paradigm has zone blocks and the
+        closed loop cannot run them, or None.
+
+        RULE: a recording with zone blocks starts only with a tracker that is
+        running and every zone it follows drawn on an open camera. REASON:
+        without them a zone stays off, so its blocks never pulse while the
+        recording and its stim_paradigm.json say they were part of it.
+        """
+        ino = self._session_stim_ino
+        if not ino or not stim_compiler.sketch_has_zone(ino):
+            return None
+        names = self._applied_zones
+        spec = getattr(self._profile, "closed_loop", None)
+        if spec is None:
+            return ("No closed loop for the zone blocks",
+                    "The applied paradigm has blocks ticked In zone, which "
+                    "pulse only while the live tracker finds a mouse in their "
+                    "zone, but this profile has no closed_loop block, so "
+                    "nothing would track.\n\nAdd closed_loop to the profile, "
+                    "or untick In zone and Apply again.")
+        zones = self._zones
+        bare = [n for n in names if n not in zones or zones[n].empty]
+        if bare:
+            return ("Draw the zone first",
+                    f"The applied paradigm has blocks that follow zone "
+                    f"{', '.join(bare)}, which has no shapes, so they would "
+                    f"never pulse.\n\nOpen Stimulation and double-click such "
+                    f"a block to draw its zone.")
+        shut = [f"zone {n} ({zones[n].camera})" for n in names
+                if zones[n].cam_index >= len(self._camera_names)]
+        if shut:
+            return ("A zone's camera is not open",
+                    f"{', '.join(shut)} is drawn on a camera that is not "
+                    f"open, so it cannot be tracked.")
+        loop = self._ensure_closed_loop()
+        if not loop.ready:
+            snap = loop.snapshot()
+            why = snap.get("error")
+            return ("The tracker is not ready",
+                    "The applied paradigm has blocks ticked In zone, and the "
+                    "live tracker is "
+                    + (f"not running ({why})" if why else "still starting")
+                    + ".\n\nOpen Stimulation, then Zones, to see the "
+                    "tracker's state, and press Record again once it tracks.")
         return None
 
     def _external_stim_refusal(self, acq_type: str):
@@ -2821,6 +2968,9 @@ class MainWindow(QMainWindow):
         refusal = self._wrong_sketch_refusal(teensy, acq_type)
         if refusal:
             return self._rollback_acquisition(refusal, sent_start=True)
+        refusal = self._arm_closed_loop(teensy, acq_type, fps)
+        if refusal:
+            return self._rollback_acquisition(refusal, sent_start=True)
         # Nothing can refuse the start from here, so the previous run's
         # reports can go.
         self._sweep_stale_diagnostics()
@@ -3607,8 +3757,13 @@ class MainWindow(QMainWindow):
             self._stop_stim_progress()
             return
         t = self._recorded_seconds()
+        zones = None
+        if self._closed_loop is not None:
+            snap = self._closed_loop.snapshot()
+            if snap.get("armed") and snap.get("status") == "running":
+                zones = dict(snap.get("zones") or {})
         try:
-            self._sidebar.update_stim_progress(t)
+            self._sidebar.update_stim_progress(t, zones)
         except Exception as e:
             print(f"[stim] progress display failed: {e}", flush=True)
             self._stop_stim_progress()
@@ -3681,6 +3836,22 @@ class MainWindow(QMainWindow):
         paradigm itself changes.
         """
         self._session_stim_ino = ino
+        # The zones the applied blocks follow: the ones a recording sends and
+        # the preview outlines. The tracker starts now, so it is warm by
+        # Record.
+        self._applied_zones = ()
+        if self._stim_window is not None:
+            try:
+                blocks, _edges = self._stim_window.get_workflow()
+                self._applied_zones = tuple(sorted({
+                    stim_compiler.zone_of(b) for b in blocks
+                    if stim_compiler.is_zone_block(b)}))
+            except Exception as e:
+                print(f"[closed-loop] could not read the applied zones: {e}",
+                      flush=True)
+        if (self._applied_zones
+                and getattr(self._profile, "closed_loop", None) is not None):
+            self._ensure_closed_loop()
         try:
             settings.set_board_sketch_hint(stim_compiler.sketch_sha(ino))
             self._board_id_stale = True
@@ -4135,6 +4306,9 @@ class MainWindow(QMainWindow):
         the operator there that the board "did not accept the stop" sends them
         to power-cycle a board that was never running.
         """
+        # No zone byte may follow the stop; this recording's log is dropped.
+        self._end_closed_loop()
+        self._closed_loop_log = None
         if sent_start and self._teensy is not None:
             if not self._teensy.stop_triggers(self._profile.trigger_pins):
                 message += ("\n\nWARNING: the trigger board did not accept the stop "
@@ -4287,6 +4461,9 @@ class MainWindow(QMainWindow):
         self._cancel_stim_autostop()
         self._stop_stim_progress()
         self._stop_record_clock()
+        # The closed loop sends its last 'out' and stops before the board's
+        # stop, so no zone byte reaches the board after it.
+        self._closed_loop_log = self._end_closed_loop()
         # Stop the triggers but KEEP the port open: reopening it would reset the
         # board at the start of the next recording and flash a connected laser.
         # This is the everyday stop — the one taken every session — so it is the
@@ -4330,6 +4507,7 @@ class MainWindow(QMainWindow):
                       flush=True)
                 self._save_capture_record(e.results)
                 self._save_acquisition_metadata()
+                self._write_closed_loop()
                 self._write_stim_trace()
                 self._finalized = True
                 self._write_session_log("an incomplete stop")
@@ -4343,6 +4521,8 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[acq] thermals unavailable: {e}", flush=True)
             self._save_acquisition_metadata()
+            # The zone's record first: the trace of zone steps reads it.
+            self._write_closed_loop()
             self._write_stim_trace()   # needs blockids, so after _save_frametimes
             # Set before resume_preview, which is the one step after this that
             # can still fail: everything the session consists of is on disk by
@@ -5591,6 +5771,7 @@ class MainWindow(QMainWindow):
                 release_serial=self.release_serial_port,
                 on_applied=self._on_stim_applied,
                 on_upload_failed=self._on_stim_upload_failed,
+                zone_host=_ZoneHost(self),
                 parent=self,
             )
             # The editor's Apply runs with this window at IDLE and not busy,
@@ -5673,6 +5854,117 @@ class MainWindow(QMainWindow):
         if win is not None:
             win.deleteLater()
         print("[focus] window closed", flush=True)
+
+    # ------------------------------------------------------- closed loop
+    #: Seconds before a closed loop whose tracker failed is started again
+    #: on its own, so a tracker that cannot start is not relaunched on every
+    #: refresh.
+    CLOSED_LOOP_RETRY_S = 30.0
+
+    def _ensure_closed_loop(self) -> "closed_loop.ClosedLoop":
+        """The closed loop, started now if there is none, or started afresh
+        when the last one stopped (a failed tracker) at least
+        CLOSED_LOOP_RETRY_S ago.
+
+        RULE: a loop a recording is sending through is kept, even stopped.
+        REASON: its log is the recording's closed_loop record, and the stop
+        collects it from that loop (_end_closed_loop); a fresh loop would
+        leave the recording with no record and its trace with every zone
+        step off.
+        """
+        loop = self._closed_loop
+        if loop is not None and (
+                loop.is_alive() or loop.snapshot().get("armed")
+                or time.monotonic() - self._closed_loop_started
+                < self.CLOSED_LOOP_RETRY_S):
+            return loop
+        if loop is not None:
+            loop.close()
+        p = self._profile
+        loop = closed_loop.ClosedLoop(self._camera_mgr, p.closed_loop,
+                                      p.frame_height, p.frame_width)
+        loop.set_zones(self._zones)
+        loop.start()
+        self._closed_loop = loop
+        self._closed_loop_started = time.monotonic()
+        return loop
+
+    def _on_zones_changed(self, zones: dict):
+        """The Stimulation editor's zones changed (drawn, loaded or deleted):
+        the tracker decides every one of them from now on."""
+        self._zones = dict(zones)
+        if self._closed_loop is not None:
+            self._closed_loop.set_zones(self._zones)
+        print(f"[closed-loop] zones: "
+              f"{', '.join(f'{n} on {z.camera}' for n, z in sorted(zones.items())) or 'none'}",
+              flush=True)
+
+    def _shutdown_closed_loop(self):
+        """Stop the tracker. The zones stay with the editor."""
+        loop, self._closed_loop = self._closed_loop, None
+        if loop is not None:
+            loop.close()
+
+    def _arm_closed_loop(self, teensy, acq_type: str, fps) -> str | None:
+        """Start sending the zones for a recording whose sketch has zone
+        blocks. Start worker, after the board's start was confirmed. Returns
+        a refusal for the rollback, or None.
+
+        The board's own ack named the sketch (_wrong_sketch_refusal), so
+        arm_zone() lets send_zone() write to exactly that board.
+        """
+        self._closed_loop_log = None
+        if acq_type != "recording":
+            return None
+        ino, _label = self._sketch_for("recording")
+        if not stim_compiler.sketch_has_zone(ino):
+            return None
+        loop = self._closed_loop
+        if loop is None or not loop.ready:
+            return ("The live tracker stopped before the recording could "
+                    "start, so the paradigm's zone blocks would never pulse. "
+                    "Open Stimulation, then Zones, to check the tracker, then "
+                    "start again.")
+        if not teensy.arm_zone(ino):
+            return ("The recording's sketch could not be armed for its zones, "
+                    "so its zone blocks would never pulse.")
+        loop.set_zones(self._zones)
+        loop.begin_recording(teensy, fps, self._applied_zones)
+        logging_setup.transition(
+            f"closed loop: sending zone(s) "
+            f"{', '.join(self._applied_zones)} to the board")
+        return None
+
+    def _end_closed_loop(self):
+        """Stop sending the zone: one last 'out', then nothing. Returns the
+        recording's log, or None."""
+        loop = self._closed_loop
+        if loop is None:
+            return None
+        try:
+            return loop.end_recording()
+        except Exception as e:
+            print(f"[closed-loop] could not end the recording cleanly: {e}",
+                  flush=True)
+            return None
+
+    def _write_closed_loop(self):
+        """Write closed_loop.csv and closed_loop.json into the recording
+        folder, and add their warnings to WARNINGS.txt. Worker thread."""
+        log, self._closed_loop_log = self._closed_loop_log, None
+        if log is None or self._acq_type != "recording" or not self._video_dir:
+            return
+        loop = self._closed_loop
+        try:
+            warn = closed_loop.write_recording(
+                self._video_dir, log, self._profile.closed_loop,
+                loop.tracker_info if loop is not None else {})
+        except Exception as e:
+            warn = [f"closed loop: its record could not be written "
+                    f"({type(e).__name__}: {e})."]
+        for w in warn:
+            print(f"[closed-loop] {w}", flush=True)
+        self._finalize_warnings = list(self._finalize_warnings) + list(warn)
 
     def _board_taken_from_test(self) -> bool:
         """True while an acquisition or a firmware flash holds the board.
@@ -5835,8 +6127,17 @@ class MainWindow(QMainWindow):
         # No bound at close: the loop exits after at most one detection pass,
         # and there is no later moment at which a straggler could be joined.
         self._close_focus_window()
+        # The zone stops before the board stands down, so no zone byte
+        # follows its stop. Ending the tracker comes after the stand-down:
+        # nothing about it may delay or prevent that.
+        self._end_closed_loop()
         self._stop_coverage_hud(timeout_ms=0)
         self._stand_down_board_for_quit()
+        try:
+            self._shutdown_closed_loop()
+        except Exception as e:
+            print(f"[closed-loop] could not stop the tracker at quit: {e}",
+                  flush=True)
 
         if busy:
             self._abandon_and_cleanup()

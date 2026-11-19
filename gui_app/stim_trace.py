@@ -48,6 +48,9 @@ from gui_app.stim_compiler import block_timing, drive_mode
 
 TRACE_NAME = "stim_trace.csv"
 PARADIGM_NAME = "stim_paradigm.json"
+#: The closed loop's record of a recording (gui_app/closed_loop.py); its
+#: ``events`` give the zone state that zone steps followed.
+CLOSED_LOOP_NAME = "closed_loop.json"
 
 
 def _step_seconds(step: dict) -> float:
@@ -127,6 +130,96 @@ def ttl_level(step: dict, t_into_step: float) -> int:
     return 1 if int(round(t_into_step * 1e6)) % period_us < pw_us else 0
 
 
+def is_zone_step(step: dict) -> bool:
+    """Whether a step pulses only while a mouse is in its zone (closed
+    loop); describe() marks such a step with ``zone``, the zone's name."""
+    return bool(step.get("zone"))
+
+
+def zone_names(chains: list) -> list:
+    """The zones a paradigm's steps follow, in name order."""
+    return sorted({str(s["zone"]) for c in chains for s in c["steps"]
+                   if is_zone_step(s)})
+
+
+class ZoneModel:
+    """One zone's state on the board, and the pulses a step in that zone
+    fired, from ``closed_loop.json``'s events.
+
+    Each event is a dict with ``zone`` (its name), ``blockid`` (the first
+    trigger the change applied to) and ``in``; only the events of ``zone``
+    are read. Before the first the zone is off, as the sketch starts it. Times are integer microseconds of paradigm time,
+    ``(blockid - 1) / fps``, the clock the rest of the trace uses.
+
+    RULE: a zone step's pulses follow the sketch's updateStim(), not a
+    restart at every entry. REASON: the sketch keeps its period anchor at the
+    last nominal rise (or the block's start) while the zone is out, so a
+    mouse entering fires at once only when a full period has passed since
+    then, and otherwise at the next rise of the old phase. A pulse running
+    when the zone turns off finishes, and the block's end cuts one short.
+    """
+
+    def __init__(self, events, fps: float, zone: str):
+        evs = sorted(((int(e["blockid"]), bool(e["in"]))
+                      for e in events or () if e.get("zone") == zone),
+                     key=lambda e: e[0])
+        self.intervals: list = []
+        on = None
+        for bid, z in evs:
+            t = int(round((bid - 1) / fps * 1e6))
+            if z and on is None:
+                on = t
+            elif not z and on is not None:
+                if t > on:
+                    self.intervals.append((on, t))
+                on = None
+        if on is not None:
+            self.intervals.append((on, float("inf")))
+        self._starts = [a for a, _b in self.intervals]
+        self._rises: dict = {}
+
+    def in_zone(self, t_us: int) -> bool:
+        k = int(np.searchsorted(self._starts, t_us, side="right")) - 1
+        return k >= 0 and t_us < self.intervals[k][1]
+
+    def rises(self, key, start_us: int, end_us: int, period_us: int) -> list:
+        """The rising edges a zone train fired between its block's start
+        and end. Cached under ``key``, one per run of the block."""
+        got = self._rises.get(key)
+        if got is not None:
+            return got
+        anchor, out = start_us, []
+        for a, b in self.intervals:
+            a, b = max(a, start_us), min(b, end_us)
+            if a >= b:
+                continue
+            first = (a if a == start_us or a - anchor >= period_us
+                     else anchor + period_us)
+            r, before = first, len(out)
+            while r < b:
+                out.append(r)
+                r += period_us
+            if len(out) > before:
+                anchor = out[-1]
+        self._rises[key] = out
+        return out
+
+    def level(self, key, step: dict, start_us: int, t_us: int) -> int:
+        """The pin level a zone step drove at ``t_us``."""
+        freq, pw_ms = float(step["freq_hz"]), float(step["pulse_width_ms"])
+        kind, _duty = drive_mode(freq, pw_ms)
+        if kind == "low":
+            return 0
+        if kind != "train":
+            return int(self.in_zone(t_us))   # a level, dropped at once
+        period_us, pw_us, _ = block_timing({"freq": freq, "pw": pw_ms,
+                                            "dur": 0})
+        end_us = start_us + int(round(_step_seconds(step) * 1e6))
+        rises = self.rises(key, start_us, end_us, period_us)
+        k = int(np.searchsorted(rises, t_us, side="right")) - 1
+        return int(k >= 0 and t_us - rises[k] < pw_us and t_us < end_us)
+
+
 def step_active(step: dict) -> bool:
     """Whether a step drives its pin at all.
 
@@ -165,7 +258,8 @@ def chain_progress(chains: list[dict], t: float) -> list[dict]:
         step = steps[idx]
         out.append({"step": idx, "into_s": into,
                     "left_s": max(0.0, _step_seconds(step) - into),
-                    "active": step_active(step)})
+                    "active": step_active(step),
+                    "zone": step.get("zone")})
     return out
 
 
@@ -186,7 +280,8 @@ def resolve_chains(paradigm: dict) -> list[dict]:
 
 
 def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
-               frames=None, camera_frames: dict | None = None):
+               frames=None, camera_frames: dict | None = None,
+               zone_events=None):
     """Return (fieldnames, rows): one row per block ID in ``blockids``.
 
     ``frames`` gives each row's ``frame`` value, -1 for a trigger the
@@ -195,16 +290,25 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
     that camera's video (-1 where it has none), written as ``frame_<name>``
     columns after all the others, so the columns a reader already indexes do
     not move.
+
+    A paradigm with zone steps adds a ``zone_<name>_in`` column per zone,
+    before the frame columns, from ``zone_events`` (closed_loop.json, read
+    by ZoneModel). A zone step is active only while its zone is in, and its
+    pin follows the pulses the sketch fires (ZoneModel). A paradigm without
+    zone steps has the columns it always had.
     """
     chains = resolve_chains(paradigm)
     pins = sorted({int(s["pin"]) for c in chains for s in c["steps"]})
     camera_frames = camera_frames or {}
+    names = zone_names(chains)
+    models = {n: ZoneModel(zone_events, fps, n) for n in names}
 
     fields = ["frame", "blockid", "t_s", "any_active"]
     for i, _c in enumerate(chains):
         fields += [f"chain{i}_step", f"chain{i}_active",
                    f"chain{i}_freq_hz", f"chain{i}_pw_ms"]
     fields += [f"pin{p}_ttl" for p in pins]
+    fields += [f"zone_{n}_in" for n in names]
     fields += [f"frame_{nm}" for nm in camera_frames]
 
     b = _unwrap_blockids(np.asarray(blockids))
@@ -216,6 +320,8 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
                "t_s": round(t, 6)}
         levels = {p: 0 for p in pins}
         any_active = False
+        t_us = int(round(t * 1e6))
+        in_zone = {n: m.in_zone(t_us) for n, m in models.items()}
         for i, ch in enumerate(chains):
             idx, into = locate(ch["steps"], ch.get("loops_back_to_step"), t)
             if idx is None:
@@ -224,15 +330,24 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
                 continue
             step = ch["steps"][idx]
             active = step_active(step)
+            if is_zone_step(step):
+                z = str(step["zone"])
+                active = active and in_zone[z]
+                start_us = t_us - int(round(into * 1e6))
+                level = models[z].level((i, idx, start_us), step, start_us,
+                                        t_us)
+            else:
+                level = ttl_level(step, into) if active else 0
             any_active |= active
             row |= {f"chain{i}_step": idx,
                     f"chain{i}_active": int(active),
                     f"chain{i}_freq_hz": step["freq_hz"],
                     f"chain{i}_pw_ms": step["pulse_width_ms"]}
             pin = int(step["pin"])
-            levels[pin] = max(levels[pin], ttl_level(step, into))
+            levels[pin] = max(levels[pin], level)
         row["any_active"] = int(any_active)
         row |= {f"pin{p}_ttl": levels[p] for p in pins}
+        row |= {f"zone_{n}_in": int(v) for n, v in in_zone.items()}
         for nm, per_row in camera_frames.items():
             v = int(per_row[k])
             row[f"frame_{nm}"] = v if v >= 0 else ""
@@ -370,8 +485,21 @@ def write_trace_result(recording_dir: Path, fps: float,
         notes.append(f"first block ID is {int(rows_ids[0])}, so {lead} leading "
                      f"trigger(s) were dropped — times account for this")
 
+    zone_events = None
+    if any(is_zone_step(s) for c in resolve_chains(paradigm)
+           for s in c["steps"]):
+        try:
+            loop = json.loads((recording_dir / CLOSED_LOOP_NAME).read_text())
+            zone_events = list(loop["events"])
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            zone_events = []
+            notes.append(f"the zone's record ({CLOSED_LOOP_NAME}) is missing "
+                         f"or unreadable ({type(e).__name__}), so zone steps "
+                         f"are written as off")
+
     fields, rows = build_rows(paradigm, rows_ids, fps, frames=frames,
-                              camera_frames=camera_frames)
+                              camera_frames=camera_frames,
+                              zone_events=zone_events)
     out = recording_dir / TRACE_NAME
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)

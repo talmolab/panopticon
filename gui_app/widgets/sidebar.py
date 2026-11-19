@@ -404,6 +404,7 @@ class SidebarWidget(QWidget):
         self._focus_btn.clicked.connect(self.focus_clicked.emit)
         layout.addWidget(self._focus_btn)
 
+
         # Live ChArUco coverage graph, shown only during calibration. It takes
         # the sidebar's spare height (stretch 1 against the bottom spacer's 0),
         # so a sidebar dragged wider gives it a bigger ring.
@@ -1074,10 +1075,11 @@ class SidebarWidget(QWidget):
         self._stim_progress.set_paradigm(provenance)
         self._stim_progress.setVisible(True)
 
-    def update_stim_progress(self, t: float | None):
+    def update_stim_progress(self, t: float | None, zones: dict | None = None):
         """The paradigm's time from the trigger count, or None before the
-        first trigger."""
-        self._stim_progress.set_time(t)
+        first trigger, and the closed loop's state of each zone (None:
+        unknown)."""
+        self._stim_progress.set_time(t, zones)
 
     def hide_stim_progress(self):
         self._stim_progress.setVisible(False)

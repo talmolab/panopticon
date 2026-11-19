@@ -117,6 +117,12 @@ PREVIEW_STALL_TIMEOUTS = 5
 #: 200 ms, because its stall ladder counts trigger periods; the preview
 #: free-runs and only needs to notice silence.
 PREVIEW_TIMEOUT_MS = 2000
+
+#: Frames the live tracker's tap copies into in turn (set_tap). Its reader
+#: copies each published frame out at once, so a buffer comes round again
+#: only after TAP_BUFFERS - 1 more tap periods.
+TAP_BUFFERS = 4
+
 #: How long every other active camera must have been silent before a stalled
 #: camera reads its own silence as the trigger source's (see
 #: GrabThread.set_source_down_check). A board that stops or loses USB silences
@@ -617,6 +623,18 @@ class GrabThread(QThread):
         #: a live display can follow the trigger count at no cost to the grab
         #: loop.
         self.latest_bid = None
+        #: The live tracker's tap (set_tap): (full-resolution frame, block ID,
+        #: sequence number, perf_counter at the grab) of one frame, published
+        #: as one tuple at most rate_hz times a second. The block ID is
+        #: unwrapped, or None outside a recording; the sequence number rises
+        #: by one per published frame, so a reader can tell a new frame from
+        #: the one it already has.
+        self.latest_tap = None
+        self._tap_period = 0.0
+        self._tap_next = 0.0
+        self._tap_seq = 0
+        self._tap_bufs = None
+        self._tap_i = 0
         # Stall recovery state (see _rearm_stream / _resync_offset).
         self._last_ts = None          # device timestamp of the last good frame
         self._last_bid_eff = -1       # its globally-consistent block ID
@@ -1364,6 +1382,28 @@ class GrabThread(QThread):
                                         full, None if bid is None else
                                         bid + self._bid_wraps * BLOCKID_WRAP)
                                 t_disp += time.perf_counter() - td0
+                            # The live tracker's frame: one full-resolution
+                            # copy per tap period, on this camera only. The
+                            # next tap is scheduled from the last one, so
+                            # the rate does not drift with the frame rate.
+                            if self._tap_period and now >= self._tap_next:
+                                td0 = time.perf_counter()
+                                bufs = self._tap_bufs
+                                if bufs and bufs[0].shape == img.shape:
+                                    self._tap_i = (self._tap_i + 1) % len(bufs)
+                                    tapped = bufs[self._tap_i]
+                                    np.copyto(tapped, img)
+                                else:
+                                    tapped = img.copy()
+                                self._tap_seq += 1
+                                self.latest_tap = (
+                                    tapped, None if bid is None else
+                                    bid + self._bid_wraps * BLOCKID_WRAP,
+                                    self._tap_seq, now)
+                                self._tap_next += self._tap_period
+                                if self._tap_next <= now:
+                                    self._tap_next = now + self._tap_period
+                                t_disp += time.perf_counter() - td0
 
                         # Python does not unbind a with-target when the block ends, so
                         # `img` would otherwise keep pointing at the driver buffer past
@@ -1873,6 +1913,22 @@ class GrabThread(QThread):
         self._keep_full = flag
         if not flag:
             self.latest_full_frame = None
+
+    def set_tap(self, rate_hz: float, buffers=None):
+        """Publish a full-resolution frame for the live tracker at most
+        `rate_hz` times a second (latest_tap); 0 stops it. One frame copy
+        per tap, so only the tracked camera's thread is ever given one.
+
+        `buffers` are frame-sized arrays the tap copies into in turn
+        (CameraManager.set_tap makes TAP_BUFFERS of them, every page already
+        touched). A new array per tap would take its first-touch page faults
+        inside the grab loop. Without them the tap copies into a new array.
+        """
+        self._tap_bufs = list(buffers) if buffers else None
+        self._tap_period = 1.0 / rate_hz if rate_hz and rate_hz > 0 else 0.0
+        self._tap_next = 0.0
+        if not self._tap_period:
+            self.latest_tap = None
 
     def stop(self):
         self._running = False
