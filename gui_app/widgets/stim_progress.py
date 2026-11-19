@@ -1,8 +1,11 @@
 """The sidebar's live view of a recording's stimulation paradigm.
 
-A miniature of the Stimulation canvas, laid out as the operator drew it, with
-the block each chain should be running highlighted, and a line per chain
-naming that block and the time left in it.
+A miniature of the Stimulation canvas, laid out as the operator drew it, each
+block labelled with its pin and parameters, the block each chain should be
+running outlined, and a line per chain naming that block and the time left in
+it. The running block is lit while it should be driving its pin: always for
+an ordinary block, and for a zone block only while the closed loop reports a
+mouse in its zone.
 
 RULE: it is fed the trigger ordinal (``set_time(t)`` with
 ``t = (unwrapped_blockid - 1) / fps``) and worked out by
@@ -17,7 +20,7 @@ whether the laser fired: the LED in the cameras' view is the only witness.
 import math
 
 from PyQt5.QtCore import Qt, QPointF, QRectF, QSize
-from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
+from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont, QFontMetrics
 from PyQt5.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from gui_app import stim_compiler, stim_trace
@@ -36,6 +39,9 @@ _FILL_NOW = {"low": QColor("#8a8aa8"), "train": QColor("#cc88ee"),
              "constant": QColor("#ff7070"), "impossible": QColor("#ff7070")}
 _OUTLINE_NOW = QColor("#ffd54a")
 _EDGE = QColor("#4a5a70")
+#: Label colours on an unlit block and on a lit one.
+_TEXT = QColor("#dcdcf0")
+_TEXT_LIT = QColor("#16162a")
 
 
 def clock_text(seconds: float, up: bool = False) -> str:
@@ -45,6 +51,19 @@ def clock_text(seconds: float, up: bool = False) -> str:
     s = max(0, int(math.ceil(seconds - 1e-9) if up else math.floor(seconds)))
     m, s = divmod(s, 60)
     return f"{m}:{s:02d}" if m else f"{s} s"
+
+
+def block_lines(block: dict) -> list:
+    """A miniature block's label: its pin (and zone), what it drives, and its
+    duration. A block with room for fewer lines drops the duration, then the
+    pin, so what it drives stays."""
+    freq, pw = float(block["freq"]), float(block["pw"])
+    kind, _duty = stim_compiler.drive_mode(freq, pw)
+    zone = block.get("zone")
+    head = f"Pin {block['pin']}" + (f" · zone {zone}" if zone else "")
+    drive = ("off" if kind == "low" else
+             f"{freq:g} Hz · {pw:g} ms" if kind == "train" else "constant on")
+    return [head, drive, f"{float(block['dur']):g} s"]
 
 
 def step_text(step: dict) -> str:
@@ -73,10 +92,13 @@ class _Miniature(QWidget):
     MARGIN = 4
     #: Tallest the canvas drawing gets, whatever the layout's aspect ratio.
     MAX_HEIGHT = 120
-    #: Below this block height the wrapped rows replace the canvas drawing.
-    MIN_CANVAS_BLOCK_H = 10
+    #: Below this block height the wrapped rows replace the canvas drawing:
+    #: two lines of its label still fit.
+    MIN_CANVAS_BLOCK_H = 24
     #: A block in the wrapped rows, the gap between blocks, and between chains.
-    CELL_W, CELL_H, GAP, CHAIN_GAP = 26, 12, 3, 8
+    CELL_W, CELL_H, GAP, CHAIN_GAP = 74, 26, 3, 8
+    #: A label's font size in pixels, from a block's height, within limits.
+    FONT_PX_MIN, FONT_PX_MAX = 7, 11
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -84,10 +106,12 @@ class _Miniature(QWidget):
         policy.setHeightForWidth(True)
         self.setSizePolicy(policy)
         self._blocks: dict = {}      # id -> (x, y, drive kind)
+        self._labels: dict = {}      # id -> block_lines()
         self._edges: list = []       # (src id, dst id)
         self._chains: list = []      # block ids per chain, in step order
         self._bounds = QRectF()
         self._now: set = set()       # ids of the blocks running now
+        self._lit: set = set()       # of those, the ones driving their pin
         self._done: set = set()      # ids of blocks in finished chains
 
     def set_paradigm(self, blocks: list, edges: list, chains: list):
@@ -95,6 +119,7 @@ class _Miniature(QWidget):
             b["id"]: (float(b.get("x", 0.0)), float(b.get("y", 0.0)),
                       stim_compiler.drive_mode(b["freq"], b["pw"])[0])
             for b in blocks}
+        self._labels = {b["id"]: block_lines(b) for b in blocks}
         self._edges = [(e["src"], e["dst"]) for e in edges
                        if e.get("src") in self._blocks
                        and e.get("dst") in self._blocks]
@@ -104,13 +129,16 @@ class _Miniature(QWidget):
         for x, y, _kind in self._blocks.values():
             bounds = bounds.united(QRectF(x, y, BW, BH))
         self._bounds = bounds
-        self._now, self._done = set(), set()
+        self._now, self._lit, self._done = set(), set(), set()
         self.updateGeometry()
         self.update()
 
-    def set_state(self, now: set, done: set):
-        if now != self._now or done != self._done:
-            self._now, self._done = set(now), set(done)
+    def set_state(self, now: set, done: set, lit: set | None = None):
+        """``now``: the blocks running; ``lit``: those of them driving their
+        pin (all of them when None); ``done``: blocks of finished chains."""
+        lit = set(now) if lit is None else set(lit) & set(now)
+        if now != self._now or done != self._done or lit != self._lit:
+            self._now, self._done, self._lit = set(now), set(done), lit
             self.update()
 
     # -- layout --
@@ -194,17 +222,43 @@ class _Miniature(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(_FILL.get(kind, _FILL["low"])))
             p.drawRoundedRect(r, radius, radius)
+            self._label(p, bid, r, lit=False)
         p.setOpacity(1.0)
+        # The running blocks keep the outline; a zone block whose zone is
+        # empty keeps its unlit fill, so it lights as a mouse enters.
         for bid in self._now:
             if bid not in rects:
                 continue
             r = rects[bid].adjusted(-1, -1, 1, 1)
             radius = min(3.0, r.height() / 3)
             kind = self._blocks[bid][2]
+            lit = bid in self._lit
+            fill = _FILL_NOW if lit else _FILL
             p.setPen(QPen(_OUTLINE_NOW, 2))
-            p.setBrush(QBrush(_FILL_NOW.get(kind, _FILL_NOW["low"])))
+            p.setBrush(QBrush(fill.get(kind, fill["low"])))
             p.drawRoundedRect(r, radius, radius)
+            self._label(p, bid, rects[bid], lit=lit)
         p.end()
+
+    def _label(self, p: QPainter, bid, r: QRectF, lit: bool):
+        """The block's label, as many of block_lines() as fit, centred."""
+        lines = self._labels.get(bid)
+        if not lines:
+            return
+        font = QFont("Segoe UI")
+        font.setPixelSize(max(self.FONT_PX_MIN,
+                              min(self.FONT_PX_MAX, int(r.height() / 3.4))))
+        fm = QFontMetrics(font)
+        fit = int((r.height() - 2) // fm.lineSpacing())
+        if fit < 1 or r.width() < 3 * fm.averageCharWidth():
+            return
+        shown = lines if fit >= 3 else lines[:2] if fit == 2 else lines[1:2]
+        width = int(r.width() - 4)
+        text = "\n".join(fm.elidedText(t, Qt.ElideRight, width)
+                         for t in shown)
+        p.setFont(font)
+        p.setPen(QPen(_TEXT_LIT if lit else _TEXT))
+        p.drawText(r.adjusted(2, 1, -2, -1), Qt.AlignCenter, text)
 
 
 class StimProgressWidget(QWidget):
@@ -252,7 +306,7 @@ class StimProgressWidget(QWidget):
             self._mini.set_state(set(), set())
             return
         progress = stim_trace.chain_progress(self._chains, t)
-        now, done, lines = set(), set(), []
+        now, lit, done, lines = set(), set(), set(), []
         for c, (chain, where) in enumerate(zip(self._chains, progress)):
             steps = chain["steps"]
             ids = self._ids[c] if c < len(self._ids) else []
@@ -262,11 +316,15 @@ class StimProgressWidget(QWidget):
                 pin = steps[-1]["pin"] if steps else "?"
                 lines.append(f"Pin {pin} · finished")
                 continue
+            z = steps[i].get("zone")
             if i < len(ids):
                 now.add(ids[i])
+                # A zone block drives its pin only while a mouse is in its
+                # zone; unknown counts as not.
+                if not z or (zones or {}).get(z):
+                    lit.add(ids[i])
             loops = " (loops)" if chain.get("loops") else ""
             zone_now = ""
-            z = steps[i].get("zone")
             if z:
                 state = None if zones is None else zones.get(z)
                 zone_now = (f" · zone {z} unknown" if state is None else
@@ -280,4 +338,4 @@ class StimProgressWidget(QWidget):
         self._title.setText("Expected stimulation · " + (
             "over" if over else clock_text(t)))
         self._detail.setText("\n".join(lines))
-        self._mini.set_state(now, done)
+        self._mini.set_state(now, done, lit)

@@ -270,7 +270,9 @@ top, because it only shows during such a recording. Here it follows a short para
 ![The bolt beside Record, then the Expected stimulation panel stepping through two blocks to over](images/gif_stimulation_record.gif)
 
 It draws your canvas in miniature, with pulsing blocks in purple and pauses in grey,
-and lights the block each chain should be running with a yellow outline. Under it, a
+each labelled with its pin, what it drives and its duration, as far as the block's size
+allows. It outlines the block each chain should be running in yellow and lights it. A
+block ticked **In zone** lights only while a mouse is in its zone. Under it, a
 line per chain names that block and counts down the time left in it, and the title
 counts the time since the first trigger. When every chain has finished, the blocks dim
 and the title reads **over**. If your canvas is too wide to shrink legibly, the panel
