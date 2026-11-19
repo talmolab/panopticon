@@ -101,6 +101,8 @@ Copy the export folder to the rig computer, and name the model and the tracker's
 ### Check it on your rig
 
 1. Open the stimulation editor's **Zones**, and click a camera. The status line reads, for example, `Tracker running · cam5 tracked 10.0 times a second, 6.5 ms a frame, 2 mice`.
+
+    ![cam5's page in the zone editor, with the tracker's status line along the bottom](images/zone_editor_draw.png)
 2. With animals in the arena, watch each camera you'll draw zones on for a minute. Every animal should carry a lime circle, and nothing else should. If something that isn't an animal is marked, raise [`min_confidence`](CONFIGURATION.md#closed_loopmin_confidence). If animals go unmarked, lower it, or train the model on more frames from that camera.
 3. Keep hands out of a zone while an animal is stimulated: a model can take a hand for an animal. Ours does.
 4. Record a session with zones, and score it afterwards. `closed_loop.csv` keeps every detection with its confidence, as `x:y:confidence`, so you can check another threshold without recording again.
