@@ -1,12 +1,18 @@
 """The zone editor: name zones and draw them on any camera, for paradigm
 blocks ticked In zone.
 
+A zone is the area a block listens to: the block pulses while a mouse is in
+any of the zone's shapes. One laser needs one zone; a second zone is for a
+block that should follow a different area.
+
 The Stimulation editor opens it when a block is created with In zone ticked,
 when In zone is ticked on a selected block, and on a double click on a zone
 block. On the left is the list of zones (A, B, ...), each in its own colour,
 with the camera it is drawn on. On the right, the cameras page shows every
 camera live, each with the zones drawn on it; clicking one opens the draw
-page for that camera.
+page for that camera, on the selected zone if it is drawn there, else the
+camera's first zone, else a new zone. New zone starts a zone on the camera
+being drawn on, or, from the cameras page, on the camera clicked next.
 
 On the draw page, the tools are Select, Polygon, Rectangle and Ellipse:
 
@@ -18,8 +24,8 @@ On the draw page, the tools are Select, Polygon, Rectangle and Ellipse:
   it, drag one of its handles to resize it (Shift keeps the proportions) or
   move a polygon's corner. Ctrl+C and Ctrl+V copy and paste, Delete removes.
 
-Shapes of other zones on the same camera are shown dimmed and cannot be
-picked. The live tracker's mice are marked in lime. Coordinates are kept in
+Shapes of other zones on the same camera are shown dimmed; a click on one
+with Select switches to its zone. The live tracker's mice are marked in lime. Coordinates are kept in
 the camera's full-resolution pixels; the views only scale them.
 """
 import copy
@@ -272,6 +278,8 @@ class DrawView(QGraphicsView):
     editable, and the tools that make new ones."""
 
     edited = pyqtSignal()
+    #: A dimmed shape clicked with Select: the zone it belongs to.
+    zone_clicked = pyqtSignal(str)
 
     def __init__(self, width: int, height: int, parent=None):
         super().__init__(parent)
@@ -398,6 +406,10 @@ class DrawView(QGraphicsView):
     def mousePressEvent(self, event):
         pos = self._clamp(self.mapToScene(event.pos()))
         if self.tool == "select" or not self.zone:
+            other = self._other_zone_at(pos)
+            if other is not None and event.button() == Qt.LeftButton:
+                self.zone_clicked.emit(other)
+                return
             super().mousePressEvent(event)
             return
         if self.tool == "polygon":
@@ -415,6 +427,14 @@ class DrawView(QGraphicsView):
         if event.button() == Qt.LeftButton:
             self._draft = [(pos.x(), pos.y())]
             self._preview = pos
+
+    def _other_zone_at(self, pos: QPointF) -> str | None:
+        """The zone of the dimmed shape under `pos`, or None when the top
+        shape there is the current zone's, or there is none."""
+        for it in self.scene().items(pos):     # topmost first
+            if isinstance(it, ShapeItem):
+                return None if it.editable else it.zone
+        return None
 
     def mouseMoveEvent(self, event):
         pos = self._clamp(self.mapToScene(event.pos()))
@@ -547,6 +567,9 @@ class ZoneEditor(QDialog):
         self._locked = bool(locked)
         self._clipboard: list = []
         self._cam: int | None = None
+        # New zone pressed on the cameras page: the next camera clicked
+        # starts a zone, even one that already has zones.
+        self._pending_new = False
 
         root = QHBoxLayout(self)
         left = QVBoxLayout()
@@ -569,6 +592,14 @@ class ZoneEditor(QDialog):
         self.del_btn.clicked.connect(self._on_delete_zone)
         left.addWidget(self.new_btn)
         left.addWidget(self.del_btn)
+        about = QLabel("A zone is the area a block listens to: the block "
+                       "pulses while a mouse is in any of the zone's shapes. "
+                       "One laser needs one zone. Make another only for a "
+                       "block that should follow a different area.")
+        about.setWordWrap(True)
+        about.setMaximumWidth(240)
+        about.setStyleSheet("color: #8a8aa8; font-size: 11px;")
+        left.addWidget(about)
         root.addLayout(left, 0)
 
         right = QVBoxLayout()
@@ -630,6 +661,7 @@ class ZoneEditor(QDialog):
         dv.addLayout(tools)
         self.view = DrawView(self._w, self._h)
         self.view.edited.connect(self._sync_from_view)
+        self.view.zone_clicked.connect(self._on_shape_zone_clicked)
         dv.addWidget(self.view, 1)
         self.pages.addWidget(draw_page)
         right.addWidget(self.pages, 1)
@@ -702,13 +734,33 @@ class ZoneEditor(QDialog):
         return None
 
     def _on_new_zone(self) -> None:
+        """A new zone on the camera being drawn on, or, from the cameras
+        page, on the camera clicked next."""
         if self._locked:
             return
+        if self.pages.currentIndex() == 1 and self._cam is not None:
+            self._new_zone_on(self._cam)
+            return
         self._sync_from_view()
+        self._pending_new = True
         self.zone_list.blockSignals(True)
         self.zone_list.setCurrentItem(None)
         self.zone_list.blockSignals(False)
         self.show_cameras("Click the camera to draw the new zone on.")
+        self._sync_buttons()
+
+    def _new_zone_on(self, index: int) -> None:
+        self._sync_from_view()
+        name = self._next_name()
+        if name is None:
+            QMessageBox.information(self, "No zone left",
+                                    f"Every zone, {ZONE_NAMES[0]} to "
+                                    f"{ZONE_NAMES[-1]}, is in use.")
+            return
+        self._zones[name] = Zone(name, f"cam{index + 1}", [])
+        self._fill_list(name)
+        self._open_zone(name)
+        self._sync_buttons()
 
     def _on_delete_zone(self) -> None:
         name = self.chosen()
@@ -735,24 +787,33 @@ class ZoneEditor(QDialog):
         self._sync_buttons()
 
     def _on_camera_clicked(self, index: int) -> None:
-        """A camera picked on the cameras page: draw the selected zone if it
-        is on this camera, else start a new zone on it."""
+        """A camera picked on the cameras page. After New zone it starts a
+        zone there. Otherwise it opens the selected zone if that is drawn on
+        this camera, else the camera's first zone, else starts a zone."""
         self._sync_from_view()
         cam = f"cam{index + 1}"
-        name = self.chosen()
-        if name is None or self._zones[name].camera != cam:
-            if self._locked:
-                self._show_camera(index, None)
+        new, self._pending_new = self._pending_new, False
+        if not new:
+            sel = self.chosen()
+            on_cam = sorted(n for n, z in self._zones.items()
+                            if z.camera == cam)
+            if sel in on_cam:
+                self._open_zone(sel)
                 return
-            name = self._next_name()
-            if name is None:
-                QMessageBox.information(self, "No zone left",
-                                        f"Every zone, {ZONE_NAMES[0]} to "
-                                        f"{ZONE_NAMES[-1]}, is in use.")
+            if on_cam:
+                self._open_zone(on_cam[0])
                 return
-            self._zones[name] = Zone(name, cam, [])
-            self._fill_list(name)
-        self._open_zone(name)
+        if self._locked:
+            self._show_camera(index, None)
+            return
+        self._new_zone_on(index)
+
+    def _on_shape_zone_clicked(self, name: str) -> None:
+        """A dimmed shape clicked on the draw page: edit its zone."""
+        self._sync_from_view()
+        if name in self._zones:
+            self._open_zone(name)
+        self._sync_buttons()
 
     def _open_zone(self, name: str) -> None:
         z = self._zones[name]
@@ -773,6 +834,9 @@ class ZoneEditor(QDialog):
     def show_cameras(self, hint: str | None = None) -> None:
         self._sync_from_view()
         self._cam = None
+        # The draw page holds no zone while hidden, so no later sync writes
+        # its shapes back, or reselects its zone.
+        self.view.zone = None
         self.cams_hint.setText(hint or "Click a camera to draw a zone on it.")
         self.pages.setCurrentIndex(0)
         self._watch({z.cam_index for z in self._zones.values()})

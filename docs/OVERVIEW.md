@@ -588,12 +588,15 @@ pin, and a double click on the block opens its zone. It needs a profile with a
 #### The zone editor
 
 The zone editor lists the paradigm's zones on the left, each in its own colour with
-the camera it's drawn on. **New zone** starts another, and **Delete zone** removes
-one. On the right, every camera's live view shows the zones drawn on it, and clicking
-a camera opens it large, with the tools: **Select** to move a shape, resize it by its
-handles or move a polygon's corner, then **Polygon**, **Rectangle** and **Ellipse** to
-draw, and **Copy**, **Paste** and **Delete**. The mice the tracker finds are marked
-with lime circles, and **Cameras** goes back to every camera.
+the camera it's drawn on. A zone is the area a block listens to, so one laser needs
+one zone. **New zone** starts another, on the camera you're drawing on, or on the
+camera you click next. **Delete zone** removes one. On the right, every camera's live
+view shows the zones drawn on it, and clicking a camera opens it large, with the
+tools: **Select** to move a shape, resize it by its handles or move a polygon's
+corner, then **Polygon**, **Rectangle** and **Ellipse** to draw, and **Copy**,
+**Paste** and **Delete**. Another zone's shapes on the same camera are dimmed, and a
+click on one with **Select** switches to that zone. The mice the tracker finds are
+marked with lime circles, and **Cameras** goes back to every camera.
 
 #### 9. Status line
 
