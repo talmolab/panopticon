@@ -1258,6 +1258,43 @@ Dead ends, do not retry:
   and detections count from 0.3. The capture-cost check of
   test_mp_sim_e2e (300 us per frame) failed on master as on the branch, at
   medians of 297 to 304 us across three runs each.
+- 2026-11-18: Named zones (`bd61bbf`). At the rig, Isaac asked for the zone
+  to be drawn in the stimulation editor, on any camera, and for more than one
+  zone. The shapes were to include rectangles and ellipses beside polygons,
+  with handles to resize them, and copy and paste. A zone is now a set of shapes on one camera, named by a
+  letter from A to P, and each zone block follows one zone. The zone byte is
+  the zone's letter, a capital while a mouse is in it and lower case while
+  none is. The sketch keeps a bit and a watchdog for each zone a block uses,
+  and consumes any other letter. The window taps every camera a zone is
+  drawn on and resends each zone on its own clock. Zones are saved with the
+  paradigm. After Apply, the preview outlines the applied zones on their
+  cameras. Zones and mice are drawn in saturated colours, since white and
+  black vanish on these cameras. `closed_loop` lost its `camera` key, and
+  the Zone window and its sidebar button are gone. The editor has run only
+  on the simulated rig.
+- 2026-11-18: The named-zone sketch on the rig, before that commit (no code
+  change). An IR LED in the middle of the field followed pin 53, and a zone
+  A block on that pin ran at 2 Hz with 250 ms pulses. A 60 s schedule of zone
+  bytes went through `send_zone()` while the nine cameras recorded 6,048
+  triggers each, none forced. On the seven cameras that see the LED well
+  (cam5 and cam6 see it faintly), it never lit while the zone was out. While
+  the zone was in, it was lit half the time at 2.0 pulses a second. Bytes for
+  a zone B, which the sketch had no bit for, changed nothing. Once the bytes
+  stopped, the last lit frame came 0.28 s later. About 400 bytes a second for
+  8 s left the block IDs contiguous. The first lit frame came 13 to 26 ms
+  after the first `in` byte. cam1, cam4 and cam5 each failed 7 grabs, and the
+  kick-out kept them aligned: the same three cameras lost frames in the
+  October calibrations.
+- 2026-11-18: The body-centre model (in `bd61bbf`). The first model's
+  centroid was the middle of each mouse's box, which the tail stretches.
+  Isaac retrained it with the centroid at the mean of the keypoints off the
+  tail. It was scored over 12 whole sessions, every 20th frame without a hand
+  in the arena, against the 3D tracking projected into cam5 and reduced the
+  same way. A dark mouse was within 25 px in 98.2% of frames (first model
+  85.7%) and missed in 1.1% (5.0%), for 0.3 s at the median. A white CD1 was
+  missed in 24.7%, in runs of up to 27 s, so a zone cannot follow a CD1. On
+  the RTX 5080 it takes about 6.5 ms a frame. A model for all nine cameras,
+  trained without mirroring, is next.
 
 Dead ends, do not retry:
 - Feeding 14t's three-channel input live (it needs a frame 10 triggers ahead
