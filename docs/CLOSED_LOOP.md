@@ -4,6 +4,12 @@ Previous: [CPU_ENCODE.md](CPU_ENCODE.md). Next: [INTERNALS.md](INTERNALS.md), fo
 
 A closed loop makes a stimulation block pulse only while an animal is in a zone you draw on a camera. That's how you run real-time place preference with optogenetics. Panopticon tracks the animals live with a SLEAP model, decides several times a second whether each zone holds one, and tells the trigger board. The board then runs or holds each zone block's pulses.
 
+Here it is on our rig. A mouse moves through five zones, each drawn on its own camera, and the lime marks are where the tracker found it, live, 10 times a second. Zone C, on cam4, drives pin 53, and the close-up at the bottom right shows the IR LED on that pin lighting while the mouse is in zone C:
+
+![A mouse tracked live on five cameras: zone C on cam4 fills while the mouse is in it, and the IR LED on pin 53 lights with it](images/closed_loop_demo.gif)
+
+The whole 150 s recording is in [closed_loop_demo.mp4](images/closed_loop_demo.mp4). Its blocks run for the first 50 s. After that the zones still fill as the mouse comes and goes, but the pin stays low.
+
 This page is for setting it up on your rig, and above all for bringing your own SLEAP model. [Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) in the workflow walks through a session once it's set up.
 
 Here's the whole path, from a camera's frame to a pulse on the stimulation pin. The recording goes on as always along the top row, because the tracker only reads copies of the frames:
