@@ -852,7 +852,7 @@ Number, seconds. Default `30`. Reference rig: not set.
 #### `closed_loop`
 
 Mapping. Default `null` (no block). Reference rig:
-`{model: "C:/Users/isaac/.panopticon/models/cam5_centroid_body_20261118.onnx",
+`{model: "C:/Users/isaac/.panopticon/models/allcam_centroid_body_20261118.onnx",
 python: "C:/Users/isaac/.panopticon/tracker-venv/Scripts/python.exe",
 min_confidence: 0.3, leave_updates: 5}`.
 
