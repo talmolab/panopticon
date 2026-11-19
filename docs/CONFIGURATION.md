@@ -852,7 +852,10 @@ Number, seconds. Default `30`. Reference rig: not set.
 
 #### `closed_loop`
 
-Mapping. Default `null` (no block). Reference rig: not set.
+Mapping. Default `null` (no block). Reference rig: `{camera: cam5,
+model: "C:/Users/isaac/.panopticon/models/cam5_centroid_live_20261118.onnx",
+python: "C:/Users/isaac/.panopticon/tracker-venv/Scripts/python.exe",
+min_confidence: 0.3, leave_updates: 5}`.
 
 - Does: Tracks one camera live, so that a stimulation block ticked **In zone**
   pulses only while a mouse is in a zone you draw on that camera, for

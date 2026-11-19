@@ -128,6 +128,18 @@ skeleton: "skeletons/mouse.json"
 # base directory). Each recording's files move into <recording>/usv/.
 collect_dirs: ["data/usv"]
 
+# Closed loop: cam5 sees the backlit arena from above. The model is a SLEAP
+# centroid model trained on cam5's raw frames, exported to ONNX and kept on
+# this computer. The tracker runs in its own environment with onnxruntime-gpu.
+# The model misses a mouse for a frame now and then, so the zone waits five
+# tracked frames (half a second) before it turns off.
+closed_loop:
+  camera: cam5
+  model: "C:/Users/isaac/.panopticon/models/cam5_centroid_live_20261118.onnx"
+  python: "C:/Users/isaac/.panopticon/tracker-venv/Scripts/python.exe"
+  min_confidence: 0.3
+  leave_updates: 5
+
 serial_port: COM3
 # Every pin driven as a camera trigger. The order carries no meaning: the board
 # writes the pins one after another in one noInterrupts() block, microseconds
