@@ -1293,8 +1293,18 @@ Dead ends, do not retry:
   same way. A dark mouse was within 25 px in 98.2% of frames (first model
   85.7%) and missed in 1.1% (5.0%), for 0.3 s at the median. A white CD1 was
   missed in 24.7%, in runs of up to 27 s, so a zone cannot follow a CD1. On
-  the RTX 5080 it takes about 6.5 ms a frame. A model for all nine cameras,
-  trained without mirroring, is next.
+  the RTX 5080 it takes about 6.5 ms a frame.
+- 2026-11-18: One model for all nine cameras (`acb15e1`). Zones can now be
+  drawn on any camera, and the cam5 model had seen no other view. gnu trained
+  the same network on raw frames from all nine cameras, unmirrored. It was
+  scored against the 3D tracking projected into each camera. A dark mouse was
+  within 25 px in 93.0% (cam7) to 99.0% (cam5) of frames and missed in 0.3%
+  (cam5) to 5.9% (cam7). On cam5 it beats the cam5 model (0.3% missed against
+  1.1%). A white CD1 was missed in 16 to 29% on six cameras, and in 61 to 80%
+  on cam2, cam4 and cam9. Through the window's worker on the RTX 5080 it
+  takes 6.3 ms a frame on every camera. 14t's offline centroids sit 50 to
+  64 px from the body centre (median, every camera, both body models), on
+  the head in the frames looked at. They cannot score a body-centre model.
 
 Dead ends, do not retry:
 - Feeding 14t's three-channel input live (it needs a frame 10 triggers ahead
