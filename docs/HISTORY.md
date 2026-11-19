@@ -1305,6 +1305,19 @@ Dead ends, do not retry:
   takes 6.3 ms a frame on every camera. 14t's offline centroids sit 50 to
   64 px from the body centre (median, every camera, both body models), on
   the head in the frames looked at. They cannot score a body-centre model.
+- 2026-11-19: The first closed loop on the rig, and a second zone on one
+  camera (`eb0d977`). Isaac drew a rectangle on cam5 around the IR LED on
+  pin 53, with a 20 Hz block of 100 ms pulses, so the pin stayed high while
+  the zone was in. He then moved his hand into the zone and out, through a
+  40 s recording. The tracker took the hand for a mouse, which is fine for a
+  test. Zone A turned on six times, for 13 s in all. On five cameras the LED
+  followed the expected trace at a correlation of 0.94 to 0.98, and on cam1
+  it matched in 99.5% of frames. The LED changed 10 to 30 ms after each of
+  the 12 zone events. No frame was dropped, with two kicked triggers. In the
+  editor, a second zone could not go on zone A's camera. New zone went to
+  the cameras page, whose save of the draw page reselected zone A. The click
+  on the same camera then reopened zone A. The tests had only tried another
+  camera. New zone on a camera's page now starts the zone there.
 
 Dead ends, do not retry:
 - Feeding 14t's three-channel input live (it needs a frame 10 triggers ahead
