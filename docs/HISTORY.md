@@ -1198,7 +1198,52 @@ Dead ends, do not retry:
 
 ---
 
-## 20. Standing dead ends (index)
+## 20. Closed-loop zone stimulation (18 November 2026)
+
+- 2026-11-18: Real-time place preference needed stimulation that follows the
+  animal: a block that pulses only while a mouse is in a zone drawn on one
+  camera, the reference rig's top-down cam5. The paradigm ran on the trigger
+  board with nothing coming back from the host. The sketch's `loop()` also
+  took any serial byte during a recording as a new configuration. It dropped
+  the cameras' and stimulation pins, waited 500 ms and restarted its trigger
+  count. Zone blocks (`57cab81`) read a zone byte, `Z` or `z`, at the top of
+  `loop()`, before that branch. Only sketches with a zone block carry the
+  code, and every other sketch is the same text, byte for byte (four
+  compared with master). A sketch without zone blocks takes the byte as a
+  command whose frame rate never arrives, and stops triggering. So the host
+  writes zone bytes only to the sketch the board's last ack named. The board
+  turns the zone off 250 ms after the last byte. The zone sketch compiles for
+  the Mega in 6,658 bytes of flash and 477 bytes of RAM.
+- 2026-11-18: The tracker, the Zone window and the record (`76326e9`). One
+  grab thread publishes a full-resolution frame at `rate_hz`. A worker
+  process in its own Python finds the mice, so neither the GPU runtime nor
+  its Python work enters the capture process. ONNX Runtime 1.32 with CUDA 13
+  runs on the RTX 5080. The full two-stage 14t export took 12.9 ms a frame
+  there (median, with a suite loading the CPU). The threshold tracker takes
+  1 ms. The window resends the zone every 50 ms and needs 2 frames in and 3
+  out. It writes closed_loop.csv and closed_loop.json, and stim_trace.csv
+  gains a `zone_in` column from them. Checked in the simulated window: the
+  two refusals, the tracker's start, and a recording with the zone on the
+  mouse and one with it off, in one process. Not yet run on the reference
+  rig.
+- 2026-11-18: The model, with no code change. 14t, the 3dpose detector, takes
+  three channels. They are the frame, the frame minus the median of about 60
+  keyframes from the whole recording, and the frame 10 triggers later minus
+  the one 10 before. Live, neither the later frame nor the background
+  exists. The homecage model takes the plain frame, and had been run on cam5
+  on 28 September. It kept the free mouse in 13% of 354 frames: the backlit
+  floor makes a mouse a black silhouette, which its training video never
+  showed. A centroid model on cam5's raw frames was trained from 14t's labels
+  instead: 145 images, 344 mice, 40 sessions, scored 5-fold by session.
+
+Dead ends, do not retry:
+- Feeding 14t's three-channel input live (it needs a frame 10 triggers ahead
+  and a background from the whole recording).
+- The homecage model on the backlit cam5 floor (missed the free mouse).
+
+---
+
+## 21. Standing dead ends (index)
 
 Everything already tried or ruled out, so nobody spends a rig day on it again:
 
@@ -1251,3 +1296,6 @@ Everything already tried or ruled out, so nobody spends a rig day on it again:
   (the cut's marker co-detections were views the solve could not pair).
 - Counting a pair by the markers its two views share (no corners in common
   in ticks with 6 or more shared markers).
+- Feeding the 14t detector's three-channel input live (it needs a frame 10
+  triggers ahead and a background from the whole recording).
+- The homecage model on the backlit cam5 floor (missed the free mouse).
