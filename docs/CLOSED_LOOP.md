@@ -6,6 +6,10 @@ A closed loop makes a stimulation block pulse only while an animal is in a zone 
 
 This page is for setting it up on your rig, and above all for bringing your own SLEAP model. [Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) in the workflow walks through a session once it's set up.
 
+Here's the whole path, from a camera's frame to a pulse on the stimulation pin. The recording goes on as always along the top row, because the tracker only reads copies of the frames:
+
+![How a zone turns a pulse on: a copy of each zone camera's frame goes to the tracker process, Panopticon's zone logic decides whether an animal is in each zone, and one byte per zone over USB serial tells the trigger board's sketch when to pulse the zone block's stimulation pin](images/closed_loop_flow.png)
+
 ---
 
 ## What's new
