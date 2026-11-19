@@ -1318,6 +1318,24 @@ Dead ends, do not retry:
   the cameras page, whose save of the draw page reselected zone A. The click
   on the same camera then reopened zone A. The tests had only tried another
   camera. New zone on a camera's page now starts the zone there.
+- 2026-11-19: Five zones on five cameras with a mouse (no code change). Isaac
+  drew a zone on each of cam5, cam4, cam1, cam2 and cam7, and gave each its
+  own 50 s block on pins 50, 52, 53, 54 and 55. The IR LED was on pin 53,
+  which zone C on cam4 drove. A mouse ran through a 150 s recording. The
+  window tracked the five cameras at 10 Hz each and found no mouse in 0%
+  (cam5) to 10.6% (cam2) of tracked frames. On six cameras the LED matched
+  pin 53's trace in 99.93% of frames, and switched 10 to 20 ms after each of
+  zone C's six changes. Once the blocks ended at 50 s, the LED never lit,
+  though the mouse was in zone C for 46% of the rest. Tracking went on to
+  the stop. No frame was dropped or forced. Failed grabs came in bursts on
+  three cameras at once, always the same groups of three (cams 1, 4 and 5,
+  cams 2, 3 and 6, cams 7, 8 and 9), whichever cameras were tracked. The same bursts hit cams 1, 4
+  and 5 in the LED run without tracking.
+- 2026-11-19: Expected stimulation lights a zone block only with a mouse in
+  its zone (`8a2d43c`). Isaac asked for it, and for the panel's blocks to
+  show their parameters. The running block keeps its yellow outline either
+  way. Each block is labelled with its pin and zone, what it drives and its
+  duration, as many lines as fit.
 
 Dead ends, do not retry:
 - Feeding 14t's three-channel input live (it needs a frame 10 triggers ahead
