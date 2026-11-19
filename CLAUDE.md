@@ -770,13 +770,20 @@ camera and sends the zone to the board. The Zone window
   `send_zone()` therefore writes only while a start is in effect and the
   board's last ack named the sketch `arm_zone()` was given
   (`stim_compiler.sketch_has_zone`). Stop and close disarm.
+- The reconfigure branch's own test consumes a zone byte at the head
+  (`Serial.available() && !zoneByte()`), not a second `Serial.available()`.
+  A byte arriving between the drain and that test would otherwise enter the
+  branch, and `readPins()` would skip it and every zone byte after it,
+  triggering nothing until the stop.
 - The zone code is emitted only when a block is a zone block, so every other
   sketch is the same text, byte for byte, and no board is reflashed for it.
   Zone bytes are letters, and start and stop commands begin with a digit.
 - The board drops the zone `ZONE_WATCHDOG_MS` after the last zone byte, and at
   every start and stop. The window resends the state every `RESEND_S`, a fifth
   of the watchdog, whether or not a frame came, and turns the zone off once no
-  frame has been tracked for `lost_s`. `end_recording()` sends a last `z`
+  frame has been tracked for `lost_s`. The resend runs on the tracking
+  thread, so an inference longer than the watchdog lets the zone lapse, which
+  the record counts. `end_recording()` sends a last `z`
   before the board's stop, and holds the loop's lock across each send, so no
   `Z` follows it.
 - Outside the zone a pulse in flight finishes and the pin then holds low. The
@@ -794,9 +801,12 @@ camera and sends the zone to the board. The Zone window
   to stderr, which the window logs. The frame travels through shared memory.
 - One grab thread, the tracked camera's, publishes a full-resolution copy at
   most `rate_hz` times a second (`GrabThread.set_tap`), as one tuple of frame,
-  block ID, sequence number and grab time. The camera manager keeps the tap,
-  so every later preview and acquisition's threads take it again. Nothing
-  else is added to the grab loop for tracking.
+  block ID, sequence number and grab time. It copies into `TAP_BUFFERS`
+  arrays in turn, which the camera manager makes once with every page
+  touched: a new array per tap would take its first-touch faults in the grab
+  loop. The camera manager keeps the tap, so every later preview and
+  acquisition's threads take it again, and only the loop that set it can
+  stop it. Nothing else is added to the grab loop for tracking.
 - The model takes one gray channel: a frame stacked with a whole-session
   background and a later frame's motion, as the 14t detector takes, cannot be
   built live. The exported centroid model marks nearly every slot valid, so
@@ -813,8 +823,15 @@ camera and sends the zone to the board. The Zone window
   `closed_loop`, the tracker is running and a zone is drawn
   (`_closed_loop_refusal`). Without them the zone stays off, and the
   recording would be labelled with a paradigm whose zone blocks never ran.
+- A loop that a recording sends through is never replaced, even once it has
+  stopped (`_ensure_closed_loop`): its log is the recording's record. A loop
+  whose worker died ends its thread and its tap, and the Zone window starts
+  a fresh one when no recording is sending. At quit the zone stops before
+  the board stands down, and the tracker closes after it, without waiting.
 - The finalize writes `closed_loop.csv` and `closed_loop.json` before
-  `stim_trace.csv`, whose zone steps read the events. `zone_in` and a zone
+  `stim_trace.csv`, whose zone steps read the events. A zone step's pulses
+  follow the sketch's anchor (`stim_trace.ZoneModel`): re-entry within a
+  period keeps the old phase, and a pulse running at an exit finishes. `zone_in` and a zone
   step's pulses are expected, not observed: an event's block ID comes from
   the host's clock, a trigger or two from when the board acted. A paradigm
   without zone steps keeps the trace's columns.

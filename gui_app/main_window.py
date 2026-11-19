@@ -5781,9 +5781,17 @@ class MainWindow(QMainWindow):
 
     def _ensure_closed_loop(self) -> "closed_loop.ClosedLoop":
         """The running closed loop, started now if there is none or the last
-        one stopped (a tracker that failed is started afresh)."""
+        one stopped (a tracker that failed is started afresh).
+
+        RULE: a loop a recording is sending through is kept, even stopped.
+        REASON: its log is the recording's closed_loop record, and the stop
+        collects it from that loop (_end_closed_loop); a fresh loop would
+        leave the recording with no record and its trace with every zone
+        step off.
+        """
         loop = self._closed_loop
-        if loop is not None and loop.is_alive():
+        if loop is not None and (loop.is_alive()
+                                 or loop.snapshot().get("armed")):
             return loop
         if loop is not None:
             loop.close()
@@ -6036,10 +6044,17 @@ class MainWindow(QMainWindow):
         # No bound at close: the loop exits after at most one detection pass,
         # and there is no later moment at which a straggler could be joined.
         self._close_focus_window()
-        # Before the board stands down, so no zone byte follows its stop.
-        self._shutdown_closed_loop()
+        # The zone stops before the board stands down, so no zone byte
+        # follows its stop. Ending the tracker comes after the stand-down:
+        # nothing about it may delay or prevent that.
+        self._end_closed_loop()
         self._stop_coverage_hud(timeout_ms=0)
         self._stand_down_board_for_quit()
+        try:
+            self._shutdown_closed_loop()
+        except Exception as e:
+            print(f"[closed-loop] could not stop the tracker at quit: {e}",
+                  flush=True)
 
         if busy:
             self._abandon_and_cleanup()

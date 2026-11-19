@@ -633,7 +633,7 @@ def _zone_snippets(has_zone: bool) -> dict[str, str]:
     """
     if not has_zone:
         return {"field": "", "block": "", "update": "", "drain": "",
-                "drop": ""}
+                "guard": "", "drop": ""}
     block = (
         "\n"
         "// ===== CLOSED-LOOP ZONE =====\n"
@@ -688,6 +688,12 @@ def _zone_snippets(has_zone: bool) -> dict[str, str]:
         "block": block,
         "update": update,
         "drain": drain,
+        # The reconfigure branch decides on the byte at the head, not on a
+        # second Serial.available(): a zone byte arriving between the drain
+        # and that test would otherwise enter the branch, and readPins()
+        # would skip it and every later zone byte, triggering nothing until
+        # the stop.
+        "guard": " && !zoneByte()",
         # Every start and stop begins with the zone empty.
         "drop": "    ZONE_IN = false;\n",
     }
@@ -1030,7 +1036,7 @@ void setup() {{
 
 // ===== LOOP =====
 void loop() {{
-{zone['drain']}  if (Serial.available()) {{
+{zone['drain']}  if (Serial.available(){zone['guard']}) {{
     camsLow();
 {gate['drop']}{zone['drop']}    allStimLow();
     STIM_ACTIVE = false;

@@ -117,6 +117,12 @@ PREVIEW_STALL_TIMEOUTS = 5
 #: 200 ms, because its stall ladder counts trigger periods; the preview
 #: free-runs and only needs to notice silence.
 PREVIEW_TIMEOUT_MS = 2000
+
+#: Frames the live tracker's tap copies into in turn (set_tap). Its reader
+#: copies each published frame out at once, so a buffer comes round again
+#: only after TAP_BUFFERS - 1 more tap periods.
+TAP_BUFFERS = 4
+
 #: How long every other active camera must have been silent before a stalled
 #: camera reads its own silence as the trigger source's (see
 #: GrabThread.set_source_down_check). A board that stops or loses USB silences
@@ -627,6 +633,8 @@ class GrabThread(QThread):
         self._tap_period = 0.0
         self._tap_next = 0.0
         self._tap_seq = 0
+        self._tap_bufs = None
+        self._tap_i = 0
         # Stall recovery state (see _rearm_stream / _resync_offset).
         self._last_ts = None          # device timestamp of the last good frame
         self._last_bid_eff = -1       # its globally-consistent block ID
@@ -1380,9 +1388,16 @@ class GrabThread(QThread):
                             # the rate does not drift with the frame rate.
                             if self._tap_period and now >= self._tap_next:
                                 td0 = time.perf_counter()
+                                bufs = self._tap_bufs
+                                if bufs and bufs[0].shape == img.shape:
+                                    self._tap_i = (self._tap_i + 1) % len(bufs)
+                                    tapped = bufs[self._tap_i]
+                                    np.copyto(tapped, img)
+                                else:
+                                    tapped = img.copy()
                                 self._tap_seq += 1
                                 self.latest_tap = (
-                                    img.copy(), None if bid is None else
+                                    tapped, None if bid is None else
                                     bid + self._bid_wraps * BLOCKID_WRAP,
                                     self._tap_seq, now)
                                 self._tap_next += self._tap_period
@@ -1899,10 +1914,17 @@ class GrabThread(QThread):
         if not flag:
             self.latest_full_frame = None
 
-    def set_tap(self, rate_hz: float):
+    def set_tap(self, rate_hz: float, buffers=None):
         """Publish a full-resolution frame for the live tracker at most
         `rate_hz` times a second (latest_tap); 0 stops it. One frame copy
-        per tap, so only the tracked camera's thread is ever given one."""
+        per tap, so only the tracked camera's thread is ever given one.
+
+        `buffers` are frame-sized arrays the tap copies into in turn
+        (CameraManager.set_tap makes TAP_BUFFERS of them, every page already
+        touched). A new array per tap would take its first-touch page faults
+        inside the grab loop. Without them the tap copies into a new array.
+        """
+        self._tap_bufs = list(buffers) if buffers else None
         self._tap_period = 1.0 / rate_hz if rate_hz and rate_hz > 0 else 0.0
         self._tap_next = 0.0
         if not self._tap_period:

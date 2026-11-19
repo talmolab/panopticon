@@ -136,29 +136,81 @@ def is_zone_step(step: dict) -> bool:
     return bool(step.get("zone"))
 
 
-def zone_lookup(events) -> "callable":
-    """A function of block ID giving the zone state the board held for that
-    trigger, from ``closed_loop.json``'s events.
+class ZoneModel:
+    """The zone the board held, and the pulses a zone step fired, from
+    ``closed_loop.json``'s events.
 
-    Each event is a dict with ``blockid`` (the first trigger the change
-    applied to) and ``zone``. Before the first event the zone is off, as the
-    sketch starts it. Returns, for a block ID, (in zone, block ID of the
-    latest entry or None).
+    Each event is a dict with ``blockid``, the first trigger the change
+    applied to, and ``zone``. Before the first event the zone is off, as the
+    sketch starts it. Times are integer microseconds of paradigm time,
+    ``(blockid - 1) / fps``, the clock the rest of the trace uses.
+
+    RULE: a zone step's pulses follow the sketch's updateStim(), not a
+    restart at every entry. REASON: the sketch keeps its period anchor at the
+    last nominal rise (or the block's start) while the zone is out, so a
+    mouse entering fires at once only when a full period has passed since
+    then, and otherwise at the next rise of the old phase. A pulse running
+    when the zone turns off finishes, and the block's end cuts one short.
     """
-    evs = sorted(((int(e["blockid"]), bool(e["zone"])) for e in events or ()),
-                 key=lambda e: e[0])
-    bids = np.array([b for b, _ in evs], dtype=np.int64)
 
-    def at(bid: int):
-        k = int(np.searchsorted(bids, bid, side="right")) - 1
-        if k < 0 or not evs[k][1]:
-            return False, None
-        # The run of "in" events this one ends: the entry is its first.
-        j = k
-        while j > 0 and evs[j - 1][1]:
-            j -= 1
-        return True, evs[j][0]
-    return at
+    def __init__(self, events, fps: float):
+        evs = sorted(((int(e["blockid"]), bool(e["zone"]))
+                      for e in events or ()), key=lambda e: e[0])
+        self.intervals: list = []
+        on = None
+        for bid, z in evs:
+            t = int(round((bid - 1) / fps * 1e6))
+            if z and on is None:
+                on = t
+            elif not z and on is not None:
+                if t > on:
+                    self.intervals.append((on, t))
+                on = None
+        if on is not None:
+            self.intervals.append((on, float("inf")))
+        self._starts = [a for a, _b in self.intervals]
+        self._rises: dict = {}
+
+    def in_zone(self, t_us: int) -> bool:
+        k = int(np.searchsorted(self._starts, t_us, side="right")) - 1
+        return k >= 0 and t_us < self.intervals[k][1]
+
+    def rises(self, key, start_us: int, end_us: int, period_us: int) -> list:
+        """The rising edges a zone train fired between its block's start
+        and end. Cached under ``key``, one per run of the block."""
+        got = self._rises.get(key)
+        if got is not None:
+            return got
+        anchor, out = start_us, []
+        for a, b in self.intervals:
+            a, b = max(a, start_us), min(b, end_us)
+            if a >= b:
+                continue
+            first = (a if a == start_us or a - anchor >= period_us
+                     else anchor + period_us)
+            r, before = first, len(out)
+            while r < b:
+                out.append(r)
+                r += period_us
+            if len(out) > before:
+                anchor = out[-1]
+        self._rises[key] = out
+        return out
+
+    def level(self, key, step: dict, start_us: int, t_us: int) -> int:
+        """The pin level a zone step drove at ``t_us``."""
+        freq, pw_ms = float(step["freq_hz"]), float(step["pulse_width_ms"])
+        kind, _duty = drive_mode(freq, pw_ms)
+        if kind == "low":
+            return 0
+        if kind != "train":
+            return int(self.in_zone(t_us))   # a level, dropped at once
+        period_us, pw_us, _ = block_timing({"freq": freq, "pw": pw_ms,
+                                            "dur": 0})
+        end_us = start_us + int(round(_step_seconds(step) * 1e6))
+        rises = self.rises(key, start_us, end_us, period_us)
+        k = int(np.searchsorted(rises, t_us, side="right")) - 1
+        return int(k >= 0 and t_us - rises[k] < pw_us and t_us < end_us)
 
 
 def step_active(step: dict) -> bool:
@@ -233,16 +285,16 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
     not move.
 
     A paradigm with zone steps adds a ``zone_in`` column, before the frame
-    columns, from ``zone_events`` (closed_loop.json; zone_lookup). A zone
-    step is active only while the zone is in, and its pulses restart at each
-    entry, as the sketch fires a pulse at once when a mouse enters. A
-    paradigm without zone steps has the columns it always had.
+    columns, from ``zone_events`` (closed_loop.json, read by ZoneModel). A
+    zone step is active only while the zone is in, and its pin follows the
+    pulses the sketch fires (ZoneModel). A paradigm without zone steps has
+    the columns it always had.
     """
     chains = resolve_chains(paradigm)
     pins = sorted({int(s["pin"]) for c in chains for s in c["steps"]})
     camera_frames = camera_frames or {}
     has_zone = any(is_zone_step(s) for c in chains for s in c["steps"])
-    zone_at = zone_lookup(zone_events)
+    zone = ZoneModel(zone_events, fps) if has_zone else None
 
     fields = ["frame", "blockid", "t_s", "any_active"]
     for i, _c in enumerate(chains):
@@ -262,7 +314,8 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
                "t_s": round(t, 6)}
         levels = {p: 0 for p in pins}
         any_active = False
-        in_zone, entry = zone_at(int(bid)) if has_zone else (False, None)
+        t_us = int(round(t * 1e6))
+        in_zone = zone.in_zone(t_us) if zone is not None else False
         for i, ch in enumerate(chains):
             idx, into = locate(ch["steps"], ch.get("loops_back_to_step"), t)
             if idx is None:
@@ -271,19 +324,19 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
                 continue
             step = ch["steps"][idx]
             active = step_active(step)
-            phase = into
             if is_zone_step(step):
                 active = active and in_zone
-                if entry is not None:
-                    phase = min(into, t - (entry - 1) / fps)
+                start_us = t_us - int(round(into * 1e6))
+                level = zone.level((i, idx, start_us), step, start_us, t_us)
+            else:
+                level = ttl_level(step, into) if active else 0
             any_active |= active
             row |= {f"chain{i}_step": idx,
                     f"chain{i}_active": int(active),
                     f"chain{i}_freq_hz": step["freq_hz"],
                     f"chain{i}_pw_ms": step["pulse_width_ms"]}
             pin = int(step["pin"])
-            if active:
-                levels[pin] = max(levels[pin], ttl_level(step, phase))
+            levels[pin] = max(levels[pin], level)
         row["any_active"] = int(any_active)
         row |= {f"pin{p}_ttl": levels[p] for p in pins}
         if has_zone:
