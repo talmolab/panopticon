@@ -28,17 +28,23 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from gui_app import cpu_encode, cuda_driver, encoders, ffmpeg_cmd
 
-#: Bytes one real-time H.264 frame costs at the rig's qp, measured on real
-#: recordings -- which are NVENC recordings. Named because the disk budget is
-#: only honest when the number it multiplies is the one the chosen encode path
-#: actually writes.
+#: Bytes the disk estimate budgets for one real-time H.264 frame at the rig's
+#: quality, from real recordings -- which are NVENC recordings. Named because
+#: the disk budget is only honest when the number it multiplies is the one
+#: the chosen encode path actually writes.
+#:
+#: RULE: the budget sits above the highest per-frame average of any measured
+#: recording, not at a typical one. REASON: the frame size follows the
+#: scene's noise and varies severalfold between recordings, and an estimate
+#: that reads low lets the disk fill mid-session after a preflight that said
+#: nothing. docs/INTERNALS.md ("The stream, and the remux") has the figures.
 #:
 #: RULE: where this is applied to the CPU path, the estimate is labelled a
 #: lower bound. REASON: libx264 at `ultrafast` and the same `-qp` emits a
 #: materially larger frame than NVENC, and no measurement of the CPU path on
 #: rig content exists to replace it -- so the shortfall is stated rather than
 #: hidden behind a constant whose comment says "measured".
-H264_BYTES_PER_FRAME = 4600
+H264_BYTES_PER_FRAME = 14000
 
 #: Presets the launch bench measures.
 #:
@@ -971,7 +977,7 @@ def check_capacity(n_cams: int, width: int, height: int,
     # `raw_mode` and `encodes_realtime` are kept apart on purpose: the first is
     # what the profile asked for, the second is what this machine can deliver,
     # and it is the SECOND that the disk budget below must use. Budgeting
-    # 4.6 KB/frame while every camera writes 2.3 MB/frame is how a disk fills
+    # 14 KB/frame while every camera writes 2.3 MB/frame is how a disk fills
     # mid-session with a preflight that said nothing.
     path = str(encoder or "auto").lower()
     # RULE: only `realtime_encode` decides whether this run writes raw frames.
@@ -1068,7 +1074,8 @@ def check_capacity(n_cams: int, width: int, height: int,
               f"the mp4s have been checked.")
 
     # --- disk ----------------------------------------------------------------
-    # Real-time H.264 is ~4.6 KB/frame; raw is the full frame every frame.
+    # Real-time H.264 is budgeted at H264_BYTES_PER_FRAME; raw is the full
+    # frame every frame.
     per_s = n_cams * fps * (H264_BYTES_PER_FRAME if encodes_realtime else frame_b)
     need_disk_gb = per_s * minutes * 60 / 2 ** 30
     # The bytes-per-frame figure was measured on NVENC recordings, so on the

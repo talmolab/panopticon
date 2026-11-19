@@ -479,7 +479,7 @@ True or false. Default `true`. Reference rig: `true`.
   `raw.bin` and encodes after Stop.
 - Change when: Set `false` only when the computer cannot encode every camera live
   and the disk can take the [raw rate](#disk).
-- Goes wrong: `false` writes about 500 times the H.264 volume ([raw rate](#disk)).
+- Goes wrong: `false` writes hundreds of times the H.264 volume ([raw rate](#disk)).
   With `false`, `realtime_kick` has no effect, and the videos are aligned after
   the encode as they are with `realtime_kick: false`.
 
@@ -1646,9 +1646,12 @@ next acquisition needs the same memory as the first.
 
 ### Disk
 
-- Real-time H.264: about 4,600 bytes per frame at `quality: 28` on the reference
-  rig, so N × F × 4,600 bytes per second. Nine cameras at 100 fps write 4.1 MB/s,
-  about 15 GB an hour.
+- Real-time H.264: about 7,000 bytes per frame at `quality: 28` on the reference
+  rig, and up to 13,600 averaged over one recording's cameras, because the frame
+  size follows the scene's noise. The estimate budgets 14,000 bytes per frame,
+  above every recording measured, so N × F × 14,000 bytes per second. Nine
+  cameras at 100 fps are budgeted 12.6 MB/s, about 45 GB an hour, and a typical
+  recording writes about half that.
 - Raw capture (`realtime_encode: false`): N × F × W × H bytes per second, the
   [network](#network) rate of every camera together. One 1920×1200 camera at
   100 fps fills 129 GiB every 10 minutes.

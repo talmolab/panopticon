@@ -1289,9 +1289,9 @@ def probe_max_sessions(width: int = 1920, height: int = 1200, limit: int = 24) -
                 # allocation -- status 8 invalid param, a cudart problem
                 # surfacing lazily, no encode-capable device -- into "the cap
                 # is 0", and the preflight then tells the operator to set
-                # `realtime_encode: false` and pay 500x the disk for what is
-                # not a session-count problem. Raising reaches the caller as
-                # "unavailable", which is both true and actionable.
+                # `realtime_encode: false` and pay hundreds of times the disk
+                # for what is not a session-count problem. Raising reaches the
+                # caller as "unavailable", which is both true and actionable.
                 if _nvenc_status(e) in (21, 10):
                     break
                 raise

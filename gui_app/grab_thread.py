@@ -399,7 +399,7 @@ class _EncoderThread(threading.Thread):
                     # back as fixed-size w*h frames, so a short write shears
                     # every subsequent frame while `spilled` keeps counting them
                     # as good. Disk-full is the realistic trigger — the capacity
-                    # preflight budgets ~4.6 KB/frame for H.264, and this path
+                    # preflight budgets ~14 KB/frame for H.264, and this path
                     # writes the full 2.3 MB plane.
                     if spill_fd == -1:
                         self._done_with(nv12)
