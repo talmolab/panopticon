@@ -115,6 +115,15 @@ class TeensyController:
         #: Set by stop_and_close(), the quit's last word to the board. open()
         #: refuses from then on.
         self._retired = False
+        #: The identity of the zone sketch arm_zone() was given, or None.
+        #: send_zone() writes only while the board's last ack named it.
+        self._zone_sketch_id: str | None = None
+        #: Why the last send_zone() wrote nothing, or None after one that
+        #: wrote. Logged only when it changes, since send_zone() runs many
+        #: times a second.
+        self._zone_refusal: str | None = None
+        #: Zone bytes written since the last arm_zone().
+        self.zone_bytes_sent = 0
 
     @property
     def speaks_rdy(self) -> bool:
@@ -409,7 +418,71 @@ class TeensyController:
         with self._lock:
             return self._stop_locked(pins)
 
+    def arm_zone(self, ino_content: str) -> bool:
+        """Allow send_zone() for the sketch `ino_content`, after its start.
+
+        Returns False, and arms nothing, for a sketch without zone blocks. A
+        stop or a close disarms, so each recording arms its own start.
+        """
+        from gui_app.stim_compiler import sketch_has_zone, sketch_id
+        with self._lock:
+            sid = sketch_id(ino_content)
+            if not sid or not sketch_has_zone(ino_content):
+                self._zone_sketch_id = None
+                return False
+            self._zone_sketch_id = sid
+            self._zone_refusal = None
+            self.zone_bytes_sent = 0
+            return True
+
+    def send_zone(self, in_zone: bool) -> bool:
+        """Tell a zone sketch whether a mouse is in the zone. True when written.
+
+        Never waits for the link. A start, stop or reopen can hold it for
+        seconds, and this is called many times a second from the tracking
+        loop, so a busy link skips this update. The sketch's watchdog empties
+        the zone if updates stop.
+
+        RULE: writes only while a start is in effect and the board's last ack
+        named the sketch arm_zone() was given. REASON: any other sketch takes
+        the byte as the start of a command and stops triggering mid-recording
+        (stim_compiler.sketch_has_zone).
+        """
+        from gui_app.stim_compiler import ZONE_IN_BYTE, ZONE_OUT_BYTE
+        if not self._lock.acquire(blocking=False):
+            return self._zone_refused("the link is busy with another exchange")
+        try:
+            if self._ser is None:
+                return self._zone_refused("no serial link")
+            if not self._start_unconfirmed:
+                return self._zone_refused("no start is in effect")
+            if self._zone_sketch_id is None:
+                return self._zone_refused("no zone sketch armed")
+            if self.board_id != self._zone_sketch_id:
+                return self._zone_refused(
+                    f"the board's last ack named sketch {self.board_id}, "
+                    f"not the armed zone sketch {self._zone_sketch_id}")
+            try:
+                self._ser.write(ZONE_IN_BYTE if in_zone else ZONE_OUT_BYTE)
+            except (serial.SerialException, OSError) as e:
+                return self._zone_refused(f"write failed: {e}")
+            self.zone_bytes_sent += 1
+            if self._zone_refusal is not None:
+                print("[teensy] zone updates reaching the board again",
+                      flush=True)
+                self._zone_refusal = None
+            return True
+        finally:
+            self._lock.release()
+
+    def _zone_refused(self, why: str) -> bool:
+        if why != self._zone_refusal:
+            print(f"[teensy] zone update not sent: {why}", flush=True)
+            self._zone_refusal = why
+        return False
+
     def _stop_locked(self, pins: list[int]) -> bool:
+        self._zone_sketch_id = None
         if not self._ser:
             print("[teensy] STOP NOT SENT: no serial link. The board may still be "
                   "triggering and any stim paradigm may still be running.",
@@ -521,6 +594,7 @@ class TeensyController:
                 self._close_port()
 
     def _close_port(self):
+        self._zone_sketch_id = None
         ser, self._ser = self._ser, None
         if ser is not None and ser.is_open:
             ser.close()

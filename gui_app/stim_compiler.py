@@ -280,10 +280,15 @@ def describe(blocks: list[dict], edges: list[dict]) -> list[dict]:
                 mode = "constant ON"
             # duration_ms is the exact value the sketch executes; a trace that
             # models step lengths from it shares the board's rounding.
-            steps.append({"pin": int(b["pin"]), "freq_hz": freq,
-                          "pulse_width_ms": pw, "duration_s": float(b["dur"]),
-                          "duration_ms": dur_to_ms(b["dur"]),
-                          "mode": mode})
+            step = {"pin": int(b["pin"]), "freq_hz": freq,
+                    "pulse_width_ms": pw, "duration_s": float(b["dur"]),
+                    "duration_ms": dur_to_ms(b["dur"]),
+                    "mode": mode}
+            # Only a zone block carries the key, so the record of a paradigm
+            # without one reads as it did before zone blocks existed.
+            if is_zone_block(b):
+                step["zone"] = True
+            steps.append(step)
         out.append({
             "loops": loop_to >= 0,
             "loops_back_to_step": loop_to if loop_to >= 0 else None,
@@ -503,6 +508,10 @@ def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
         if dur_ms < 1:
             out.append((bid, f"a duration of {dur:g} s is below the 1 ms "
                              f"resolution of the firmware"))
+        if is_zone_block(b) and drive_mode(freq, pw)[0] == "low":
+            out.append((bid, "a zone block holds its pin LOW whether or not a "
+                             "mouse is in the zone; give it a frequency and a "
+                             "pulse width"))
         for name, val in (("period", period_us), ("pulse width", pw_us),
                           ("duration", dur_ms)):
             if val > UINT32_MAX:
@@ -597,6 +606,93 @@ def _gate_snippets(gate_pins: list[int]) -> dict[str, str]:
     }
 
 
+#: Milliseconds a zone block keeps running after the host's last zone byte.
+#: The host resends the zone's state on every update, so a host that hangs or
+#: exits stops the zone blocks this long after its last byte.
+ZONE_WATCHDOG_MS = 250
+
+#: The bytes the host sends to a sketch with zone blocks: a mouse is in the
+#: zone, and no mouse is. Neither can begin a start or stop command, which
+#: begin with a digit.
+ZONE_IN_BYTE = b"Z"
+ZONE_OUT_BYTE = b"z"
+
+
+def is_zone_block(blk: dict) -> bool:
+    """True for a block that runs only while the host reports a mouse in the
+    zone (closed loop)."""
+    return bool(blk.get("zone"))
+
+
+def _zone_snippets(has_zone: bool) -> dict[str, str]:
+    """The sketch text zone blocks add, by the place it goes in compile_ino().
+
+    Every entry is empty when no block is a zone block, which keeps such a
+    sketch identical to one compiled before zone blocks existed, so no board
+    is reflashed for them.
+    """
+    if not has_zone:
+        return {"field": "", "block": "", "update": "", "drain": "",
+                "drop": ""}
+    block = (
+        "\n"
+        "// ===== CLOSED-LOOP ZONE =====\n"
+        "// The host tracks the animals and sends one byte per update: 'Z' while a\n"
+        "// mouse is in the zone, 'z' while none is. A zone block runs its pulses only\n"
+        "// while ZONE_IN holds. The watchdog drops ZONE_IN once no byte has arrived for\n"
+        "// ZONE_WATCHDOG_MS, so a host that hangs or exits cannot leave a zone block\n"
+        "// running.\n"
+        f"const uint32_t ZONE_WATCHDOG_MS = {ZONE_WATCHDOG_MS}UL;\n"
+        "bool ZONE_IN = false;\n"
+        "uint32_t ZONE_SEEN_MS = 0;\n"
+        "\n"
+        "// Consumes one zone byte, or returns false for any other byte. loop() calls it\n"
+        "// before its reconfigure check, because a zone byte that reached readPins()\n"
+        "// would stop the triggers until a full command arrived.\n"
+        "bool zoneByte() {\n"
+        "  int c = Serial.peek();\n"
+        "  if (c != 'Z' && c != 'z') return false;\n"
+        "  Serial.read();\n"
+        "  ZONE_IN = (c == 'Z');\n"
+        "  ZONE_SEEN_MS = (uint32_t)millis();\n"
+        "  return true;\n"
+        "}\n")
+    update = (
+        "    // A zone block pulses only while a mouse is in the zone. Outside it, a\n"
+        "    // pulse in flight still finishes, since a pulse is never cut short, and\n"
+        "    // the pin then holds LOW. The anchor is kept at most one period old, so\n"
+        "    // a mouse entering fires the next pulse at once when a full period has\n"
+        "    // passed since the last one, and never sooner: re-entry cannot raise\n"
+        "    // the pulse rate above the block's frequency.\n"
+        "    if (blk->zone && !ZONE_IN) {\n"
+        "      if (cs->pin_high && (blk->pw_us >= blk->period_us\n"
+        "                           || nowUs - cs->rise_us >= blk->pw_us)) {\n"
+        "        digitalWrite(blk->pin, LOW);\n"
+        "        cs->pin_high = false;\n"
+        "      }\n"
+        "      if (nowUs - cs->period_anchor_us > blk->period_us) {\n"
+        "        cs->period_anchor_us = nowUs - blk->period_us;\n"
+        "      }\n"
+        "      cs->fresh = false;\n"
+        "      continue;\n"
+        "    }\n")
+    drain = (
+        "  // Zone bytes first, at the period boundary, so they never reach the\n"
+        "  // reconfigure branch below. The last one read wins.\n"
+        "  while (Serial.available() && zoneByte()) {}\n"
+        "  if (ZONE_IN && (uint32_t)millis() - ZONE_SEEN_MS > ZONE_WATCHDOG_MS) {\n"
+        "    ZONE_IN = false;\n"
+        "  }\n")
+    return {
+        "field": "  uint8_t zone;         // 1 = pulse only while ZONE_IN\n",
+        "block": block,
+        "update": update,
+        "drain": drain,
+        # Every start and stop begins with the zone empty.
+        "drop": "    ZONE_IN = false;\n",
+    }
+
+
 def compile_ino(blocks: list[dict], edges: list[dict],
                 safe_pins, trigger_pins=(),
                 max_pin: int = MEGA_MAX_DIGITAL_PIN,
@@ -625,6 +721,12 @@ def compile_ino(blocks: list[dict], edges: list[dict],
     gate pins existed, so its identity and its RDY line do not change. A
     sketch with gate pins appends the gate's state to its RDY line.
 
+    A block with ``zone`` set pulses only while the host reports a mouse in
+    the zone (ZONE_IN_BYTE and ZONE_OUT_BYTE, read at each trigger period's
+    boundary). The zone code is emitted only when some block is a zone block,
+    so every other sketch is the same text, byte for byte, as before zone
+    blocks existed. sketch_has_zone() tells the two apart.
+
     Also raises ValueError for parameter_problems() (numbers the firmware
     would silently execute as something else) and structural_problems()
     (branches or fan-in the chain walker would silently collapse). The editor
@@ -649,6 +751,8 @@ def compile_ino(blocks: list[dict], edges: list[dict],
 
     chains = _extract_chains(blocks, edges)
     n = len(chains)
+    has_zone = any(is_zone_block(b) for chain, _ in chains for b in chain)
+    zone = _zone_snippets(has_zone)
 
     chain_defs_parts: list[str] = []
     chain_refs: list[str] = []
@@ -663,9 +767,11 @@ def compile_ino(blocks: list[dict], edges: list[dict],
             dur_s = float(blk["dur"])
             # Integer microseconds and milliseconds only; see block_timing().
             period_us, pw_us, dur_ms = block_timing(blk)
+            zone_field = (f", {int(is_zone_block(blk))}u" if has_zone else "")
+            zone_note = ", in zone only" if is_zone_block(blk) else ""
             entries.append(
-                f"  {{{pin}u, {period_us}UL, {pw_us}UL, {dur_ms}UL}},"
-                f"   // {freq:g} Hz, {pw:g} ms pulse, {dur_s:g} s"
+                f"  {{{pin}u, {period_us}UL, {pw_us}UL, {dur_ms}UL{zone_field}}},"
+                f"   // {freq:g} Hz, {pw:g} ms pulse, {dur_s:g} s{zone_note}"
             )
             all_stim_pins.add(pin)
         chain_defs_parts.append(
@@ -712,7 +818,7 @@ struct StimBlock {{
   uint32_t period_us;   // 0 = hold the pin LOW for this block
   uint32_t pw_us;       // >= period_us = hold the pin HIGH for the whole block
   uint32_t dur_ms;
-}};
+{zone['field']}}};
 struct StimChainRef {{
   StimBlock* blocks;
   int len;
@@ -723,7 +829,7 @@ struct StimChainRef {{
 // the very first thing in setup() so nothing fires before the record command.
 const uint8_t STIM_PINS[] = {{{pin_list}}};
 const int N_STIM_PINS = {n_pins};
-{gate['block']}
+{gate['block']}{zone['block']}
 {chain_defs}
 
 {chain_table}
@@ -852,7 +958,7 @@ void updateStim() {{
       cs->fresh = false;
       continue;
     }}
-    // Pulse >= period is 100% duty -- hold the pin HIGH for the whole block
+{zone['update']}    // Pulse >= period is 100% duty -- hold the pin HIGH for the whole block
     // rather than treating it as an unrepresentable waveform.
     if (blk->pw_us >= blk->period_us) {{
       if (!cs->pin_high) {{
@@ -924,9 +1030,9 @@ void setup() {{
 
 // ===== LOOP =====
 void loop() {{
-  if (Serial.available()) {{
+{zone['drain']}  if (Serial.available()) {{
     camsLow();
-{gate['drop']}    allStimLow();
+{gate['drop']}{zone['drop']}    allStimLow();
     STIM_ACTIVE = false;
     N_CAMS = readPins();
     FPS_OUT = readFPS();
@@ -983,6 +1089,20 @@ def sketch_gate_pins(ino_content: str) -> list[int]:
     """
     m = _GATE_PINS_RE.search(ino_content or "")
     return [int(p) for p in m.group(1).split(",")] if m else []
+
+
+_ZONE_WATCHDOG_RE = re.compile(r"const uint32_t ZONE_WATCHDOG_MS = (\d+)UL;")
+
+
+def sketch_has_zone(ino_content: str) -> bool:
+    """True when a sketch reads zone bytes, that is, it has a zone block.
+
+    RULE: the host sends a zone byte only to a board whose last ack named such
+    a sketch. REASON: any other sketch takes the byte as the start of a
+    command, and its readPins() then waits for a frame rate that never comes,
+    so the board stops triggering in the middle of the recording.
+    """
+    return bool(_ZONE_WATCHDOG_RE.search(ino_content or ""))
 
 
 def recording_only_sketch(safe_pins, trigger_pins=(), gate_pins=(),
