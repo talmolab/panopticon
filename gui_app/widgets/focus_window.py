@@ -40,6 +40,9 @@ BOX_HOLD_S = 1.0
 #: at or above which it shows amber; below, red.
 GOOD_SHARE = 0.75
 FAIR_SHARE = 0.40
+#: The window's smallest size, (width, height), with the camera view still
+#: large enough to see the board in. It grows when the tiles need more.
+MIN_SIZE = (980, 640)
 
 GOOD = "#5fd35f"
 FAIR = "#e0b040"
@@ -369,8 +372,8 @@ class FocusWindow(QDialog):
     def __init__(self, camera_names: list, engine, camera_mgr, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Focus")
-        self.setMinimumSize(980, 640)
-        # Room for the camera view beside the counters.
+        # Room for the camera view beside the counters. The minimum is set
+        # once the layout is built (below).
         self.resize(1400, 820)
         self.setStyleSheet("background: #141428; color: #dcdcdc;")
         self._names = list(camera_names)
@@ -421,6 +424,19 @@ class FocusWindow(QDialog):
         self._rate.setStyleSheet("color: #889; font-size: 11px;")
         bottom.addWidget(self._rate)
         root.addLayout(bottom)
+
+        # RULE: the window's minimum is MIN_SIZE or what its layout needs,
+        # whichever is larger. REASON: an explicit minimum overrides the
+        # layout's. Below what the tiles and the camera view need, the grid
+        # is squeezed under its tiles' minimum width while the view keeps
+        # its own, and the view covers the grid's right-hand column. The
+        # columns grow with the camera count, so no fixed floor fits every
+        # rig. Polishing first applies the style sheets' fonts, which the
+        # layout's heights depend on.
+        self.ensurePolished()
+        need = self.minimumSizeHint()
+        self.setMinimumSize(max(MIN_SIZE[0], need.width()),
+                            max(MIN_SIZE[1], need.height()))
 
         self._stale_timer = QTimer(self)
         self._stale_timer.setInterval(1000)
