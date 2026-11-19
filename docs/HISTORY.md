@@ -1236,6 +1236,29 @@ Dead ends, do not retry:
   showed. A centroid model on cam5's raw frames was trained from 14t's labels
   instead: 145 images, 344 mice, 40 sessions, scored 5-fold by session.
 
+- 2026-11-18: A review of the branch before its first rig run (`46eabf4`). The
+  zone sketch's reconfigure test now consumes a zone byte at the head. A
+  byte that arrived in the microseconds between the drain and a second
+  `Serial.available()` entered the branch, and `readPins()` then skipped
+  every later zone byte, triggering nothing until the stop. At 20 bytes a
+  second that is once in minutes to tens of minutes of recording. The
+  simulated board takes zone bytes as they are written, so it could not
+  show it. The trace now follows the sketch's anchor: on a 1 Hz train, a
+  mouse back within the second had its pulses traced a second early. A
+  final watchdog lapse is recorded, and a recording's loop is never
+  replaced. A dead worker ends its loop and its tap, and the tap copies into
+  buffers touched in advance. Quit stands the board down before the tracker
+  closes. The zone sketch compiles in 6,688 bytes.
+- 2026-11-18: The model on the rig (`8ba4f42`). The 3dpose profile tracks
+  cam5 with the one-channel centroid model, kept on the rig PC with its
+  tracker environment. On the RTX 5080 the worker tracks a frame in 5.8 ms
+  (median). Against the 9-camera tracking projected into cam5, it misses a
+  dark mouse in 5% of frames (14t 1%), mostly for one frame, and a white
+  CD1 in 27%. So the zone waits five tracked frames before it turns off,
+  and detections count from 0.3. The capture-cost check of
+  test_mp_sim_e2e (300 us per frame) failed on master as on the branch, at
+  medians of 297 to 304 us across three runs each.
+
 Dead ends, do not retry:
 - Feeding 14t's three-channel input live (it needs a frame 10 triggers ahead
   and a background from the whole recording).
