@@ -272,7 +272,11 @@ top, because it only shows during such a recording. Here it follows a short para
 It draws your canvas in miniature, with pulsing blocks in purple and pauses in grey,
 each labelled with its pin, what it drives and its duration, as far as the block's size
 allows. It outlines the block each chain should be running in yellow and lights it. A
-block ticked **In zone** lights only while a mouse is in its zone. Under it, a
+block ticked **In zone** lights only while a mouse is in its zone, as on the right here:
+
+![The Expected stimulation panel with zone A empty, then with a mouse in it](images/stim_progress_zone.png)
+
+Under the miniature, a
 line per chain names that block and counts down the time left in it, and the title
 counts the time since the first trigger. When every chain has finished, the blocks dim
 and the title reads **over**. If your canvas is too wide to shrink legibly, the panel
@@ -587,6 +591,8 @@ pin, and a double click on the block opens its zone. It needs a profile with a
 [`closed_loop`](CONFIGURATION.md#closed_loop) block.
 [Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) shows a session.
 
+![A block on pin 53 that follows zone A](images/stim_zone_block.png)
+
 #### The zone editor
 
 The zone editor lists the paradigm's zones on the left, each in its own colour with
@@ -599,6 +605,8 @@ corner, then **Polygon**, **Rectangle** and **Ellipse** to draw, and **Copy**,
 **Paste** and **Delete**. Another zone's shapes on the same camera are dimmed, and a
 click on one with **Select** switches to that zone. The mice the tracker finds are
 marked with lime circles, and **Cameras** goes back to every camera.
+
+![cam5's page in the zone editor, with zone A selected and zone B dimmed](images/zone_editor_draw.png)
 
 #### 9. Status line
 

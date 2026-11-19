@@ -5,7 +5,7 @@ A session is one visit to the rig: we launch Panopticon, tell it which rig and w
 If you haven't set up the rig yet, start with [INSTALLATION.md](INSTALLATION.md). [OVERVIEW.md](OVERVIEW.md) names every part of the window, and if a message pops up that you don't recognise, look it up in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 > [!NOTE]
-> The screenshots come from our rig, nine Basler cameras described by `profiles/3dpose.yaml`, and so does every number marked "on our rig". Your window will show your own cameras, but everything else works the same way. The pictures of the stimulation bolt and the **Expected stimulation** panel, and the clips of the editor and of a short take, come from the [simulated rig](SIMULATION.md), which shows the same sidebar and editor.
+> The screenshots come from our rig, nine Basler cameras described by `profiles/3dpose.yaml`, and so does every number marked "on our rig". Your window will show your own cameras, but everything else works the same way. The pictures of the stimulation bolt and the **Expected stimulation** panel, and the clips of the editor and of a short take, come from the [simulated rig](SIMULATION.md), which shows the same sidebar and editor. The pair of panels under [Closed-loop stimulation](#closed-loop-stimulation) is drawn by the panel itself for two made-up moments.
 
 You'll keep coming back to two places in the window. The **state label** is the coloured word at the bottom right of the sidebar, and it reads **IDLE** whenever Panopticon is waiting for you. The **status bar** is the line of text along the bottom of the window.
 
@@ -441,13 +441,26 @@ One laser needs one zone, however many shapes make it up: a mouse in any of its 
 Your profile needs a [`closed_loop`](CONFIGURATION.md#closed_loop) block, and the model needs a Python environment of its own ([Set up the tracker](#set-up-the-tracker)). Then, in the stimulation editor:
 
 1. Fill in the block's **Pin**, **Freq**, **PW** and **Dur** as usual, tick **In zone** with no block selected, and press **Create Block**. The zone editor opens, with every camera's live view.
+
+    ![The zone editor's cameras page, with zones A and B drawn on cam5](images/zone_editor_cameras.png)
+
 2. Click the camera you'll draw on. The one above the arena is the safe choice: in a side view, a zone on the floor doesn't line up with a point on the mouse's back. The camera opens large, and the new zone gets the next free letter.
 3. Draw the zone with **Rectangle**, **Ellipse** or **Polygon**. Drag from corner to corner for a rectangle or an ellipse, and hold <kbd>Shift</kbd> for a square or a circle. For a polygon, click each corner and double-click (or press <kbd>Enter</kbd>) to close it. A right click takes back a corner. Any number of shapes can make up the zone.
 4. Switch to **Select** to adjust: click a shape, drag it to move it, and drag a handle to resize it, or a polygon's corner to move that corner. <kbd>Ctrl</kbd>+<kbd>C</kbd> and <kbd>Ctrl</kbd>+<kbd>V</kbd> copy and paste shapes, and <kbd>Delete</kbd> removes them. Each zone has its own colour, and the mice the tracker finds are marked with lime circles. Watch them for a minute: every mouse should carry one, and nothing else should. If not, see [`min_confidence`](CONFIGURATION.md#closed_loopmin_confidence).
+
+    ![cam5's page in the zone editor, with zone A selected and zone B dimmed](images/zone_editor_draw.png)
+
 5. Press **Use zone A**. The block appears with `zone A` in its header. To make another block follow the same zone, create it the same way and pick zone A from the list. To give it a zone of its own, press **New zone**. On a camera's page, the new zone starts on that camera. On the cameras page, click the camera for it. With **Select**, a click on another zone's dimmed shape switches to that zone.
+
+    ![A block on pin 53 that follows zone A](images/stim_zone_block.png)
+
 6. Apply as usual, and press **Save** to keep the paradigm and its zones in one file. Panopticon never brings a zone back by itself: **Load** the file next time, double-click a zone block to open its zone, and check it still lines up, since the arena can sit a little differently from one session to the next.
 
 Once the paradigm is applied, the main window's preview outlines each zone it follows on its camera, in the zone's colour, and fills the zone while a mouse is in it. While a recording runs, the zones can be looked at but not changed, and the Expected stimulation panel says, for each zone block, whether a mouse is in its zone. A running zone block keeps its yellow outline throughout, and lights only while a mouse is in its zone.
+
+![Zone A outlined on cam5's pane after Apply](images/preview_zones.png)
+
+![The Expected stimulation panel with zone A empty, then with a mouse in it](images/stim_progress_zone.png)
 
 With the defaults the tracker looks at 10 frames a second of every camera a zone is drawn on, and a zone turns on once a mouse has been in it for 2 tracked frames in a row and off after 3 without one ([`enter_updates`](CONFIGURATION.md#closed_loopenter_updates)). The pulses then start 0.1 to 0.2 s after a mouse enters, and stop 0.2 to 0.3 s after it leaves. A pulse already running when a zone turns off still finishes, and a mouse that comes straight back never makes the pulses come faster than the block's frequency.
 
