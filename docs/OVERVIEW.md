@@ -228,6 +228,12 @@ a profile with `trigger_source: external`, the button just shows a dialog saying
 
 **Focus**, just below it, opens the [Focus window](#the-focus-window).
 
+**Zone**, below **Focus**, opens the Zone window, where you draw the zone for
+[closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) and watch the live
+tracker find the mice. The button appears only on a profile with a
+[`closed_loop`](CONFIGURATION.md#closed_loop) block, and it keeps working while you
+record.
+
 #### 12. Coverage display
 
 During a calibration, the coverage display shows up here and tells you whether you
@@ -574,6 +580,13 @@ stops. A canvas can only have one. A loop on its own keeps going until you stop 
 recording, so to let a loop run for a set time, put the **Ending** block in a separate
 chain beside it.
 
+#### In zone
+
+Beside **Ending**, **In zone** makes the selected block pulse only while the live
+tracker finds a mouse in the zone, and hold its pin low the rest of the time. The
+block's header then reads `in zone` after its pin.
+[Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) shows a session.
+
 #### 9. Status line
 
 The line under the fields tells you what the graph will do, like
@@ -667,7 +680,8 @@ something to show, and so do the two stimulation indicators. The bolt beside **R
 shows only while the next recording will run a paradigm, and the
 [**Expected stimulation**](#expected-stimulation) panel only during a recording that
 runs one. Neither appears on a profile with `trigger_source: external`, which can't
-stimulate. Other controls grey out when using them would do the wrong thing.
+stimulate. The **Zone** button shows only on a profile with a `closed_loop`
+block. Other controls grey out when using them would do the wrong thing.
 Hover over a greyed-out toggle or **Solve** to see why.
 
 - **Calibrate** and **Record**: while the hardware check runs, while videos are
@@ -681,7 +695,7 @@ Hover over a greyed-out toggle or **Solve** to see why.
 - **Snapshot** and **Focus**: during a solve, because the preview is paused.
 - During the jobs in the second table under [State](#16-state): everything above,
   plus **Snapshot**. **Stimulation** and the sliders keep working.
-- In the editor: **Starting** and **Ending** until one block is selected, **Apply**
+- In the editor: **Starting**, **Ending** and **In zone** until one block is selected, **Apply**
   and **Test** during an upload, and **Apply** during a **Test**.
 
 If you quit in the middle of something, [After you stop](WORKFLOW.md#9-after-you-stop)

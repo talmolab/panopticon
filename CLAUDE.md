@@ -33,6 +33,9 @@ checked by hand that no other one holds the hardware.
     `widgets/stimulation_window.py`, `widgets/sidebar.py` or
     `widgets/stim_progress.py`;
   - `test_serial_handshake.py` after `serial_controller.py`;
+  - `test_closed_loop.py` after `closed_loop.py` or `tracker_worker.py`, and
+    `test_closed_loop_gui.py` after the window's closed-loop paths or
+    `widgets/zone_window.py`;
   - `test_frame_sync.py` after `frame_sync.py`;
   - `test_grab_failure.py` and `test_capture_faults.py` after `grab_thread.py`;
   - `test_sync_router_offline.py` after `sync_encode.py` (`test_sync_router.py`
@@ -752,6 +755,69 @@ and no Qt.
   Nothing is overwritten.
   What moved goes into `session_metadata.json` (`collected`), and every file
   left and every folder that gained nothing into `WARNINGS.txt`.
+
+## Closed loop
+
+A block ticked In zone pulses only while a mouse is in a zone drawn on one
+camera (`closed_loop` in the profile). `gui_app/closed_loop.py` tracks that
+camera and sends the zone to the board. The Zone window
+(`widgets/zone_window.py`) draws the zone and shows the tracking.
+
+- The sketch reads a zone byte, `Z` (in) or `z` (out), at the top of `loop()`,
+  before the reconfigure branch. Any other sketch takes the byte as the start
+  of a command, and its `readPins()` then waits for a frame rate that never
+  comes, so the board stops triggering in the middle of the recording.
+  `send_zone()` therefore writes only while a start is in effect and the
+  board's last ack named the sketch `arm_zone()` was given
+  (`stim_compiler.sketch_has_zone`). Stop and close disarm.
+- The zone code is emitted only when a block is a zone block, so every other
+  sketch is the same text, byte for byte, and no board is reflashed for it.
+  Zone bytes are letters, and start and stop commands begin with a digit.
+- The board drops the zone `ZONE_WATCHDOG_MS` after the last zone byte, and at
+  every start and stop. The window resends the state every `RESEND_S`, a fifth
+  of the watchdog, whether or not a frame came, and turns the zone off once no
+  frame has been tracked for `lost_s`. `end_recording()` sends a last `z`
+  before the board's stop, and holds the loop's lock across each send, so no
+  `Z` follows it.
+- Outside the zone a pulse in flight finishes and the pin then holds low. The
+  period anchor is held one period old, so a mouse entering fires at once
+  when a full period has passed and never sooner: re-entry cannot raise the
+  rate above the block's frequency. No float reaches `updateStim()`.
+- `send_zone()` never waits for the link. A start or stop holds it for
+  seconds, and a skipped update is covered by the next one or the watchdog.
+  It logs a refusal only when the reason changes: it runs many times a
+  second.
+- The tracker runs in its own process (`tracker_worker.py`), started with
+  `closed_loop.python`, and imports nothing from `gui_app`. Its GPU runtime
+  and its Python work stay out of the capture process, where the GIL is the
+  scaling wall. Its stdout carries only protocol lines. Everything else goes
+  to stderr, which the window logs. The frame travels through shared memory.
+- One grab thread, the tracked camera's, publishes a full-resolution copy at
+  most `rate_hz` times a second (`GrabThread.set_tap`), as one tuple of frame,
+  block ID, sequence number and grab time. The camera manager keeps the tap,
+  so every later preview and acquisition's threads take it again. Nothing
+  else is added to the grab loop for tracking.
+- The model takes one gray channel: a frame stacked with a whole-session
+  background and a later frame's motion, as the 14t detector takes, cannot be
+  built live. The exported centroid model marks nearly every slot valid, so
+  `min_confidence` is the only filter, and `closed_loop.csv` keeps every
+  detection so a recording can be scored again. The model ships as an
+  `.onnx` file: a TensorRT engine runs only on the GPU type and TensorRT
+  version that built it.
+- The zone is never restored at launch: it decides what reaches the board,
+  and the arena moves between sessions. Save and Load keep it in a file, and
+  `Zone.load` refuses one drawn on another camera or frame size. It cannot be
+  edited while a recording sends (the window locks itself on `armed`), and
+  each recording's log keeps the zone it started with.
+- Record refuses an applied paradigm with a zone block unless the profile has
+  `closed_loop`, the tracker is running and a zone is drawn
+  (`_closed_loop_refusal`). Without them the zone stays off, and the
+  recording would be labelled with a paradigm whose zone blocks never ran.
+- The finalize writes `closed_loop.csv` and `closed_loop.json` before
+  `stim_trace.csv`, whose zone steps read the events. `zone_in` and a zone
+  step's pulses are expected, not observed: an event's block ID comes from
+  the host's clock, a trigger or two from when the board acted. A paradigm
+  without zone steps keeps the trace's columns.
 
 ## Serial and laser safety
 

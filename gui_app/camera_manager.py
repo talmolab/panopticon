@@ -503,6 +503,29 @@ class CameraManager(QObject):
         for gt in self._grab_threads:
             gt.set_keep_full(flag)
 
+    #: (rig-wide camera index, rate in Hz) of the live tracker's tap, or
+    #: None. Kept here because every preview and acquisition starts new grab
+    #: threads, and each new thread of that camera takes the tap again.
+    _tap = None
+
+    def set_tap(self, cam_index: int | None, rate_hz: float = 0.0):
+        """Give camera `cam_index` (rig-wide, 0-based) the live tracker's tap
+        at `rate_hz` (GrabThread.set_tap), now and in every later preview and
+        acquisition; None stops it."""
+        self._tap = (None if cam_index is None or not rate_hz
+                     else (int(cam_index), float(rate_hz)))
+        for i, gt in enumerate(self._grab_threads):
+            on = self._tap is not None and self._gi(i) == self._tap[0]
+            gt.set_tap(self._tap[1] if on else 0.0)
+
+    def latest_tap(self, cam_index: int):
+        """The tapped camera's newest GrabThread.latest_tap tuple, or None
+        when that camera is not open or has published none."""
+        for i, gt in enumerate(self._grab_threads):
+            if self._gi(i) == cam_index:
+                return getattr(gt, "latest_tap", None)
+        return None
+
     def _settings_source(self) -> str:
         """What a message tells the operator to fix: the file the camera
         settings come from, or the profile block that replaces it."""
@@ -814,6 +837,8 @@ class CameraManager(QObject):
             gt._pin_ecore = self.pin_encoder_threads
             gt._enc_pcores = self.encoder_pcores
             gt.set_source_down_check(self.source_down_check or self._source_down)
+            if self._tap is not None and self._tap[0] == self._gi(i):
+                gt.set_tap(self._tap[1])
             gt.start()
             self._grab_threads.append(gt)
 

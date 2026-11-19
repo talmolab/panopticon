@@ -185,6 +185,7 @@ def parse_workflow(blocks, edges) -> tuple[list[dict], list[dict]]:
         rec["pin"] = int(rec["pin"])
         rec["start"] = bool(d.get("start", False))
         rec["end"] = bool(d.get("end", False))
+        rec["zone"] = bool(d.get("zone", False))
         parsed_blocks.append(rec)
     parsed_edges: list[dict] = []
     for n, e in enumerate(edges, start=1):
@@ -218,6 +219,9 @@ class BlockItem(QGraphicsItem):
         self.explicit_start = False
         # When this block finishes, the recording stops. At most one per canvas.
         self.explicit_end = False
+        # Pulses only while the live tracker reports a mouse in the zone
+        # (closed loop); outside it the pin holds LOW.
+        self.zone = False
         # Resolved globally by StimCanvas.refresh_starts() -- never set directly.
         self._is_start = True
         self._needs_start = False
@@ -294,7 +298,8 @@ class BlockItem(QGraphicsItem):
         painter.setPen(QPen(Qt.white))
         painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
         painter.drawText(QRectF(0, 0, BW, HEADER_H), Qt.AlignCenter,
-                         f"Pin {self.pin}")
+                         f"Pin {self.pin}  ·  in zone" if self.zone
+                         else f"Pin {self.pin}")
 
         # body text — spell out the resulting waveform, since a pulse width at or
         # above the period is a 100% duty cycle, not a malformed train.
@@ -335,10 +340,15 @@ class BlockItem(QGraphicsItem):
 
     def to_dict(self) -> dict:
         p = self.pos()
-        return {"id": self.block_id, "x": p.x(), "y": p.y(),
-                "pin": self.pin, "freq": self.freq,
-                "pw": self.pw, "dur": self.dur,
-                "start": self.explicit_start, "end": self.explicit_end}
+        d = {"id": self.block_id, "x": p.x(), "y": p.y(),
+             "pin": self.pin, "freq": self.freq,
+             "pw": self.pw, "dur": self.dur,
+             "start": self.explicit_start, "end": self.explicit_end}
+        # Only a zone block carries the key, so a saved paradigm without one
+        # reads as it did before zone blocks existed.
+        if self.zone:
+            d["zone"] = True
+        return d
 
 
 # ── ArrowItem ─────────────────────────────────────────────────────────────────
@@ -821,6 +831,7 @@ class StimCanvas(QGraphicsView):
         new_blocks = []
         for d in self._clipboard:
             blk = BlockItem(d["pin"], d["freq"], d["pw"], d["dur"])
+            blk.zone = bool(d.get("zone", False))
             blk.setPos(origin.x() + d["rx"] + BW + 40, origin.y() + d["ry"])
             self.scene().addItem(blk)
             new_blocks.append(blk)
@@ -865,6 +876,7 @@ class StimCanvas(QGraphicsView):
                             block_id=d["id"])
             blk.explicit_start = d["start"]
             blk.explicit_end = d["end"]
+            blk.zone = d["zone"]
             blk.setPos(d["x"], d["y"])
             self.scene().addItem(blk)
             by_id[d["id"]] = blk
@@ -1210,6 +1222,22 @@ class StimulationWindow(QDialog):
         )
         self._end_cb.toggled.connect(self._on_end_toggled)
 
+        self._zone_cb = QCheckBox("In zone")
+        self._zone_cb.setToolTip(
+            "Closed loop: the selected block pulses only while the live\n"
+            "tracker finds a mouse in the zone drawn in the Zone window,\n"
+            "and holds its pin LOW otherwise. Needs the profile's\n"
+            "closed_loop block.")
+        self._zone_cb.setEnabled(False)
+        self._zone_cb.setStyleSheet(
+            "QCheckBox { color: #e0c060; font-size: 11px; border: none; }"
+            "QCheckBox:disabled { color: #555; }"
+            "QCheckBox::indicator { width: 12px; height: 12px; border-radius: 3px; "
+            "border: 1px solid #666; background: #1a1a2e; }"
+            "QCheckBox::indicator:checked { background: #c8a030; border-color: #f0d080; }"
+        )
+        self._zone_cb.toggled.connect(self._on_zone_toggled)
+
         param_row = QHBoxLayout()
         param_row.setSpacing(8)
         for w in [_lbl("Pin"), self._f_pin,
@@ -1220,6 +1248,7 @@ class StimulationWindow(QDialog):
         param_row.addSpacing(10)
         param_row.addWidget(self._start_cb)
         param_row.addWidget(self._end_cb)
+        param_row.addWidget(self._zone_cb)
         create_btn = _btn("Create Block", bg="#1e3a1e", fg="#88dd88",
                           bd="#3a6a3a", hv="#254a25")
         create_btn.clicked.connect(self._on_create)
@@ -1294,7 +1323,8 @@ class StimulationWindow(QDialog):
         self._selected_block = block
         # Reflect the block's flags without re-triggering the setters.
         for cb, flag in ((self._start_cb, "explicit_start"),
-                         (self._end_cb, "explicit_end")):
+                         (self._end_cb, "explicit_end"),
+                         (self._zone_cb, "zone")):
             cb.setEnabled(block is not None)
             cb.blockSignals(True)
             cb.setChecked(bool(block is not None and getattr(block, flag)))
@@ -1312,6 +1342,15 @@ class StimulationWindow(QDialog):
     def _on_end_toggled(self, checked: bool):
         if self._selected_block is not None:
             self._canvas.set_explicit_end(self._selected_block, checked)
+
+    def _on_zone_toggled(self, checked: bool):
+        blk = self._selected_block
+        if blk is not None and blk.zone != checked:
+            blk.zone = checked
+            blk.update()
+            # The same signal a start or end change sends, so the status line
+            # and the Record check see the edited canvas.
+            self._canvas.refresh_starts()
 
     def _num(self, field) -> float:
         try:

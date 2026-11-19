@@ -132,6 +132,16 @@ board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
 # collect_dirs: [D:/usv]          # folders whose new files move into each recording
 # collect_wait_s: 30              # seconds to wait for a file still open
 
+# --- Closed loop ------------------------------------------------------------
+# One camera tracked live, for paradigm blocks ticked In zone (Zone window).
+# closed_loop:
+#   camera: cam5                  # SITE: the camera that sees the arena from above
+#   tracker: onnx                 # onnx (a SLEAP centroid model) | threshold
+#   model: models/centroid.onnx   # SITE: the model, exported to ONNX
+#   python: C:/tracker-env/Scripts/python.exe   # SITE: has onnxruntime-gpu
+#   rate_hz: 10                   # tracked frames per second
+#   min_confidence: 0.2           # detections below it are ignored
+
 # --- Calibration coverage ---------------------------------------------------
 calibration_min_per_cam_shared: 120
 calibration_min_edge: 40
@@ -838,6 +848,25 @@ Number, seconds. Default `30`. Reference rig: not set.
   file still open at the end of the wait stays where it was written. 0 tries
   each file once. The loader refuses a negative value.
 
+### Closed loop
+
+#### `closed_loop`
+
+Mapping. Default `null` (no block). Reference rig: not set.
+
+- Does: Tracks one camera live, so that a stimulation block ticked **In zone**
+  pulses only while a mouse is in a zone you draw on that camera, for
+  real-time place preference. Its keys are listed under
+  [Closed loop: the closed_loop: block](#closed-loop-the-closed_loop-block),
+  and [Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) walks
+  through a session.
+- Change when: A paradigm should stimulate only while an animal is in one
+  place.
+- Goes wrong: Without the block, Record refuses a paradigm with an In zone
+  block. The loader refuses the block with an external trigger source, since
+  the zone reaches the stimulation through Panopticon's trigger board, and
+  refuses a camera beyond `n_cameras`.
+
 ### Calibration coverage
 
 These decide when the coverage display shows READY during a calibration
@@ -1371,6 +1400,153 @@ Text, a path, or null. Default `null`.
   profile that names another folder after that is refused. Restart Panopticon, or
   set `PANOPTICON_SPINNAKER_DIR`, to change folders.
 
+## Closed loop: the closed_loop: block
+
+The block names the camera Panopticon tracks live, the tracker that finds the
+mice in its frames, and how a mouse found in the zone turns the zone on. A
+stimulation block ticked **In zone** pulses only while the zone is on. The
+tracker runs in a process of its own, in the Python the block names, so its
+GPU runtime stays out of the process that captures the cameras.
+
+The window sends the zone to the trigger board many times a second. The board
+turns the zone off 250 ms after the last update, and at every start and stop,
+so a tracker or a window that stops cannot leave a zone block running.
+
+```yaml
+closed_loop:
+  camera: cam5
+  tracker: onnx
+  model: models/cam5_centroid.onnx
+  python: C:/tracker-env/Scripts/python.exe
+  rate_hz: 10
+  min_confidence: 0.2
+  enter_updates: 2
+  leave_updates: 3
+  lost_s: 0.5
+```
+
+#### `closed_loop.camera`
+
+Text. Required.
+
+- Does: The camera tracked live, named as its folder is: `cam1`, `cam2` and so
+  on.
+- Change when: Choose the camera that sees the whole arena from above. In an
+  oblique view, a zone drawn on the floor does not line up with a point on the
+  mouse's back.
+- Goes wrong: The loader refuses a name that is not `cam` and a number, and a
+  camera beyond `n_cameras`.
+
+#### `closed_loop.tracker`
+
+Text. Default `onnx`.
+
+- Does: `onnx` runs a SLEAP centroid model exported to ONNX on the GPU.
+  `threshold` counts every dark area below the gray level `threshold` and at
+  least `min_area_px` pixels as a mouse, with no model.
+- Change when: Use `threshold` for a dark animal on a backlit floor when you
+  have no model, or to try the closed loop on the simulated rig.
+- Goes wrong: The threshold tracker takes any dark object for a mouse, so keep
+  the zone inside the arena. It counts two mice that touch as one.
+
+#### `closed_loop.model`
+
+Path. Default `null`; required for the `onnx` tracker.
+
+- Does: The centroid model, exported to ONNX from a model trained on the raw
+  gray frame (`in_channels: 1`). Relative paths start at the Panopticon
+  folder.
+- Change when: You train or export the model again.
+- Goes wrong: The tracker refuses a model that takes another number of
+  channels, such as one trained on frames stacked with a background and a
+  motion channel, and one without `centroids` and `centroid_vals` outputs. The
+  Zone window shows the refusal.
+
+#### `closed_loop.python`
+
+Path. Default `null` (Panopticon's own Python).
+
+- Does: The Python the tracker runs in. The `onnx` tracker needs an
+  environment with `onnxruntime-gpu`, which Panopticon's own does not have.
+  [Set up the tracker](WORKFLOW.md#set-up-the-tracker) makes one.
+- Change when: Set it for the `onnx` tracker. The `threshold` tracker runs in
+  Panopticon's own Python.
+- Goes wrong: Without the runtime, the Zone window reports a tracker error
+  that names onnxruntime.
+
+#### `closed_loop.rate_hz`
+
+Number, frames per second. Default `10`.
+
+- Does: How many of the camera's frames are tracked each second, in the
+  preview and in a recording.
+- Change when: Raise it for a shorter delay between a mouse crossing the
+  zone's edge and the stimulation. Lower it if recordings lose frames while
+  the tracker runs.
+- Goes wrong: Each tracked frame is one more full-size copy on that camera's
+  capture thread. The loader refuses 0 or less.
+
+#### `closed_loop.min_confidence`
+
+Number, 0 to 1. Default `0.2`.
+
+- Does: Detections below it are ignored. The exported model reports a
+  confidence for every slot it has, found or not, so this is what keeps the
+  empty slots out. `closed_loop.csv` keeps every detection with its
+  confidence, so a recording can be scored again at another threshold.
+- Change when: Raise it if the Zone window marks mice where there are none.
+  Lower it if it misses mice.
+- Goes wrong: The loader refuses a value outside 0 to 1.
+
+#### `closed_loop.enter_updates`
+
+Whole number. Default `2`.
+
+- Does: Tracked frames in a row with a mouse in the zone before the zone turns
+  on.
+- Change when: Raise it to steady a zone that flickers while a mouse sits on
+  its edge. Each one adds a tracked frame, 0.1 s at 10 per second, to every
+  entry.
+- Goes wrong: The loader refuses 0 or less.
+
+#### `closed_loop.leave_updates`
+
+Whole number. Default `3`.
+
+- Does: Tracked frames in a row without a mouse in the zone before the zone
+  turns off.
+- Change when: As `enter_updates`, for every exit.
+- Goes wrong: The loader refuses 0 or less.
+
+#### `closed_loop.lost_s`
+
+Number, seconds. Default `0.5`.
+
+- Does: The zone turns off when no frame has been tracked for this long, such
+  as when the tracker stops.
+- Change when: Rarely.
+- Goes wrong: The loader refuses a value no longer than one tracked frame
+  (`1 / rate_hz`), which would turn the zone off between frames.
+
+#### `closed_loop.threshold`
+
+Whole number, a gray level. Default `null`; required for the `threshold`
+tracker.
+
+- Does: Pixels darker than this are the mouse.
+- Change when: Set it between the mouse and the floor: look at both in the
+  Zone window's view.
+- Goes wrong: The loader refuses a value outside 1 to 254.
+
+#### `closed_loop.min_area_px`
+
+Whole number, pixels. Default `null`; required for the `threshold` tracker.
+
+- Does: The smallest dark area, in full-size pixels, that counts as a mouse.
+- Change when: Set it to about half a mouse's area seen from above, so that
+  smaller dark specks do not count.
+- Goes wrong: The loader refuses a value below 1.
+
 ## Board config
 
 A board config describes the printed ChArUco board in `configs/boards/`. The
@@ -1650,6 +1826,7 @@ An external trigger source:
 | A non-empty `stim_safe_pins` | `Stimulation needs trigger_source: board` |
 | `board_fqbn` or `board_max_pin` | `Panopticon never compiles or flashes a board` |
 | A non-empty `gate_pins` | `nothing drives them` |
+| A `closed_loop` block | `which an external source replaces` |
 
 The `camera:` block. Messages start with the key, such as `camera.trigger.line`:
 
@@ -1680,6 +1857,23 @@ The `camera:` block. Messages start with the key, such as `camera.trigger.line`:
 | Sets a `packet_size` outside 576 to 9000 | `bytes` and `is outside` |
 | Sets a negative `packet_delay` | `packet_delay` and `must be 0 or more` |
 | Sets a `black_level` that is not a finite number | `must be a finite number` |
+
+The `closed_loop:` block. Messages start with the key, such as
+`closed_loop.rate_hz`. An unknown key, a key set to nothing and a `tracker`
+that is not `onnx` or `threshold` are refused as in the `camera:` block:
+
+| The block | The message contains |
+|---|---|
+| Leaves out `camera` | `closed_loop.camera is required` |
+| Names a camera that is not `cam` and a number | `is not a camera name` |
+| Names a camera beyond `n_cameras` | `is not one of this rig's` |
+| Sets a `rate_hz` of 0 or less | `tracked frames per second` |
+| Sets a `min_confidence` outside 0 to 1 | `must be from 0 to 1` |
+| Sets `enter_updates` or `leave_updates` below 1 | `must be 1 or more tracked frames` |
+| Sets a `lost_s` no longer than one tracked frame | `would read as a lost mouse` |
+| Leaves out `model` for the `onnx` tracker | `closed_loop.model is required for the onnx tracker` |
+| Leaves out `threshold`, or sets it outside 1 to 254, for the `threshold` tracker | `the gray level from 1 to 254` |
+| Leaves out `min_area_px`, or sets it below 1, for the `threshold` tracker | `that counts as a mouse` |
 
 ### Refused before the cameras open
 

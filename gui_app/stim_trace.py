@@ -48,6 +48,9 @@ from gui_app.stim_compiler import block_timing, drive_mode
 
 TRACE_NAME = "stim_trace.csv"
 PARADIGM_NAME = "stim_paradigm.json"
+#: The closed loop's record of a recording (gui_app/closed_loop.py); its
+#: ``events`` give the zone state that zone steps followed.
+CLOSED_LOOP_NAME = "closed_loop.json"
 
 
 def _step_seconds(step: dict) -> float:
@@ -127,6 +130,37 @@ def ttl_level(step: dict, t_into_step: float) -> int:
     return 1 if int(round(t_into_step * 1e6)) % period_us < pw_us else 0
 
 
+def is_zone_step(step: dict) -> bool:
+    """Whether a step pulses only while a mouse is in the zone (closed
+    loop); describe() marks such a step with ``zone``."""
+    return bool(step.get("zone"))
+
+
+def zone_lookup(events) -> "callable":
+    """A function of block ID giving the zone state the board held for that
+    trigger, from ``closed_loop.json``'s events.
+
+    Each event is a dict with ``blockid`` (the first trigger the change
+    applied to) and ``zone``. Before the first event the zone is off, as the
+    sketch starts it. Returns, for a block ID, (in zone, block ID of the
+    latest entry or None).
+    """
+    evs = sorted(((int(e["blockid"]), bool(e["zone"])) for e in events or ()),
+                 key=lambda e: e[0])
+    bids = np.array([b for b, _ in evs], dtype=np.int64)
+
+    def at(bid: int):
+        k = int(np.searchsorted(bids, bid, side="right")) - 1
+        if k < 0 or not evs[k][1]:
+            return False, None
+        # The run of "in" events this one ends: the entry is its first.
+        j = k
+        while j > 0 and evs[j - 1][1]:
+            j -= 1
+        return True, evs[j][0]
+    return at
+
+
 def step_active(step: dict) -> bool:
     """Whether a step drives its pin at all.
 
@@ -165,7 +199,8 @@ def chain_progress(chains: list[dict], t: float) -> list[dict]:
         step = steps[idx]
         out.append({"step": idx, "into_s": into,
                     "left_s": max(0.0, _step_seconds(step) - into),
-                    "active": step_active(step)})
+                    "active": step_active(step),
+                    "zone": is_zone_step(step)})
     return out
 
 
@@ -186,7 +221,8 @@ def resolve_chains(paradigm: dict) -> list[dict]:
 
 
 def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
-               frames=None, camera_frames: dict | None = None):
+               frames=None, camera_frames: dict | None = None,
+               zone_events=None):
     """Return (fieldnames, rows): one row per block ID in ``blockids``.
 
     ``frames`` gives each row's ``frame`` value, -1 for a trigger the
@@ -195,16 +231,26 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
     that camera's video (-1 where it has none), written as ``frame_<name>``
     columns after all the others, so the columns a reader already indexes do
     not move.
+
+    A paradigm with zone steps adds a ``zone_in`` column, before the frame
+    columns, from ``zone_events`` (closed_loop.json; zone_lookup). A zone
+    step is active only while the zone is in, and its pulses restart at each
+    entry, as the sketch fires a pulse at once when a mouse enters. A
+    paradigm without zone steps has the columns it always had.
     """
     chains = resolve_chains(paradigm)
     pins = sorted({int(s["pin"]) for c in chains for s in c["steps"]})
     camera_frames = camera_frames or {}
+    has_zone = any(is_zone_step(s) for c in chains for s in c["steps"])
+    zone_at = zone_lookup(zone_events)
 
     fields = ["frame", "blockid", "t_s", "any_active"]
     for i, _c in enumerate(chains):
         fields += [f"chain{i}_step", f"chain{i}_active",
                    f"chain{i}_freq_hz", f"chain{i}_pw_ms"]
     fields += [f"pin{p}_ttl" for p in pins]
+    if has_zone:
+        fields += ["zone_in"]
     fields += [f"frame_{nm}" for nm in camera_frames]
 
     b = _unwrap_blockids(np.asarray(blockids))
@@ -216,6 +262,7 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
                "t_s": round(t, 6)}
         levels = {p: 0 for p in pins}
         any_active = False
+        in_zone, entry = zone_at(int(bid)) if has_zone else (False, None)
         for i, ch in enumerate(chains):
             idx, into = locate(ch["steps"], ch.get("loops_back_to_step"), t)
             if idx is None:
@@ -224,15 +271,23 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
                 continue
             step = ch["steps"][idx]
             active = step_active(step)
+            phase = into
+            if is_zone_step(step):
+                active = active and in_zone
+                if entry is not None:
+                    phase = min(into, t - (entry - 1) / fps)
             any_active |= active
             row |= {f"chain{i}_step": idx,
                     f"chain{i}_active": int(active),
                     f"chain{i}_freq_hz": step["freq_hz"],
                     f"chain{i}_pw_ms": step["pulse_width_ms"]}
             pin = int(step["pin"])
-            levels[pin] = max(levels[pin], ttl_level(step, into))
+            if active:
+                levels[pin] = max(levels[pin], ttl_level(step, phase))
         row["any_active"] = int(any_active)
         row |= {f"pin{p}_ttl": levels[p] for p in pins}
+        if has_zone:
+            row["zone_in"] = int(in_zone)
         for nm, per_row in camera_frames.items():
             v = int(per_row[k])
             row[f"frame_{nm}"] = v if v >= 0 else ""
@@ -370,8 +425,21 @@ def write_trace_result(recording_dir: Path, fps: float,
         notes.append(f"first block ID is {int(rows_ids[0])}, so {lead} leading "
                      f"trigger(s) were dropped — times account for this")
 
+    zone_events = None
+    if any(is_zone_step(s) for c in resolve_chains(paradigm)
+           for s in c["steps"]):
+        try:
+            loop = json.loads((recording_dir / CLOSED_LOOP_NAME).read_text())
+            zone_events = list(loop["events"])
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            zone_events = []
+            notes.append(f"the zone's record ({CLOSED_LOOP_NAME}) is missing "
+                         f"or unreadable ({type(e).__name__}), so zone steps "
+                         f"are written as off")
+
     fields, rows = build_rows(paradigm, rows_ids, fps, frames=frames,
-                              camera_frames=camera_frames)
+                              camera_frames=camera_frames,
+                              zone_events=zone_events)
     out = recording_dir / TRACE_NAME
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)

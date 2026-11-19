@@ -119,6 +119,7 @@ class SidebarWidget(QWidget):
     snapshot_clicked = pyqtSignal()
     stimulation_clicked = pyqtSignal()
     focus_clicked = pyqtSignal()
+    zone_clicked = pyqtSignal()
     profile_changed = pyqtSignal(object)
 
     #: The sidebar's width at first launch and its narrowest; the divider on
@@ -403,6 +404,21 @@ class SidebarWidget(QWidget):
         )
         self._focus_btn.clicked.connect(self.focus_clicked.emit)
         layout.addWidget(self._focus_btn)
+
+        # Shown only for a profile with a closed_loop block (_apply_profile).
+        # It stays enabled while recording, when the window only watches.
+        self._zone_btn = QPushButton("Zone")
+        self._zone_btn.setToolTip(
+            "Draw the closed loop's zone on the tracked camera, and watch the "
+            "live tracker find the mice")
+        self._zone_btn.setStyleSheet(
+            "QPushButton { background: #3a2e14; color: #f0c060; border: 1px solid #6a5420; "
+            "border-radius: 3px; padding: 5px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #4a3a18; border-color: #a08030; }"
+        )
+        self._zone_btn.clicked.connect(self.zone_clicked.emit)
+        self._zone_btn.setVisible(False)
+        layout.addWidget(self._zone_btn)
 
         # Live ChArUco coverage graph, shown only during calibration. It takes
         # the sidebar's spare height (stretch 1 against the bottom spacer's 0),
@@ -826,6 +842,10 @@ class SidebarWidget(QWidget):
         self._floor_box.setChecked(settings.get_bool(
             settings.KEY_FLOOR_PREFIX + profile.name, False))
         self._floor_box.blockSignals(False)
+        zone_btn = getattr(self, "_zone_btn", None)
+        if zone_btn is not None:
+            zone_btn.setVisible(
+                getattr(profile, "closed_loop", None) is not None)
         chosen = settings.get_text(
             settings.KEY_OUTPUT_DIR_PREFIX + profile.name, "")
         if chosen:
@@ -1074,10 +1094,10 @@ class SidebarWidget(QWidget):
         self._stim_progress.set_paradigm(provenance)
         self._stim_progress.setVisible(True)
 
-    def update_stim_progress(self, t: float | None):
+    def update_stim_progress(self, t: float | None, zone: bool | None = None):
         """The paradigm's time from the trigger count, or None before the
-        first trigger."""
-        self._stim_progress.set_time(t)
+        first trigger, and the closed loop's zone state (None: unknown)."""
+        self._stim_progress.set_time(t, zone)
 
     def hide_stim_progress(self):
         self._stim_progress.setVisible(False)
