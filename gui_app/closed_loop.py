@@ -494,18 +494,25 @@ class ClosedLoop(threading.Thread):
             return
         print(f"[closed-loop] tracker ready: {info}", flush=True)
         self._status = "running"
-        self._mgr.set_tap(self.cam_index, self.spec.rate_hz)
-        last_seq = None
-        while not self._halt.is_set():
-            tap = self._mgr.latest_tap(self.cam_index)
-            if tap is not None and tap[2] != last_seq:
-                last_seq = tap[2]
-                self._track(tap)
-            else:
-                self._halt.wait(0.002)
-            self._keep_alive()
-            if not self._proc.alive and self._status == "running":
-                self._fail("the tracker process has exited")
+        try:
+            self._mgr.set_tap(self.cam_index, self.spec.rate_hz)
+            last_seq = None
+            while not self._halt.is_set():
+                tap = self._mgr.latest_tap(self.cam_index)
+                if tap is not None and tap[2] != last_seq:
+                    last_seq = tap[2]
+                    self._track(tap)
+                else:
+                    self._halt.wait(0.002)
+                self._keep_alive()
+                if not self._proc.alive and self._status == "running":
+                    self._fail("the tracker process has exited")
+        except Exception as e:
+            # The thread ends here: say why, instead of a status left at
+            # running with nothing behind it. The board's watchdog empties
+            # the zone once the updates stop.
+            self._fail(f"the closed loop stopped: {type(e).__name__}: {e}")
+            return
         self._status = "stopped" if self._status == "running" else self._status
 
     def _fail(self, why: str) -> None:
