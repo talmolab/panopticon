@@ -124,6 +124,8 @@ class TeensyController:
         self._zone_refusal: str | None = None
         #: Zone bytes written since the last arm_zone().
         self.zone_bytes_sent = 0
+        #: How many zones (A onward) the armed sketch keeps bits for.
+        self._zone_count = 0
 
     @property
     def speaks_rdy(self) -> bool:
@@ -424,19 +426,22 @@ class TeensyController:
         Returns False, and arms nothing, for a sketch without zone blocks. A
         stop or a close disarms, so each recording arms its own start.
         """
-        from gui_app.stim_compiler import sketch_has_zone, sketch_id
+        from gui_app.stim_compiler import (sketch_has_zone, sketch_id,
+                                           sketch_zone_count)
         with self._lock:
             sid = sketch_id(ino_content)
             if not sid or not sketch_has_zone(ino_content):
                 self._zone_sketch_id = None
                 return False
             self._zone_sketch_id = sid
+            self._zone_count = sketch_zone_count(ino_content)
             self._zone_refusal = None
             self.zone_bytes_sent = 0
             return True
 
-    def send_zone(self, in_zone: bool) -> bool:
-        """Tell a zone sketch whether a mouse is in the zone. True when written.
+    def send_zone(self, zone: str, in_zone: bool) -> bool:
+        """Tell a zone sketch whether a mouse is in zone `zone` (a letter of
+        stim_compiler.ZONE_NAMES). True when written.
 
         Never waits for the link. A start, stop or reopen can hold it for
         seconds, and this is called many times a second from the tracking
@@ -448,7 +453,7 @@ class TeensyController:
         the byte as the start of a command and stops triggering mid-recording
         (stim_compiler.sketch_has_zone).
         """
-        from gui_app.stim_compiler import ZONE_IN_BYTE, ZONE_OUT_BYTE
+        from gui_app.stim_compiler import ZONE_NAMES, zone_byte
         if not self._lock.acquire(blocking=False):
             return self._zone_refused("the link is busy with another exchange")
         try:
@@ -462,8 +467,13 @@ class TeensyController:
                 return self._zone_refused(
                     f"the board's last ack named sketch {self.board_id}, "
                     f"not the armed zone sketch {self._zone_sketch_id}")
+            if (len(zone) != 1 or zone not in ZONE_NAMES
+                    or ZONE_NAMES.index(zone) >= self._zone_count):
+                return self._zone_refused(
+                    f"zone {zone!r} is not one of the armed sketch's "
+                    f"{ZONE_NAMES[:self._zone_count]}")
             try:
-                self._ser.write(ZONE_IN_BYTE if in_zone else ZONE_OUT_BYTE)
+                self._ser.write(zone_byte(zone, in_zone))
             except (serial.SerialException, OSError) as e:
                 return self._zone_refused(f"write failed: {e}")
             self.zone_bytes_sent += 1

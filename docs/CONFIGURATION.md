@@ -133,9 +133,8 @@ board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
 # collect_wait_s: 30              # seconds to wait for a file still open
 
 # --- Closed loop ------------------------------------------------------------
-# One camera tracked live, for paradigm blocks ticked In zone (Zone window).
+# Live tracking for paradigm blocks ticked In zone; zones are drawn in Stimulation.
 # closed_loop:
-#   camera: cam5                  # SITE: the camera that sees the arena from above
 #   tracker: onnx                 # onnx (a SLEAP centroid model) | threshold
 #   model: models/centroid.onnx   # SITE: the model, exported to ONNX
 #   python: C:/tracker-env/Scripts/python.exe   # SITE: has onnxruntime-gpu
@@ -852,23 +851,24 @@ Number, seconds. Default `30`. Reference rig: not set.
 
 #### `closed_loop`
 
-Mapping. Default `null` (no block). Reference rig: `{camera: cam5,
-model: "C:/Users/isaac/.panopticon/models/cam5_centroid_live_20261118.onnx",
+Mapping. Default `null` (no block). Reference rig:
+`{model: "C:/Users/isaac/.panopticon/models/cam5_centroid_body_20261118.onnx",
 python: "C:/Users/isaac/.panopticon/tracker-venv/Scripts/python.exe",
 min_confidence: 0.3, leave_updates: 5}`.
 
-- Does: Tracks one camera live, so that a stimulation block ticked **In zone**
-  pulses only while a mouse is in a zone you draw on that camera, for
-  real-time place preference. Its keys are listed under
+- Does: Tracks the cameras live, so that a stimulation block ticked **In zone**
+  pulses only while a mouse is in its zone, a shape you draw on a camera in
+  the Stimulation editor. It is how you run real-time place preference. Its
+  keys are listed under
   [Closed loop: the closed_loop: block](#closed-loop-the-closed_loop-block),
   and [Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) walks
   through a session.
 - Change when: A paradigm should stimulate only while an animal is in one
   place.
-- Goes wrong: Without the block, Record refuses a paradigm with an In zone
-  block. The loader refuses the block with an external trigger source, since
-  the zone reaches the stimulation through Panopticon's trigger board, and
-  refuses a camera beyond `n_cameras`.
+- Goes wrong: Without the block, the editor cannot draw zones and refuses to
+  apply a paradigm with an In zone block. The loader refuses the block with
+  an external trigger source, since the zones reach the stimulation through
+  Panopticon's trigger board.
 
 ### Calibration coverage
 
@@ -1405,19 +1405,21 @@ Text, a path, or null. Default `null`.
 
 ## Closed loop: the closed_loop: block
 
-The block names the camera Panopticon tracks live, the tracker that finds the
-mice in its frames, and how a mouse found in the zone turns the zone on. A
-stimulation block ticked **In zone** pulses only while the zone is on. The
-tracker runs in a process of its own, in the Python the block names, so its
-GPU runtime stays out of the process that captures the cameras.
+The block names the tracker that finds the mice in the cameras' frames, and
+how a mouse found in a zone turns that zone on. The zones themselves are part
+of the paradigm: each is named by a letter (A to P) and drawn on one camera
+in the Stimulation editor, and a block ticked **In zone** pulses only while
+its zone is on. Every camera a zone is drawn on is tracked. The tracker runs
+in a process of its own, in the Python the block names, so its GPU runtime
+stays out of the process that captures the cameras.
 
-The window sends the zone to the trigger board many times a second. The board
-turns the zone off 250 ms after the last update, and at every start and stop,
-so a tracker or a window that stops cannot leave a zone block running.
+The window sends each zone's state to the trigger board many times a second.
+The board turns a zone off 250 ms after its last update, and every zone at
+each start and stop, so a tracker or a window that stops cannot leave a zone
+block running.
 
 ```yaml
 closed_loop:
-  camera: cam5
   tracker: onnx
   model: models/cam5_centroid.onnx
   python: C:/tracker-env/Scripts/python.exe
@@ -1427,18 +1429,6 @@ closed_loop:
   leave_updates: 3
   lost_s: 0.5
 ```
-
-#### `closed_loop.camera`
-
-Text. Required.
-
-- Does: The camera tracked live, named as its folder is: `cam1`, `cam2` and so
-  on.
-- Change when: Choose the camera that sees the whole arena from above. In an
-  oblique view, a zone drawn on the floor does not line up with a point on the
-  mouse's back.
-- Goes wrong: The loader refuses a name that is not `cam` and a number, and a
-  camera beyond `n_cameras`.
 
 #### `closed_loop.tracker`
 
@@ -1463,7 +1453,9 @@ Path. Default `null`; required for the `onnx` tracker.
 - Goes wrong: The tracker refuses a model that takes another number of
   channels, such as one trained on frames stacked with a background and a
   motion channel, and one without `centroids` and `centroid_vals` outputs. The
-  Zone window shows the refusal.
+  zone editor shows the refusal. A model sees only the views it was trained
+  on: one trained on the camera above the arena may miss mice in the side
+  views.
 
 #### `closed_loop.python`
 
@@ -1474,15 +1466,15 @@ Path. Default `null` (Panopticon's own Python).
   [Set up the tracker](WORKFLOW.md#set-up-the-tracker) makes one.
 - Change when: Set it for the `onnx` tracker. The `threshold` tracker runs in
   Panopticon's own Python.
-- Goes wrong: Without the runtime, the Zone window reports a tracker error
+- Goes wrong: Without the runtime, the zone editor reports a tracker error
   that names onnxruntime.
 
 #### `closed_loop.rate_hz`
 
 Number, frames per second. Default `10`.
 
-- Does: How many of the camera's frames are tracked each second, in the
-  preview and in a recording.
+- Does: How many frames of each tracked camera are tracked each second, in
+  the preview and in a recording.
 - Change when: Raise it for a shorter delay between a mouse crossing the
   zone's edge and the stimulation. Lower it if recordings lose frames while
   the tracker runs.
@@ -1497,7 +1489,7 @@ Number, 0 to 1. Default `0.2`.
   confidence for every slot it has, found or not, so this is what keeps the
   empty slots out. `closed_loop.csv` keeps every detection with its
   confidence, so a recording can be scored again at another threshold.
-- Change when: Raise it if the Zone window marks mice where there are none.
+- Change when: Raise it if the zone editor marks mice where there are none.
   Lower it if it misses mice.
 - Goes wrong: The loader refuses a value outside 0 to 1.
 
@@ -1538,7 +1530,7 @@ tracker.
 
 - Does: Pixels darker than this are the mouse.
 - Change when: Set it between the mouse and the floor: look at both in the
-  Zone window's view.
+  zone editor's view.
 - Goes wrong: The loader refuses a value outside 1 to 254.
 
 #### `closed_loop.min_area_px`
@@ -1867,9 +1859,6 @@ that is not `onnx` or `threshold` are refused as in the `camera:` block:
 
 | The block | The message contains |
 |---|---|
-| Leaves out `camera` | `closed_loop.camera is required` |
-| Names a camera that is not `cam` and a number | `is not a camera name` |
-| Names a camera beyond `n_cameras` | `is not one of this rig's` |
 | Sets a `rate_hz` of 0 or less | `tracked frames per second` |
 | Sets a `min_confidence` outside 0 to 1 | `must be from 0 to 1` |
 | Sets `enter_updates` or `leave_updates` below 1 | `must be 1 or more tracked frames` |

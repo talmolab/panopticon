@@ -287,7 +287,7 @@ def describe(blocks: list[dict], edges: list[dict]) -> list[dict]:
             # Only a zone block carries the key, so the record of a paradigm
             # without one reads as it did before zone blocks existed.
             if is_zone_block(b):
-                step["zone"] = True
+                step["zone"] = zone_of(b)
             steps.append(step)
         out.append({
             "loops": loop_to >= 0,
@@ -508,6 +508,9 @@ def parameter_problems(blocks: list[dict]) -> list[tuple[str, str]]:
         if dur_ms < 1:
             out.append((bid, f"a duration of {dur:g} s is below the 1 ms "
                              f"resolution of the firmware"))
+        if is_zone_block(b) and zone_of(b) not in ZONE_NAMES:
+            out.append((bid, f"zone {zone_of(b)!r} is not a zone name; zones "
+                             f"are the letters A to P"))
         if is_zone_block(b) and drive_mode(freq, pw)[0] == "low":
             out.append((bid, "a zone block holds its pin LOW whether or not a "
                              "mouse is in the zone; give it a frequency and a "
@@ -606,65 +609,91 @@ def _gate_snippets(gate_pins: list[int]) -> dict[str, str]:
     }
 
 
-#: Milliseconds a zone block keeps running after the host's last zone byte.
-#: The host resends the zone's state on every update, so a host that hangs or
-#: exits stops the zone blocks this long after its last byte.
+#: Milliseconds a zone keeps its state after the host's last byte for it. The
+#: host resends every zone's state many times a second, so a host that hangs
+#: or exits stops the zone blocks this long after its last byte.
 ZONE_WATCHDOG_MS = 250
 
-#: The bytes the host sends to a sketch with zone blocks: a mouse is in the
-#: zone, and no mouse is. Neither can begin a start or stop command, which
-#: begin with a digit.
-ZONE_IN_BYTE = b"Z"
-ZONE_OUT_BYTE = b"z"
+#: The zones a paradigm may name, in the order of their bits on the board.
+#: The host's byte for a zone is its letter: in capitals while a mouse is in
+#: it, in lower case while none is. No start or stop command holds a letter:
+#: they are digits, commas, a minus sign and a newline.
+ZONE_NAMES = "ABCDEFGHIJKLMNOP"
+
+
+def zone_of(blk: dict) -> str | None:
+    """The zone a block follows (closed loop), or None for a block that
+    pulses regardless."""
+    z = blk.get("zone")
+    return str(z) if z else None
 
 
 def is_zone_block(blk: dict) -> bool:
-    """True for a block that runs only while the host reports a mouse in the
+    """True for a block that runs only while the host reports a mouse in its
     zone (closed loop)."""
-    return bool(blk.get("zone"))
+    return zone_of(blk) is not None
 
 
-def _zone_snippets(has_zone: bool) -> dict[str, str]:
+def zone_byte(name: str, in_zone: bool) -> bytes:
+    """The byte that tells a zone sketch whether a mouse is in zone `name`."""
+    if name not in ZONE_NAMES or len(name) != 1:
+        raise ValueError(f"zone {name!r} is not one of {ZONE_NAMES}")
+    return (name.upper() if in_zone else name.lower()).encode("ascii")
+
+
+def _zone_snippets(n_zones: int) -> dict[str, str]:
     """The sketch text zone blocks add, by the place it goes in compile_ino().
 
-    Every entry is empty when no block is a zone block, which keeps such a
-    sketch identical to one compiled before zone blocks existed, so no board
-    is reflashed for them.
+    ``n_zones`` is one more than the highest zone index a block uses, 0 for
+    none. Every entry is empty without zone blocks, which keeps such a sketch
+    identical to one compiled before zone blocks existed, so no board is
+    reflashed for them.
     """
-    if not has_zone:
+    if not n_zones:
         return {"field": "", "block": "", "update": "", "drain": "",
                 "guard": "", "drop": ""}
     block = (
         "\n"
-        "// ===== CLOSED-LOOP ZONE =====\n"
-        "// The host tracks the animals and sends one byte per update: 'Z' while a\n"
-        "// mouse is in the zone, 'z' while none is. A zone block runs its pulses only\n"
-        "// while ZONE_IN holds. The watchdog drops ZONE_IN once no byte has arrived for\n"
+        "// ===== CLOSED-LOOP ZONES =====\n"
+        "// The host tracks the animals and sends one byte per zone and update: the\n"
+        "// zone's letter in capitals ('A' for zone A) while a mouse is in it, in lower\n"
+        "// case ('a') while none is. A zone block pulses only while its zone's bit is\n"
+        "// set. The watchdog clears a zone's bit once no byte for it has arrived for\n"
         "// ZONE_WATCHDOG_MS, so a host that hangs or exits cannot leave a zone block\n"
         "// running.\n"
         f"const uint32_t ZONE_WATCHDOG_MS = {ZONE_WATCHDOG_MS}UL;\n"
-        "bool ZONE_IN = false;\n"
-        "uint32_t ZONE_SEEN_MS = 0;\n"
+        f"const uint8_t N_ZONES = {n_zones};\n"
+        "uint16_t ZONE_BITS = 0;\n"
+        "uint32_t ZONE_SEEN_MS[N_ZONES];\n"
         "\n"
-        "// Consumes one zone byte, or returns false for any other byte. loop() calls it\n"
-        "// before its reconfigure check, because a zone byte that reached readPins()\n"
-        "// would stop the triggers until a full command arrived.\n"
+        "// Consumes one zone byte, 'A' to 'P' or 'a' to 'p', or returns false for any\n"
+        "// other byte. A letter for a zone no block uses is consumed and ignored.\n"
+        "// loop() calls it before its reconfigure check, because a zone byte that\n"
+        "// reached readPins() would stop the triggers until a full command arrived.\n"
         "bool zoneByte() {\n"
         "  int c = Serial.peek();\n"
-        "  if (c != 'Z' && c != 'z') return false;\n"
+        "  bool upper = (c >= 'A' && c <= 'P');\n"
+        "  if (!upper && !(c >= 'a' && c <= 'p')) return false;\n"
         "  Serial.read();\n"
-        "  ZONE_IN = (c == 'Z');\n"
-        "  ZONE_SEEN_MS = (uint32_t)millis();\n"
+        "  uint8_t k = upper ? (uint8_t)(c - 'A') : (uint8_t)(c - 'a');\n"
+        "  if (k < N_ZONES) {\n"
+        "    if (upper) {\n"
+        "      ZONE_BITS |= (uint16_t)(1u << k);\n"
+        "      ZONE_SEEN_MS[k] = (uint32_t)millis();\n"
+        "    } else {\n"
+        "      ZONE_BITS &= (uint16_t)~(1u << k);\n"
+        "    }\n"
+        "  }\n"
         "  return true;\n"
         "}\n")
     update = (
-        "    // A zone block pulses only while a mouse is in the zone. Outside it, a\n"
+        "    // A zone block pulses only while a mouse is in its zone. Outside it, a\n"
         "    // pulse in flight still finishes, since a pulse is never cut short, and\n"
         "    // the pin then holds LOW. The anchor is kept at most one period old, so\n"
         "    // a mouse entering fires the next pulse at once when a full period has\n"
         "    // passed since the last one, and never sooner: re-entry cannot raise\n"
         "    // the pulse rate above the block's frequency.\n"
-        "    if (blk->zone && !ZONE_IN) {\n"
+        "    if (blk->zone && !(ZONE_BITS & (1u << (blk->zone - 1)))) {\n"
         "      if (cs->pin_high && (blk->pw_us >= blk->period_us\n"
         "                           || nowUs - cs->rise_us >= blk->pw_us)) {\n"
         "        digitalWrite(blk->pin, LOW);\n"
@@ -678,13 +707,16 @@ def _zone_snippets(has_zone: bool) -> dict[str, str]:
         "    }\n")
     drain = (
         "  // Zone bytes first, at the period boundary, so they never reach the\n"
-        "  // reconfigure branch below. The last one read wins.\n"
+        "  // reconfigure branch below. The last one read for a zone wins.\n"
         "  while (Serial.available() && zoneByte()) {}\n"
-        "  if (ZONE_IN && (uint32_t)millis() - ZONE_SEEN_MS > ZONE_WATCHDOG_MS) {\n"
-        "    ZONE_IN = false;\n"
+        "  for (uint8_t k = 0; k < N_ZONES; k++) {\n"
+        "    if ((ZONE_BITS & (1u << k))\n"
+        "        && (uint32_t)millis() - ZONE_SEEN_MS[k] > ZONE_WATCHDOG_MS) {\n"
+        "      ZONE_BITS &= (uint16_t)~(1u << k);\n"
+        "    }\n"
         "  }\n")
     return {
-        "field": "  uint8_t zone;         // 1 = pulse only while ZONE_IN\n",
+        "field": "  uint8_t zone;         // 0, or 1 + its zone's bit: pulse only while set\n",
         "block": block,
         "update": update,
         "drain": drain,
@@ -694,8 +726,8 @@ def _zone_snippets(has_zone: bool) -> dict[str, str]:
         # would skip it and every later zone byte, triggering nothing until
         # the stop.
         "guard": " && !zoneByte()",
-        # Every start and stop begins with the zone empty.
-        "drop": "    ZONE_IN = false;\n",
+        # Every start and stop begins with every zone empty.
+        "drop": "    ZONE_BITS = 0;\n",
     }
 
 
@@ -727,11 +759,12 @@ def compile_ino(blocks: list[dict], edges: list[dict],
     gate pins existed, so its identity and its RDY line do not change. A
     sketch with gate pins appends the gate's state to its RDY line.
 
-    A block with ``zone`` set pulses only while the host reports a mouse in
-    the zone (ZONE_IN_BYTE and ZONE_OUT_BYTE, read at each trigger period's
-    boundary). The zone code is emitted only when some block is a zone block,
-    so every other sketch is the same text, byte for byte, as before zone
-    blocks existed. sketch_has_zone() tells the two apart.
+    A block with ``zone`` set to a zone name (a letter of ZONE_NAMES) pulses
+    only while the host reports a mouse in that zone (zone_byte(), read at
+    each trigger period's boundary). The zone code is emitted only when some
+    block is a zone block, so every other sketch is the same text, byte for
+    byte, as before zone blocks existed. sketch_has_zone() tells the two
+    apart.
 
     Also raises ValueError for parameter_problems() (numbers the firmware
     would silently execute as something else) and structural_problems()
@@ -757,8 +790,10 @@ def compile_ino(blocks: list[dict], edges: list[dict],
 
     chains = _extract_chains(blocks, edges)
     n = len(chains)
-    has_zone = any(is_zone_block(b) for chain, _ in chains for b in chain)
-    zone = _zone_snippets(has_zone)
+    used = [ZONE_NAMES.index(zone_of(b)) for chain, _ in chains for b in chain
+            if is_zone_block(b)]
+    has_zone = bool(used)
+    zone = _zone_snippets(max(used) + 1 if used else 0)
 
     chain_defs_parts: list[str] = []
     chain_refs: list[str] = []
@@ -773,8 +808,10 @@ def compile_ino(blocks: list[dict], edges: list[dict],
             dur_s = float(blk["dur"])
             # Integer microseconds and milliseconds only; see block_timing().
             period_us, pw_us, dur_ms = block_timing(blk)
-            zone_field = (f", {int(is_zone_block(blk))}u" if has_zone else "")
-            zone_note = ", in zone only" if is_zone_block(blk) else ""
+            zone_field = (f", {ZONE_NAMES.index(zone_of(blk)) + 1 if is_zone_block(blk) else 0}u"
+                          if has_zone else "")
+            zone_note = (f", zone {zone_of(blk)} only" if is_zone_block(blk)
+                         else "")
             entries.append(
                 f"  {{{pin}u, {period_us}UL, {pw_us}UL, {dur_ms}UL{zone_field}}},"
                 f"   // {freq:g} Hz, {pw:g} ms pulse, {dur_s:g} s{zone_note}"
@@ -1098,6 +1135,16 @@ def sketch_gate_pins(ino_content: str) -> list[int]:
 
 
 _ZONE_WATCHDOG_RE = re.compile(r"const uint32_t ZONE_WATCHDOG_MS = (\d+)UL;")
+
+
+_N_ZONES_RE = re.compile(r"const uint8_t N_ZONES = (\d+);")
+
+
+def sketch_zone_count(ino_content: str) -> int:
+    """How many zones a sketch keeps bits for (zones A onward), 0 for a
+    sketch without zone blocks."""
+    m = _N_ZONES_RE.search(ino_content or "")
+    return int(m.group(1)) if m else 0
 
 
 def sketch_has_zone(ino_content: str) -> bool:

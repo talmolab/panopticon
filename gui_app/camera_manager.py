@@ -503,42 +503,50 @@ class CameraManager(QObject):
         for gt in self._grab_threads:
             gt.set_keep_full(flag)
 
-    #: (rig-wide camera index, rate in Hz, owner) of the live tracker's
-    #: tap, or None. Kept here because every preview and acquisition starts new grab
-    #: threads, and each new thread of that camera takes the tap again.
-    _tap = None
-    #: The frames the tap copies into in turn, made once per frame size.
-    _tap_buffers = None
+    #: The live tracker's taps: rig-wide camera index -> (rate in Hz,
+    #: owner). Kept here because every preview and acquisition starts new
+    #: grab threads, and each new thread of a tapped camera takes it again.
+    _taps: dict = {}
+    #: Per tapped camera, the frames its tap copies into in turn, made once
+    #: per frame size.
+    _tap_buffers: dict = {}
 
     def set_tap(self, cam_index: int | None, rate_hz: float = 0.0,
                 owner=None):
         """Give camera `cam_index` (rig-wide, 0-based) the live tracker's tap
         at `rate_hz` (GrabThread.set_tap), now and in every later preview and
-        acquisition; None stops it.
+        acquisition; a rate of 0 stops that camera's tap, and `cam_index`
+        None stops every tap `owner` set.
 
-        RULE: a stop from an `owner` other than the one that set the tap
-        does nothing. REASON: a closed loop still ending in the background
-        would otherwise stop the tap of the loop that replaced it.
+        RULE: a stop from an `owner` other than the one that set a tap does
+        nothing to it. REASON: a closed loop still ending in the background
+        would otherwise stop the taps of the loop that replaced it.
         """
-        if cam_index is None or not rate_hz:
-            if (owner is not None and self._tap is not None
-                    and self._tap[2] is not owner):
-                return
-            self._tap = None
+        taps = dict(self._taps)
+        if cam_index is None:
+            taps = {c: t for c, t in taps.items()
+                    if owner is not None and t[1] is not owner}
+        elif not rate_hz:
+            t = taps.get(int(cam_index))
+            if t is not None and (owner is None or t[1] is owner):
+                del taps[int(cam_index)]
         else:
-            self._tap = (int(cam_index), float(rate_hz), owner)
+            cam = int(cam_index)
+            taps[cam] = (float(rate_hz), owner)
             geo = self._geometry
             if geo is not None:
                 w, h = geo
-                bufs = self._tap_buffers
+                bufs = self._tap_buffers.get(cam)
                 if not bufs or bufs[0].shape != (h, w):
                     # np.full touches every page now, outside the grab loop.
-                    self._tap_buffers = [np.full((h, w), 0, np.uint8)
-                                         for _ in range(TAP_BUFFERS)]
+                    self._tap_buffers = dict(self._tap_buffers)
+                    self._tap_buffers[cam] = [np.full((h, w), 0, np.uint8)
+                                              for _ in range(TAP_BUFFERS)]
+        self._taps = taps
         for i, gt in enumerate(self._grab_threads):
-            on = self._tap is not None and self._gi(i) == self._tap[0]
-            gt.set_tap(self._tap[1] if on else 0.0,
-                       self._tap_buffers if on else None)
+            t = taps.get(self._gi(i))
+            gt.set_tap(t[0] if t else 0.0,
+                       self._tap_buffers.get(self._gi(i)) if t else None)
 
     def latest_tap(self, cam_index: int):
         """The tapped camera's newest GrabThread.latest_tap tuple, or None
@@ -859,8 +867,9 @@ class CameraManager(QObject):
             gt._pin_ecore = self.pin_encoder_threads
             gt._enc_pcores = self.encoder_pcores
             gt.set_source_down_check(self.source_down_check or self._source_down)
-            if self._tap is not None and self._tap[0] == self._gi(i):
-                gt.set_tap(self._tap[1], self._tap_buffers)
+            tap = self._taps.get(self._gi(i))
+            if tap is not None:
+                gt.set_tap(tap[0], self._tap_buffers.get(self._gi(i)))
             gt.start()
             self._grab_threads.append(gt)
 

@@ -131,18 +131,24 @@ def ttl_level(step: dict, t_into_step: float) -> int:
 
 
 def is_zone_step(step: dict) -> bool:
-    """Whether a step pulses only while a mouse is in the zone (closed
-    loop); describe() marks such a step with ``zone``."""
+    """Whether a step pulses only while a mouse is in its zone (closed
+    loop); describe() marks such a step with ``zone``, the zone's name."""
     return bool(step.get("zone"))
 
 
-class ZoneModel:
-    """The zone the board held, and the pulses a zone step fired, from
-    ``closed_loop.json``'s events.
+def zone_names(chains: list) -> list:
+    """The zones a paradigm's steps follow, in name order."""
+    return sorted({str(s["zone"]) for c in chains for s in c["steps"]
+                   if is_zone_step(s)})
 
-    Each event is a dict with ``blockid``, the first trigger the change
-    applied to, and ``zone``. Before the first event the zone is off, as the
-    sketch starts it. Times are integer microseconds of paradigm time,
+
+class ZoneModel:
+    """One zone's state on the board, and the pulses a step in that zone
+    fired, from ``closed_loop.json``'s events.
+
+    Each event is a dict with ``zone`` (its name), ``blockid`` (the first
+    trigger the change applied to) and ``in``; only the events of ``zone``
+    are read. Before the first the zone is off, as the sketch starts it. Times are integer microseconds of paradigm time,
     ``(blockid - 1) / fps``, the clock the rest of the trace uses.
 
     RULE: a zone step's pulses follow the sketch's updateStim(), not a
@@ -153,9 +159,10 @@ class ZoneModel:
     when the zone turns off finishes, and the block's end cuts one short.
     """
 
-    def __init__(self, events, fps: float):
-        evs = sorted(((int(e["blockid"]), bool(e["zone"]))
-                      for e in events or ()), key=lambda e: e[0])
+    def __init__(self, events, fps: float, zone: str):
+        evs = sorted(((int(e["blockid"]), bool(e["in"]))
+                      for e in events or () if e.get("zone") == zone),
+                     key=lambda e: e[0])
         self.intervals: list = []
         on = None
         for bid, z in evs:
@@ -252,7 +259,7 @@ def chain_progress(chains: list[dict], t: float) -> list[dict]:
         out.append({"step": idx, "into_s": into,
                     "left_s": max(0.0, _step_seconds(step) - into),
                     "active": step_active(step),
-                    "zone": is_zone_step(step)})
+                    "zone": step.get("zone")})
     return out
 
 
@@ -284,25 +291,24 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
     columns after all the others, so the columns a reader already indexes do
     not move.
 
-    A paradigm with zone steps adds a ``zone_in`` column, before the frame
-    columns, from ``zone_events`` (closed_loop.json, read by ZoneModel). A
-    zone step is active only while the zone is in, and its pin follows the
-    pulses the sketch fires (ZoneModel). A paradigm without zone steps has
-    the columns it always had.
+    A paradigm with zone steps adds a ``zone_<name>_in`` column per zone,
+    before the frame columns, from ``zone_events`` (closed_loop.json, read
+    by ZoneModel). A zone step is active only while its zone is in, and its
+    pin follows the pulses the sketch fires (ZoneModel). A paradigm without
+    zone steps has the columns it always had.
     """
     chains = resolve_chains(paradigm)
     pins = sorted({int(s["pin"]) for c in chains for s in c["steps"]})
     camera_frames = camera_frames or {}
-    has_zone = any(is_zone_step(s) for c in chains for s in c["steps"])
-    zone = ZoneModel(zone_events, fps) if has_zone else None
+    names = zone_names(chains)
+    models = {n: ZoneModel(zone_events, fps, n) for n in names}
 
     fields = ["frame", "blockid", "t_s", "any_active"]
     for i, _c in enumerate(chains):
         fields += [f"chain{i}_step", f"chain{i}_active",
                    f"chain{i}_freq_hz", f"chain{i}_pw_ms"]
     fields += [f"pin{p}_ttl" for p in pins]
-    if has_zone:
-        fields += ["zone_in"]
+    fields += [f"zone_{n}_in" for n in names]
     fields += [f"frame_{nm}" for nm in camera_frames]
 
     b = _unwrap_blockids(np.asarray(blockids))
@@ -315,7 +321,7 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
         levels = {p: 0 for p in pins}
         any_active = False
         t_us = int(round(t * 1e6))
-        in_zone = zone.in_zone(t_us) if zone is not None else False
+        in_zone = {n: m.in_zone(t_us) for n, m in models.items()}
         for i, ch in enumerate(chains):
             idx, into = locate(ch["steps"], ch.get("loops_back_to_step"), t)
             if idx is None:
@@ -325,9 +331,11 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
             step = ch["steps"][idx]
             active = step_active(step)
             if is_zone_step(step):
-                active = active and in_zone
+                z = str(step["zone"])
+                active = active and in_zone[z]
                 start_us = t_us - int(round(into * 1e6))
-                level = zone.level((i, idx, start_us), step, start_us, t_us)
+                level = models[z].level((i, idx, start_us), step, start_us,
+                                        t_us)
             else:
                 level = ttl_level(step, into) if active else 0
             any_active |= active
@@ -339,8 +347,7 @@ def build_rows(paradigm: dict, blockids: np.ndarray, fps: float,
             levels[pin] = max(levels[pin], level)
         row["any_active"] = int(any_active)
         row |= {f"pin{p}_ttl": levels[p] for p in pins}
-        if has_zone:
-            row["zone_in"] = int(in_zone)
+        row |= {f"zone_{n}_in": int(v) for n, v in in_zone.items()}
         for nm, per_row in camera_frames.items():
             v = int(per_row[k])
             row[f"frame_{nm}"] = v if v >= 0 else ""

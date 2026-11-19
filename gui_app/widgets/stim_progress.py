@@ -51,7 +51,7 @@ def step_text(step: dict) -> str:
     """What a step drives, in the words the editor's blocks use."""
     freq, pw = float(step["freq_hz"]), float(step["pulse_width_ms"])
     kind, _duty = stim_compiler.drive_mode(freq, pw)
-    where = " in the zone" if step.get("zone") else ""
+    where = f" in zone {step['zone']}" if step.get("zone") else ""
     if kind == "low":
         return "off"
     if kind == "train":
@@ -242,9 +242,9 @@ class StimProgressWidget(QWidget):
             self._mini.set_paradigm([], [], [])
         self.set_time(None)
 
-    def set_time(self, t: float | None, zone: bool | None = None):
-        """``zone`` is the closed loop's zone state, None when unknown; a
-        zone step's line says it."""
+    def set_time(self, t: float | None, zones: dict | None = None):
+        """``zones`` maps each zone's name to the closed loop's state for it,
+        None when unknown; a zone step's line says its zone's."""
         if t is None:
             self._title.setText("Expected stimulation · waiting for the "
                                 "first trigger")
@@ -266,9 +266,12 @@ class StimProgressWidget(QWidget):
                 now.add(ids[i])
             loops = " (loops)" if chain.get("loops") else ""
             zone_now = ""
-            if steps[i].get("zone"):
-                zone_now = (" · zone unknown" if zone is None else
-                            " · mouse in zone" if zone else " · zone empty")
+            z = steps[i].get("zone")
+            if z:
+                state = None if zones is None else zones.get(z)
+                zone_now = (f" · zone {z} unknown" if state is None else
+                            f" · mouse in zone {z}" if state
+                            else f" · zone {z} empty")
             lines.append(f"Pin {steps[i]['pin']} · block {i + 1} of "
                          f"{len(steps)}{loops} · {step_text(steps[i])}"
                          f"{zone_now} · "

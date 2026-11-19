@@ -68,9 +68,8 @@ board_config: configs/boards/charuco_8x8_15mm.yaml   # SITE: your printed board
 # collect_wait_s: 30              # seconds to wait for a file still open
 
 # --- Closed loop ------------------------------------------------------------
-# One camera tracked live, for paradigm blocks ticked In zone (Zone window).
+# Live tracking for paradigm blocks ticked In zone; zones are drawn in Stimulation.
 # closed_loop:
-#   camera: cam5                  # SITE: the camera that sees the arena from above
 #   tracker: onnx                 # onnx (a SLEAP centroid model) | threshold
 #   model: models/centroid.onnx   # SITE: the model, exported to ONNX
 #   python: C:/tracker-env/Scripts/python.exe   # SITE: has onnxruntime-gpu

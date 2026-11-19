@@ -228,12 +228,6 @@ a profile with `trigger_source: external`, the button just shows a dialog saying
 
 **Focus**, just below it, opens the [Focus window](#the-focus-window).
 
-**Zone**, below **Focus**, opens the Zone window, where you draw the zone for
-[closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) and watch the live
-tracker find the mice. The button appears only on a profile with a
-[`closed_loop`](CONFIGURATION.md#closed_loop) block, and it keeps working while you
-record.
-
 #### 12. Coverage display
 
 During a calibration, the coverage display shows up here and tells you whether you
@@ -582,10 +576,24 @@ chain beside it.
 
 #### In zone
 
-Beside **Ending**, **In zone** makes the selected block pulse only while the live
-tracker finds a mouse in the zone, and hold its pin low the rest of the time. The
-block's header then reads `in zone` after its pin.
+Beside **Ending**, **In zone** makes a block pulse only while the live tracker finds
+a mouse in its zone, and hold its pin low the rest of the time. With no block
+selected, it applies to the next **Create Block**, which then opens the zone editor
+to pick or draw the block's zone. With a block selected, it turns that block's zone
+on or off. The block's header then reads `zone A` (or its zone's letter) after its
+pin, and a double click on the block opens its zone. It needs a profile with a
+[`closed_loop`](CONFIGURATION.md#closed_loop) block.
 [Closed-loop stimulation](WORKFLOW.md#closed-loop-stimulation) shows a session.
+
+#### The zone editor
+
+The zone editor lists the paradigm's zones on the left, each in its own colour with
+the camera it's drawn on. **New zone** starts another, and **Delete zone** removes
+one. On the right, every camera's live view shows the zones drawn on it, and clicking
+a camera opens it large, with the tools: **Select** to move a shape, resize it by its
+handles or move a polygon's corner, then **Polygon**, **Rectangle** and **Ellipse** to
+draw, and **Copy**, **Paste** and **Delete**. The mice the tracker finds are marked
+with lime circles, and **Cameras** goes back to every camera.
 
 #### 9. Status line
 
@@ -645,8 +653,9 @@ every flash.
 **Save** and **Load** keep the graph in a JSON file, `stim_config.json` in the output
 directory unless you pick another name. **Load** asks before replacing unsaved
 changes, then fits the view to the blocks it loaded. **Clear** asks before emptying
-the canvas, and **Fit** brings every block into view, just like <kbd>Home</kbd>. None
-of them touch the board.
+the canvas, and **Fit** brings every block into view, just like <kbd>Home</kbd>.
+**Zones** opens the zone editor to change any zone. **Save** and **Load** keep the
+zones with the blocks. None of them touch the board.
 
 ---
 
@@ -680,8 +689,9 @@ something to show, and so do the two stimulation indicators. The bolt beside **R
 shows only while the next recording will run a paradigm, and the
 [**Expected stimulation**](#expected-stimulation) panel only during a recording that
 runs one. Neither appears on a profile with `trigger_source: external`, which can't
-stimulate. The **Zone** button shows only on a profile with a `closed_loop`
-block. Other controls grey out when using them would do the wrong thing.
+stimulate. Once a paradigm with zone blocks is applied, each camera's pane outlines
+the zones drawn on it, and fills a zone while a mouse is in it. Other controls
+grey out when using them would do the wrong thing.
 Hover over a greyed-out toggle or **Solve** to see why.
 
 - **Calibrate** and **Record**: while the hardware check runs, while videos are

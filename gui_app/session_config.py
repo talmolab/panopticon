@@ -275,26 +275,25 @@ class CameraSpec:
 #: dark pixels below a gray level (no model, for a backlit floor and the
 #: simulated rig).
 CLOSED_LOOP_TRACKERS = ("onnx", "threshold")
-_CLOSED_LOOP_CAMERA = re.compile(r"cam[1-9][0-9]*")
 
 
 @dataclass(frozen=True)
 class ClosedLoopSpec:
     """A profile's ``closed_loop:`` block, as ``parse_closed_loop_spec``
-    returns it: which camera is tracked live, by what, and how a tracked
-    mouse becomes the zone state that zone blocks follow.
+    returns it: what tracks the cameras live, and how a tracked mouse
+    becomes the state of the zones that zone blocks follow. The zones, and
+    the cameras they are drawn on, belong to the paradigm.
 
     ``model`` and ``python`` are resolved against the repository root like
     every profile path. ``python`` None runs the tracker in Panopticon's own
     interpreter, which has no ONNX runtime, so an onnx tracker names the
     interpreter of an environment that has one.
     """
-    camera: str
     tracker: str = "onnx"
     model: str | None = None
     python: str | None = None
-    #: Tracked frames per second. The camera's every Nth trigger is tracked,
-    #: N = round(frame rate / rate_hz), in the preview as in a recording.
+    #: Tracked frames per second, of each camera a zone is drawn on, in the
+    #: preview as in a recording.
     rate_hz: float = 10.0
     #: Detections with a lower confidence are ignored. The ONNX export marks
     #: nearly every slot valid, so this is the only filter.
@@ -323,17 +322,10 @@ def parse_closed_loop_spec(raw) -> ClosedLoopSpec | None:
     if raw is None:
         return None
     d = _check_keys(raw, _CLOSED_LOOP_KEYS, "closed_loop")
-    if "camera" not in d:
-        raise ValueError("closed_loop.camera is required: the camera that is "
-                         "tracked live, such as cam5")
-    camera = _spec_scalar("closed_loop.camera", str, d["camera"])
-    if not _CLOSED_LOOP_CAMERA.fullmatch(camera):
-        raise ValueError(f"closed_loop.camera {camera!r} is not a camera name "
-                         f"(cam1, cam2, ...)")
     tracker = _spec_choice("closed_loop.tracker", d.get("tracker", "onnx"),
                            CLOSED_LOOP_TRACKERS)
     spec = ClosedLoopSpec(
-        camera=camera, tracker=tracker,
+        tracker=tracker,
         model=_spec_scalar("closed_loop.model", str, d.get("model"), True),
         python=_spec_scalar("closed_loop.python", str, d.get("python"), True),
         rate_hz=_spec_scalar("closed_loop.rate_hz", float,
@@ -1365,8 +1357,8 @@ class RigProfile:
                 f"{self.board_max_pin}.")
 
     def _validate_closed_loop(self) -> None:
-        """The closed_loop block against the rest of the profile: its camera
-        exists, and the trigger board that carries the zone is Panopticon's."""
+        """The closed_loop block against the rest of the profile: the trigger
+        board that carries the zones is Panopticon's."""
         loop = self.closed_loop
         if loop is None:
             return
@@ -1377,11 +1369,6 @@ class RigProfile:
                 f"through Panopticon's trigger board, which an external "
                 f"source replaces. Remove closed_loop, or use "
                 f"trigger_source: board.")
-        index = int(loop.camera[3:])
-        if self.n_cameras and index > self.n_cameras:
-            raise ValueError(
-                f"closed_loop.camera {loop.camera} is not one of this rig's "
-                f"{self.n_cameras} cameras")
 
     def _validate_collect_dirs(self) -> None:
         """The collected folders: named, distinct, and outside the sessions.

@@ -110,21 +110,33 @@ class SimBoard:
         #: has one. A stop or any later command lowers them.
         self.gate_pins: list = []
         self.gate_armed = False
-        #: Whether the last sketch accepted reads zone bytes, the zone state
-        #: it holds, when (perf_counter) the last zone byte arrived, and every
-        #: change as (virtual time, in zone). Every command empties the zone,
-        #: as the sketch's reconfigure branch does.
-        self.zone_capable = False
-        self.zone_in = False
-        self.zone_seen = 0.0
+        #: How many zones the last sketch accepted keeps bits for (0: it
+        #: reads no zone bytes), each zone's state and when (perf_counter)
+        #: its last byte arrived, and every change as (virtual time, zone, in
+        #: zone). Every command empties every zone, as the sketch's
+        #: reconfigure branch does.
+        self.zone_count = 0
+        self.zone_in: dict = {}
+        self.zone_seen: dict = {}
         self.zone_log: list = []
 
-    def zone_active(self) -> bool:
-        """Whether the sketch's zone blocks would pulse now: a mouse reported
-        in the zone, by a byte newer than the sketch's watchdog."""
+    @property
+    def zone_capable(self) -> bool:
+        return self.zone_count > 0
+
+    def zone_active(self, zone: str) -> bool:
+        """Whether the sketch's blocks in `zone` would pulse now: a mouse
+        reported in it, by a byte newer than the sketch's watchdog."""
         from gui_app.stim_compiler import ZONE_WATCHDOG_MS
-        return (self.zone_in and time.perf_counter() - self.zone_seen
+        return (self.zone_in.get(zone, False)
+                and time.perf_counter() - self.zone_seen.get(zone, 0.0)
                 <= ZONE_WATCHDOG_MS / 1000.0)
+
+    def empty_zones(self) -> None:
+        for z, on in list(self.zone_in.items()):
+            if on:
+                self.zone_log.append((self.virtual_now(), z, False))
+        self.zone_in = {}
 
     # ------------------------------------------------------------------ time
     def virtual_now(self) -> float:
@@ -571,15 +583,15 @@ def accept_upload(ino_content: str, board: SimBoard | None = None) -> str | None
     tells which build the board runs instead of trusting a per-machine record
     of what was last uploaded.
     """
-    from gui_app.stim_compiler import (sketch_gate_pins, sketch_has_zone,
-                                       sketch_id)
+    from gui_app.stim_compiler import (sketch_gate_pins, sketch_id,
+                                       sketch_zone_count)
     brd = board or shared_board()
     brd.last_sketch = ino_content
     brd.sketch_id = sketch_id(ino_content)
     brd.gate_pins = sketch_gate_pins(ino_content)
     brd.gate_armed = False
-    brd.zone_capable = sketch_has_zone(ino_content)
-    brd.zone_in = False
+    brd.zone_count = sketch_zone_count(ino_content)
+    brd.zone_in = {}
     return brd.sketch_id
 
 
@@ -688,26 +700,36 @@ class SimSerial:
     def _take_zone_bytes(self, data: bytes) -> bytes:
         """Act on the zone bytes in `data`; return what is left for parsing.
 
-        A sketch with zone blocks reads each zone byte and keeps the last
-        state, and a start or stop command holds none. Any other sketch takes
-        a zone byte as the start of a command: its readPins() waits for a
-        frame rate that never comes, so the board stops triggering, and the
-        byte stays in the line to garble the next command, as on the board.
+        A sketch with zone blocks reads each zone byte, a letter A to P (in)
+        or a to p (out), keeps the last state of each zone it has bits for,
+        and ignores the rest; a start or stop command holds no letter. Any
+        other sketch takes a zone byte as the start of a command: its
+        readPins() waits for a frame rate that never comes, so the board
+        stops triggering, and the byte stays in the line to garble the next
+        command, as on the board.
         """
-        zone = {ord("Z"): True, ord("z"): False}
-        if not any(b in zone for b in data):
+        from gui_app.stim_compiler import ZONE_NAMES
+        upper = {ord(c): c for c in ZONE_NAMES}
+        lower = {ord(c.lower()): c for c in ZONE_NAMES}
+        if not any(b in upper or b in lower for b in data):
             return data
         brd = self._board
         if not brd.zone_capable:
             brd.stop()
             return data
         for b in data:
-            if b in zone:
-                if brd.zone_in != zone[b]:
-                    brd.zone_log.append((brd.virtual_now(), zone[b]))
-                brd.zone_in = zone[b]
-                brd.zone_seen = time.perf_counter()
-        return bytes(b for b in data if b not in zone)
+            if b not in upper and b not in lower:
+                continue
+            name = upper.get(b) or lower.get(b)
+            if ZONE_NAMES.index(name) >= brd.zone_count:
+                continue
+            on = b in upper
+            if brd.zone_in.get(name, False) != on:
+                brd.zone_log.append((brd.virtual_now(), name, on))
+            brd.zone_in[name] = on
+            if on:
+                brd.zone_seen[name] = time.perf_counter()
+        return bytes(b for b in data if b not in upper and b not in lower)
 
     def _handle(self, line: str) -> None:
         """Parse one `n,p1..pn,fps[,gate]` command and queue the RDY answer.
@@ -729,10 +751,8 @@ class SimSerial:
         except ValueError:
             return                      # garbled; no ack, so the host retries
         brd = self._board
-        # Every start and stop begins with the zone empty.
-        if brd.zone_in:
-            brd.zone_log.append((brd.virtual_now(), False))
-        brd.zone_in = False
+        # Every start and stop begins with every zone empty.
+        brd.empty_zones()
         # Only a sketch with gate pins reads the field; any other drains it.
         has_gate = bool(brd.gate_pins)
         brd.gate_armed = has_gate and asked and fps > 0

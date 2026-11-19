@@ -2,7 +2,7 @@
 import math
 import numpy as np
 from PyQt5.QtWidgets import QWidget, QGridLayout, QLabel
-from PyQt5.QtCore import Qt, QRect
+from PyQt5.QtCore import QPointF, Qt, QRect
 from PyQt5.QtGui import QImage, QFont, QPainter
 
 
@@ -24,6 +24,17 @@ class PreviewPane(QWidget):
         super().__init__(parent)
         self._frame = None
         self._image = None
+        #: The applied paradigm's zones on this camera, [(Zone, on), ...],
+        #: drawn over the frame, and the camera's full frame size their
+        #: pixels belong to.
+        self._zones: list = []
+        self._full = (0, 0)
+
+    def set_zones(self, zones: list, full_size: tuple) -> None:
+        if zones or self._zones:
+            self._zones = list(zones)
+            self._full = tuple(full_size)
+            self.update()
 
     def set_frame(self, frame: np.ndarray):
         if frame.ndim == 2:
@@ -69,7 +80,16 @@ class PreviewPane(QWidget):
         # Nearest-neighbour scaling: the preview is decimated already and a
         # smooth transform would cost a filtered pass per pane per tick.
         p.setRenderHint(QPainter.SmoothPixmapTransform, False)
-        p.drawImage(self.target_rect(), self._image)
+        target = self.target_rect()
+        p.drawImage(target, self._image)
+        if self._zones and self._full[0] > 0:
+            from gui_app.widgets.zone_editor import paint_zone
+            p.setRenderHint(QPainter.Antialiasing, True)
+            k = target.width() / self._full[0]
+            for zone, on in self._zones:
+                paint_zone(p, zone, lambda x, y: QPointF(target.x() + x * k,
+                                                         target.y() + y * k),
+                           k, filled=on)
         p.end()
 
 
@@ -157,6 +177,7 @@ class CameraGridWidget(QWidget):
         if frame_width <= 0 or frame_height <= 0:
             raise ValueError(f"frame size must be positive, got {frame_width}x{frame_height}")
         self._cam_aspect = frame_width / frame_height
+        self._full_size = (int(frame_width), int(frame_height))
 
     def set_columns(self, cols: int):
         """Declare the column count. Takes effect on the next setup_grid."""
@@ -256,6 +277,15 @@ class CameraGridWidget(QWidget):
         if cell.isHidden():
             return
         cell.view.set_frame(frame)
+
+    #: The cameras' full frame size, which zone overlays are drawn in.
+    _full_size = (0, 0)
+
+    def set_zone_overlay(self, cam_index: int, zones: list):
+        """Draw `zones` ([(Zone, on), ...]) over camera `cam_index`'s pane;
+        an empty list clears it."""
+        if cam_index < len(self._cells):
+            self._cells[cam_index].view.set_zones(zones, self._full_size)
 
     def update_fps(self, cam_index: int, fps: float):
         if cam_index < len(self._cells):
