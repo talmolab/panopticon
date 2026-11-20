@@ -130,14 +130,18 @@ collect_dirs: ["data/usv"]
 
 # Closed loop: zones are drawn on the cameras in the Stimulation editor. The
 # model is a SLEAP body-centre model trained on all nine cameras' raw frames,
-# exported to ONNX and kept on this computer. The tracker runs in its own
-# environment with onnxruntime-gpu. The model misses a dark mouse for a frame
-# now and then (cam7 most, cam5 least), so a zone waits five tracked frames
-# (half a second) before it turns off. It misses a white CD1 often on every
-# camera, and nearly always on cam2, cam4 and cam9.
+# exported to ONNX by sleap-nn 0.3.5 and kept on this computer. The tracker
+# runs in its own environment with onnxruntime-gpu and TensorRT, which builds
+# an fp16 engine from the .onnx on this GPU: 2.4 ms a frame while recording,
+# against 8 ms with the CUDA provider. The model misses a dark mouse for a
+# frame now and then (cam7 most, cam5 least), so a zone waits five tracked
+# frames (half a second) before it turns off. It misses a white CD1 often on
+# every camera, and nearly always on cam2, cam4 and cam9.
 closed_loop:
-  model: "C:/Users/isaac/.panopticon/models/allcam_centroid_body_20261118.onnx"
-  python: "C:/Users/isaac/.panopticon/tracker-venv/Scripts/python.exe"
+  model: "C:/Users/isaac/.panopticon/models/allcam_centroid_body_20261118_nn035.onnx"
+  python: "C:/Users/isaac/.panopticon/tracker-venv-trt/Scripts/python.exe"
+  runtime: tensorrt
+  precision: fp16
   min_confidence: 0.3
   leave_updates: 5
 

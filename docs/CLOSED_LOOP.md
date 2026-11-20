@@ -36,7 +36,7 @@ If you've used Panopticon's stimulation editor before, this is what closed loop 
 
 ## What you need
 
-- **An NVIDIA GPU.** The model runs on it with ONNX Runtime. On our rig, an RTX 5080 that also encodes nine cameras, it takes about 6.5 ms a frame.
+- **An NVIDIA GPU.** The model runs on it with ONNX Runtime. On our rig, an RTX 5080 that also encodes nine cameras, it takes about 8 ms a frame while recording, or 2.4 ms with [`runtime: tensorrt`](CONFIGURATION.md#closed_loopruntime) in `fp16`.
 - **Panopticon's trigger board** (`trigger_source: board`). The zones reach the stimulation through the board's sketch, so a profile on an external trigger source can't use them.
 - **A tracker.** Either a SLEAP centroid model for your cameras ([Bring your own SLEAP model](#2-bring-your-own-sleap-model)), or the threshold tracker, which needs no model and finds dark animals on a bright floor ([`tracker`](CONFIGURATION.md#closed_looptracker)).
 - **A light on the stimulation pin that the cameras can see**, such as an LED, for checking the loop before an animal is stimulated ([Check the loop with a light](#4-check-the-loop-with-a-light)).
@@ -53,6 +53,14 @@ uv pip install --python C:\tracker-env\Scripts\python.exe "onnxruntime-gpu[cuda,
 ```
 
 The `[cuda,cudnn]` extra brings the CUDA libraries with it, so you don't install CUDA yourself. The folder can be anywhere: the profile names it in [step 3](#3-point-the-profile-at-it).
+
+For the faster [`runtime: tensorrt`](CONFIGURATION.md#closed_loopruntime), add TensorRT to the same environment. It has to be the major version your `onnxruntime-gpu` was built against: onnxruntime-gpu 1.32 needs TensorRT 10, so:
+
+```powershell
+uv pip install --python C:\tracker-env\Scripts\python.exe "tensorrt-cu13<11"
+```
+
+That's about 3 GB. If the versions don't match, the tracker refuses to start and the zone editor's status line says that ONNX Runtime could not load its TensorRT provider.
 
 ---
 
@@ -86,7 +94,7 @@ sleap-nn export models/my_centroid -o exports/my_centroid --format onnx --max-in
 
 That writes `model.onnx` and `export_metadata.json` into `exports/my_centroid`. Keep the two together. The flags are from sleap-nn's current documentation, and our model was exported with sleap-nn 0.1.0. Run `sleap-nn export --help` to check them for your version.
 
-Use ONNX, not a TensorRT engine. An engine runs only on the GPU type and the TensorRT version that built it, while ONNX Runtime runs the `.onnx` file on any NVIDIA GPU.
+Ship the `.onnx`, never a TensorRT engine. An engine runs only on the GPU type and the TensorRT version that built it. With [`runtime: tensorrt`](CONFIGURATION.md#closed_loopruntime), Panopticon builds the engine from the `.onnx` on the rig's own GPU the first time the tracker starts, and keeps it for later starts.
 
 ### Check the file
 
@@ -140,9 +148,11 @@ These settings are worth a look once the model works:
 | [`enter_updates`](CONFIGURATION.md#closed_loopenter_updates) | 2 | A zone turns on for a stray detection. More updates wait longer before turning a zone on |
 | [`leave_updates`](CONFIGURATION.md#closed_loopleave_updates) | 3 | A zone flickers off while an animal sits in it, because the model misses it for a frame now and then. Ours is 5 |
 | [`rate_hz`](CONFIGURATION.md#closed_looprate_hz) | 10 | You want a faster response, and the GPU has time to spare |
+| [`runtime`](CONFIGURATION.md#closed_loopruntime) | `cuda` | You want the tracker about twice as fast: `tensorrt`, with TensorRT installed ([step 1](#1-set-up-the-trackers-python)) |
+| [`precision`](CONFIGURATION.md#closed_loopprecision) | `fp32` | With `tensorrt`, `fp16` halves the time again. Check it finds the same animals on your recordings first |
 | [`lost_s`](CONFIGURATION.md#closed_looplost_s) | 0.5 | A camera stops being tracked, and you want its zones off sooner or later |
 
-One tracker serves every camera a zone is drawn on, in turn, so its GPU time adds up. A frame's time, times `rate_hz`, times the cameras with zones, has to stay well under a second. On our rig, five cameras at 10 Hz and about 6.5 ms a frame take a third of a second each second.
+One tracker serves every camera a zone is drawn on, in turn, so its GPU time adds up. A frame's time, times `rate_hz`, times the cameras with zones, has to stay well under a second. While our rig records, the video encoder shares the GPU. Five cameras at 10 Hz took 8 to 10 ms a frame (median) with `cuda`, nearly half a second each second, and 2.4 ms with `tensorrt` in `fp16`, an eighth of a second.
 
 ---
 

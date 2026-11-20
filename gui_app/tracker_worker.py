@@ -8,7 +8,8 @@ from gui_app, only the standard library, numpy, and OpenCV or onnxruntime.
 Protocol, one JSON object per line:
 
 - argv names the tracker, the shared-memory block that holds the frame and
-  the frame's height and width.
+  the frame's height and width, and for the onnx tracker the model, the
+  runtime (ONNX Runtime's CUDA or TensorRT provider) and the precision.
 - stdout first says ``{"ready": true, ...}`` once the tracker can answer, or
   ``{"ready": false, "error": ...}`` before exiting.
 - Each stdin line ``{"seq": n}`` asks for the frame now in shared memory, and
@@ -20,9 +21,14 @@ stdout carries only these lines. Everything else goes to stderr, which the
 window copies to its log.
 """
 import argparse
+import gc
+import hashlib
 import json
+import os
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -84,6 +90,47 @@ class ThresholdTracker:
         return out
 
 
+def _tensorrt_libs() -> str:
+    """Put the TensorRT libraries of this environment (the tensorrt-cu13
+    package's tensorrt_libs) where ONNX Runtime's TensorRT provider loads
+    them from, and return their folder."""
+    try:
+        import tensorrt_libs
+    except ImportError:
+        raise RuntimeError(
+            "runtime tensorrt needs TensorRT in closed_loop.python's "
+            "environment: the tensorrt-cu13 package at the major version "
+            "this onnxruntime-gpu was built against") from None
+    libs = os.path.dirname(tensorrt_libs.__file__)
+    os.environ["PATH"] = libs + os.pathsep + os.environ.get("PATH", "")
+    os.add_dll_directory(libs)
+    return libs
+
+
+def _gpu_name() -> str:
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i",
+             "0"], capture_output=True, text=True, timeout=10).stdout.strip()
+        return out or "gpu"
+    except Exception:
+        return "gpu"
+
+
+def engine_folder(root: str, model: str, precision: str, shape) -> Path:
+    """The folder of the TensorRT engine for this model, GPU, ONNX Runtime,
+    TensorRT, precision and input shape. An engine runs only on the GPU and
+    the versions that built it, so any change gets a folder of its own and
+    builds afresh, rather than loading a stale engine."""
+    import onnxruntime as ort
+    import tensorrt
+    mid = hashlib.sha256(Path(model).read_bytes()).hexdigest()[:12]
+    name = "-".join([_gpu_name().replace(" ", "_"), "ort" + ort.__version__,
+                     "trt" + tensorrt.__version__, mid, precision,
+                     "x".join(str(int(v)) for v in shape)])
+    return Path(root) / name
+
+
 class OnnxCentroidTracker:
     """A SLEAP centroid model exported to ONNX (sleap-nn export): uint8 frames
     in, ``centroids`` and ``centroid_vals`` out.
@@ -92,9 +139,19 @@ class OnnxCentroidTracker:
     which keeps every coordinate where it was. Every slot is returned with
     its confidence; the window applies min_confidence, because the export
     marks nearly every slot valid.
+
+    ``runtime`` "tensorrt" runs the model through ONNX Runtime's TensorRT
+    provider, which builds an engine for this GPU from the .onnx at the first
+    start and keeps it in `engine_cache` (a minute at most, then seconds).
+    The input's free dimensions are fixed to one padded frame, so the engine
+    is built for exactly that shape.
     """
 
-    def __init__(self, model: str, pad_to: int, height: int, width: int):
+    def __init__(self, model: str, pad_to: int, height: int, width: int,
+                 runtime: str = "cuda", precision: str = "fp32",
+                 engine_cache: str | None = None):
+        if runtime == "tensorrt":
+            _tensorrt_libs()
         import onnxruntime as ort
         # Errors only: its warnings about the exported graph repeat at every
         # start, and on Windows its native logger writes them as UTF-16.
@@ -111,9 +168,35 @@ class OnnxCentroidTracker:
         so.intra_op_num_threads = 2
         so.inter_op_num_threads = 1
         so.log_severity_level = 3
-        want = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
-                if p in ort.get_available_providers()]
+        p = max(1, int(pad_to))
+        shape = (1, 1, -(-height // p) * p, -(-width // p) * p)
+        cache = None
+        if runtime == "tensorrt":
+            for name, size in (("batch", shape[0]), ("height", shape[2]),
+                               ("width", shape[3])):
+                so.add_free_dimension_override_by_name(name, size)
+            cache = engine_folder(engine_cache, model, precision, shape)
+            cache.mkdir(parents=True, exist_ok=True)
+            want = [("TensorrtExecutionProvider", {
+                "trt_fp16_enable": precision == "fp16",
+                "trt_engine_cache_enable": True,
+                "trt_engine_cache_path": str(cache),
+                "trt_timing_cache_enable": True,
+                "trt_timing_cache_path": str(cache)}),
+                "CUDAExecutionProvider"]
+        else:
+            want = [p for p in ("CUDAExecutionProvider",
+                                "CPUExecutionProvider")
+                    if p in ort.get_available_providers()]
         self.sess = ort.InferenceSession(model, so, providers=want)
+        if (runtime == "tensorrt" and self.sess.get_providers()[0]
+                != "TensorrtExecutionProvider"):
+            # The profile asked for TensorRT; a silent CUDA fallback would
+            # run three times slower than the operator was told.
+            raise RuntimeError(
+                f"ONNX Runtime did not load its TensorRT provider (it offers "
+                f"{self.sess.get_providers()}); check that TensorRT's "
+                f"version matches this onnxruntime-gpu")
         inp = self.sess.get_inputs()[0]
         self.input_name = inp.name
         channels = inp.shape[1]
@@ -127,12 +210,13 @@ class OnnxCentroidTracker:
         if missing:
             raise ValueError(f"{model} has no output {sorted(missing)}; "
                              f"expected a sleap-nn centroid export")
-        p = max(1, int(pad_to))
-        self.padded = np.zeros((1, 1, -(-height // p) * p, -(-width // p) * p),
-                               np.uint8)
+        self.padded = np.zeros(shape, np.uint8)
         self.info = {"tracker": "onnx", "model": model,
+                     "runtime": runtime, "precision": precision,
                      "providers": self.sess.get_providers(),
                      "input": list(self.padded.shape)}
+        if cache is not None:
+            self.info["engine_cache"] = str(cache)
 
     def __call__(self, frame: np.ndarray) -> list:
         h, w = frame.shape
@@ -156,6 +240,9 @@ def main(argv=None) -> int:
     ap.add_argument("--pad-to", type=int, default=32)
     ap.add_argument("--threshold", type=int)
     ap.add_argument("--min-area-px", type=int)
+    ap.add_argument("--runtime", choices=("cuda", "tensorrt"), default="cuda")
+    ap.add_argument("--precision", choices=("fp32", "fp16"), default="fp32")
+    ap.add_argument("--engine-cache")
     args = ap.parse_args(argv)
     _below_normal_priority()
 
@@ -166,7 +253,9 @@ def main(argv=None) -> int:
         t0 = time.perf_counter()
         if args.tracker == "onnx":
             track = OnnxCentroidTracker(args.model, args.pad_to,
-                                        args.height, args.width)
+                                        args.height, args.width,
+                                        args.runtime, args.precision,
+                                        args.engine_cache)
         else:
             track = ThresholdTracker(args.threshold, args.min_area_px)
         blank = np.full((args.height, args.width), 255, np.uint8)
@@ -174,6 +263,11 @@ def main(argv=None) -> int:
             track(blank)
         info = dict(track.info, ready=True,
                     warmup_ms=round((time.perf_counter() - t0) * 1e3, 1))
+        # Everything made so far lives as long as the worker. Freezing it
+        # keeps a full garbage collection from walking it in the middle of
+        # tracking.
+        gc.collect()
+        gc.freeze()
     except Exception as e:
         _say({"ready": False, "error": f"{type(e).__name__}: {e}"})
         return 1
