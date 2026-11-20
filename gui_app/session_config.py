@@ -275,6 +275,10 @@ class CameraSpec:
 #: dark pixels below a gray level (no model, for a backlit floor and the
 #: simulated rig).
 CLOSED_LOOP_TRACKERS = ("onnx", "threshold")
+#: What runs an onnx tracker's model: ONNX Runtime's CUDA provider, or its
+#: TensorRT provider, which builds an engine from the .onnx on this computer.
+CLOSED_LOOP_RUNTIMES = ("cuda", "tensorrt")
+CLOSED_LOOP_PRECISIONS = ("fp32", "fp16")
 
 
 @dataclass(frozen=True)
@@ -295,8 +299,9 @@ class ClosedLoopSpec:
     #: Tracked frames per second, of each camera a zone is drawn on, in the
     #: preview as in a recording.
     rate_hz: float = 10.0
-    #: Detections with a lower confidence are ignored. The ONNX export marks
-    #: nearly every slot valid, so this is the only filter.
+    #: Detections with a lower confidence are ignored. A sleap-nn 0.1 export
+    #: marks nearly every slot valid, so this is the only filter; a 0.3.5
+    #: export already drops peaks at or below its own peak threshold.
     min_confidence: float = 0.2
     #: Consecutive tracked frames with a mouse in the zone before the zone
     #: turns on, and without one before it turns off.
@@ -308,6 +313,12 @@ class ClosedLoopSpec:
     #: smallest dark area, in full-resolution pixels, that counts as one.
     threshold: int | None = None
     min_area_px: int | None = None
+    #: onnx tracker only: ONNX Runtime's provider, the arithmetic's precision
+    #: (fp16 needs tensorrt), and the folder TensorRT keeps the engines it
+    #: builds in (None: .panopticon/tracker-cache in the user's home).
+    runtime: str = "cuda"
+    precision: str = "fp32"
+    engine_cache: str | None = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -340,7 +351,14 @@ def parse_closed_loop_spec(raw) -> ClosedLoopSpec | None:
         threshold=_spec_scalar("closed_loop.threshold", int,
                                d.get("threshold"), True),
         min_area_px=_spec_scalar("closed_loop.min_area_px", int,
-                                 d.get("min_area_px"), True))
+                                 d.get("min_area_px"), True),
+        runtime=_spec_choice("closed_loop.runtime", d.get("runtime", "cuda"),
+                             CLOSED_LOOP_RUNTIMES),
+        precision=_spec_choice("closed_loop.precision",
+                               d.get("precision", "fp32"),
+                               CLOSED_LOOP_PRECISIONS),
+        engine_cache=_spec_scalar("closed_loop.engine_cache", str,
+                                  d.get("engine_cache"), True))
     if not (math.isfinite(spec.rate_hz) and spec.rate_hz > 0):
         raise ValueError(f"closed_loop.rate_hz {spec.rate_hz:g} must be a "
                          f"positive number of tracked frames per second")
@@ -357,6 +375,10 @@ def parse_closed_loop_spec(raw) -> ClosedLoopSpec | None:
             f"tracked frame at rate_hz {spec.rate_hz:g} "
             f"({1.0 / spec.rate_hz:g} s), or every gap between tracked frames "
             f"would read as a lost mouse")
+    if spec.precision == "fp16" and spec.runtime != "tensorrt":
+        raise ValueError(
+            "closed_loop.precision fp16 needs closed_loop.runtime tensorrt: "
+            "ONNX Runtime's CUDA provider runs the model in fp32")
     if spec.tracker == "onnx" and not spec.model:
         raise ValueError("closed_loop.model is required for the onnx tracker: "
                          "the SLEAP centroid model exported to ONNX")
@@ -1029,7 +1051,9 @@ class RigProfile:
             kwargs["closed_loop"] = dataclasses.replace(
                 loop,
                 model=_resolve_path(loop.model) if loop.model else loop.model,
-                python=_resolve_path(loop.python) if loop.python else loop.python)
+                python=_resolve_path(loop.python) if loop.python else loop.python,
+                engine_cache=(_resolve_path(loop.engine_cache)
+                              if loop.engine_cache else loop.engine_cache))
         if "metadata_defaults" in kwargs:
             merged = _default_metadata()
             merged.update(kwargs["metadata_defaults"])

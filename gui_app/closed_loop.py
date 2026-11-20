@@ -268,7 +268,11 @@ class TrackerProcess:
                "--shm", shm_name, "--height", str(self.height),
                "--width", str(self.width)]
         if s.tracker == "onnx":
-            cmd += ["--model", str(s.model)]
+            cmd += ["--model", str(s.model), "--runtime", s.runtime,
+                    "--precision", s.precision]
+            if s.runtime == "tensorrt":
+                cmd += ["--engine-cache", str(s.engine_cache or (
+                    Path.home() / ".panopticon" / "tracker-cache"))]
         else:
             cmd += ["--threshold", str(s.threshold),
                     "--min-area-px", str(s.min_area_px)]

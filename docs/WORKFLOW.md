@@ -469,7 +469,7 @@ With the defaults the tracker looks at 10 frames a second of every camera a zone
 
 A closed-loop recording also writes these beside the videos:
 
-- `closed_loop.csv`: one row per tracked frame of each camera, with its time, camera and block ID, the mice found and kept, the zones a mouse was in, each zone's state, whether it went to the board, the tracker's time, and every detection as `x:y:confidence`. Every detection is there, whatever its confidence, so a recording can be scored again at another threshold.
+- `closed_loop.csv`: one row per tracked frame of each camera, with its time, camera and block ID, the mice found and kept, the zones a mouse was in, each zone's state, whether it went to the board, the tracker's time, and every detection as `x:y:confidence`. Every detection the model returns is there, whatever its confidence, so a recording can be scored again at another threshold. A model exported by sleap-nn 0.3.5 returns only peaks above its own threshold, 0.2 by default.
 - `closed_loop.json`: the settings, the tracker, the zones as drawn, and `events`, each change of a zone with the block ID it applied from.
 
 `stim_trace.csv` gains a `zone_<letter>_in` column per zone from those events, and a zone block's pulses appear there only while its zone reads 1. The window can't know the exact trigger at which the board heard each update, so the column can be a trigger or two off. As for any paradigm, a light that follows the stimulation pin, where a camera can see it, is the evidence of what was delivered.

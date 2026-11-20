@@ -852,9 +852,9 @@ Number, seconds. Default `30`. Reference rig: not set.
 #### `closed_loop`
 
 Mapping. Default `null` (no block). Reference rig:
-`{model: "C:/Users/isaac/.panopticon/models/allcam_centroid_body_20261118.onnx",
-python: "C:/Users/isaac/.panopticon/tracker-venv/Scripts/python.exe",
-min_confidence: 0.3, leave_updates: 5}`.
+`{model: "C:/Users/isaac/.panopticon/models/allcam_centroid_body_20261118_nn035.onnx",
+python: "C:/Users/isaac/.panopticon/tracker-venv-trt/Scripts/python.exe",
+runtime: tensorrt, precision: fp16, min_confidence: 0.3, leave_updates: 5}`.
 
 - Does: Tracks the cameras live, so that a stimulation block ticked **In zone**
   pulses only while a mouse is in its zone, a shape you draw on a camera in
@@ -1488,10 +1488,14 @@ Number, frames per second. Default `10`.
 
 Number, 0 to 1. Default `0.2`.
 
-- Does: Detections below it are ignored. The exported model reports a
-  confidence for every slot it has, found or not, so this is what keeps the
-  empty slots out. `closed_loop.csv` keeps every detection with its
-  confidence, so a recording can be scored again at another threshold.
+- Does: Detections below it are ignored. A model exported by sleap-nn 0.1
+  reports a confidence for every slot it has, found or not, so this is what
+  keeps the empty slots out. A sleap-nn 0.3.5 export already drops peaks at
+  or below its own peak threshold (0.2 unless exported with another
+  `--peak-threshold`), so a lower `min_confidence` changes nothing.
+  `closed_loop.csv` keeps every detection the model returns, with its
+  confidence, so a recording can be scored again at another threshold above
+  the model's own.
 - Change when: Raise it if the zone editor marks mice where there are none.
   Lower it if it misses mice.
 - Goes wrong: The loader refuses a value outside 0 to 1.
@@ -1544,6 +1548,46 @@ Whole number, pixels. Default `null`; required for the `threshold` tracker.
 - Change when: Set it to about half a mouse's area seen from above, so that
   smaller dark specks do not count.
 - Goes wrong: The loader refuses a value below 1.
+
+#### `closed_loop.runtime`
+
+`cuda` or `tensorrt`. Default `cuda`.
+
+- Does: What runs the `onnx` tracker's model: ONNX Runtime's CUDA provider, or
+  its TensorRT provider. TensorRT builds an engine for this computer's GPU from
+  the `.onnx` the first time the tracker starts, keeps it in `engine_cache`,
+  and loads it from there afterwards. On our rig it tracks a frame in about
+  3 ms in `fp32`, against about 6 ms with `cuda`, with the same detections.
+- Change when: You want the tracker faster, or to track more cameras at a
+  higher `rate_hz`. It needs TensorRT in the tracker's environment
+  ([CLOSED_LOOP.md](CLOSED_LOOP.md#1-set-up-the-trackers-python)).
+- Goes wrong: The first start after a new model, GPU or version takes a
+  minute at most while the engine builds, then about a second. The tracker
+  refuses to start when ONNX Runtime cannot load its TensorRT provider, rather
+  than run on CUDA, and the zone editor's status line says why.
+
+#### `closed_loop.precision`
+
+`fp32` or `fp16`. Default `fp32`.
+
+- Does: The arithmetic TensorRT runs the model in. `fp16` takes about half
+  the time of `fp32` (1.5 to 1.8 ms a frame on our rig).
+- Change when: You want the fastest tracker, after checking that `fp16` finds
+  the same animals as `fp32` on your own recordings. On ours it changed one
+  tracked frame's zone state in about 7,400.
+- Goes wrong: The loader refuses `fp16` unless `runtime` is `tensorrt`.
+
+#### `closed_loop.engine_cache`
+
+Path. Default `null` (`.panopticon/tracker-cache` in your home folder).
+
+- Does: The folder TensorRT keeps the engines it builds in. Each engine gets a
+  folder named after the GPU, the ONNX Runtime and TensorRT versions, the
+  model's checksum, the precision and the frame size, so a change of any of
+  them builds a new engine instead of loading one that no longer fits.
+- Change when: Your home folder is on a slow or small drive.
+- Goes wrong: Nothing is shared between computers: copying the folder to
+  another computer only makes it build again there.
 
 ## Board config
 
@@ -1860,8 +1904,10 @@ The `camera:` block. Messages start with the key, such as `camera.trigger.line`:
 | Sets a `black_level` that is not a finite number | `must be a finite number` |
 
 The `closed_loop:` block. Messages start with the key, such as
-`closed_loop.rate_hz`. An unknown key, a key set to nothing and a `tracker`
-that is not `onnx` or `threshold` are refused as in the `camera:` block:
+`closed_loop.rate_hz`. An unknown key, a key set to nothing, a `tracker`
+that is not `onnx` or `threshold`, a `runtime` that is not `cuda` or `tensorrt`
+and a `precision` that is not `fp32` or `fp16` are refused as in the `camera:`
+block:
 
 | The block | The message contains |
 |---|---|
@@ -1872,6 +1918,7 @@ that is not `onnx` or `threshold` are refused as in the `camera:` block:
 | Leaves out `model` for the `onnx` tracker | `closed_loop.model is required for the onnx tracker` |
 | Leaves out `threshold`, or sets it outside 1 to 254, for the `threshold` tracker | `the gray level from 1 to 254` |
 | Leaves out `min_area_px`, or sets it below 1, for the `threshold` tracker | `that counts as a mouse` |
+| Sets `precision: fp16` with `runtime: cuda` | `needs closed_loop.runtime tensorrt` |
 
 ### Refused before the cameras open
 
