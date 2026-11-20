@@ -89,10 +89,12 @@ Panopticon runs any SLEAP centroid model that meets the requirements below, expo
 Export the centroid model's folder on its own, not as a centroid and centered-instance pair:
 
 ```
-sleap-nn export models/my_centroid -o exports/my_centroid --format onnx --max-instances 6
+sleap-nn export models/my_centroid -o exports/my_centroid --format onnx --max-instances 6 --input-height 1216 --input-width 1920
 ```
 
-That writes `model.onnx` and `export_metadata.json` into `exports/my_centroid`. Keep the two together. The flags are from sleap-nn's current documentation, and our model was exported with sleap-nn 0.1.0. Run `sleap-nn export --help` to check them for your version.
+That writes `model.onnx` and `export_metadata.json` into `exports/my_centroid`. Keep the two together. Set `--input-height` and `--input-width` to your frame's size padded to a multiple of 32, so the graph is traced at the size Panopticon feeds it. We export with sleap-nn 0.3.5. Run `sleap-nn export --help` to check the flags for your version.
+
+A 0.3.5 export drops every confidence peak at or below its `--peak-threshold`, 0.2 by default, so those never reach Panopticon or `closed_loop.csv`. Export with a lower threshold if you want to try a [`min_confidence`](CONFIGURATION.md#closed_loopmin_confidence) below 0.2. Use 0.3.5 or later for `precision: fp16`. Its export keeps a peak that is a flat top of equal pixels, which half precision makes common, and the 0.1.0 export dropped it.
 
 Ship the `.onnx`, never a TensorRT engine. An engine runs only on the GPU type and the TensorRT version that built it. With [`runtime: tensorrt`](CONFIGURATION.md#closed_loopruntime), Panopticon builds the engine from the `.onnx` on the rig's own GPU the first time the tracker starts, and keeps it for later starts.
 
@@ -123,7 +125,7 @@ Copy the export folder to the rig computer, and name the model and the tracker's
     ![cam5's page in the zone editor, with the tracker's status line along the bottom](images/zone_editor_draw.png)
 2. With animals in the arena, watch each camera you'll draw zones on for a minute. Every animal should carry a lime circle, and nothing else should. If something that isn't an animal is marked, raise [`min_confidence`](CONFIGURATION.md#closed_loopmin_confidence). If animals go unmarked, lower it, or train the model on more frames from that camera.
 3. Keep hands out of a zone while an animal is stimulated: a model can take a hand for an animal. Ours does.
-4. Record a session with zones, and score it afterwards. `closed_loop.csv` keeps every detection with its confidence, as `x:y:confidence`, so you can check another threshold without recording again.
+4. Record a session with zones, and score it afterwards. `closed_loop.csv` keeps every detection the model returns with its confidence, as `x:y:confidence`, so you can check another threshold above the model's own without recording again.
 
 ---
 

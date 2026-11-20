@@ -820,9 +820,12 @@ each zone's state to the board.
   any the zone editor shows (`ClosedLoop.watch`).
 - The model takes one gray channel: a frame stacked with a whole-session
   background and a later frame's motion, as the 14t detector takes, cannot be
-  built live. The exported centroid model marks nearly every slot valid, so
-  `min_confidence` is the only filter, and `closed_loop.csv` keeps every
-  detection so a recording can be scored again. The model ships as an
+  built live. A sleap-nn 0.1 export marks nearly every slot valid, and a
+  0.3.5 export drops peaks at or below its baked peak threshold (0.2 by
+  default) as `centroid_vals` -1e9. So the worker keeps every positive
+  confidence, `min_confidence` is the window's filter, and `closed_loop.csv`
+  keeps every detection the model returned, so a recording can be scored
+  again. The model ships as an
   `.onnx` file: a TensorRT engine runs only on the GPU type and TensorRT
   version that built it. With `runtime: tensorrt` the worker builds the
   engine from the `.onnx` on the rig, in a folder of `engine_cache`

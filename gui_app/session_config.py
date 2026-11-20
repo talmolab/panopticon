@@ -299,8 +299,9 @@ class ClosedLoopSpec:
     #: Tracked frames per second, of each camera a zone is drawn on, in the
     #: preview as in a recording.
     rate_hz: float = 10.0
-    #: Detections with a lower confidence are ignored. The ONNX export marks
-    #: nearly every slot valid, so this is the only filter.
+    #: Detections with a lower confidence are ignored. A sleap-nn 0.1 export
+    #: marks nearly every slot valid, so this is the only filter; a 0.3.5
+    #: export already drops peaks at or below its own peak threshold.
     min_confidence: float = 0.2
     #: Consecutive tracked frames with a mouse in the zone before the zone
     #: turns on, and without one before it turns off.

@@ -1488,10 +1488,14 @@ Number, frames per second. Default `10`.
 
 Number, 0 to 1. Default `0.2`.
 
-- Does: Detections below it are ignored. The exported model reports a
-  confidence for every slot it has, found or not, so this is what keeps the
-  empty slots out. `closed_loop.csv` keeps every detection with its
-  confidence, so a recording can be scored again at another threshold.
+- Does: Detections below it are ignored. A model exported by sleap-nn 0.1
+  reports a confidence for every slot it has, found or not, so this is what
+  keeps the empty slots out. A sleap-nn 0.3.5 export already drops peaks at
+  or below its own peak threshold (0.2 unless exported with another
+  `--peak-threshold`), so a lower `min_confidence` changes nothing.
+  `closed_loop.csv` keeps every detection the model returns, with its
+  confidence, so a recording can be scored again at another threshold above
+  the model's own.
 - Change when: Raise it if the zone editor marks mice where there are none.
   Lower it if it misses mice.
 - Goes wrong: The loader refuses a value outside 0 to 1.

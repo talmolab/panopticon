@@ -1432,7 +1432,11 @@ Dead ends, do not retry:
   With the 0.1.0 export, fp16 changed the count of mice in 42 to 58 of each
   camera's 1,500 tracked frames of the recording. With 0.3.5 it changed 1 to
   15, the same as fp32 on the compressed video, and every zone decision
-  matched fp32's. In the window on the rig, five zone cameras at 10 Hz
+  matched fp32's. In fp32 the two exports agree exactly: gnu found the same
+  4,183 detections in 1,800 frames of two sessions the model never trained
+  on, with no centroid moved. The 0.3.5 export also bakes in a peak
+  threshold of 0.2: a weaker peak comes back as a confidence of -1e9, so
+  closed_loop.csv no longer holds detections below 0.2. In the window on the rig, five zone cameras at 10 Hz
   while nine cameras recorded: 8.07 ms a frame with CUDA (median, p99
   12.9), 2.42 ms with TensorRT fp16 (p99 5.8). Neither dropped a frame or
   lapsed a watchdog. The first second was no slower than the rest, so the

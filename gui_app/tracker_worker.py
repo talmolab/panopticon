@@ -136,9 +136,11 @@ class OnnxCentroidTracker:
     in, ``centroids`` and ``centroid_vals`` out.
 
     The frame is padded at the bottom and right to a multiple of `pad_to`,
-    which keeps every coordinate where it was. Every slot is returned with
-    its confidence; the window applies min_confidence, because the export
-    marks nearly every slot valid.
+    which keeps every coordinate where it was. Every slot with a positive
+    confidence is returned; the window applies min_confidence. A sleap-nn
+    0.1 export marks nearly every slot valid, and a 0.3.5 export gives the
+    slots at or below its peak threshold a confidence of -1e9 and junk
+    coordinates, which the positive test drops.
 
     ``runtime`` "tensorrt" runs the model through ONNX Runtime's TensorRT
     provider, which builds an engine for this GPU from the .onnx at the first
